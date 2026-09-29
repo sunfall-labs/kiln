@@ -1431,6 +1431,15 @@ static int kiln_c99_new_object(kiln_value *out) {
     return kiln_c99_new_object_sized(out, 0);
 }
 
+/* A property/prototype store can be a slot in an older owner. Publishing a newly built
+ * candidate object through that slot is an incoming edge, independently of its own fields. */
+static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload) {
+    kiln_value built;
+    int status = kiln_c99_new_object(&built);
+    if (status == KILN_C99_OK) kiln_c99_heap_store_value(owner_payload, out, built);
+    return status;
+}
+
 /* Allocate or recover this realm's identity for one graph node. The weak chain is not a GC root;
  * its entries leave on finalization. A second read of the same node while it is live therefore
  * returns exactly the same JS object, including after a message is echoed back to this realm. */

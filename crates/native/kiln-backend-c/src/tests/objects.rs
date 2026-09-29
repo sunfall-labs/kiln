@@ -3069,6 +3069,104 @@ int main(void) {
 }
 
 #[test]
+fn executable_candidate_ledger_covers_interior_pointers_and_output_slot_publication() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int ledger_raw_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value closure_value, root_value;
+    kiln_closure *closure;
+    kiln_val *root;
+    kiln_string *text;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    kiln_c99_graph_side_set sides = {0};
+    const size_t length = 300000;
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 0;
+    if (kiln_c99_make_closure(&closure_value, NULL, NULL, NULL, 0, NULL, 0, 0,
+                              0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
+                              0, 0, 0, 0, NULL, 0) != KILN_C99_OK) return 1;
+    closure = kiln_c99_closure_of(closure_value);
+    if (!kiln_c99_actor_candidate_begin(heap)) return 2;
+    root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
+    text = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof *text + length);
+    if (root == NULL || text == NULL) return 3;
+    text->unit_len = length;
+    text->flags = KILN_STRING_LATIN1;
+    text->data = (char *)(text + 1);
+    memset((void *)text->data, 'a', length);
+    kiln_c99_val_store_cell(root, KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text));
+    group = heap->actor_candidate_group;
+    root_value = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root, NULL, 0);
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 4;
+    kiln_c99_actor_candidate_seal(heap, root_value);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count) ||
+        !kiln_c99_graph_candidate_closed_with_sides(heap, batch, count, root, &sides, NULL)) return 5;
+    heap->graph_proof_sides = &sides;
+    /* Neither address is an exact GC payload or the start of a string's bytes. */
+    kiln_c99_heap_store_pointer(closure, &closure->source, (const char *)text->data + 17);
+    if (group->incoming_owners.count != 1 ||
+        kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, count) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 6;
+    kiln_c99_heap_store_pointer(closure, &closure->source, (const char *)root + 4);
+    if (group->incoming_owners.count != 1 ||
+        kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 7;
+    kiln_c99_heap_store_pointer(closure, &closure->source, NULL);
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 8;
+    heap->graph_proof_sides = NULL;
+    kiln_c99_graph_side_set_dispose(&sides);
+    free(batch);
+    batch = NULL;
+    count = 0;
+    /* An older closure gains a candidate through a constructor's output slot. */
+    if (!kiln_c99_actor_candidate_begin(heap)) return 9;
+    if (kiln_c99_function_store(closure_value, &root_value) != KILN_C99_OK) return 10;
+    group = heap->actor_candidate_group;
+    if (group->incoming_owners.count != 1) return 11;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 12;
+    kiln_c99_actor_candidate_seal(heap, root_value);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 13;
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, count) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 14;
+    kiln_c99_heap_store_value(closure, &closure->own_store, kiln_c99_undefined());
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 15;
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 16;
+    status = kiln_realm_enter(realm, ledger_raw_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 17;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-interior-output-ledger");
+    assert!(
+        run.status.success(),
+        "interior/output ledger failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_large_candidate_metadata_is_not_a_collector_root() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

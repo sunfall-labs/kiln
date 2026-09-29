@@ -1604,6 +1604,7 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key);
 static int kiln_c99_new_object(kiln_value *out);
+static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload);
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
@@ -2211,11 +2212,13 @@ static void kiln_c99_gc_note_finalizable(const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
 static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
+static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_t);
 static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
 static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer) {
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
 static void kiln_c99_candidate_record_vals(const void *owner_payload,
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
 static void kiln_c99_candidate_record_property(const void *owner_payload,
@@ -2561,6 +2564,7 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
 static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
 static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
 static int kiln_c99_new_object(kiln_value *out) {
+static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
 static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value *out,
 static int kiln_c99_shared_is_array(kiln_value value) {

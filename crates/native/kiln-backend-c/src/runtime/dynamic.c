@@ -878,7 +878,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) return status;
-        kiln_c99_closure_of(*out)->source_value = upvals[1];
+        kiln_c99_heap_store_value(kiln_c99_closure_of(*out), &kiln_c99_closure_of(*out)->source_value, upvals[1]);
         if (explicit_name) {
             (void)kiln_dyn_scope_set(scope, fn_name, fn_name_len, *out);
             (void)kiln_c99_put(host, env_obj, fn_name, fn_name_len, *out, 0, NULL);
@@ -1933,7 +1933,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                        0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                        KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                        val_upvalues, 3);
-    if (status == KILN_C99_OK) kiln_c99_closure_of(*result)->source_value = upvalues[1];
+    if (status == KILN_C99_OK) kiln_c99_heap_store_value(kiln_c99_closure_of(*result), &kiln_c99_closure_of(*result)->source_value, upvalues[1]);
     return status;
 }
 /* Dynamic import option validation is shared by every generated importer. Keeping it in the

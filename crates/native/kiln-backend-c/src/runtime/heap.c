@@ -3001,6 +3001,8 @@ static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
     return NULL;
 }
 
+static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_t);
+
 /* Remember possible owners, not slot addresses: growth can replace side buffers, and clearing
  * an edge must permit retry. Metadata does not root either endpoint. The admission walker will
  * inspect the owner's current complete layout. Missing coverage still requires the full scan. */
@@ -3012,6 +3014,26 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
     if (heap == NULL || heap->candidate_ledger_groups == 0 || target_payload == NULL ||
         kiln_c99_no_write_depth != 0) return;
     target = kiln_c99_gc_lookup(heap, target_payload);
+    if (target == NULL && (uintptr_t)target_payload >= heap->lo &&
+        (uintptr_t)target_payload < heap->hi) {
+        target = kiln_c99_gc_lookup_interior(heap, (uintptr_t)target_payload);
+        /* Large-block interior addresses are absent from the collector's exact-payload
+         * table. Only the cold candidate map can supply their live allocation authority. */
+        if (target == NULL && heap->candidate_large != NULL) {
+            for (size_t index = 0; index < heap->candidate_large->capacity; ++index) {
+                kiln_c99_candidate_large *entry = heap->candidate_large->table[index];
+                uintptr_t address = (uintptr_t)target_payload;
+                uintptr_t base;
+                if (entry == NULL || entry == KILN_C99_CANDIDATE_LARGE_TOMBSTONE) continue;
+                base = (uintptr_t)entry->block;
+                if (address >= base && (address - base < sizeof(kiln_gc_block) ||
+                    address - base - sizeof(kiln_gc_block) < entry->block->size)) {
+                    target = entry->block;
+                    break;
+                }
+            }
+        }
+    }
     group = kiln_c99_candidate_block_group(heap, target);
     if (group == NULL || group->ledger_heap != heap || group->incoming_failed) return;
     owner = kiln_c99_gc_lookup(heap, owner_payload);
@@ -3053,6 +3075,15 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
         kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
                                                 (const void *)(uintptr_t)value.bits);
     *slot = value;
+}
+
+/* Object-pointer fields use memcpy rather than a void** lvalue, preserving their declared
+ * pointer type under strict aliasing. Callers supply the audited GC owner of the field. */
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
+    const void *owner_payload, void *slot, const void *pointer) {
+    if (pointer != NULL && owner_payload != NULL && kiln_c99_no_write_depth == 0)
+        kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload, pointer);
+    memcpy(slot, &pointer, sizeof pointer);
 }
 
 static void kiln_c99_candidate_record_vals(const void *owner_payload,

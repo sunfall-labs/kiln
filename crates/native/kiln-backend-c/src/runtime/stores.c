@@ -53,7 +53,7 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
         kiln_value *slot = kiln_c99_closure_prototype_slot(closure);
         int status;
         if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
-        status = kiln_c99_new_object(slot);
+        status = kiln_c99_new_object_for_owner(slot, closure);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -150,7 +150,7 @@ int kiln_c99_get_array_unscopables(kiln_value *out) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        kiln_c99_object_of(built)->prototype = kiln_c99_null();
+        kiln_c99_heap_store_value(kiln_c99_object_of(built), &kiln_c99_object_of(built)->prototype, kiln_c99_null());
         static const struct {
             const char *name;
             size_t len;
@@ -193,7 +193,7 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
         kiln_value *slot = kiln_c99_closure_store_slot(closure);
         int status;
         if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
-        status = kiln_c99_new_object(slot);
+        status = kiln_c99_new_object_for_owner(slot, closure);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -431,7 +431,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
         if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
         entry->code = store_code;
         entry->next = kiln_c99_fixture_method_stores;
-        if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
+        if (kiln_c99_new_object_for_owner(&entry->properties, entry) != KILN_C99_OK) {
             kiln_c99_gc_release(entry);
             return KILN_C99_OUT_OF_MEMORY;
         }
@@ -459,7 +459,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
     entry->code = callable.bits | ((uint64_t)callable.tag << 56);
     entry->next = NULL;
-    if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
+    if (kiln_c99_new_object_for_owner(&entry->properties, entry) != KILN_C99_OK) {
         kiln_c99_gc_release(entry);
         return KILN_C99_OUT_OF_MEMORY;
     }

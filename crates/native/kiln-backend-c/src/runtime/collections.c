@@ -63,7 +63,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     collection->weak_previous = NULL;
     collection->weak_next = NULL;
     collection->weak_owner = NULL;
-    collection->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(collection, &collection->properties, kiln_c99_undefined());
     kiln_c99_collection_register_weak(collection);
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
     return KILN_C99_OK;

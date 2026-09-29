@@ -543,7 +543,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         prototype.tag == KILN_VALUE_SYMBOL || prototype.tag == KILN_VALUE_BIGINT) {
         prototype = kiln_c99_undefined();
     }
-    kiln_c99_object_of(instance)->prototype = prototype;
+    kiln_c99_heap_store_value(kiln_c99_object_of(instance), &kiln_c99_object_of(instance)->prototype, prototype);
     /* Inside the body being constructed, `new.target` is the constructor the `new` named -- and
      * the call below is the one that installs it, so the flag that makes `super()` keep it has to
      * be off here whatever the caller was in the middle of. */
@@ -638,19 +638,19 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     }
     prototype = kiln_c99_object_of(*receiver)->prototype;
     if (produced.tag == KILN_VALUE_OBJECT) {
-        kiln_c99_object_of(produced)->prototype = prototype;
+        kiln_c99_heap_store_value(kiln_c99_object_of(produced), &kiln_c99_object_of(produced)->prototype, prototype);
         *receiver = produced;
         kiln_c99_adopted_this = produced;
         return KILN_C99_OK;
     }
     slot = kiln_c99_exotic_store(produced);
     if (slot->tag != KILN_VALUE_OBJECT) {
-        int status = kiln_c99_new_object(slot);
+        int status = kiln_c99_new_object_for_owner(slot, (const void *)(uintptr_t)produced.bits);
         if (status != KILN_C99_OK) {
             return status;
         }
     }
-    kiln_c99_object_of(*slot)->prototype = prototype;
+    kiln_c99_heap_store_value(kiln_c99_object_of(*slot), &kiln_c99_object_of(*slot)->prototype, prototype);
     *receiver = produced;
     kiln_c99_adopted_this = produced;
     return KILN_C99_OK;
@@ -784,7 +784,7 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
              * not find `toString`. */
             return KILN_C99_OK;
         }
-        kiln_c99_object_of(target)->prototype = prototype;
+        kiln_c99_heap_store_value(kiln_c99_object_of(target), &kiln_c99_object_of(target)->prototype, prototype);
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_FUNCTION || kiln_c99_exotic_store(target) != NULL) {
@@ -796,7 +796,7 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        kiln_c99_object_of(store)->prototype = prototype;
+        kiln_c99_heap_store_value(kiln_c99_object_of(store), &kiln_c99_object_of(store)->prototype, prototype);
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(target.bits)) {
@@ -806,7 +806,7 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_value store;
         int status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;
-        kiln_c99_object_of(store)->prototype = prototype;
+        kiln_c99_heap_store_value(kiln_c99_object_of(store), &kiln_c99_object_of(store)->prototype, prototype);
         return KILN_C99_OK;
     }
     KILN_C99_REFUSE("setting the prototype of a value with no prototype slot");

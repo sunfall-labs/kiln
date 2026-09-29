@@ -151,11 +151,11 @@ kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size
     sliced->base.unit_len = (uint32_t)len;
     sliced->base.flags = (source->flags & (KILN_STRING_UTF16 | KILN_STRING_LATIN1)) | KILN_STRING_SLICED;
     if (kiln_string_is_utf16(source)) {
-        sliced->base.data = (const void *)(((const uint16_t *)source->data) + start);
+        kiln_c99_heap_store_pointer(sliced, &sliced->base.data, (const void *)(((const uint16_t *)source->data) + start));
     } else {
-        sliced->base.data = (const void *)(((const char *)source->data) + start);
+        kiln_c99_heap_store_pointer(sliced, &sliced->base.data, (const void *)(((const char *)source->data) + start));
     }
-    sliced->parent = source;
+    kiln_c99_heap_store_pointer(sliced, &sliced->parent, source);
     return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &sliced->base);
 }
 
@@ -368,7 +368,7 @@ int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *sour
                 array->count = index;
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            slots[index] = part;
+            kiln_c99_heap_store_val(array, &slots[index], part);
             array->count = index + 1;
         }
     }
@@ -466,7 +466,7 @@ static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
-            slots[index] = part;
+            kiln_c99_heap_store_val(array, &slots[index], part);
             /* The count follows the write, so a collection inside the fallback above never
              * traces a slot nothing has been put in. */
             array->count = index + 1;

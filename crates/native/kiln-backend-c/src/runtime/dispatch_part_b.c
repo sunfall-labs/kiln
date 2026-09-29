@@ -2260,7 +2260,7 @@
              * nothing: an object with no link at all inherits `Object.prototype`. */
             if (argc > 0 &&
                 (args[0].tag == KILN_VALUE_NULL || kiln_c99_can_be_prototype(args[0]))) {
-                kiln_c99_object_of(built)->prototype = args[0];
+                kiln_c99_heap_store_value(kiln_c99_object_of(built), &kiln_c99_object_of(built)->prototype, args[0]);
             } else if (argc > 0) {
                 KILN_C99_REFUSE("Object.create given a prototype that cannot be one");
             }

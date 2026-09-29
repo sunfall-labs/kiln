@@ -17,7 +17,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->elements = NULL;
     array->count = 0;
     array->capacity = 0;
-    array->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;
@@ -137,7 +137,7 @@ static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
     array->elements = NULL;
     array->count = 0;
     array->capacity = 0;
-    array->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;

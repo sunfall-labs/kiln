@@ -239,7 +239,7 @@ static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
         kiln_value *slot = kiln_c99_exotic_store(target);
         if (slot != NULL) {
             if (slot->tag != KILN_VALUE_OBJECT) {
-                int status = kiln_c99_new_object(slot);
+                int status = kiln_c99_new_object_for_owner(slot, (const void *)(uintptr_t)target.bits);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -1228,7 +1228,7 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
             given = kiln_c99_region_string(given);
             if (given == NULL && named.len != 0) return KILN_C99_OUT_OF_MEMORY;
         }
-        closure->name = given;
+        kiln_c99_heap_store_pointer(closure, &closure->name, given);
     }
     return KILN_C99_OK;
 }

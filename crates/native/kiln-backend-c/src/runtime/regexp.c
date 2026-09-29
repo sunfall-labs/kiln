@@ -25,12 +25,12 @@ static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
     regexp->handle = handle;
     regexp->matcher = NULL;
     regexp->matcher_ascii = NULL;
-    regexp->source = source;
-    regexp->flags = flags;
+    kiln_c99_heap_store_pointer(regexp, &regexp->source, source);
+    kiln_c99_heap_store_pointer(regexp, &regexp->flags, flags);
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
-    regexp->cached_subject_ptr = NULL;
+    kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, NULL);
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
@@ -68,12 +68,12 @@ static int kiln_c99_new_regexp_matcher(kiln_value *out, const kiln_string *sourc
     regexp->handle = NULL;
     regexp->matcher = matcher;
     regexp->matcher_ascii = matcher_ascii;
-    regexp->source = source;
-    regexp->flags = flags;
+    kiln_c99_heap_store_pointer(regexp, &regexp->source, source);
+    kiln_c99_heap_store_pointer(regexp, &regexp->flags, flags);
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
-    regexp->cached_subject_ptr = NULL;
+    kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, NULL);
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
@@ -97,7 +97,7 @@ static void kiln_c99_materialize_match_properties(kiln_array *arr) {
     kiln_c99_put_mode(NULL, props, "index", 5, kiln_c99_number((double)arr->match_index), 0, 0, NULL);
     kiln_c99_put_mode(NULL, props, "input", 5, arr->match_input, 0, 0, NULL);
     kiln_c99_put_mode(NULL, props, "groups", 6, arr->match_groups, 0, 0, NULL);
-    arr->properties = props;
+    kiln_c99_heap_store_value(arr, &arr->properties, props);
 }
 
 /* The `groups` of a match: one property per named capture, holding that group's element, on
@@ -114,7 +114,7 @@ static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr, size_t gr
         int32_t len = kiln_regexp_group_name(regexp->handle, g, name, sizeof name);
         if (len <= 0) continue;
         if (!found) {
-            int status = kiln_c99_new_object(&arr->match_groups);
+            int status = kiln_c99_new_object_for_owner(&arr->match_groups, arr);
             if (status != KILN_C99_OK) return status;
             status = kiln_c99_set_prototype(arr->match_groups, kiln_c99_null());
             if (status != KILN_C99_OK) return status;

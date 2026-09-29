@@ -814,6 +814,8 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 copy->count = count;
                 copy->capacity = count;
                 copy->shape = NULL;
+                for (i = 0; i < count; ++i)
+                    kiln_c99_candidate_record_property(copy, &copy->properties[i]);
             }
             for (i = 0; i < count; ++i) {
                 if (table->arena != NULL && i >= numeric_count) {
@@ -842,9 +844,9 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 /* Read the array again: the walk allocated, and the object it belongs to is
                  * the one that owns it, so the pointer is the same, but this keeps the store
                  * next to the only load that can see it. */
-                copy->properties[i].value = table->arena != NULL
-                                                ? kiln_c99_clone_arena_boundary(cloned)
-                                                : kiln_val_to_boundary(cloned);
+                kiln_c99_heap_store_value(copy, &copy->properties[i].value,
+                    table->arena != NULL ? kiln_c99_clone_arena_boundary(cloned)
+                                         : kiln_val_to_boundary(cloned));
             }
         }
         *out = copy_val;
@@ -1716,7 +1718,7 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
     array->elements = NULL;
     array->count = 0;
     array->capacity = 0;
-    array->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;

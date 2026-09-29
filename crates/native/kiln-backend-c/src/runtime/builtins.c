@@ -458,7 +458,7 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
             return status;
         }
         slot->accessor = 0;
-        slot->value = kiln_val_to_boundary(kiln_c99_frame_args[at]);
+        kiln_c99_heap_store_value(kiln_c99_object_of(*out), &slot->value, kiln_val_to_boundary(kiln_c99_frame_args[at]));
         slot->enumerable = 1;
         slot->writable = 1;
         slot->configurable = 1;
@@ -469,7 +469,7 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
     }
     if (kiln_c99_frame_mapped_arguments) {
         slot->accessor = 0;
-        slot->value = kiln_c99_frame_callee;
+        kiln_c99_heap_store_value(kiln_c99_object_of(*out), &slot->value, kiln_c99_frame_callee);
         slot->enumerable = 0;
         slot->writable = 1;
         slot->configurable = 1;

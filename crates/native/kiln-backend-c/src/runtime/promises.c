@@ -118,7 +118,7 @@ static int kiln_c99_new_promise(kiln_value *out) {
     promise->reactions = NULL;
     promise->count = 0;
     promise->capacity = 0;
-    promise->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(promise, &promise->properties, kiln_c99_undefined());
     *out = kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)promise, NULL, 0);
     return KILN_C99_OK;
 }
@@ -260,7 +260,7 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
     bound->receiver = receiver;
     bound->arguments = NULL;
     bound->count = count;
-    bound->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(bound, &bound->properties, kiln_c99_undefined());
     if (count != 0) {
         /* The argument array is the bound function's alone, so it stays malloc-backed and the
          * KILN_GC_BOUND finaliser is the one place it is released. */

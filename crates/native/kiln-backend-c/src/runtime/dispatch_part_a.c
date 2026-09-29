@@ -2946,7 +2946,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 is_ascii = regexp->cached_is_ascii;
             } else {
                 is_ascii = kiln_c99_string_is_ascii(subject);
-                regexp->cached_subject_ptr = subject.ptr;
+                kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, subject.ptr);
                 regexp->cached_subject_len = subject.len;
                 regexp->cached_is_ascii = is_ascii;
                 regexp->cached_group_count = 0;

@@ -409,8 +409,9 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
      * object value by `ptr == NULL` while the pointer itself sat in `bits` -- a scheme that
      * needed the two to be separate fields. They now share one word, so the marker moves to
      * `len`, which no object value uses. */
-    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL,
-                                 0xFFFFFFFFu);
+    kiln_c99_heap_store_value(kiln_c99_object_of(object), &slot->value,
+                              kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer,
+                                             NULL, 0xFFFFFFFFu));
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
@@ -871,7 +872,7 @@ static int kiln_c99_node_request_headers_object(kiln_node_response *response, ki
         } else {
             /* An own definition, not an assignment: a header named `__proto__` is a header. */
             status = kiln_c99_own_slot(*out, name, fields[index].name_len, &slot);
-            if (status == KILN_C99_OK) slot->value = value;
+            if (status == KILN_C99_OK) kiln_c99_heap_store_value(kiln_c99_object_of(*out), &slot->value, value);
         }
         if (name != name_buffer) free(name);
         index = run;
@@ -1543,14 +1544,15 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
              * the slots are written rather than between two writes through one pointer. */
             kiln_value url = kiln_c99_node_http_target_text((const char *)event->target,
                                                             (size_t)event->target_len);
-            kiln_val *slots = kiln_c99_object_of(request)->slots;
+            kiln_object *owner = kiln_c99_object_of(request);
+            kiln_val *slots = owner->slots;
             if (url.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-            slots[KILN_C99_NODE_REQ_METHOD] = kiln_val_from_boundary(kiln_c99_node_http_method_text(
-                (const char *)event->method, (size_t)event->method_len));
-            slots[KILN_C99_NODE_REQ_URL] = kiln_val_from_boundary(url);
-            slots[KILN_C99_NODE_REQ_SOCKET] = kiln_val_from_boundary(socket->object);
-            slots[KILN_C99_NODE_REQ_CONNECTION] = kiln_val_from_boundary(socket->object);
-            slots[KILN_C99_NODE_REQ_COMPLETE] = KILN_VAL_FALSE;
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_REQ_METHOD], kiln_val_from_boundary(kiln_c99_node_http_method_text(
+                (const char *)event->method, (size_t)event->method_len)));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_REQ_URL], kiln_val_from_boundary(url));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_REQ_SOCKET], kiln_val_from_boundary(socket->object));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_REQ_CONNECTION], kiln_val_from_boundary(socket->object));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_REQ_COMPLETE], KILN_VAL_FALSE);
         }
         if (!event->version_minor) {
             status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
@@ -1564,13 +1566,14 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                              layout->response_shape, response);
         if (status != KILN_C99_OK) return status;
         {
-            kiln_val *slots = kiln_c99_object_of(response->object)->slots;
-            slots[KILN_C99_NODE_RES_REQ] = kiln_val_from_boundary(request);
-            slots[KILN_C99_NODE_RES_SOCKET] = kiln_val_from_boundary(socket->object);
-            slots[KILN_C99_NODE_RES_CONNECTION] = kiln_val_from_boundary(socket->object);
-            slots[KILN_C99_NODE_RES_STATUS_CODE] = kiln_val_from_boundary(kiln_c99_number(200.0));
-            slots[KILN_C99_NODE_RES_HEADERS_SENT] = KILN_VAL_FALSE;
-            slots[KILN_C99_NODE_RES_WRITABLE_ENDED] = KILN_VAL_FALSE;
+            kiln_object *owner = kiln_c99_object_of(response->object);
+            kiln_val *slots = owner->slots;
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_REQ], kiln_val_from_boundary(request));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_SOCKET], kiln_val_from_boundary(socket->object));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_CONNECTION], kiln_val_from_boundary(socket->object));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_STATUS_CODE], kiln_val_from_boundary(kiln_c99_number(200.0)));
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_HEADERS_SENT], KILN_VAL_FALSE);
+            kiln_c99_heap_store_val(owner, &slots[KILN_C99_NODE_RES_WRITABLE_ENDED], KILN_VAL_FALSE);
         }
         response->next = socket->responses;
         socket->responses = response;
@@ -2153,7 +2156,7 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
             &result, KILN_C99_BUILTIN_ERROR,
             kiln_c99_copy_text((const char *)completion->error_message,
                                (size_t)completion->error_message_len));
-        work->result = result;
+        kiln_c99_heap_store_value(work, &work->result, result);
         if (status == KILN_C99_OK)
             status = kiln_c99_node_fs_error_property(result, "code", 4, completion->error_code,
                                                      completion->error_code_len);
@@ -2176,13 +2179,13 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
         return KILN_C99_INVALID_ARGUMENT;
     status = kiln_c99_new_object(&result);
     if (status != KILN_C99_OK) return status;
-    work->result = result;
+    kiln_c99_heap_store_value(work, &work->result, result);
     status = kiln_c99_typed_alloc(&stdout_value, KILN_TYPED_UINT8, (size_t)completion->bytes_len);
     if (status != KILN_C99_OK) return status;
-    work->stdout_value = stdout_value;
+    kiln_c99_heap_store_value(work, &work->stdout_value, stdout_value);
     status = kiln_c99_typed_alloc(&stderr_value, KILN_TYPED_UINT8, (size_t)completion->stderr_len);
     if (status != KILN_C99_OK) return status;
-    work->stderr_value = stderr_value;
+    kiln_c99_heap_store_value(work, &work->stderr_value, stderr_value);
     if (completion->bytes_len) memcpy(kiln_c99_typed_array_of(stdout_value)->buffer->bytes, completion->bytes, (size_t)completion->bytes_len);
     if (completion->stderr_len) memcpy(kiln_c99_typed_array_of(stderr_value)->buffer->bytes, completion->stderr_bytes, (size_t)completion->stderr_len);
     kiln_c99_typed_array_of(stdout_value)->is_buffer = 1;
@@ -2217,7 +2220,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
     if (kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
     if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
-    work->promise = promise;
+    kiln_c99_heap_store_value(work, &work->promise, promise);
     operation.operation = KILN_REALM_OP_PROCESS_RUN; operation.flags = 1;
     operation.bytes = kiln_c99_typed_array_of(bytes)->buffer->bytes + kiln_c99_typed_array_of(bytes)->byte_offset;
     operation.bytes_len = kiln_c99_typed_array_of(bytes)->length;
@@ -2230,7 +2233,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
         (void)kiln_realm_cancel_active_request(request);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    work->result = pair;
+    kiln_c99_heap_store_value(work, &work->result, pair);
     status_code = kiln_c99_put(NULL, pair, "requestId", 9, kiln_c99_number((double)request), 0, NULL);
     if (status_code == KILN_C99_OK)
         status_code = kiln_c99_put(NULL, pair, "promise", 7, promise, 0, NULL);
@@ -2991,7 +2994,7 @@ static int kiln_c99_port_wait_raw(kiln_value *result, const kiln_value *args, si
     if (!direct && kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
     if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
-    work->promise = direct ? args[2] : promise;
+    kiln_c99_heap_store_value(work, &work->promise, direct ? args[2] : promise);
     work->port_callback = (uint8_t)direct;
     operation.operation = KILN_REALM_OP_PORT_WAIT;
     operation.flags = argc > 1 && kiln_c99_truthy(args[1]) ? 1u : 0u;
@@ -3010,7 +3013,7 @@ static int kiln_c99_port_wait_raw(kiln_value *result, const kiln_value *args, si
         (void)kiln_realm_cancel_active_request(request);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    work->result = pair;
+    kiln_c99_heap_store_value(work, &work->result, pair);
     status = kiln_c99_put(NULL, pair, "requestId", 9, kiln_c99_number((double)request), 0, NULL);
     if (status == KILN_C99_OK) status = kiln_c99_put(NULL, pair, "promise", 7, promise, 0, NULL);
     if (status != KILN_C99_OK) {
@@ -3135,7 +3138,7 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
         free(data_owned);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    work->promise = promise;
+    kiln_c99_heap_store_value(work, &work->promise, promise);
     work->operation = code == KILN_C99_METHOD_NODE_FS_READ_FILE
                           ? KILN_REALM_OP_READ_FILE
                           : code == KILN_C99_METHOD_NODE_FS_WRITE_FILE
@@ -4356,7 +4359,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
                 status = kiln_c99_own_slot(copy, lowered, name_len, &slot);
-                if (status == KILN_C99_OK) slot->value = text;
+                if (status == KILN_C99_OK) kiln_c99_heap_store_value(kiln_c99_object_of(copy), &slot->value, text);
             }
             if (lowered != name_buffer) free(lowered);
         }

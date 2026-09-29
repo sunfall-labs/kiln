@@ -199,7 +199,7 @@ static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_v
                         is_ascii = regexp->cached_is_ascii;
                     } else {
                         is_ascii = kiln_c99_string_is_ascii(sval);
-                        regexp->cached_subject_ptr = sval.ptr;
+                        kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, sval.ptr);
                         regexp->cached_subject_len = sval.len;
                         regexp->cached_is_ascii = is_ascii;
                         regexp->cached_group_count = 0;
@@ -246,7 +246,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         is_ascii = regexp->cached_is_ascii;
                     } else {
                         is_ascii = kiln_c99_string_is_ascii(sval);
-                        regexp->cached_subject_ptr = sval.ptr;
+                        kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, sval.ptr);
                         regexp->cached_subject_len = sval.len;
                         regexp->cached_is_ascii = is_ascii;
                         regexp->cached_group_count = 0;
@@ -382,7 +382,7 @@ static kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak) 
     collection->weak_previous = NULL;
     collection->weak_next = NULL;
     collection->weak_owner = NULL;
-    collection->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(collection, &collection->properties, kiln_c99_undefined());
     kiln_c99_collection_register_weak(collection);
     return collection;
 }

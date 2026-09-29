@@ -197,9 +197,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     if (symbol == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    symbol->description = NULL;
+    kiln_c99_heap_store_pointer(symbol, &symbol->description, NULL);
     symbol->description_len = 0;
-    symbol->description_value = kiln_c99_undefined();
+    kiln_c99_heap_store_value(symbol, &symbol->description_value, kiln_c99_undefined());
     serial = __atomic_add_fetch(&kiln_c99_symbol_serial, 1u, __ATOMIC_RELAXED);
     written = kiln_c99_double_to_js((double)serial, digits);
     if (kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
@@ -226,7 +226,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         view.unit_len = (uint32_t)key.len;
         view.flags = KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY;
         view.data = key.bytes;
-        symbol->key = kiln_c99_intern_pinned_key(&view);
+        kiln_c99_heap_store_pointer(symbol, &symbol->key, kiln_c99_intern_pinned_key(&view));
         if (symbol->key == NULL) {
             free(key.bytes);
             kiln_c99_gc_release(symbol);
@@ -238,9 +238,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     if (description.tag == KILN_VALUE_UNDEFINED) {
         /* `Symbol()` has no description, which prints as `Symbol()` rather than
          * `Symbol(undefined)`. */
-        symbol->description = NULL;
+        kiln_c99_heap_store_pointer(symbol, &symbol->description, NULL);
         symbol->description_len = 0;
-        symbol->description_value = kiln_c99_undefined();
+        kiln_c99_heap_store_value(symbol, &symbol->description_value, kiln_c99_undefined());
     } else {
         kiln_value text = kiln_c99_text(description);
         if (text.tag != KILN_VALUE_STRING) {
@@ -248,9 +248,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
             kiln_c99_gc_release(symbol);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        symbol->description = NULL;
+        kiln_c99_heap_store_pointer(symbol, &symbol->description, NULL);
         symbol->description_len = 0;
-        symbol->description_value = text;
+        kiln_c99_heap_store_value(symbol, &symbol->description_value, text);
     }
     symbol->registry_id = 0;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
@@ -341,15 +341,15 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
         free(property_units);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    symbol->key = kiln_c99_intern_shared_key(&property_view);
+    kiln_c99_heap_store_pointer(symbol, &symbol->key, kiln_c99_intern_shared_key(&property_view));
     free(property_units);
     if (symbol->key == NULL) {
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    symbol->description = NULL;
+    kiln_c99_heap_store_pointer(symbol, &symbol->description, NULL);
     symbol->description_len = 0;
-    symbol->description_value = description;
+    kiln_c99_heap_store_value(symbol, &symbol->description_value, description);
     symbol->registry_id = id;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
