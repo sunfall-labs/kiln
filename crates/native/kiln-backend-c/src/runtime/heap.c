@@ -3834,6 +3834,73 @@ static void kiln_c99_actor_isolated_request_commit_published(kiln_gc_heap *heap,
     realm->isolated_request_invalidated = 0;
 }
 
+/* A single read-only enumeration of the realm context's strong C roots. GC marking and the
+ * graph incoming proof must see the same slots: adding a realm field to only one of those walks
+ * could either collect a live value or move a graph still held by the sender. The two value
+ * layouts are distinct (`kiln_value` and the generated units' compact `kiln_val`). A visitor
+ * may stop early; the only excluded slot is the active graph request's escrow value. */
+typedef struct kiln_c99_realm_root_visitor {
+    void *context;
+    int (*value)(void *context, const kiln_value *slot);
+    int (*val)(void *context, kiln_val value);
+} kiln_c99_realm_root_visitor;
+
+static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
+                                         const kiln_c99_realm_root_visitor *visitor,
+                                         const kiln_value *excluded_escrow_slot) {
+    const kiln_c99_realm_state *realm = &heap->realm;
+    size_t index, slot;
+#define KILN_VISIT_REALM_VALUE(address)                                                        \
+    do {                                                                                        \
+        if ((address) != excluded_escrow_slot &&                                              \
+            visitor->value(visitor->context, (address))) return 1;                             \
+    } while (0)
+    for (index = 0; index < realm->symbol_count; ++index)
+        KILN_VISIT_REALM_VALUE(&realm->symbols[index]);
+    KILN_VISIT_REALM_VALUE(&realm->isolated_graphs);
+    KILN_VISIT_REALM_VALUE(&realm->isolated_request_handle);
+    KILN_VISIT_REALM_VALUE(&realm->isolated_escrow_key);
+    KILN_VISIT_REALM_VALUE(&realm->isolated_escrow_value);
+    KILN_VISIT_REALM_VALUE(&realm->graph_inbox_root);
+    KILN_VISIT_REALM_VALUE(&realm->array_unscopables);
+    for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
+         ++index)
+        KILN_VISIT_REALM_VALUE(&realm->native_prototypes[index]);
+    for (index = 0; index < realm->unit_capacity; ++index) {
+        const kiln_c99_unit_block *unit = realm->units[index];
+        if (unit == NULL) continue;
+        for (slot = 0; slot < unit->val_count; ++slot)
+            if (visitor->val(visitor->context, unit->vals[slot])) return 1;
+    }
+    for (index = 0; index < realm->region_own_buckets; ++index) {
+        const kiln_c99_region_own *entry;
+        for (entry = realm->region_own[index]; entry != NULL; entry = entry->next) {
+            KILN_VISIT_REALM_VALUE(&entry->prototype);
+            KILN_VISIT_REALM_VALUE(&entry->store);
+        }
+    }
+#undef KILN_VISIT_REALM_VALUE
+    return 0;
+}
+
+typedef struct kiln_c99_graph_root_alias_visitor {
+    const kiln_gc_heap *heap;
+    kiln_nursery_chunk *const *chunks;
+    size_t count;
+} kiln_c99_graph_root_alias_visitor;
+
+static int kiln_c99_graph_realm_value_alias(void *opaque, const kiln_value *slot) {
+    const kiln_c99_graph_root_alias_visitor *visit =
+        (const kiln_c99_graph_root_alias_visitor *)opaque;
+    return kiln_c99_graph_value_in_batch(visit->heap, visit->chunks, visit->count, slot);
+}
+
+static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
+    const kiln_c99_graph_root_alias_visitor *visit =
+        (const kiln_c99_graph_root_alias_visitor *)opaque;
+    return kiln_c99_graph_val_in_batch(visit->heap, visit->chunks, visit->count, value);
+}
+
 /* Inspect C-owned direct roots and key-table side pointers. Unpinned canonical keys are weak
  * for GC, but they still contain an address until purge and cannot point into a moved chunk.
  * This is a useful negative witness, not a complete root enumeration: the provider, generated
@@ -3842,38 +3909,12 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
                                                    kiln_nursery_chunk *const *chunks,
                                                    size_t count,
                                                    const kiln_value *excluded_escrow_slot) {
-    const kiln_c99_realm_state *realm = &heap->realm;
+    kiln_c99_graph_root_alias_visitor context = { heap, chunks, count };
+    kiln_c99_realm_root_visitor visitor = {
+        &context, kiln_c99_graph_realm_value_alias, kiln_c99_graph_realm_val_alias
+    };
     size_t index;
-    size_t slot;
-    for (index = 0; index < realm->symbol_count; ++index) {
-        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->symbols[index])) return 1;
-    }
-    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_graphs)) return 1;
-    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_request_handle) ||
-        kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_key)) return 1;
-    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->graph_inbox_root)) return 1;
-    if (excluded_escrow_slot != &realm->isolated_escrow_value &&
-        kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_value)) return 1;
-    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->array_unscopables)) return 1;
-    for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
-         ++index) {
-        if (kiln_c99_graph_value_in_batch(heap, chunks, count,
-                                          &realm->native_prototypes[index])) return 1;
-    }
-    for (index = 0; index < realm->unit_capacity; ++index) {
-        const kiln_c99_unit_block *unit = realm->units[index];
-        if (unit == NULL) continue;
-        for (slot = 0; slot < unit->val_count; ++slot) {
-            if (kiln_c99_graph_val_in_batch(heap, chunks, count, unit->vals[slot])) return 1;
-        }
-    }
-    for (index = 0; index < realm->region_own_buckets; ++index) {
-        const kiln_c99_region_own *entry;
-        for (entry = realm->region_own[index]; entry != NULL; entry = entry->next) {
-            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->prototype) ||
-                kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->store)) return 1;
-        }
-    }
+    if (kiln_c99_gc_visit_realm_roots(heap, &visitor, excluded_escrow_slot)) return 1;
     for (index = heap->job_head; index < heap->job_tail; ++index) {
         const kiln_microtask *job = &heap->jobs[index & heap->job_mask];
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &job->handler) ||
@@ -6916,31 +6957,23 @@ static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
     }
 }
 
+static int kiln_c99_gc_mark_realm_value(void *opaque, const kiln_value *slot) {
+    kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, slot);
+    return 0;
+}
+
+static int kiln_c99_gc_mark_realm_val(void *opaque, kiln_val value) {
+    kiln_c99_gc_mark_val((kiln_gc_heap *)opaque, value);
+    return 0;
+}
+
 /* The realm context's roots: its symbols, its built-in objects, and every unit's module block.
  * Not marked at teardown: nothing here outlives the realm. */
 static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
-    kiln_c99_realm_state *realm = &heap->realm;
-    size_t index;
-    kiln_c99_gc_mark_values(heap, realm->symbols, realm->symbol_count);
-    kiln_c99_gc_mark_value(heap, &realm->isolated_graphs);
-    kiln_c99_gc_mark_value(heap, &realm->isolated_request_handle);
-    kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_key);
-    kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_value);
-    kiln_c99_gc_mark_value(heap, &realm->graph_inbox_root);
-    kiln_c99_gc_mark_value(heap, &realm->array_unscopables);
-    kiln_c99_gc_mark_values(heap, realm->native_prototypes,
-                            sizeof realm->native_prototypes / sizeof *realm->native_prototypes);
-    for (index = 0; index < realm->unit_capacity; ++index) {
-        const kiln_c99_unit_block *block = realm->units[index];
-        if (block != NULL) kiln_c99_gc_mark_vals(heap, block->vals, block->val_count);
-    }
-    for (index = 0; index < realm->region_own_buckets; ++index) {
-        const kiln_c99_region_own *entry;
-        for (entry = realm->region_own[index]; entry != NULL; entry = entry->next) {
-            kiln_c99_gc_mark_value(heap, &entry->prototype);
-            kiln_c99_gc_mark_value(heap, &entry->store);
-        }
-    }
+    kiln_c99_realm_root_visitor visitor = {
+        heap, kiln_c99_gc_mark_realm_value, kiln_c99_gc_mark_realm_val
+    };
+    (void)kiln_c99_gc_visit_realm_roots(heap, &visitor, NULL);
 }
 
 /* Free what the realm context owns outside the collector, with the heap (teardown). */

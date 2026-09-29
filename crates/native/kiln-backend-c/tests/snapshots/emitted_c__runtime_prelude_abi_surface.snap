@@ -2218,6 +2218,13 @@ static int kiln_c99_actor_isolated_request_begin(kiln_gc_heap *heap, kiln_value 
 static int kiln_c99_actor_isolated_request_escrow(kiln_gc_heap *heap, uint64_t id) {
 static int kiln_c99_actor_isolated_request_rollback(kiln_gc_heap *heap, uint64_t id) {
 static void kiln_c99_actor_isolated_request_commit_published(kiln_gc_heap *heap, uint64_t id,
+typedef struct kiln_c99_realm_root_visitor {
+static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
+#define KILN_VISIT_REALM_VALUE(address)                                                        \
+#undef KILN_VISIT_REALM_VALUE
+typedef struct kiln_c99_graph_root_alias_visitor {
+static int kiln_c99_graph_realm_value_alias(void *opaque, const kiln_value *slot) {
+static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
 static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
@@ -2343,6 +2350,8 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
 static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *chunk, int orphan) {
 static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
 static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
+static int kiln_c99_gc_mark_realm_value(void *opaque, const kiln_value *slot) {
+static int kiln_c99_gc_mark_realm_val(void *opaque, kiln_val value) {
 static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
 static void kiln_c99_realm_free(kiln_c99_realm_state *realm) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
