@@ -4209,6 +4209,28 @@ static int kiln_cli_report_worker_error(void *opaque) {
     return kiln_c99_worker_report_error(graph->result);
 }
 
+/* A scheduled turn saves its worker and process-exit state in the realm scope before the
+ * launcher regains control. Enter that scope to consume the exit request: reading the lane's
+ * thread-local slot here would see whichever realm used the lane outside this turn. */
+typedef struct kiln_cli_exit_request {
+    int found;
+    int32_t code;
+} kiln_cli_exit_request;
+
+static int kiln_cli_read_exit_request(void *opaque) {
+    kiln_cli_exit_request *request = (kiln_cli_exit_request *)opaque;
+    request->found = kiln_worker_exit_code(&request->code);
+    return request->found < 0 ? request->found : KILN_C99_OK;
+}
+
+static int kiln_cli_take_realm_exit_code(uint64_t realm, int32_t *out) {
+    kiln_cli_exit_request request = {0};
+    int status = kiln_realm_enter(realm, kiln_cli_read_exit_request, &request);
+    if (status != KILN_C99_OK) return -1;
+    if (request.found == 1) *out = request.code;
+    return request.found;
+}
+
 /* The graph and result slots outlive every generated C frame. A scheduler can run one step,
  * release its lane, and later resume this record without retaining a frame pointer. */
 typedef struct kiln_cli_realm_run {
@@ -4363,7 +4385,10 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
     if (worker_entry != 0) {
         int32_t requested = 0;
         int code = 0;
-        if (kiln_worker_exit_code(&requested) == 1) {
+        int exit_request = kiln_cli_take_realm_exit_code(realm, &requested);
+        if (exit_request < 0) {
+            code = 1;
+        } else if (exit_request == 1) {
             code = requested;
         } else if (status == KILN_C99_THROWN) {
             (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
@@ -4381,7 +4406,9 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * process (realms issue 23): the runtime recorded the code and the realm unwound here. The
      * launcher decides what the code means for the other realms, as the supervisor does for a
      * process-mode worker's. */
-    if (kiln_worker_exit_code(&exit_requested) == 1) {
+    int exit_request = kiln_cli_take_realm_exit_code(realm, &exit_requested);
+    if (exit_request < 0 && status == 0) status = KILN_C99_CONTROL_ERROR;
+    if (exit_request == 1) {
         exit_asked = 1;
         status = 0;
         writes_result = 0;
