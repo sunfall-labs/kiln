@@ -3906,6 +3906,18 @@ static int candidate_array_entry(void *context) {
         !((sides.spans[0].owner == array && sides.spans[1].owner == second_array) ||
           (sides.spans[0].owner == second_array && sides.spans[1].owner == array))) return 15;
     heap->graph_proof_sides = &sides;
+    /* An indexed certificate retains interior-pointer semantics and must not hide an
+     * alias when a diagnostic asks about a different batch while the index is installed. */
+    {
+        kiln_nursery_chunk *other_batch[1] = {
+            kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)ordinary_array - 1)
+        };
+        if (!kiln_c99_graph_in_batch(heap, batch, 1, (const char *)array + 1) ||
+            kiln_c99_graph_in_batch(heap, batch, 1, ordinary_array) ||
+            !kiln_c99_graph_in_batch(heap, other_batch, 1, ordinary_array) ||
+            kiln_c99_graph_in_batch(heap, other_batch, 1, array) ||
+            kiln_c99_graph_in_batch(heap, batch, 1, batch[0]->base - 1)) return 21;
+    }
     side_word = (uintptr_t)(array->elements + 127);
     if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
         !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 16;
@@ -3918,7 +3930,7 @@ static int candidate_array_entry(void *context) {
         return 17;
     ordinary_array->elements = ordinary_elements;
     heap->graph_proof_sides = NULL;
-    free(sides.spans);
+    kiln_c99_graph_side_set_dispose(&sides);
     header->candidate_id = 0;
     if (kiln_c99_graph_candidate_closed(heap, batch, 1, array)) return 18;
     header->candidate_id = candidate_id;
@@ -4006,7 +4018,7 @@ static int candidate_dictionary_entry(void *context) {
             (kiln_gc_block *)outside - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 14;
     outside->properties = outside_properties;
     heap->graph_proof_sides = NULL;
-    free(sides.spans);
+    kiln_c99_graph_side_set_dispose(&sides);
     header->candidate_id = 0;
     if (kiln_c99_graph_candidate_closed(heap, batch, 1, object)) return 15;
     header->candidate_id = candidate_id;
@@ -4097,7 +4109,7 @@ static int candidate_slots_entry(void *context) {
             (kiln_gc_block *)outside - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 13;
     outside->slots = outside_slots;
     heap->graph_proof_sides = NULL;
-    free(sides.spans);
+    kiln_c99_graph_side_set_dispose(&sides);
     header->candidate_id = 0;
     if (kiln_c99_graph_candidate_closed(heap, batch, 1, object)) return 14;
     header->candidate_id = candidate_id;
@@ -4441,17 +4453,41 @@ __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap
     return request;
 }
 
+static int reject_validated_manifest(void *context, const kiln_gc_heap *heap,
+    kiln_nursery_chunk **chunks, size_t count, kiln_value root,
+    const kiln_c99_graph_side_set *proof) {
+    (void)heap; (void)chunks; (void)count; (void)root; (void)proof;
+    *(int *)context = 1;
+    return 0;
+}
+
+__attribute__((noinline)) static uint64_t rearm_closed_request(kiln_gc_heap *heap) {
+    kiln_collection *registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    uint64_t request = 0;
+    if (!kiln_c99_actor_isolated_request_begin(heap, registry->entries[0].key, &request))
+        return 0;
+    return request;
+}
+
 static int actor_certificate_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_c99_graph_capsule capsule;
     kiln_collection *registry;
     uint64_t request;
+    int rejected = 0;
     (void)context;
     if (heap == NULL) return 1;
     heap->fallback = 0;
     heap->enabled = 1;
     request = make_closed_request(heap);
     if (request == 0) return 2;
+    /* A consumer refusal must return the manifest to the proof and restore sender escrow. */
+    if (kiln_c99_graph_incoming_request_scan_with_manifest(heap, request, 1,
+            reject_validated_manifest, &rejected) != KILN_C99_GRAPH_OUTGOING_UNPROVEN ||
+        !rejected || heap->realm.isolated_escrow_entry != NULL ||
+        heap->realm.isolated_request_id != 0) return 10;
+    request = rearm_closed_request(heap);
+    if (request == 0) return 11;
     if (!kiln_c99_graph_capsule_certify_request(heap, request, &capsule)) return 3;
     if (capsule.chunk == NULL || capsule.detached ||
         heap->realm.isolated_escrow_entry == NULL ||
@@ -4462,6 +4498,7 @@ static int actor_certificate_entry(void *context) {
     if (registry->entries[0].value.bits != capsule.root.bits ||
         heap->realm.isolated_escrow_entry != NULL ||
         heap->realm.isolated_request_id != 0) return 7;
+    kiln_c99_graph_capsule_dispose(&capsule);
     return 0;
 }
 

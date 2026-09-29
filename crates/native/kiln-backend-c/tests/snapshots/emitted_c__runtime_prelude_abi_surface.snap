@@ -2008,6 +2008,7 @@ typedef struct kiln_c99_local_edge {
 #define KILN_GC_PENDING_EDGES 16u
 typedef struct kiln_c99_graph_side_span {
 typedef struct kiln_c99_graph_side_set {
+static void kiln_c99_graph_side_set_dispose(kiln_c99_graph_side_set *set) {
 typedef struct kiln_gc_weak_resource {
 typedef struct kiln_gc_heap {
 static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
@@ -2305,13 +2306,15 @@ static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id);
+typedef int (*kiln_c99_graph_manifest_accept)(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t request_id,
 done:
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
-kiln_c99_graph_incoming_request_scan(kiln_gc_heap *heap, uint64_t request_id,
+kiln_c99_graph_incoming_request_scan_with_manifest(
 #if defined(__GNUC__) || defined(__clang__)
 #endif
+static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_request_scan(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
@@ -2447,10 +2450,12 @@ static kiln_c99_graph_capsule *kiln_c99_prepared_graph_capsule(kiln_gc_heap *hea
 static void kiln_c99_prepared_graph_commit(kiln_gc_heap *heap, kiln_value handle,
 static kiln_nursery_chunk *kiln_c99_graph_capsule_chunk(
 static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
+static const void *kiln_c99_graph_capsule_root_payload(const kiln_gc_heap *from,
 static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
 fail:
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
 static void kiln_c99_actor_candidate_seal(kiln_gc_heap *heap, kiln_value root) {
+static int kiln_c99_graph_capsule_accept_manifest(
 static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t request_id,
 static int kiln_c99_graph_capsule_receiver_preflight(
 static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_capsule *capsule) {

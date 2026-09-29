@@ -43,6 +43,37 @@ static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
     capsule->chunks = NULL;
 }
 
+/* The incoming proof and private-arena path use the same exact root representation check. */
+static const void *kiln_c99_graph_capsule_root_payload(const kiln_gc_heap *from,
+                                                        kiln_value root) {
+    const kiln_gc_block *block;
+    const void *payload;
+    uint32_t kind;
+    if (root.bits == 0) return NULL;
+    block = kiln_c99_gc_lookup_interior(from, (uintptr_t)root.bits);
+    if (block == NULL) return NULL;
+    payload = block + 1;
+    kind = block->kind & KILN_GC_KIND_MASK;
+    if (root.tag == KILN_VALUE_CELL) {
+        if (kind != KILN_GC_CELL || payload != (const void *)(uintptr_t)root.bits) return NULL;
+    } else if (root.tag == KILN_VALUE_STRING) {
+        const kiln_string *string = (const kiln_string *)payload;
+        if (kind != KILN_GC_STRING || !kiln_c99_graph_inline_string(block) ||
+            string->data != (const void *)(uintptr_t)root.bits ||
+            string->unit_len != root.len) return NULL;
+    } else if (root.tag == KILN_VALUE_OBJECT || root.tag == KILN_VALUE_ARRAY) {
+        if ((root.tag == KILN_VALUE_OBJECT ? kind != KILN_GC_OBJECT : kind != KILN_GC_ARRAY) ||
+            payload != (const void *)(uintptr_t)root.bits ||
+            !kiln_c99_graph_inert_finalizer_block(block)) return NULL;
+    } else if (root.tag == KILN_VALUE_DATE) {
+        if (kind != KILN_GC_DATE || block->size != sizeof(double) ||
+            payload != (const void *)(uintptr_t)root.bits) return NULL;
+    } else {
+        return NULL;
+    }
+    return payload;
+}
+
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
  * exact cell/object/array/date payloads and inline string bytes are supported; the returned
  * requirements contain numbers only and may cross lanes before either heap is changed. */
@@ -52,9 +83,7 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
                                                      kiln_c99_graph_capsule *out,
                                                      kiln_gc_block *large_head) {
     kiln_nursery_chunk **chunks = NULL;
-    const kiln_gc_block *block;
     const void *payload;
-    uint32_t kind;
     size_t count = 0, index = 0, objects = 0, bytes = 0, filled = 0;
     size_t large_objects = 0, large_bytes = 0;
     if (from == NULL || chunk == NULL || out == NULL || from->collecting || from->parallel_paused ||
@@ -64,27 +93,8 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
         chunk->candidate_id == 0 || chunk->candidate_epoch != from->epoch ||
         !kiln_c99_chunk_sealed_for_move(&from->nursery, chunk)) return 0;
     if (!kiln_c99_nursery_full_contains(&from->nursery, chunk) || root.bits == 0) return 0;
-    block = kiln_c99_gc_lookup_interior(from, (uintptr_t)root.bits);
-    if (block == NULL) return 0;
-    payload = block + 1;
-    kind = block->kind & KILN_GC_KIND_MASK;
-    if (root.tag == KILN_VALUE_CELL) {
-        if (kind != KILN_GC_CELL || payload != (const void *)(uintptr_t)root.bits) return 0;
-    } else if (root.tag == KILN_VALUE_STRING) {
-        const kiln_string *string = (const kiln_string *)payload;
-        if (kind != KILN_GC_STRING || !kiln_c99_graph_inline_string(block) ||
-            string->data != (const void *)(uintptr_t)root.bits ||
-            string->unit_len != root.len) return 0;
-    } else if (root.tag == KILN_VALUE_OBJECT || root.tag == KILN_VALUE_ARRAY) {
-        if ((root.tag == KILN_VALUE_OBJECT ? kind != KILN_GC_OBJECT : kind != KILN_GC_ARRAY) ||
-            payload != (const void *)(uintptr_t)root.bits ||
-            !kiln_c99_graph_inert_finalizer_block(block)) return 0;
-    } else if (root.tag == KILN_VALUE_DATE) {
-        if (kind != KILN_GC_DATE || block->size != sizeof(double) ||
-            payload != (const void *)(uintptr_t)root.bits) return 0;
-    } else {
-        return 0;
-    }
+    payload = kiln_c99_graph_capsule_root_payload(from, root);
+    if (payload == NULL) return 0;
     if (!kiln_c99_candidate_group_snapshot(from, chunk, &chunks, &count)) return 0;
     for (index = 0; index < count; ++index) {
         kiln_nursery_chunk *it = chunks[index];
@@ -183,36 +193,66 @@ static void kiln_c99_actor_candidate_seal(kiln_gc_heap *heap, kiln_value root) {
     kiln_c99_actor_candidate_finish(heap, closed);
 }
 
-/* This is the sole positive certificate for the narrow capsule kinds. The machine boundary is
- * captured by `request_scan` before it resolves an opaque request ID into a graph pointer.
- * Every failure restores the sender's registry value. Success retains the exact escrow slot as
- * the graph's only sender root; the pair transaction must either roll it back or consume it
- * before releasing either realm. No actor path calls this until publication is atomic. */
+/* Reuse the completed outgoing walk under the same exclusive sender lease. This does not
+ * admit a transfer by itself: the incoming coordinator calls it only after C, machine, outside
+ * heap and provider roots all pass. It owns the vector only on success; no JS, allocation or
+ * collection may occur here. */
+static int kiln_c99_graph_capsule_accept_manifest(
+    void *context, const kiln_gc_heap *from, kiln_nursery_chunk **chunks, size_t count,
+    kiln_value root, const kiln_c99_graph_side_set *proof) {
+    kiln_c99_graph_capsule *out = (kiln_c99_graph_capsule *)context;
+    const void *payload;
+    const kiln_gc_block *block;
+    size_t index, objects = 0, bytes = 0, filled = 0;
+    if (out == NULL || from->collecting || from->parallel_paused || count == 0 ||
+        proof->region_source != chunks || proof->regions.count != count) return 0;
+    payload = kiln_c99_graph_capsule_root_payload(from, root);
+    if (payload == NULL) return 0;
+    block = (const kiln_gc_block *)payload - 1;
+    if ((block->kind & KILN_GC_FLAG_NURSERY) == 0 ||
+        !kiln_c99_gc_ptrset_contains(&proof->regions,
+                                      kiln_c99_nursery_chunk_of(from, block))) return 0;
+    for (index = 0; index < count; ++index) {
+        const kiln_nursery_chunk *chunk = chunks[index];
+        size_t used = (size_t)(chunk->limit - chunk->base);
+        if (objects > SIZE_MAX - chunk->alloc_count || bytes > SIZE_MAX - chunk->alloc_bytes ||
+            filled > SIZE_MAX - used) return 0;
+        objects += chunk->alloc_count;
+        bytes += chunk->alloc_bytes;
+        filled += used;
+    }
+    if (objects > from->count || bytes > from->bytes || filled > from->nursery.full_bytes)
+        return 0;
+    memset(out, 0, sizeof *out);
+    out->chunk = chunks[0];
+    out->chunks = chunks;
+    out->root = root;
+    out->candidate_id = chunks[0]->candidate_id;
+    out->sender_epoch = from->epoch;
+    out->needs.regions = count;
+    out->needs.objects = objects;
+    out->needs.bytes = bytes;
+    out->needs.filled = filled;
+    out->needs.region_capacity = from->nursery.capacity;
+    out->needs.bitmap_words = from->nursery.bitmap_words;
+    out->needs.foreign_dictionary_keys = proof->foreign_dictionary_keys;
+    return 1;
+}
+
+/* The machine boundary is captured before resolving the opaque request ID. A successful
+ * capsule retains the exact escrow slot; the pair transaction either rolls it back or consumes
+ * it before releasing either realm. */
 static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t request_id,
                                                    kiln_c99_graph_capsule *out) {
-    kiln_c99_realm_state *realm;
-    kiln_gc_block *block;
-    kiln_nursery_chunk *chunk;
     if (heap == NULL) return 0;
     if (out == NULL || request_id == 0) {
         (void)kiln_c99_actor_isolated_request_rollback(heap, request_id);
         return 0;
     }
     memset(out, 0, sizeof *out);
-    if (kiln_c99_graph_incoming_request_scan(heap, request_id, 1) != KILN_C99_GRAPH_CLEAR)
-        return 0;
-    realm = &heap->realm;
-    if (realm->isolated_request_id == request_id && realm->isolated_escrow_entry != NULL &&
-        realm->isolated_escrow_value.bits != 0) {
-        block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)realm->isolated_escrow_value.bits);
-        if (block != NULL && (block->kind & KILN_GC_FLAG_NURSERY) != 0) {
-            chunk = kiln_c99_nursery_chunk_of(heap, block);
-            if (kiln_c99_graph_capsule_prepare(heap, chunk, realm->isolated_escrow_value, out))
-                return 1;
-        }
-    }
-    (void)kiln_c99_actor_isolated_request_rollback(heap, request_id);
-    return 0;
+    return kiln_c99_graph_incoming_request_scan_with_manifest(
+               heap, request_id, 1, kiln_c99_graph_capsule_accept_manifest, out) ==
+           KILN_C99_GRAPH_CLEAR;
 }
 
 /* Receiver preflight is wholly lane-local. The ID must be a host-authenticated reservation,

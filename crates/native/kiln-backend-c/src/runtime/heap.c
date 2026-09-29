@@ -389,7 +389,19 @@ typedef struct kiln_c99_graph_side_set {
     size_t capacity;
     uintptr_t lo;
     uintptr_t hi;
+    /* The outgoing certificate already validates these regions. Retain its index for the
+     * incoming walk, bound to the exact borrowed manifest so unrelated diagnostic batches
+     * cannot accidentally use another candidate's membership answer. */
+    kiln_gc_ptrset regions;
+    kiln_nursery_chunk *const *region_source;
+    int foreign_dictionary_keys;
 } kiln_c99_graph_side_set;
+
+static void kiln_c99_graph_side_set_dispose(kiln_c99_graph_side_set *set) {
+    free(set->spans);
+    free(set->regions.table);
+    memset(set, 0, sizeof *set);
+}
 
 /* A native resource owned by a JavaScript object without making that object a GC root. The
  * collector releases it after marking proves the handle dead, before sweeping its block. */
@@ -4203,6 +4215,7 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
             if (!kiln_c99_graph_follow_val(walk, object->elements[index])) return 0;
         }
         if (object->shape == NULL) {
+            if (object->count != 0) walk->sides.foreign_dictionary_keys = 1;
             if (object->candidate_properties != 0 &&
                 !kiln_c99_graph_add_object_side(walk, block, object)) return 0;
             for (index = 0; index < object->count; ++index) {
@@ -4331,9 +4344,12 @@ static int kiln_c99_graph_candidate_closed_with_sides(
 done:
     if (result && sides != NULL) {
         *sides = walk.sides;
+        sides->regions = walk.regions;
+        sides->region_source = chunks;
         memset(&walk.sides, 0, sizeof walk.sides);
+        memset(&walk.regions, 0, sizeof walk.regions);
     }
-    free(walk.sides.spans);
+    kiln_c99_graph_side_set_dispose(&walk.sides);
     free(walk.queue);
     free(walk.regions.table);
     free(walk.reached.table);
@@ -4369,6 +4385,8 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
     kiln_gc_block *block;
     kiln_nursery_chunk *chunk;
     size_t index;
+    int indexed = sides != NULL && sides->region_source == chunks &&
+                  sides->regions.count == count;
     if (sides != NULL && sides->count != 0 &&
         address >= sides->lo && address < sides->hi) {
         size_t low = 0, high = sides->count;
@@ -4380,9 +4398,16 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
         if (low != 0 && address < sides->spans[low - 1].limit) return 1;
     }
     if (address < heap->lo || address >= heap->hi) return 0;
+    if (indexed) {
+        /* Masking does not dereference this untrusted machine word. Most outside edges do
+         * not enter a candidate region; reject them before the collector's interior lookup. */
+        chunk = kiln_c99_nursery_chunk_of(heap, (const kiln_gc_block *)pointer);
+        if (!kiln_c99_gc_ptrset_contains(&sides->regions, chunk)) return 0;
+    }
     block = kiln_c99_gc_lookup_interior(heap, address);
     if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 0;
     chunk = kiln_c99_nursery_chunk_of(heap, block);
+    if (indexed) return kiln_c99_gc_ptrset_contains(&sides->regions, chunk);
     for (index = 0; index < count; ++index) {
         if (chunks[index] == chunk) return 1;
     }
@@ -5195,12 +5220,21 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id);
 
+/* A successful consumer may take the manifest only after every incoming authority has
+ * passed. It must be read-only and non-allocating: both the closure and ownership proof refer
+ * to this uninterrupted sender lease. Failure leaves manifest ownership with the proof. */
+typedef int (*kiln_c99_graph_manifest_accept)(
+    void *context, const kiln_gc_heap *heap, kiln_nursery_chunk **chunks, size_t count,
+    kiln_value root, const kiln_c99_graph_side_set *proof);
+
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t request_id,
                                                 const uintptr_t *stack_low,
                                                 const uintptr_t *stack_high,
                                                 const jmp_buf *registers,
-                                                int retain_clear_escrow) {
+                                                int retain_clear_escrow,
+                                                kiln_c99_graph_manifest_accept accept,
+                                                void *accept_context) {
     kiln_c99_realm_state *realm = &heap->realm;
     kiln_nursery_chunk *chunk;
     kiln_nursery_chunk **chunks = NULL;
@@ -5257,9 +5291,17 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
         else if (status != KILN_C99_OK) result = KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
         else result = KILN_C99_GRAPH_CLEAR;
     }
+    if (result == KILN_C99_GRAPH_CLEAR && retain_clear_escrow && accept != NULL) {
+        if (!accept(accept_context, heap, chunks, count, realm->isolated_escrow_value,
+                    &sides)) {
+            result = KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+        } else {
+            chunks = NULL; /* The accepted capsule now owns this manifest vector. */
+        }
+    }
 done:
     if (sides_installed) heap->graph_proof_sides = NULL;
-    free(sides.spans);
+    kiln_c99_graph_side_set_dispose(&sides);
     free(chunks);
     /* Only the explicit certificate path can retain escrow after full enumeration. The
      * diagnostic probe keeps its historical refusal and restores the sender graph. */
@@ -5272,8 +5314,9 @@ done:
 }
 
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
-kiln_c99_graph_incoming_request_scan(kiln_gc_heap *heap, uint64_t request_id,
-                                      int retain_clear_escrow) {
+kiln_c99_graph_incoming_request_scan_with_manifest(
+    kiln_gc_heap *heap, uint64_t request_id, int retain_clear_escrow,
+    kiln_c99_graph_manifest_accept accept, void *accept_context) {
     volatile uintptr_t anchor = 0;
     uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
     uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();
@@ -5294,7 +5337,14 @@ kiln_c99_graph_incoming_request_scan(kiln_gc_heap *heap, uint64_t request_id,
         return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
     }
     return kiln_c99_graph_incoming_request_below_boundary(heap, request_id, low, high, &registers,
-                                                            retain_clear_escrow);
+                                                            retain_clear_escrow, accept,
+                                                            accept_context);
+}
+
+static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_request_scan(
+    kiln_gc_heap *heap, uint64_t request_id, int retain_clear_escrow) {
+    return kiln_c99_graph_incoming_request_scan_with_manifest(heap, request_id,
+                                                               retain_clear_escrow, NULL, NULL);
 }
 
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
