@@ -72,6 +72,8 @@ static int kiln_module_50bb64be60684e555d9624079376f324_body(kiln_host *host, ki
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
     kiln_val locals[2];
+    const void *locals_owner = NULL;
+    (void)locals_owner;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;

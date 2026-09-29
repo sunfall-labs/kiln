@@ -900,7 +900,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         {
             kiln_generator *frame = kiln_c99_generator_of(built);
             frame->is_async = 1;
-            status = kiln_c99_new_promise(&frame->promise);
+            kiln_value frame_promise;
+            status = kiln_c99_new_promise(&frame_promise);
+            if (status == KILN_C99_OK)
+                kiln_c99_heap_store_value(frame, &frame->promise, frame_promise);
             if (status != KILN_C99_OK) {
                 return status;
             }

@@ -2213,7 +2213,7 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
 static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
 static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
-static void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value) {
+static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer) {
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
 static void kiln_c99_candidate_record_vals(const void *owner_payload,
@@ -2330,6 +2330,7 @@ static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
 static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
+static void kiln_c99_candidate_prune_owners(kiln_gc_heap *heap) {
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 typedef struct kiln_c99_graph_provider_visit {

@@ -2613,6 +2613,7 @@ fn render_entry(
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
         let locals = usize::try_from(program.local_count).unwrap().max(1);
         writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
+        output.push_str("    const void *locals_owner = NULL;\n    (void)locals_owner;\n");
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
 
         if let Some((module_prog, is_commonjs)) = module {
@@ -2790,8 +2791,10 @@ fn render_entry(
         .max(1);
     if module_scope {
         writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
+        output.push_str("    const void *locals_owner = NULL;\n    (void)locals_owner;\n");
     } else if !array_slots.is_empty() {
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
+        output.push_str("    const void *locals_owner = NULL;\n    (void)locals_owner;\n");
     }
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     match module {

@@ -33,21 +33,21 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->handler_stack = NULL;
     frame->handler_top = 0;
     for (index = 0; index < locals; ++index) {
-        frame->locals[index] = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(frame, &frame->locals[index], KILN_VAL_UNDEFINED);
     }
     for (index = 0; index < argc && index < locals; ++index) {
-        frame->locals[index] = kiln_val_from_boundary(args[index]);
+        kiln_c99_heap_store_val(frame, &frame->locals[index], kiln_val_from_boundary(args[index]));
     }
-    frame->function = function;
-    frame->receiver = receiver;
+    kiln_c99_heap_store_value(frame, &frame->function, function);
+    kiln_c99_heap_store_value(frame, &frame->receiver, receiver);
     frame->sp = 0;
     frame->resume = 0;
-    frame->sent = kiln_c99_undefined();
+    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());
     frame->awaiting = 0;
     frame->async_generator = 0;
     frame->raising = 0;
     frame->binding = 0;
-    frame->promise = kiln_c99_undefined();
+    kiln_c99_heap_store_value(frame, &frame->promise, kiln_c99_undefined());
     frame->is_async = 0;
     frame->started = 0;
     frame->done = 0;
@@ -57,7 +57,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->queue_count = 0;
     frame->queue_capacity = 0;
     frame->queue_executing = 0;
-    frame->delegate = kiln_c99_undefined();
+    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
     *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
     return KILN_C99_OK;

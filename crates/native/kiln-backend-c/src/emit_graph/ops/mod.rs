@@ -392,7 +392,12 @@ pub(super) fn emit_graph_op(
         }
         GraphOp::StoreLocal { slot, value } => {
             if in_array(slot) {
-                writeln!(output, "    locals[{slot}] = v{};", value.0).unwrap();
+                writeln!(
+                    output,
+                    "    kiln_c99_heap_store_val(locals_owner, &locals[{slot}], v{});",
+                    value.0
+                )
+                .unwrap();
             }
             if is_used {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
@@ -668,6 +673,13 @@ pub(super) fn emit_graph_op(
                 writeln!(
                     output,
                     "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+            }
+            if proto.generator || proto.asynchronous {
+                writeln!(
+                    output,
+                    "    kiln_c99_heap_store_val(locals_owner, &locals[{slot}], locals[{slot}]);"
                 )
                 .unwrap();
             }
@@ -1619,7 +1631,9 @@ pub(super) fn materialize_sunk(
         if let Some(GraphOp::StoreLocal { slot, .. }) = defs.get(&alias)
             && array_slots.contains(slot)
         {
-            text.push_str(&format!(" locals[{slot}] = v{alloc};"));
+            text.push_str(&format!(
+                " kiln_c99_heap_store_val(locals_owner, &locals[{slot}], v{alloc});"
+            ));
         }
     }
     text.push_str(" }");

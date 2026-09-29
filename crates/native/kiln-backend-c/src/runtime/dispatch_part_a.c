@@ -1115,12 +1115,12 @@ static int kiln_c99_is_object(kiln_value val) {
 
 static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
                                     kiln_value *result, int depth, kiln_value *thrown) {
-    frame->delegate = kiln_c99_undefined();
+    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
     if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
         kiln_val vproduced = KILN_VAL_UNDEFINED;
         frame->raising = 1;
-        frame->sent = error;
+        kiln_c99_heap_store_value(frame, &frame->sent, error);
         kiln_closure *closure = kiln_c99_closure_of(frame->function);
         frame->running = 1;
         int status = kiln_c99_invoke_closure_body(
@@ -1145,11 +1145,11 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
 
 static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame, kiln_value return_val,
                                          kiln_value *result, int depth, kiln_value *thrown) {
-    frame->delegate = kiln_c99_undefined();
+    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
     if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
         frame->raising = 1;
-        frame->sent = kiln_c99_return_signal();
+        kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
         kiln_closure *closure = kiln_c99_closure_of(frame->function);
         frame->running = 1;
         kiln_val vproduced = KILN_VAL_UNDEFINED;
@@ -1271,11 +1271,11 @@ static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *fr
         if (status != KILN_C99_OK) {
             return kiln_c99_generator_raise(host, frame, *thrown, result, depth, thrown);
         }
-        frame->delegate = kiln_c99_undefined();
+        kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
         frame->resume = frame->delegate_exit;
         frame->delegate_exit = 0;
         frame->raising = 0;
-        frame->sent = inner_val;
+        kiln_c99_heap_store_value(frame, &frame->sent, inner_val);
         kiln_closure *closure = kiln_c99_closure_of(frame->function);
         frame->running = 1;
         kiln_val vproduced = KILN_VAL_UNDEFINED;

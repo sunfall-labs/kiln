@@ -1073,7 +1073,7 @@
             if (frame->started && !frame->done && frame->handler_top != 0 && !frame->async_generator) {
                 kiln_val vproduced = KILN_VAL_UNDEFINED;
                 frame->raising = 1;
-                frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
+                kiln_c99_heap_store_value(frame, &frame->sent, argc > 0 ? args[0] : kiln_c99_undefined());
                 closure = kiln_c99_closure_of(frame->function);
                 frame->running = 1;
                 status = kiln_c99_invoke_closure_body(
@@ -1128,7 +1128,7 @@
                 if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
                     if (frame->handler_top != 0 && !frame->done) {
                         frame->raising = 1;
-                        frame->sent = kiln_c99_undefined();
+                        kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());
                         closure = kiln_c99_closure_of(frame->function);
                         frame->running = 1;
                         kiln_val vproduced = KILN_VAL_UNDEFINED;
@@ -1149,13 +1149,13 @@
                         /* The frame owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
                         kiln_c99_gc_note_finalizable(frame);
                     }
-                    frame->queue_promises[frame->queue_count] = step_promise;
-                    frame->queue_sent[frame->queue_count] = sent_val;
+                    kiln_c99_heap_store_value(frame, &frame->queue_promises[frame->queue_count], step_promise);
+                    kiln_c99_heap_store_value(frame, &frame->queue_sent[frame->queue_count], sent_val);
                     frame->queue_count++;
                     return KILN_C99_OK;
                 }
                 frame->queue_executing = 1;
-                frame->promise = step_promise;
+                kiln_c99_heap_store_value(frame, &frame->promise, step_promise);
                 return kiln_c99_async_generator_step(
                     host, receiver, sent_val, 0, depth, thrown);
             }
@@ -1166,7 +1166,7 @@
                 }
                 if (frame->handler_top != 0 && !frame->done) {
                     frame->raising = 1;
-                    frame->sent = kiln_c99_return_signal();
+                    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
                     closure = kiln_c99_closure_of(frame->function);
                     frame->running = 1;
                     kiln_val vproduced = KILN_VAL_UNDEFINED;
@@ -1181,7 +1181,7 @@
                 frame->done = 1;
                 produced = argc > 0 ? args[0] : kiln_c99_undefined();
             } else if (!frame->done) {
-                frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
+                kiln_c99_heap_store_value(frame, &frame->sent, argc > 0 ? args[0] : kiln_c99_undefined());
                 frame->raising = 0;
                 closure = kiln_c99_closure_of(frame->function);
                 frame->running = 1;

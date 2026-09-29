@@ -534,7 +534,7 @@ pub fn emit_function_from_graph_with_profile(
     if suspends {
         // The frame outlives this call: its locals are the generator's, bound by the runtime
         // before the first entry, and its stack holds what a suspend spilled.
-        output.push_str("    kiln_val *locals = frame->locals;\n    (void)args; (void)argc;\n");
+        output.push_str("    const void *locals_owner = frame;\n    (void)locals_owner;\n    kiln_val *locals = frame->locals;\n    (void)args; (void)argc;\n");
         if !graph
             .blocks
             .iter()
@@ -570,6 +570,7 @@ pub fn emit_function_from_graph_with_profile(
         }
     } else if !array_slots.is_empty() {
         writeln!(output, "    kiln_val locals[{locals}];").unwrap();
+        output.push_str("    const void *locals_owner = NULL;\n    (void)locals_owner;\n");
         writeln!(
             output,
             "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
@@ -793,6 +794,7 @@ pub fn emit_async_entry_body(
         }
     }
     writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
+    output.push_str("    const void *locals_owner = NULL;\n    (void)locals_owner;\n");
     output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
     for block in &graph.blocks {
         if let Terminator::Suspend { pc, delegate, .. } = &block.terminator {
@@ -1276,7 +1278,7 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_{pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
                 )
                 .unwrap();
                 writeln!(
@@ -1313,7 +1315,7 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_exit_{exit_pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
                 )
                 .unwrap();
                 writeln!(
@@ -3650,7 +3652,10 @@ fn emit_terminator(
         } => {
             let mut spill = String::new();
             for (i, v) in spilled.iter().enumerate() {
-                spill.push_str(&format!(" frame->stack[{i}] = v{};", v.0));
+                spill.push_str(&format!(
+                    " kiln_c99_heap_store_val(frame, &frame->stack[{i}], v{});",
+                    v.0
+                ));
             }
             // Whether a handler covers this suspension. The handlers themselves are static
             // here, but the runtime's `return()` and `throw()` read this to decide whether the
@@ -3659,13 +3664,13 @@ fn emit_terminator(
             let delegate_set = match delegate {
                 Some((iter, _, exit_pc)) => {
                     format!(
-                        " frame->delegate = kiln_val_to_boundary(v{}); frame->delegate_exit = {};",
+                        " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_val_to_boundary(v{})); frame->delegate_exit = {};",
                         iter.0,
                         delegate_exit_id(*exit_pc)
                     )
                 }
                 None => {
-                    " frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;".to_string()
+                    " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;".to_string()
                 }
             };
             writeln!(

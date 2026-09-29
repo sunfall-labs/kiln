@@ -186,11 +186,17 @@ extern kiln_value kiln_c99_null(void);
 extern kiln_value kiln_c99_boolean(int value);
 extern kiln_closure *kiln_c99_closure_of(kiln_value value);
 extern kiln_val *kiln_c99_cell_of(kiln_value value);
-extern void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value);
+extern void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer);
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
     const void *owner_payload, kiln_val *slot, kiln_val value) {
-    if (!KILN_VAL_IS_NUMBER(value) && value >= KILN_TAG_STRING_PREFIX)
-        kiln_c99_heap_record_val(owner_payload, value);
+    if (owner_payload != NULL && !KILN_VAL_IS_NUMBER(value) && value >= KILN_TAG_STRING_PREFIX)
+        kiln_c99_heap_record_pointer(owner_payload, KILN_VAL_PTR(value));
+    *slot = value;
+}
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
+    const void *owner_payload, kiln_value *slot, kiln_value value) {
+    if (owner_payload != NULL && value.tag >= KILN_VALUE_STRING)
+        kiln_c99_heap_record_pointer(owner_payload, (const void *)(uintptr_t)value.bits);
     *slot = value;
 }
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell, kiln_val value) {

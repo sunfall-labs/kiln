@@ -2613,7 +2613,7 @@ fn executable_candidate_ledger_observes_post_factory_cell_aliases_and_clears() {
     let wrapper = r#"
 static int ledger_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
-    kiln_val *old, *root, *internal, *late;
+    kiln_val *old, *root, *internal, *late, *holders[100];
     kiln_nursery_chunk *chunk, *batch[1];
     kiln_c99_candidate_group *group;
     kiln_value boxed, root_value;
@@ -2665,8 +2665,31 @@ static int ledger_entry(void *context) {
     if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
             KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 12;
     group->incoming_failed = 0;
+    heap->realm.isolated_escrow_value = root_value;
     kiln_c99_gc_collect(heap, 1);
-    if (heap->candidate_ledger_groups != 0) return 13;
+    if (heap->candidate_ledger_groups != 1 || heap->candidate_ledger_head != group ||
+        group->incoming_owners.count != 0 || group->incoming_owners.capacity != 0 ||
+        group->incoming_owners.table != NULL) return 16;
+    /* The reset current chunk reuses a reclaimed owner's address. A new write must record
+     * the new live holder, not rely on a stale witness that the collection removed. */
+    for (size_t index = 0; index < 100; ++index) {
+        holders[index] = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *holders[index]);
+        if (holders[index] == NULL) return 17;
+        kiln_c99_val_store_cell(holders[index], KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, root));
+    }
+    if (holders[0] != late || group->incoming_owners.count != 100 ||
+        group->incoming_owners.capacity < 256) return 18;
+    for (size_t index = 1; index < 100; ++index) kiln_c99_gc_release_cell(holders[index]);
+    kiln_c99_candidate_prune_owners(heap);
+    if (group->incoming_owners.count != 1 || group->incoming_owners.capacity != 64 ||
+        kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 19;
+    kiln_c99_gc_release_cell(holders[0]);
+    kiln_c99_candidate_prune_owners(heap);
+    if (group->incoming_owners.count != 0 || group->incoming_owners.table != NULL) return 20;
+    heap->realm.isolated_escrow_value = kiln_c99_undefined();
+    kiln_c99_gc_collect(heap, 1);
+    if (heap->candidate_ledger_groups != 0 || heap->candidate_ledger_head != NULL) return 13;
     return 0;
 }
 int main(void) {
@@ -2933,6 +2956,113 @@ int main(void) {
     assert!(
         run.status.success(),
         "collection/async ledger failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_candidate_ledger_records_generated_suspended_locals_and_spills() {
+    let mut source = program(
+        vec![],
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    source.functions.push(FunctionProto {
+        local_count: 1,
+        ..function(vec![
+            Instruction::NewCell(0),
+            Instruction::MakeFunction(1),
+            Instruction::Return,
+        ])
+    });
+    source.functions.push(FunctionProto {
+        generator: true,
+        local_count: 1,
+        upvalues: vec![Upvalue::ParentLocal(0)],
+        ..function(vec![
+            Instruction::LoadUpvalue(0),
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::Yield,
+            Instruction::Pop,
+            Instruction::Return,
+        ])
+    });
+    let generated = emit(&source).expect("suspending captured-value function emits");
+    let wrapper = r#"
+static int ledger_frame_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value function, generator, root_value, thrown = kiln_c99_undefined();
+    kiln_val *root, *captured;
+    kiln_val produced;
+    kiln_closure *closure;
+    kiln_generator *frame;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk *batch[1];
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    kiln_val built_function = @ENTRY@_fn_0_t(0);
+    if (built_function == KILN_VAL_TYPED_FAIL) return 1;
+    function = kiln_val_to_boundary(built_function);
+    if (function.tag != KILN_VALUE_FUNCTION) { fprintf(stderr, "function tag=%u bits=%llu\n", function.tag, (unsigned long long)function.bits); return 14; }
+    closure = kiln_c99_closure_of(function);
+    if (closure == NULL || closure->upvalue_count != 1 || closure->upvalues == NULL) return 15;
+    captured = KILN_VAL_PTR(closure->upvalues[0]);
+    if (kiln_c99_new_generator(&generator, function, kiln_c99_undefined(), NULL, 0) != KILN_C99_OK)
+        return 2;
+    frame = kiln_c99_generator_of(generator);
+    if (!kiln_c99_actor_candidate_begin(heap)) return 3;
+    root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 4;
+    kiln_c99_val_store_cell(root, KILN_VAL_UNDEFINED);
+    group = heap->actor_candidate_group;
+    root_value = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root, NULL, 0);
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 5;
+    kiln_c99_actor_candidate_seal(heap, root_value);
+    batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root - 1);
+    kiln_c99_val_store_cell(captured, KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, root));
+    if (group->incoming_owners.count != 1) return 6;
+    if (kiln_c99_invoke_closure_body(NULL, &produced, closure, KILN_VAL_UNDEFINED,
+                                     NULL, 0, 0, &thrown, frame, 0) != KILN_C99_YIELDED) return 7;
+    if (group->incoming_owners.count != 2 || frame->sp != 1 ||
+        frame->locals[0] != KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, root) ||
+        frame->stack[0] != KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, root)) return 8;
+    /* Clearing the original capture leaves only the generated heap-frame stores. */
+    kiln_c99_val_store_cell(captured, KILN_VAL_UNDEFINED);
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 9;
+    kiln_c99_heap_store_val(frame, &frame->locals[0], KILN_VAL_UNDEFINED);
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 10;
+    kiln_c99_heap_store_val(frame, &frame->stack[0], KILN_VAL_UNDEFINED);
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 11;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 12;
+    status = kiln_realm_enter(realm, ledger_frame_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 13;
+    return status;
+}
+"#.replace("@ENTRY@", &generated.symbol);
+    let run = run_with_main(&generated, &wrapper, "candidate-generated-frame-ledger");
+    assert!(
+        run.status.success(),
+        "generated frame ledger failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

@@ -318,6 +318,8 @@ struct kiln_c99_candidate_group {
     /* Direct-factory owner records are weak and live through later writes, not just the
      * factory scope. Arena snapshots never expose pointers to their sender and need no ledger. */
     struct kiln_gc_heap *ledger_heap;
+    kiln_c99_candidate_group *ledger_previous;
+    kiln_c99_candidate_group *ledger_next;
     kiln_gc_ptrset incoming_owners;
     int incoming_failed;
     /* A synchronous factory or private arena pins metadata while its membership can be empty.
@@ -476,6 +478,7 @@ typedef struct kiln_gc_heap {
     kiln_c99_candidate_group *actor_candidate_group;
     kiln_c99_candidate_large_map *candidate_large;
     size_t candidate_ledger_groups;
+    kiln_c99_candidate_group *candidate_ledger_head;
     int candidate_ledger_publication_failed;
     /* Temporary realm-thread observer reuses the audited incoming field inventory. */
     void (*graph_pointer_observer)(void *, const void *);
@@ -883,8 +886,18 @@ static kiln_c99_candidate_group *kiln_c99_candidate_group_new(uint64_t id) {
 static void kiln_c99_candidate_group_dispose(kiln_c99_candidate_group *group) {
     if (group->builder || group->count != 0 || group->large_count != 0) abort();
     if (group->ledger_heap != NULL) {
-        if (group->ledger_heap->candidate_ledger_groups == 0) abort();
-        --group->ledger_heap->candidate_ledger_groups;
+        kiln_gc_heap *heap = group->ledger_heap;
+        if (heap->candidate_ledger_groups == 0) abort();
+        if (group->ledger_previous != NULL)
+            group->ledger_previous->ledger_next = group->ledger_next;
+        else {
+            if (heap->candidate_ledger_head != group) abort();
+            heap->candidate_ledger_head = group->ledger_next;
+        }
+        if (group->ledger_next != NULL)
+            group->ledger_next->ledger_previous = group->ledger_previous;
+        --heap->candidate_ledger_groups;
+        if (heap->candidate_ledger_groups == 0) heap->candidate_ledger_publication_failed = 0;
     }
     free(group->incoming_owners.table);
     free(group);
@@ -3013,16 +3026,17 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
 
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
     const void *owner_payload, kiln_val value) {
-    if (KILN_VAL_IS_NUMBER(value) || value < KILN_TAG_STRING_PREFIX ||
-        kiln_c99_no_write_depth != 0) return;
+    if (owner_payload == NULL || KILN_VAL_IS_NUMBER(value) ||
+        value < KILN_TAG_STRING_PREFIX || kiln_c99_no_write_depth != 0) return;
     kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
                                             KILN_VAL_PTR(value));
 }
 
 /* Decoupled emitted units keep the immediate-value skip inline and call this bridge only
  * for pointer stores. The realm's ledger and worker read-path guard remain runtime-owned. */
-static void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value) {
-    kiln_c99_candidate_record_val_store(owner_payload, value);
+static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer) {
+    if (owner_payload == NULL || kiln_c99_no_write_depth != 0) return;
+    kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload, pointer);
 }
 
 /* The slot can live inside its block or an owned side allocation. The owner payload supplies
@@ -5557,6 +5571,33 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
                                                : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
 }
 
+/* After sweep, weak owner witnesses no longer resolve to reclaimed blocks. Prune them
+ * without retaining slot addresses or tracing the owners. Rehash sparsely occupied tables so
+ * a long-lived candidate does not retain the high-water allocation of transient holders. */
+static void kiln_c99_candidate_prune_owners(kiln_gc_heap *heap) {
+    kiln_c99_candidate_group *group;
+    for (group = heap->candidate_ledger_head; group != NULL; group = group->ledger_next) {
+        kiln_gc_ptrset *owners = &group->incoming_owners;
+        size_t index = 0;
+        while (index < owners->capacity) {
+            const void *witness = owners->table[index];
+            uintptr_t address = (uintptr_t)witness;
+            if (witness != NULL && (address > UINTPTR_MAX - sizeof(kiln_gc_block) ||
+                kiln_c99_gc_lookup(heap, (const void *)(address + sizeof(kiln_gc_block))) == NULL)) {
+                /* Deletion may shift a later witness into this slot. Inspect it again. */
+                kiln_c99_gc_ptrset_remove(owners, witness);
+            } else ++index;
+        }
+        if (owners->count == 0) {
+            free(owners->table);
+            memset(owners, 0, sizeof *owners);
+        } else if (owners->capacity > 64 && owners->count <= owners->capacity / 8) {
+            /* Rehash allocation failure preserves the old complete table, so is harmless. */
+            (void)kiln_c99_gc_ptrset_grow(owners, owners->count);
+        }
+    }
+}
+
 /* This is only the ledger's heap-owner observation, not admission. The full outside scan
  * remains authoritative until every producer and mutation seam has complete store coverage. */
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
@@ -6157,6 +6198,10 @@ static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
         return 0;
     }
     heap->actor_candidate_group->ledger_heap = heap;
+    heap->actor_candidate_group->ledger_next = heap->candidate_ledger_head;
+    if (heap->candidate_ledger_head != NULL)
+        heap->candidate_ledger_head->ledger_previous = heap->actor_candidate_group;
+    heap->candidate_ledger_head = heap->actor_candidate_group;
     ++heap->candidate_ledger_groups;
     heap->actor_candidate_id = id;
     heap->actor_candidate_collected = 0;
@@ -8479,6 +8524,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             kiln_c99_gc_sweep(heap, 0);
             heap->collections += 1;
         }
+        kiln_c99_candidate_prune_owners(heap);
     }
     if (heap->trace) {
         kiln_c99_gc_trace_text("kiln gc: collection ");
@@ -8624,7 +8670,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     kiln_c99_nursery_destroy(&heap->nursery);
     kiln_c99_candidate_group_close(heap->actor_candidate_group);
     heap->actor_candidate_group = NULL;
-    if (heap->candidate_ledger_groups != 0) abort();
+    if (heap->candidate_ledger_groups != 0 || heap->candidate_ledger_head != NULL) abort();
     /* A result retained outside its dead realm may have survived the final sweep. It cannot
      * name a usable realm-local facade after teardown, so release its lease here. */
     for (kiln_shared_facade *facade = heap->shared_facades; facade != NULL; ) {

@@ -567,11 +567,11 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
                 size_t idx;
                 frame->queue_count--;
                 for (idx = 0; idx < frame->queue_count; ++idx) {
-                    frame->queue_promises[idx] = frame->queue_promises[idx + 1];
-                    frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+                    kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
+                    kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
                 }
                 frame->queue_executing = 1;
-                frame->promise = next_p;
+                kiln_c99_heap_store_value(frame, &frame->promise, next_p);
                 if (frame->done) {
                     frame->queue_executing = 0;
                     return kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, 0, thrown);
@@ -881,7 +881,7 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
         frame->done = 1;
         return kiln_c99_settle(step, sent, 1);
     }
-    frame->sent = sent;
+    kiln_c99_heap_store_value(frame, &frame->sent, sent);
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
     kiln_val vproduced = KILN_VAL_UNDEFINED;
@@ -904,8 +904,8 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
             size_t idx;
             frame->queue_count--;
             for (idx = 0; idx < frame->queue_count; ++idx) {
-                frame->queue_promises[idx] = frame->queue_promises[idx + 1];
-                frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+                kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
+                kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
             }
             (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
         }
@@ -923,8 +923,8 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
         size_t idx;
         frame->queue_count--;
         for (idx = 0; idx < frame->queue_count; ++idx) {
-            frame->queue_promises[idx] = frame->queue_promises[idx + 1];
-            frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+            kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
+            kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
         }
         (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
     }
@@ -953,7 +953,7 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
         frame->done = 1;
         return kiln_c99_settle(frame->promise, sent, 1);
     }
-    frame->sent = sent;
+    kiln_c99_heap_store_value(frame, &frame->sent, sent);
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
     kiln_val vproduced = KILN_VAL_UNDEFINED;

@@ -22,6 +22,8 @@ static int kiln_module_0ad5777a8e957cd533ffceae613c0290_body(kiln_host *host, ki
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
     kiln_val locals[1];
+    const void *locals_owner = NULL;
+    (void)locals_owner;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
@@ -31,7 +33,7 @@ kiln_block_0:;
     *thrown = kiln_val_to_boundary(v2); goto kiln_block_6;
 kiln_block_6:;
     kiln_c99_forget_handled_throw(); v1 = kiln_val_from_boundary(*thrown);
-    locals[0] = v1;
+    kiln_c99_heap_store_val(locals_owner, &locals[0], v1);
     *result = kiln_val_to_boundary(v1);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;

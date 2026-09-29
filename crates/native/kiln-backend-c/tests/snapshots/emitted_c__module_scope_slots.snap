@@ -46,6 +46,8 @@ kiln_refusal:;
 static int kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_body(kiln_host *host, kiln_value *result) {
     if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_gc_roots, kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     kiln_val *locals = kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_globals;
+    const void *locals_owner = NULL;
+    (void)locals_owner;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
@@ -55,7 +57,7 @@ kiln_block_0:;
     v2 = UINT64_C(4613937818241073152);
     kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_globals[0] = v2;
     { kiln_value built; int status = kiln_c99_make_closure(&built, kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_fn_0, &kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b_function_name_0, NULL, 0, "kiln_module_8f13cddf858999d0ff1713dc8c6c9e2b", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, UINT32_C(0)); if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->publishes_frame = 0; v4 = kiln_val_from_boundary(built); }
-    locals[1] = v4;
+    kiln_c99_heap_store_val(locals_owner, &locals[1], v4);
     *result = kiln_val_to_boundary(v4);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
