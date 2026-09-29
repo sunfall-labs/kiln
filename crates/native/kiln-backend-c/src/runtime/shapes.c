@@ -700,6 +700,48 @@ static uint64_t kiln_c99_object_candidate_id(const kiln_object *object) {
                ? heap->actor_candidate_id : 0;
 }
 
+/* Numeric keys use a separate dense vector. Candidate-created objects give that vector the
+ * same owner/generation certificate as shaped slots and dictionary records, so the graph
+ * mover can account for its malloc allocation before handing it to another heap. */
+static kiln_val *kiln_c99_object_elements_resize(kiln_object *object, size_t capacity) {
+    uint64_t candidate_id;
+    kiln_val *elements;
+    if (capacity < object->element_capacity || capacity > SIZE_MAX / sizeof(kiln_val))
+        return NULL;
+    candidate_id = object->candidate_elements ? 0 : kiln_c99_object_candidate_id(object);
+    if (object->candidate_elements || candidate_id != 0) {
+        kiln_c99_candidate_object_elements *header;
+        if (capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return NULL;
+        if (object->candidate_elements) {
+            header = kiln_c99_object_candidate_elements_header(object);
+            if (object->candidate_elements != 1 || header->owner != object ||
+                header->capacity != object->element_capacity ||
+                header->generation == UINT64_MAX) return NULL;
+            header = (kiln_c99_candidate_object_elements *)realloc(
+                header, sizeof *header + capacity * sizeof(kiln_val));
+            if (header == NULL) return NULL;
+            header->generation += 1;
+        } else {
+            header = (kiln_c99_candidate_object_elements *)malloc(
+                sizeof *header + capacity * sizeof(kiln_val));
+            if (header == NULL) return NULL;
+            header->candidate_id = candidate_id;
+            header->owner = object;
+            header->generation = 1;
+            if (object->elements != NULL) {
+                memcpy(header + 1, object->elements,
+                       object->element_capacity * sizeof(kiln_val));
+                free(object->elements);
+            }
+            object->candidate_elements = 1;
+        }
+        header->capacity = capacity;
+        return (kiln_val *)(header + 1);
+    }
+    elements = (kiln_val *)realloc(object->elements, capacity * sizeof(kiln_val));
+    return elements;
+}
+
 static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capacity) {
     kiln_val *slots;
     uint64_t candidate_id;
@@ -878,7 +920,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             object->properties[pos].value = kiln_val_to_boundary(object->elements[i]);
             pos++;
         }
-        free(object->elements);
+        kiln_c99_object_elements_free(object);
         object->elements = NULL;
         object->element_count = 0;
         object->element_capacity = 0;
@@ -1355,6 +1397,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->sealed = NULL;
     object->candidate_properties = 0;
     object->candidate_slots = 0;
+    object->candidate_elements = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -1688,6 +1731,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->sealed = NULL;
     object->candidate_properties = 0;
     object->candidate_slots = 0;
+    object->candidate_elements = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

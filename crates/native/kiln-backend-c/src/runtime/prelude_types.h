@@ -1208,6 +1208,8 @@ typedef struct kiln_object {
     uint32_t candidate_properties;
     /* Provenance for a shaped object's separately allocated value slots. */
     uint32_t candidate_slots;
+    /* Provenance for a shaped object's separately allocated numeric elements. */
+    uint32_t candidate_elements;
 } kiln_object;
 
 typedef struct kiln_c99_candidate_object_properties {
@@ -1232,6 +1234,18 @@ typedef struct kiln_c99_candidate_object_slots {
 static inline kiln_c99_candidate_object_slots *kiln_c99_object_candidate_slots_header(
     const kiln_object *object) {
     return ((kiln_c99_candidate_object_slots *)object->slots) - 1;
+}
+
+typedef struct kiln_c99_candidate_object_elements {
+    uint64_t candidate_id;
+    kiln_object *owner;
+    size_t capacity;
+    uint64_t generation;
+} kiln_c99_candidate_object_elements;
+
+static inline kiln_c99_candidate_object_elements *kiln_c99_object_candidate_elements_header(
+    const kiln_object *object) {
+    return ((kiln_c99_candidate_object_elements *)object->elements) - 1;
 }
 
 /* A prepared graph can keep a dictionary's fixed records in the same movable GC block.
@@ -1261,6 +1275,12 @@ static inline void kiln_c99_object_slots_free(kiln_object *object) {
         free(object->candidate_slots ? (void *)kiln_c99_object_candidate_slots_header(object)
                                      : (void *)object->slots);
     object->candidate_slots = 0;
+}
+
+static inline void kiln_c99_object_elements_free(kiln_object *object) {
+    free(object->candidate_elements ? (void *)kiln_c99_object_candidate_elements_header(object)
+                                    : (void *)object->elements);
+    object->candidate_elements = 0;
 }
 
 static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capacity);

@@ -43,6 +43,11 @@ export class Counter extends Actor {
     value[255] = 4;
     return [keys, ...snapshot, value[255], Object.keys(value).join(',')];
   }
+  inspectNumericAfterAlloc(value) {
+    const scratch = [];
+    for (let index = 0; index < 4096; index++) scratch.push({ index });
+    return [Object.keys(value).join(','), value[0], value[127], value.label, scratch.length];
+  }
   sumLinked(value) {
     let count = 0;
     let sum = 0;

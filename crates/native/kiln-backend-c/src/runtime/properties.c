@@ -856,7 +856,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                     size_t new_cap = object->element_capacity == 0 ? 8 : object->element_capacity * 2;
                     kiln_val *new_elements;
                     while (elem_idx >= new_cap) new_cap *= 2;
-                    new_elements = (kiln_val *)realloc(object->elements, new_cap * sizeof(kiln_val));
+                    new_elements = kiln_c99_object_elements_resize(object, new_cap);
                     if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
                     for (size_t fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                         new_elements[fill_i] = KILN_VAL_HOLE;

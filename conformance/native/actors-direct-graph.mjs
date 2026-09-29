@@ -41,6 +41,16 @@ try {
       sparseReply[3] !== 17) {
     throw new Error('sparse graph changed');
   }
+  const numeric = transfer(isolate(() => {
+    const value = { label: 7 };
+    value[127] = 13;
+    value[0] = 11;
+    return value;
+  }));
+  const numericReply = await owner.ref.call('inspectNumericAfterAlloc', [numeric]);
+  if (numericReply.join(',') !== '0,127,label,11,13,7,4096') {
+    throw new Error('numeric-key graph changed');
+  }
 
   let retained;
   const aliased = transfer(isolate(() => { retained = { answer: 17 }; return retained; }));

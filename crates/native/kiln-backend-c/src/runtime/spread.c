@@ -1582,6 +1582,7 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->sealed = NULL;
     object->candidate_properties = 0;
     object->candidate_slots = 0;
+    object->candidate_elements = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

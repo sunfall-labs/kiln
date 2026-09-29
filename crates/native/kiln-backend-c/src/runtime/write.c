@@ -369,7 +369,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                     kiln_val *new_elements;
                     size_t fill_i;
                     while (elem_idx >= new_cap) new_cap *= 2;
-                    new_elements = (kiln_val *)realloc(object->elements, new_cap * sizeof(kiln_val));
+                    new_elements = kiln_c99_object_elements_resize(object, new_cap);
                     if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
                     for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                         new_elements[fill_i] = KILN_VAL_HOLE;
@@ -614,7 +614,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                 kiln_val *new_elements;
                 size_t fill_i;
                 while (elem_idx >= new_cap) new_cap *= 2;
-                new_elements = (kiln_val *)realloc(object->elements, new_cap * sizeof(kiln_val));
+                new_elements = kiln_c99_object_elements_resize(object, new_cap);
                 if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
                 for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                     new_elements[fill_i] = KILN_VAL_HOLE;

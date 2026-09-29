@@ -1995,7 +1995,8 @@ static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
             side[KILN_PROFILE_SLOTS] += object->slot_capacity * sizeof(kiln_val);
         }
         if (object->elements != NULL)
-            side[KILN_PROFILE_OBJECT_ELEMENTS] += object->element_capacity * sizeof(kiln_val);
+            side[KILN_PROFILE_OBJECT_ELEMENTS] += object->element_capacity * sizeof(kiln_val) +
+                (object->candidate_elements ? sizeof(kiln_c99_candidate_object_elements) : 0);
     }
     if (kind == KILN_GC_ARRAY && block->size >= sizeof(kiln_array)) {
         const kiln_array *array = (const kiln_array *)(block + 1);
@@ -3629,8 +3630,8 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
     case KILN_GC_OBJECT: {
         const kiln_object *object = (const kiln_object *)(block + 1);
         const kiln_shape *shape;
-        if (block->size < sizeof *object || object->sealed != NULL || object->elements != NULL ||
-            object->element_count != 0 || object->element_capacity != 0 ||
+        if (block->size < sizeof *object || object->sealed != NULL ||
+            object->element_count > object->element_capacity ||
             (object->candidate_slots == 0 && object->slots == object->inline_slots &&
              object->slot_capacity != KILN_C99_INLINE_SLOTS) ||
             (object->candidate_slots == 0 && object->slots == NULL &&
@@ -3645,6 +3646,17 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
             object->read_only_seen || object->frozen || object->not_extensible ||
             (object->prototype.tag != KILN_VALUE_UNDEFINED &&
              object->prototype.tag != KILN_VALUE_NULL)) return 0;
+        if (object->elements != NULL || object->element_count != 0 ||
+            object->element_capacity != 0 || object->candidate_elements != 0) {
+            const kiln_c99_candidate_object_elements *header;
+            if (object->candidate_elements != 1 || object->elements == NULL ||
+                object->element_capacity == 0 ||
+                object->element_capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val))
+                return 0;
+            header = kiln_c99_object_candidate_elements_header(object);
+            if (header->owner != object || header->capacity != object->element_capacity ||
+                header->candidate_id == 0 || header->generation == 0) return 0;
+        }
         shape = object->shape;
         if (shape == NULL) {
             if (object->candidate_slots != 0 || object->count == 0 ||
@@ -3870,6 +3882,20 @@ static int kiln_c99_graph_add_object_slots_side(kiln_c99_graph_walk *walk,
         sizeof *header + object->slot_capacity * sizeof(kiln_val), object);
 }
 
+static int kiln_c99_graph_add_object_elements_side(kiln_c99_graph_walk *walk,
+                                                   const kiln_gc_block *block,
+                                                   const kiln_object *object) {
+    const kiln_c99_candidate_object_elements *header =
+        kiln_c99_object_candidate_elements_header(object);
+    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
+    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+        header->owner != object || header->capacity != object->element_capacity ||
+        header->generation == 0 ||
+        object->element_capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
+    return kiln_c99_graph_add_side(walk, (uintptr_t)header,
+        sizeof *header + object->element_capacity * sizeof(kiln_val), object);
+}
+
 static int kiln_c99_graph_side_span_compare(const void *left, const void *right) {
     uintptr_t a = ((const kiln_c99_graph_side_span *)left)->base;
     uintptr_t b = ((const kiln_c99_graph_side_span *)right)->base;
@@ -3989,6 +4015,12 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
         const kiln_object *object = (const kiln_object *)(block + 1);
         size_t index;
         if (!kiln_c99_graph_inert_finalizer_block(block)) return 0;
+        if (object->candidate_elements != 0 &&
+            !kiln_c99_graph_add_object_elements_side(walk, block, object)) return 0;
+        for (index = 0; index < object->element_count; ++index) {
+            if (object->elements[index] == KILN_VAL_HOLE) continue;
+            if (!kiln_c99_graph_follow_val(walk, object->elements[index])) return 0;
+        }
         if (object->shape == NULL) {
             if (object->candidate_properties != 0 &&
                 !kiln_c99_graph_add_object_side(walk, block, object)) return 0;
@@ -7063,7 +7095,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         if (((kiln_object *)payload)->sealed != NULL) {
             free(kiln_c99_sealed_values_of((kiln_object *)payload));
         } else kiln_c99_object_slots_free((kiln_object *)payload);
-        free(((kiln_object *)payload)->elements);
+        kiln_c99_object_elements_free((kiln_object *)payload);
         break;
     case KILN_GC_CLOSURE: {
         kiln_closure *closure = (kiln_closure *)payload;
