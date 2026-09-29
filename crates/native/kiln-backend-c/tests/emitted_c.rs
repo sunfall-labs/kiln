@@ -1084,7 +1084,10 @@ fn runtime_prelude_size() {
     // provider calls on shared property reads; about 64,550 lines after that change. No runtime part
     // was emitted twice. Candidate-owned shaped-slot buffers add one resize path, ownership
     // checks and a side-span walker (65,075 lines). Leave a small margin for later edits.
-    const CEILING_LINES: usize = 65_500;
+    // Full-chunk list ownership helpers replace linear membership/unlink searches (+35 net
+    // runtime lines), bringing the measured prelude to 65,509. Only four helper declarations
+    // are added to the ABI snapshot; no runtime section is duplicated.
+    const CEILING_LINES: usize = 65_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

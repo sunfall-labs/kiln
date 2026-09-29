@@ -2030,6 +2030,10 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
 static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
 static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words) {
 static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+static int kiln_c99_nursery_full_contains(const kiln_gc_nursery *nursery,
+static void kiln_c99_nursery_full_push(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+static void kiln_c99_nursery_full_remove(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+static kiln_nursery_chunk *kiln_c99_nursery_full_take_all(kiln_gc_nursery *nursery) {
 static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static kiln_nursery_chunk *kiln_c99_nursery_seal(kiln_gc_nursery *nursery) {
 static void kiln_c99_nursery_init(kiln_gc_nursery *nursery) {

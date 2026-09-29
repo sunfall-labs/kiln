@@ -291,6 +291,10 @@ typedef struct kiln_nursery_chunk {
     /* Provisional between CANDIDATE_END and ISOLATE, sealed after the latter proves closure.
      * Both states keep the original bitmap/layout while a live root still names this chunk. */
     uint8_t candidate_state;
+    /* Only the full-chunk list is doubly linked. Its membership bit and predecessor make
+     * batch handoff validation/unlink independent of the sender's unrelated chunk count. */
+    uint8_t in_full;
+    struct kiln_nursery_chunk *full_prev;
     struct kiln_nursery_chunk *next;
 } kiln_nursery_chunk;
 
@@ -788,6 +792,8 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     chunk->candidate_epoch = 0;
     chunk->candidate_id = 0;
     chunk->candidate_state = 0;
+    chunk->in_full = 0;
+    chunk->full_prev = NULL;
     chunk->next = NULL;
     return chunk;
 }
@@ -795,6 +801,48 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
 static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
     kiln_c99_gc_ptrset_remove(&nursery->regions, chunk);
     kiln_c99_gc_aligned_free(chunk);
+}
+
+static int kiln_c99_nursery_full_contains(const kiln_gc_nursery *nursery,
+                                           const kiln_nursery_chunk *chunk) {
+    if (chunk == NULL || !kiln_c99_gc_ptrset_contains(&nursery->regions, chunk) ||
+        !chunk->in_full) return 0;
+    if (chunk->full_prev == NULL) return nursery->full == chunk;
+    return kiln_c99_gc_ptrset_contains(&nursery->regions, chunk->full_prev) &&
+           chunk->full_prev->in_full && chunk->full_prev->next == chunk;
+}
+
+static void kiln_c99_nursery_full_push(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    if (chunk->in_full) abort();
+    chunk->full_prev = NULL;
+    chunk->next = nursery->full;
+    if (chunk->next != NULL) chunk->next->full_prev = chunk;
+    chunk->in_full = 1;
+    nursery->full = chunk;
+}
+
+static void kiln_c99_nursery_full_remove(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    if (!kiln_c99_nursery_full_contains(nursery, chunk)) abort();
+    if (chunk->full_prev == NULL) nursery->full = chunk->next;
+    else chunk->full_prev->next = chunk->next;
+    if (chunk->next != NULL) chunk->next->full_prev = chunk->full_prev;
+    chunk->full_prev = NULL;
+    chunk->next = NULL;
+    chunk->in_full = 0;
+}
+
+/* Return the ordinary singly linked storage list when a temporary indexing heap relinquishes
+ * an arena. The region table still indexes these chunks until the caller discards that table. */
+static kiln_nursery_chunk *kiln_c99_nursery_full_take_all(kiln_gc_nursery *nursery) {
+    kiln_nursery_chunk *list = nursery->full;
+    for (kiln_nursery_chunk *chunk = list; chunk != NULL; chunk = chunk->next) {
+        chunk->in_full = 0;
+        chunk->full_prev = NULL;
+    }
+    nursery->full = NULL;
+    nursery->full_bytes = 0;
+    nursery->held_bytes = 0;
+    return list;
 }
 
 /* Make `chunk`'s region the one allocation bumps through. */
@@ -809,6 +857,8 @@ static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *c
     nursery->bytes = 0;
     chunk->candidate_id = 0;
     chunk->candidate_epoch = 0;
+    if (chunk->in_full) abort();
+    chunk->full_prev = NULL;
     chunk->candidate_state = 0;
 }
 
@@ -3214,8 +3264,7 @@ static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
     if (nursery->bump == nursery->base) return;
     filled = kiln_c99_nursery_seal(nursery);
     if (filled->candidate_id != 0) filled->candidate_epoch = heap->epoch;
-    filled->next = nursery->full;
-    nursery->full = filled;
+    kiln_c99_nursery_full_push(nursery, filled);
     nursery->full_bytes += (size_t)(nursery->bump - nursery->base);
     (void)kiln_c99_nursery_fresh_chunk(heap);
 }
@@ -3588,8 +3637,7 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
         }
         kiln_c99_gc_bound(heap, region, nursery->capacity);
         if (chunk->candidate_id != 0) chunk->candidate_epoch = heap->epoch;
-        chunk->next = nursery->full;
-        nursery->full = chunk;
+        kiln_c99_nursery_full_push(nursery, chunk);
         nursery->full_bytes += (size_t)(chunk->limit - chunk->base);
         heap->count += chunk->alloc_count;
         heap->bytes += chunk->alloc_bytes;
@@ -4082,7 +4130,6 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     walk.large_head = large_head;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
-        const kiln_nursery_chunk *it;
         int found = 0;
         size_t previous;
         if (chunk == NULL || chunk->candidate_id == 0 || chunk->candidate_epoch != heap->epoch ||
@@ -4091,9 +4138,7 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             !kiln_c99_chunk_sealed_for_move(&heap->nursery, chunk)) goto done;
         id = chunk->candidate_id;
         for (previous = 0; previous < index; ++previous) if (chunks[previous] == chunk) goto done;
-        for (it = heap->nursery.full; it != NULL; it = it->next) {
-            if (it == chunk) { found = 1; break; }
-        }
+        found = kiln_c99_nursery_full_contains(&heap->nursery, chunk);
         if (!found || seen > SIZE_MAX - chunk->alloc_count) goto done;
         seen += chunk->alloc_count;
     }
@@ -5163,7 +5208,6 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
     if (count > SIZE_MAX - to->nursery.regions.count) return 0;
     for (index = 0; index < count; ++index) {
         kiln_nursery_chunk *chunk = chunks[index];
-        kiln_nursery_chunk *it;
         size_t prior;
         int found = 0;
         if (chunk == NULL || (char *)chunk == from->nursery.region ||
@@ -5175,9 +5219,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
         if (chunk->candidate_id == 0 || chunk->candidate_epoch != from->epoch) return 0;
         if (candidate_id != 0 && candidate_id != chunk->candidate_id) return 0;
         candidate_id = chunk->candidate_id;
-        for (it = from->nursery.full; it != NULL; it = it->next) {
-            if (it == chunk) { found = 1; break; }
-        }
+        found = kiln_c99_nursery_full_contains(&from->nursery, chunk);
         if (found) {
             size_t filled = (size_t)(chunk->limit - chunk->base);
             if (sender_full_bytes > SIZE_MAX - filled) return 0;
@@ -5206,9 +5248,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
      * be stopped at the caller's safepoint until the destination root is published. */
     for (index = 0; index < count; ++index) {
         kiln_nursery_chunk *chunk = chunks[index];
-        kiln_nursery_chunk **link = &from->nursery.full;
-        while (*link != NULL && *link != chunk) link = &(*link)->next;
-        *link = chunk->next;
+        kiln_c99_nursery_full_remove(&from->nursery, chunk);
         from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
         kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
         (void)kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk);
@@ -5222,8 +5262,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
         chunk->candidate_id = 0;
         chunk->marked_count = 0;
         chunk->marked_bytes = 0;
-        chunk->next = to->nursery.full;
-        to->nursery.full = chunk;
+        kiln_c99_nursery_full_push(&to->nursery, chunk);
     }
     from->count -= moved_count;
     from->bytes -= moved_bytes;
@@ -7702,13 +7741,14 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             while (chunk != NULL) {
                 kiln_nursery_chunk *next = chunk->next;
                 size_t filled = (size_t)(chunk->limit - chunk->base);
+                chunk->in_full = 0;
+                chunk->full_prev = NULL;
                 if (chunk->candidate_state != 0 && chunk->mark_epoch == heap->epoch &&
                     chunk->marked_count != 0) {
                     /* Preserve the exact allocation layout until the graph is moved or dies.
                      * Marking has already traced the reachable blocks. */
                     chunk->candidate_epoch = heap->epoch;
-                    chunk->next = heap->nursery.full;
-                    heap->nursery.full = chunk;
+                    kiln_c99_nursery_full_push(&heap->nursery, chunk);
                     heap->nursery.full_bytes += filled;
                     heap->nursery.held_bytes += filled;
                     chunk = next;

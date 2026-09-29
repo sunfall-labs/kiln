@@ -1002,6 +1002,7 @@ static int kiln_c99_clone_arena_prepare(kiln_c99_clone_arena *arena, kiln_gc_hea
         return KILN_C99_CLONE_BAIL;
     }
     arena->certified = 1;
+    arena->storage.filled = kiln_c99_nursery_full_take_all(&view->nursery);
     free(view->large_table.table);
     free(view->nursery.regions.table);
     free(view);

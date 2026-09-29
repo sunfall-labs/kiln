@@ -2106,6 +2106,91 @@ int main(void) {
 }
 
 #[test]
+fn executable_nursery_full_list_moves_interior_chunks_without_disturbing_neighbors() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static kiln_nursery_chunk *full_list_allocate(kiln_c99_par_arena *arena, unsigned char byte) {
+    void *value = kiln_c99_par_alloc(arena, KILN_GC_BYTES, 8);
+    kiln_nursery_chunk *chunk;
+    if (value == NULL) return NULL;
+    memset(value, byte, 8);
+    chunk = arena->current;
+    kiln_c99_par_arena_seal(arena);
+    arena->filled = NULL;
+    chunk->next = NULL;
+    return chunk;
+}
+static int full_list_valid(const kiln_gc_nursery *nursery, size_t expected) {
+    const kiln_nursery_chunk *previous = NULL;
+    size_t count = 0;
+    for (const kiln_nursery_chunk *chunk = nursery->full; chunk != NULL; chunk = chunk->next) {
+        if (count++ >= expected || chunk->full_prev != previous ||
+            !kiln_c99_nursery_full_contains(nursery, chunk)) return 0;
+        previous = chunk;
+    }
+    return count == expected;
+}
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate, unrelated;
+    kiln_nursery_chunk *a, *b, *c, *d, *batch[2];
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                         2 * sender.nursery.capacity)) return 1;
+    memset(&unrelated, 0, sizeof unrelated);
+    unrelated.heap = &sender;
+    unrelated.budget = 2 * sender.nursery.capacity;
+    a = full_list_allocate(&candidate, 0x61);
+    c = full_list_allocate(&unrelated, 0x63);
+    b = full_list_allocate(&candidate, 0x62);
+    d = full_list_allocate(&unrelated, 0x64);
+    if (a == NULL || b == NULL || c == NULL || d == NULL) return 2;
+    if (!kiln_c99_heap_adopt_chunks(&sender, a) ||
+        !kiln_c99_heap_adopt_chunks(&sender, c) ||
+        !kiln_c99_heap_adopt_chunks(&sender, b) ||
+        !kiln_c99_heap_adopt_chunks(&sender, d)) return 3;
+    /* d -> b -> c -> a: move two nonadjacent candidates, preserving ordinary chunks. */
+    if (!full_list_valid(&sender.nursery, 4) || sender.nursery.full != d ||
+        d->next != b || b->next != c || c->next != a) return 4;
+    batch[0] = b;
+    batch[1] = a;
+    if (!kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 5;
+    if (!full_list_valid(&sender.nursery, 2) || !full_list_valid(&receiver.nursery, 2) ||
+        sender.nursery.full != d || d->next != c || c->next != NULL ||
+        receiver.nursery.full != a || a->next != b || b->next != NULL ||
+        sender.count != 2 || receiver.count != 2) return 6;
+    if (kiln_c99_nursery_full_contains(&sender.nursery, a) ||
+        kiln_c99_nursery_full_contains(&sender.nursery, b) ||
+        kiln_c99_nursery_full_contains(&receiver.nursery, c)) return 7;
+    if (((unsigned char *)(a->base + sizeof(kiln_gc_block)))[0] != 0x61 ||
+        ((unsigned char *)(b->base + sizeof(kiln_gc_block)))[0] != 0x62 ||
+        ((unsigned char *)(c->base + sizeof(kiln_gc_block)))[0] != 0x63 ||
+        ((unsigned char *)(d->base + sizeof(kiln_gc_block)))[0] != 0x64) return 8;
+    /* Removing/reinserting the head leaves the remaining list valid; detached chunks
+     * are not members even while their regions still belong to the same heap. */
+    kiln_c99_nursery_full_remove(&sender.nursery, d);
+    if (!full_list_valid(&sender.nursery, 1) ||
+        kiln_c99_nursery_full_contains(&sender.nursery, d) || d->in_full ||
+        d->next != NULL || d->full_prev != NULL) return 9;
+    kiln_c99_nursery_full_push(&sender.nursery, d);
+    if (!full_list_valid(&sender.nursery, 2)) return 10;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "nursery-full-interior-handoff");
+    assert!(
+        run.status.success(),
+        "interior chunk handoff failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_receiver_reserves_then_publishes_a_root() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -3593,14 +3678,13 @@ int main(void) {
     outside->properties[0].value.tag = KILN_VALUE_STRING;
     outside->properties[0].value.bits = (uint64_t)(uintptr_t)text;
     kiln_nursery_chunk *outside_chunk = kiln_c99_nursery_seal(&heap.nursery);
-    outside_chunk->next = heap.nursery.full;
-    heap.nursery.full = outside_chunk;
+    kiln_c99_nursery_full_push(&heap.nursery, outside_chunk);
     heap.nursery.region = NULL;
     heap.nursery.base = heap.nursery.bump = heap.nursery.limit = NULL;
     heap.nursery.active = 0;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 31;
-    heap.nursery.full = outside_chunk->next;
+    kiln_c99_nursery_full_remove(&heap.nursery, outside_chunk);
     outside_chunk->next = heap.nursery.promoted;
     heap.nursery.promoted = outside_chunk;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=

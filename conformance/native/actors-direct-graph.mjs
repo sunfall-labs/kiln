@@ -74,6 +74,22 @@ try {
   catch (error) { throw new Error(`refused-ticket retry: ${error.message}`); }
   if (retried.answer !== 17) throw new Error('refused ticket could not be retried');
 
+  // Move an alias into a new outside holder after the factory has finished, then release
+  // the original escape. A factory-only write log would miss the surviving holder edge.
+  let lateAlias;
+  const lateTicket = transfer(isolate(() => { lateAlias = { answer: 23 }; return lateAlias; }));
+  const outsideHolder = { value: lateAlias };
+  lateAlias = undefined;
+  let lateRefused = false;
+  try { await owner.ref.call('echo', [lateTicket]); }
+  catch (error) { lateRefused = error.name === 'DataCloneError'; }
+  if (!lateRefused || outsideHolder.value.answer !== 23) {
+    throw new Error('post-factory alias moved');
+  }
+  outsideHolder.value = undefined;
+  const lateRetry = await owner.ref.call('echo', [lateTicket]);
+  if (lateRetry.answer !== 23) throw new Error('post-factory alias retry failed');
+
   let retainedChild;
   const childAlias = transfer(isolate(() => ({ child: retainedChild = { value: 21 } })));
   let childRefused = false;
