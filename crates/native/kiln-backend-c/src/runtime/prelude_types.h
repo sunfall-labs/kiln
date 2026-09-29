@@ -689,6 +689,8 @@ typedef struct kiln_shared_field_info {
 extern uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node);
 extern int kiln_shared_graph_release(uint64_t lease);
 extern int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out);
+extern int kiln_shared_graph_find_field(uint64_t lease, const uint16_t *key,
+                                        uint64_t key_length, uint64_t *out_index);
 extern int kiln_shared_graph_field(uint64_t lease, uint64_t index, kiln_shared_field_info *out,
                                    uint16_t *key_out, uint64_t key_capacity,
                                    uint16_t *value_out, uint64_t value_capacity);

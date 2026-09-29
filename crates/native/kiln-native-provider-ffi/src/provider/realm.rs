@@ -6384,6 +6384,9 @@ macro_rules! assert_provider_export {
         (realm, kiln_shared_graph_info, shared_graph_info) => {
             const _: unsafe extern "C" fn(u64, *mut shared_graph::SharedInfo) -> i32 = shared_graph::kiln_shared_graph_info;
         };
+        (realm, kiln_shared_graph_find_field, shared_graph_find_field) => {
+            const _: unsafe extern "C" fn(u64, *const u16, u64, *mut u64) -> i32 = shared_graph::kiln_shared_graph_find_field;
+        };
         (realm, kiln_shared_graph_field, shared_graph_field) => {
             const _: unsafe extern "C" fn(u64, u64, *mut shared_graph::SharedFieldInfo, *mut u16, u64, *mut u16, u64) -> i32 = shared_graph::kiln_shared_graph_field;
         };

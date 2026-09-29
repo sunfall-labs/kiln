@@ -205,43 +205,32 @@ static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
         if (enumerable != NULL) *enumerable = 0;
         goto done;
     }
-    for (uint64_t index = 0; index < node.field_count; ++index) {
-        kiln_shared_field_info field;
+    if (key == NULL || key->unit_len > SIZE_MAX / sizeof(uint16_t)) {
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto done;
+    }
+    {
         uint16_t *units = small;
-        int match = 1;
-        if (kiln_shared_graph_field(lease, index, &field, NULL, 0, NULL, 0) != 0) {
-            status = KILN_C99_INVALID_ARGUMENT;
-            goto done;
+        uint64_t slot;
+        int lookup;
+        kiln_shared_field_info field;
+        if (key->unit_len > sizeof small / sizeof small[0]) {
+            units = (uint16_t *)malloc(key->unit_len * sizeof(uint16_t));
+            if (units == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
         }
-        if (field.key_length != key->unit_len) continue;
-        if (field.key_length > SIZE_MAX / sizeof(uint16_t)) {
-            status = KILN_C99_OUT_OF_MEMORY;
-            goto done;
-        }
-        if (field.key_length > sizeof small / sizeof small[0]) {
-            units = (uint16_t *)malloc((size_t)field.key_length * sizeof(uint16_t));
-            if (units == NULL) {
-                status = KILN_C99_OUT_OF_MEMORY;
-                goto done;
-            }
-        }
-        status = kiln_shared_graph_field(lease, index, &field, units, field.key_length,
-                                         NULL, 0);
-        if (status != 0) {
-            if (units != small) free(units);
-            status = KILN_C99_INVALID_ARGUMENT;
-            goto done;
-        }
-        for (uint64_t at = 0; at < field.key_length; ++at) {
-            if (units[at] != kiln_string_unit_at(key, (size_t)at)) { match = 0; break; }
-        }
+        for (size_t at = 0; at < key->unit_len; ++at)
+            units[at] = kiln_string_unit_at(key, at);
+        lookup = kiln_shared_graph_find_field(lease, units, key->unit_len, &slot);
         if (units != small) free(units);
-        if (match) {
-            *found = 1;
-            if (enumerable != NULL) *enumerable = field.enumerable != 0;
-            status = kiln_c99_shared_field_value(lease, index, &field, out);
+        if (lookup == 1) goto done;
+        if (lookup != 0 || slot >= node.field_count ||
+            kiln_shared_graph_field(lease, slot, &field, NULL, 0, NULL, 0) != 0) {
+            status = KILN_C99_INVALID_ARGUMENT;
             goto done;
         }
+        *found = 1;
+        if (enumerable != NULL) *enumerable = field.enumerable != 0;
+        status = kiln_c99_shared_field_value(lease, slot, &field, out);
     }
 done:
     (void)kiln_shared_graph_release(lease);

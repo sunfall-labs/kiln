@@ -324,6 +324,50 @@ pub unsafe extern "C" fn kiln_shared_graph_info(lease: u64, out: *mut SharedInfo
     0
 }
 
+/// Find an own string field without materializing its key or scanning across the C boundary.
+/// Returns 0 with its ordinal, 1 when absent, and -1 for an invalid lease or argument.
+/// The caller retains the lease while using the returned ordinal.
+///
+/// # Safety
+///
+/// `key` must point to `key_length` readable UTF-16 units when nonempty; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_shared_graph_find_field(
+    lease: u64,
+    key: *const u16,
+    key_length: u64,
+    out: *mut u64,
+) -> i32 {
+    if out.is_null() || (key.is_null() && key_length != 0) {
+        return -1;
+    }
+    let Ok(length) = usize::try_from(key_length) else {
+        return -1;
+    };
+    let units = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller supplies a readable buffer of the checked length.
+        unsafe { std::slice::from_raw_parts(key, length) }
+    };
+    let handle = leases()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .held
+        .get(&lease)
+        .cloned();
+    let Some(handle) = handle else { return -1 };
+    let Some(index) = handle.graph().find_field_index_units(handle.index(), units) else {
+        return 1;
+    };
+    let Ok(index) = u64::try_from(index) else {
+        return -1;
+    };
+    // SAFETY: the caller's writable output was checked above.
+    unsafe { *out = index };
+    0
+}
+
 /// Copy one field by index. A null buffer queries its required length; a non-null buffer must
 /// have enough UTF-16 elements. The caller keeps the facade's lease for the whole call. Returns
 /// -1 for an invalid lease/index or buffer, -2 for insufficient capacity, and zero on success.

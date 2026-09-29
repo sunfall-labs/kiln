@@ -186,7 +186,7 @@ def build_all(kiln, go_cmd, work, selected):
     by_workload = {
         "start": ["kiln-start", "start", "actor-start", "actor-capacity"],
         "messages": ["inrealm", "messages", "actor-graph"],
-        "shared": ["shared"],
+        "shared": ["shared", "actor-shared"],
         "tasks": ["tasks"],
         "realms": ["realm-periodic"],
         "pmap": ["pmap", "pmap-parallel", "pmap-parallel-light"],
@@ -532,6 +532,9 @@ def jobs_for(cfg, bins):
         for mode in ("copy", "sab"):
             add("shared", "kiln", lambda n=n, mode=mode: simple(
                 "kiln", [k["shared"], str(n), str(cfg["queries"]), mode], timeout=300), k["shared"])
+        for mode in ("copy", "shared"):
+            add("shared", "kiln", lambda n=n, mode=mode: simple(
+                "kiln", [k["actor-shared"], mode, str(n)], timeout=300), k["actor-shared"])
 
     # 4. many tasks
     for n in cfg["task_ns"]:
@@ -856,6 +859,22 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
             w(rep.row(str(n), [f"{rt}: {mode}", rep.cell(case, rt, "setup_ms", " ms"),
                                rep.cell(case, rt, "query_ms", " ms"),
                                rep.cell(case, rt, "rss_kib", " MB", scale=mb)]))
+    w("")
+    w("A separate kiln-only row holds the same ordinary object graph in public actors. The copy "
+      "mode clones it into each actor; `share()` snapshots once and sends shared handles. Each "
+      "mode runs in a fresh process. Dataset RSS is the held RSS minus RSS after actors have "
+      "started, so actor startup is outside the setup and memory deltas.")
+    w("")
+    w("| actors | mode | snapshot | load all | query all | dataset RSS delta | held RSS |")
+    w("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    for n in cfg["shared_ns"]:
+        for mode in ("copy", "shared"):
+            case = f"actor-shared-{n}-{mode}"
+            w(rep.row(str(n), [mode, rep.cell(case, "kiln", "prepare_ms", " ms"),
+                               rep.cell(case, "kiln", "setup_ms", " ms"),
+                               rep.cell(case, "kiln", "query_ms", " ms"),
+                               rep.cell(case, "kiln", "dataset_rss_kib", " MB", scale=mb),
+                               rep.cell(case, "kiln", "held_rss_kib", " MB", scale=mb)]))
     w("")
 
     # 4. tasks

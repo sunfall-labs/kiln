@@ -24,6 +24,8 @@ pub struct NodeRecord {
     pub length: u64,
     pub fields: u64,
     pub field_count: u64,
+    pub index: u64,
+    pub index_capacity: u64,
 }
 
 #[repr(C)]
@@ -35,6 +37,14 @@ pub struct FieldRecord {
     pub enumerable: u32,
     pub payload: u64,
     pub value_length: u64,
+}
+
+fn key_hash(units: impl IntoIterator<Item = u16>) -> u64 {
+    units
+        .into_iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, unit| {
+            (hash ^ u64::from(unit)).wrapping_mul(0x100_0000_01b3)
+        })
 }
 
 pub struct SealedArena {
@@ -160,6 +170,23 @@ impl SealedArena {
             .eq(wanted.units())
     }
 
+    fn units_equal_slice(&self, offset: u64, length: u64, wanted: &[u16]) -> bool {
+        if length != wanted.len() as u64 {
+            return false;
+        }
+        let Some(bytes) = wanted
+            .len()
+            .checked_mul(2)
+            .and_then(|size| self.range(offset, size))
+        else {
+            return false;
+        };
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .eq(wanted.iter().copied())
+    }
+
     fn text(&self, offset: u64, length: u64) -> Option<String> {
         let bytes = self.range(offset, usize::try_from(length).ok()?)?;
         String::from_utf8(bytes.to_vec()).ok()
@@ -272,6 +299,41 @@ pub(super) fn seal(nodes: &[Node]) -> Result<(SealedArena, Vec<Handle>), ()> {
                 .checked_mul(size_of::<FieldRecord>())
                 .ok_or(())?,
         )?;
+        // Small records are cheaper to scan. Larger records and arrays get an immutable open
+        // addressed index in the same protected mapping; no reader learns or writes a cache.
+        let mut index_slots = Vec::new();
+        let index_capacity = if fields.len() >= 16 {
+            fields
+                .len()
+                .checked_mul(2)
+                .and_then(usize::checked_next_power_of_two)
+                .ok_or(())?
+        } else {
+            0
+        };
+        if index_capacity != 0 {
+            index_slots
+                .try_reserve_exact(index_capacity)
+                .map_err(|_| ())?;
+            index_slots.resize(index_capacity, 0u64);
+            for (field_index, field) in fields.iter().enumerate() {
+                let mut slot = key_hash(field.key.units()) as usize & (index_capacity - 1);
+                while index_slots[slot] != 0 {
+                    slot = (slot + 1) & (index_capacity - 1);
+                }
+                index_slots[slot] = u64::try_from(field_index + 1).map_err(|_| ())?;
+            }
+        }
+        let index_offset =
+            writer.reserve(index_capacity.checked_mul(size_of::<u64>()).ok_or(())?)?;
+        for (slot, value) in index_slots.into_iter().enumerate() {
+            let offset = index_offset
+                .checked_add(
+                    u64::try_from(slot.checked_mul(size_of::<u64>()).ok_or(())?).map_err(|_| ())?,
+                )
+                .ok_or(())?;
+            writer.put(offset, value);
+        }
         writer.put(
             u64::try_from(index.checked_mul(size_of::<NodeRecord>()).ok_or(())?).map_err(|_| ())?,
             NodeRecord {
@@ -280,6 +342,8 @@ pub(super) fn seal(nodes: &[Node]) -> Result<(SealedArena, Vec<Handle>), ()> {
                 length,
                 fields: table,
                 field_count: u64::try_from(fields.len()).map_err(|_| ())?,
+                index: index_offset,
+                index_capacity: u64::try_from(index_capacity).map_err(|_| ())?,
             },
         );
         for (field_index, field) in fields.iter().enumerate() {
@@ -374,15 +438,60 @@ impl Graph {
         })
     }
 
-    pub fn find_field(&self, node: u32, key: &StringUnits) -> Option<super::Field> {
-        let count = self.node_info(node)?.3;
+    fn find_field_index_matching(
+        &self,
+        node: u32,
+        hash: u64,
+        mut matches: impl FnMut(&SealedArena, &FieldRecord) -> bool,
+    ) -> Option<usize> {
+        let record = self.record(node)?;
+        let count = usize::try_from(record.field_count).ok()?;
+        let capacity = usize::try_from(record.index_capacity).ok()?;
+        if capacity != 0 {
+            if !capacity.is_power_of_two() || capacity < count.checked_mul(2)? {
+                return None;
+            }
+            let mut slot = hash as usize & (capacity - 1);
+            for _ in 0..capacity {
+                let offset = record
+                    .index
+                    .checked_add(u64::try_from(slot.checked_mul(size_of::<u64>())?).ok()?)?;
+                let entry = self.arena.read::<u64>(offset)?;
+                if entry == 0 {
+                    return None;
+                }
+                let index = usize::try_from(entry - 1).ok()?;
+                let raw = self.raw_field(node, index)?;
+                if matches(&self.arena, &raw) {
+                    return Some(index);
+                }
+                slot = (slot + 1) & (capacity - 1);
+            }
+            return None;
+        }
         for index in 0..count {
             let raw = self.raw_field(node, index)?;
-            if self.arena.units_equal(raw.key_offset, raw.key_length, key) {
-                return self.field(node, index);
+            if matches(&self.arena, &raw) {
+                return Some(index);
             }
         }
         None
+    }
+
+    pub fn find_field_index(&self, node: u32, key: &StringUnits) -> Option<usize> {
+        self.find_field_index_matching(node, key_hash(key.units()), |arena, raw| {
+            arena.units_equal(raw.key_offset, raw.key_length, key)
+        })
+    }
+
+    pub fn find_field_index_units(&self, node: u32, key: &[u16]) -> Option<usize> {
+        self.find_field_index_matching(node, key_hash(key.iter().copied()), |arena, raw| {
+            arena.units_equal_slice(raw.key_offset, raw.key_length, key)
+        })
+    }
+
+    pub fn find_field(&self, node: u32, key: &StringUnits) -> Option<super::Field> {
+        self.field(node, self.find_field_index(node, key)?)
     }
 
     pub fn arena_ptr(&self) -> *const u8 {

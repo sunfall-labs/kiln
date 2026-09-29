@@ -1,5 +1,7 @@
 // State shared by the public actor module and its worker entry within one realm. Keeping it
 // here makes their static dependency graph acyclic while ticket identities stay private.
+import { isShared } from "kiln:shared";
+
 export abstract class Actor {}
 // The module graph can evaluate this internal module in more than one dynamic-import plan.
 // A global symbol marks the prototype chain across those plans without sharing mutable state.
@@ -191,6 +193,10 @@ export function prepareActorMessage(
   nativePlain = false,
 ): any {
   if (value === null || typeof value !== "object") return value;
+  // A shared graph is already an immutable message token. Walking its facade here would
+  // materialize an ordinary clone (and can miss its indexed properties); the port codec owns
+  // the cross-realm handle and keeps its identity and lifetime rules.
+  if (isShared(value)) return value;
   // Native certifies a complete graph of plain data without invoking any getter or Proxy trap.
   // It cannot contain a ticket or isolated handle. Sending the original lets postMessage's
   // shared codec make the one required clone instead of first copying the graph in TypeScript.

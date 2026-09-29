@@ -635,6 +635,13 @@ int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out) {
     out->field_count = 1;
     return 0;
 }
+int kiln_shared_graph_find_field(uint64_t lease, const uint16_t *key,
+                                  uint64_t key_length, uint64_t *out_index) {
+    if (lease == 0 || key == NULL || out_index == NULL) return -1;
+    if (key_length != 1 || key[0] != 'x') return 1;
+    *out_index = 0;
+    return 0;
+}
 int kiln_shared_graph_field(uint64_t lease, uint64_t index, kiln_shared_field_info *out,
                             uint16_t *key_out, uint64_t key_capacity,
                             uint16_t *value_out, uint64_t value_capacity) {

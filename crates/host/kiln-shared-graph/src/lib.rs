@@ -486,6 +486,41 @@ mod tests {
     }
 
     #[test]
+    fn sealed_index_finds_large_sparse_array_fields_without_changing_order() {
+        let mut properties = Vec::new();
+        for index in (0..80).step_by(2) {
+            properties.push(field(&index.to_string(), InputValue::Number(index as f64)));
+        }
+        properties.push(field("note", InputValue::String("kept".into())));
+        let mut source = Table(HashMap::from([(
+            1,
+            SourceNode::Array {
+                length: 80,
+                properties,
+            },
+        )]));
+        let Snapshot::Shared(root) = share(InputValue::Object(1), &mut source).unwrap() else {
+            panic!("expected shared array")
+        };
+        for (position, index) in (0..80).step_by(2).enumerate() {
+            let key: StringUnits = index.to_string().into();
+            assert_eq!(root.graph().find_field_index(0, &key), Some(position));
+            assert_eq!(
+                root.graph().find_field_index_units(0, &key.to_units()),
+                Some(position)
+            );
+        }
+        assert_eq!(root.graph().find_field_index(0, &"note".into()), Some(40));
+        assert_eq!(root.graph().find_field_index(0, &"1".into()), None);
+        assert_eq!(root.graph().find_field_index_units(0, &[0xd800]), None);
+        let Node::Array { fields, .. } = root.graph().node(0).unwrap() else {
+            panic!("expected shared array")
+        };
+        assert_eq!(fields[0].key, "0");
+        assert_eq!(fields[40].key, "note");
+    }
+
+    #[test]
     fn rejects_invalid_graph_without_inspecting_a_proxy_or_accessor_value() {
         let mut source = Table(HashMap::from([
             (

@@ -66,7 +66,7 @@ below is about the native runtime.
 | --- | --- | --- | --- | --- |
 | 1 | **Worker and actor start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`), plus `spawnActor` to ready and first call (`js/actor-start.mjs`) and up to 10,000 simultaneously held public actors when memory permits (`js/actor-capacity.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
 | 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred; 1 KB and 100 MB transfer size check | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun, plus public actor calls with clone and `prepareTransfer` (`js/actor-graph.mjs`) |
-| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; the separate frozen object-graph API is not measured in this byte-table row |
+| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups; separately, one ordinary graph held in N public actors | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; `js/actor-shared.mjs` compares cloned graphs with one `share()` snapshot sent to several actors |
 | 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks in one realm; workload 7 measures separate scheduled realms |
 | 5 | **Data-parallel map** over 10M numbers: a compute-heavy callback, and a light one | `Array.prototype.map`; a `worker_threads` pool of one worker per core that copies each slice in and transfers it back (`js/pmap-pool.mjs`) | a loop; goroutines over sub-slices | `map`, and `parallelMap` (ADR 0058) natively, plus `parallelMap` with `KILN_PARALLELISM=1` to show whether the parallel lowering ran |
 | 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` in process and thread mode (`js/serve.mjs`); `KILN_WORKERS=1` for scale |
@@ -97,7 +97,11 @@ Details that matter when reading the numbers:
   sum in both modes; preparation is a sender-side copy, not a zero-copy construction.
 - **3.** Setup is from the first send until every worker holds the table, with the workers already
   started; the copy row pays one structured clone per worker, the `SharedArrayBuffer` row none.
-  This byte-table row does not measure `kiln:shared` frozen object graphs.
+  The kiln-only actor graph row runs each mode in a fresh process, starts actors before timing,
+  then measures the one-time `share()` snapshot, loading every actor, one query per actor, and
+  the held RSS delta from just before snapshot/loading. It verifies the graph checksum and
+  `isShared` status inside each actor. This graph is about 1 MB and is a different workload
+  from the 50 MB byte table.
 - **4.** The floor is 100 ms (10 ticks of 10 ms); everything above it is scheduling. Peak RSS
   includes each runtime's baseline.
 - **5.** The pool rows include copying the input into typed arrays: that is what a pool of isolates
