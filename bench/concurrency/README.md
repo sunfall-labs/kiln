@@ -9,6 +9,11 @@ bench/concurrency/run.sh --only messages,server
 bench/concurrency/run.sh --only realms --quick
 ```
 
+The latest three-round comparison without the HTTP server workload is
+[`results-2026-09-29-nonserver.md`](results-2026-09-29-nonserver.md). It includes the
+10,000-public-actor and 100,000-scheduled-realm capacity rows. The server workload needs
+loopback sockets and remains in the earlier full report.
+
 The separate one-realm-per-connection scheduler probe is
 `python3 bench/concurrency/realm-connections.py --quick` after building the release CLI with
 `mbx build --release -p kiln-cli`. It compiles one native TCP client outside the measured runs,
@@ -112,16 +117,17 @@ Details that matter when reading the numbers:
 - **7.** This is an end-to-end native launcher measurement: wall time includes the process launch,
   realm setup and teardown, timer turns, and two result files per realm. The runner checks all
   output files and statuses before accepting a timing. Before trying 100,000 realms, it projects
-  RSS from the 10 and 1,000 realm runs and skips the row if that would exceed 70% of available
-  host or cgroup memory with a 1.5× margin. A skipped row is a capacity limit, not a passing
-  100,000-realm result.
+  RSS from the smaller realm runs and requires the projected use plus the larger of 2 GiB or 20%
+  of that use to fit available host or cgroup memory. It also monitors child RSS and available
+  memory while the row runs. A skipped row is a capacity limit, not a passing 100,000-realm
+  result.
 - **6.** `oha` runs on the same machine and competes for the same cores, so absolute rps is a
   property of this box; the columns are comparable with each other. Requests `oha` cancels at the
   deadline are not counted as errors.
 - **Public actor capacity.** Each `spawnActor` constructs a separate realm; the benchmark keeps
   every owner alive, calls each once, checks every reply, then stops every owner. It limits pending
   spawn/call requests to 64, measures the held process RSS and thread count from `/proc`, and
-  protects the 10,000-actor run with the same projected-memory rule. This measures the API users
+  protects the 10,000-actor run with the same projected-memory rule and live guard. This measures the API users
   call; the separate realm workload measures the native launcher and its output files.
 
 ## What "not available" means

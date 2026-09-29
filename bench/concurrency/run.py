@@ -1007,8 +1007,8 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("Each realm wakes on a timer 10 times and prints `10`; every output and exit status is "
       "checked. Wall time includes process launch, realm setup, timer turns, and the native "
       "launcher's two result files per realm. Peak RSS is for the whole process. The 100,000 "
-      "realm row runs only if the RSS slope measured at smaller counts fits within 70% of "
-      "available memory with a 1.5× margin. This row has no Node/Bun equivalent: their "
+      "realm row runs only if projected RSS plus a reserve of at least 2 GiB or 20% fits "
+      "available memory; a live guard checks the same reserve. This row has no Node/Bun equivalent: their "
       "one-realm async tasks appear in section 4, and spawning 100,000 worker isolates is "
       "a different resource budget.")
     w("")
