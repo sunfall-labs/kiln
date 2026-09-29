@@ -22,6 +22,16 @@ export class Counter extends Actor {
   inspectGraph(value) {
     return [Object.getPrototypeOf(value) === Object.prototype, value.answer, value.values.join(',')];
   }
+  inspectPreparedDictionary(value) {
+    const key = Object.keys(value)[0];
+    const original = value[key];
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    const nullPrototype = Object.getPrototypeOf(value) === null;
+    value['received-' + key] = 23;
+    const grew = value['received-' + key] === 23;
+    return [key, original, typeof original, descriptor?.value, nullPrototype, grew,
+            Object.keys(value).length];
+  }
   sumLinked(value) {
     let count = 0;
     let sum = 0;

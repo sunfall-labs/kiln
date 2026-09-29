@@ -285,6 +285,13 @@ pub struct PendingTurnControl {
 }
 
 impl PendingTurnControl {
+    /// Before a two-sided handoff starts, either control completing means it could not enter
+    /// the rendezvous. Consuming that result is safe: a successful control cannot finish until
+    /// the coordinator starts the handoff.
+    pub fn finished_before_start(&self) -> bool {
+        !matches!(self.result.try_recv(), Err(mpsc::TryRecvError::Empty))
+    }
+
     pub fn cancel_pending(&self) -> bool {
         self.permit
             .compare_exchange(
@@ -308,6 +315,25 @@ impl PendingTurnControl {
                     // letting its mutator resume beside a detached graph.
                     self.result.recv().unwrap_or(PausedTurnResult::Unavailable)
                 }
+            }
+        }
+    }
+
+    /// A graph coordinator may wait behind an unrelated language turn for arbitrarily long.
+    /// Cancellation ends a still-queued control; a control that already started must finish
+    /// before its realm claim can be released.
+    pub fn wait_while(self, mut pending: impl FnMut() -> bool) -> PausedTurnResult {
+        loop {
+            match self.result.recv_timeout(Duration::from_millis(10)) {
+                Ok(answer) => return answer,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return PausedTurnResult::Unavailable,
+                Err(mpsc::RecvTimeoutError::Timeout) if !pending() => {
+                    if self.cancel_pending() {
+                        return PausedTurnResult::Unavailable;
+                    }
+                    return self.result.recv().unwrap_or(PausedTurnResult::Unavailable);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -365,6 +391,46 @@ impl TurnPairClaim {
         }
     }
 
+    /// Wait for both realm turns to reach a boundary. The caller supplies the request's live
+    /// state; scheduler contention does not turn a valid ownership move into a refusal.
+    pub fn wait_while(&self, mut pending: impl FnMut() -> bool) -> bool {
+        let on_lane = ACTIVE_LANE.with(|slot| {
+            slot.get()
+                .is_some_and(|(queue, _)| queue == self.coordinator.queue_identity)
+        });
+        if on_lane {
+            return false;
+        }
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .expect("turn pause lock poisoned");
+        loop {
+            if !pending()
+                || self.targets.iter().any(|target| {
+                    TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active
+                })
+            {
+                return false;
+            }
+            if self.targets.iter().all(|target| {
+                state
+                    .entries
+                    .get(&target.id())
+                    .is_some_and(|entry| entry.claim == self.claim && entry.acknowledged)
+            }) {
+                return true;
+            }
+            state = self
+                .coordinator
+                .changed
+                .wait_timeout(state, Duration::from_millis(10))
+                .expect("turn pause wait poisoned")
+                .0;
+        }
+    }
+
     /// Ask one paused body to perform a bounded control operation on a scheduler lane. A pinned
     /// body runs on its owner lane; a movable body can run on any lane between turns. Both
     /// bodies must already have acknowledged this claim. The operation is synchronous and must
@@ -378,6 +444,18 @@ impl TurnPairClaim {
             return PausedTurnResult::Unavailable;
         };
         pending.wait(Duration::from_secs(1))
+    }
+
+    pub fn control_while(
+        &self,
+        target: &TurnPauseTarget,
+        command: PausedTurnCommand,
+        pending: impl FnMut() -> bool,
+    ) -> PausedTurnResult {
+        let Some(control) = self.enqueue_control(target, command, None) else {
+            return PausedTurnResult::Unavailable;
+        };
+        control.wait_while(pending)
     }
 
     /// Choose distinct lanes for two callbacks that must both enter before either unlinks a

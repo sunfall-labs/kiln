@@ -9,6 +9,7 @@ typedef struct kiln_c99_graph_capsule_requirements {
     size_t filled;
     size_t region_capacity;
     size_t bitmap_words;
+    int foreign_dictionary_keys;
 } kiln_c99_graph_capsule_requirements;
 
 typedef struct kiln_c99_graph_capsule {
@@ -116,6 +117,21 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
     out->needs.filled = filled;
     out->needs.region_capacity = from->nursery.capacity;
     out->needs.bitmap_words = from->nursery.bitmap_words;
+    /* The closure proof above validated each block before this scan. Keep the answer in the
+     * capsule so receiver publication stays constant time after sender detachment. */
+    for (index = 0; index < count; ++index) {
+        kiln_nursery_chunk *part = count == 1 ? chunk : chunks[index];
+        const char *cursor;
+        for (cursor = part->base; cursor < part->limit;) {
+            const kiln_gc_block *member = (const kiln_gc_block *)cursor;
+            if ((member->kind & KILN_GC_KIND_MASK) == KILN_GC_OBJECT) {
+                const kiln_object *object = (const kiln_object *)(member + 1);
+                if (object->shape == NULL && kiln_c99_object_properties_in_block(object))
+                    out->needs.foreign_dictionary_keys = 1;
+            }
+            cursor += (sizeof *member + (member->size == 0 ? 1 : member->size) + 15) & ~(size_t)15;
+        }
+    }
     return 1;
 fail:
     free(chunks);
@@ -296,6 +312,7 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
     to->bytes += capsule->needs.bytes;
     to->since_collection += capsule->needs.bytes;
     to->nursery.full_bytes += capsule->needs.filled;
+    if (capsule->needs.foreign_dictionary_keys) to->foreign_dictionary_keys = 1;
     realm->graph_inbox_root = capsule->root;
     realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_PUBLISHED;
     capsule->chunk = NULL;

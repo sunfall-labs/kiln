@@ -4,6 +4,23 @@
 
 Accepted, and implemented for the C backend. The interpreter is not touched by this decision.
 
+### Amendment: keys carried by a prepared graph (2026-09-28)
+
+Ordinary property writes still intern keys in the owning realm. A `prepareTransfer` dictionary
+is the one exception: its property records and key bytes are built in a private arena, then move
+to another realm together. Replacing those keys with the receiver's interned pointers during
+the atomic handoff would allocate and create new GC roots after receiver preflight. Inserting
+every user key into the process-wide shared table would retain unbounded input. The transferred
+dictionary therefore keeps its arena-owned key bytes. Its receiver reads and mutations compare
+a canonical pointer first, then spelling; its collector marks the key blocks as ordinary graph
+edges. The capsule records whether it contains such a dictionary and sets a realm-local flag at
+publication. While that flag is set, an intern-table miss cannot skip the object's prototype
+walk: a moved dictionary may still hold the spelling. This flag is conservative until realm
+teardown. It never changes lookup in realms that have received no such graph, and shaped objects
+retain their canonical-key fast path. `KILN_KEYS_CHECK=1` still checks dictionary results by
+spelling. This exception implements ADR 0070's ownership transfer without adding fallible
+work after detachment.
+
 ## Context
 
 The native object model (`kiln_object` in the emitted prelude) is a list of `kiln_property`

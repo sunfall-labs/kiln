@@ -1078,7 +1078,8 @@ fn runtime_prelude_size() {
     // A multi-chunk graph capsule and provisional collector retention bring it to 63,172.
     // The private graph clone's arena allocator and side-buffer rollback bring it to 63,597.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 64_000;
+    // In-block dictionaries and key copying let prepared graphs carry computed property names.
+    const CEILING_LINES: usize = 64_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

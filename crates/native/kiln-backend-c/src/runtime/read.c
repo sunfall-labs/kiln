@@ -320,7 +320,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * the chain can hold it and the walk is not made at all -- unless the check mode is on,
          * which wants every level's scan run by bytes. */
         if (ikey == NULL) ikey = kiln_c99_interned_key(key);
-        walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index_key(key) >= 0.0;
+        walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index_key(key) >= 0.0 ||
+               (kiln_c99_gc_heap() != NULL && kiln_c99_gc_heap()->foreign_dictionary_keys);
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
@@ -2379,7 +2380,7 @@ static int kiln_c99_par_walk(kiln_c99_par_site *site, kiln_val object, const kil
             size_t index;
             for (index = 0; index < obj->count && obj->properties != NULL; ++index) {
                 const kiln_property *property = &obj->properties[index];
-                if (ikey != NULL ? property->key == ikey : kiln_c99_same_key_view(property, key)) {
+                if (property->key == ikey || kiln_c99_same_key_view(property, key)) {
                     if (property->refused || property->accessor) return 0;
                     *out = kiln_val_from_boundary(property->value);
                     return 1;

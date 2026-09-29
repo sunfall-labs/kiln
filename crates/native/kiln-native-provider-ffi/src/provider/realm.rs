@@ -5195,8 +5195,15 @@ fn refuse_graph_claim_request(
         return;
     }
     let result = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
-        if claim.wait(Duration::from_secs(1)) {
-            coordinate_scheduled_graph_request(&claim, sender, receiver, request, reservation)
+        if claim.wait_while(|| status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING) {
+            coordinate_scheduled_graph_request(
+                &claim,
+                sender,
+                receiver,
+                request,
+                reservation,
+                &status,
+            )
         } else {
             GRAPH_REQUEST_REFUSED
         }
@@ -5266,7 +5273,7 @@ fn refuse_dedicated_graph_claim_request(
             receiver,
             request,
             reservation,
-            |realm, command| claim.control(realm, command),
+            |realm, command, _| claim.control(realm, command),
         )
     } else {
         coordinate_mixed_graph_request(sender, receiver, request, reservation)
@@ -5325,6 +5332,7 @@ fn coordinate_scheduled_graph_request(
     receiver: u64,
     request: u64,
     reservation: u64,
+    status: &AtomicU8,
 ) -> u8 {
     if reservation == 0 {
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
@@ -5335,7 +5343,11 @@ fn coordinate_scheduled_graph_request(
             receiver,
             request,
             reservation,
-            |realm, command| claim.control(realm, command),
+            |realm, command, can_cancel| {
+                claim.control_while(realm, command, || {
+                    !can_cancel || status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING
+                })
+            },
         );
     };
     let Some(lease) =
@@ -5359,24 +5371,32 @@ fn coordinate_scheduled_graph_request(
     let receiver_pending = claim.enqueue_receiver(receiver_command, Some(lanes[1]));
     if sender_pending.is_none()
         || receiver_pending.is_none()
-        || !handoff.handoff.wait_ready(Duration::from_secs(1))
+        || !handoff.handoff.wait_ready_while(|| {
+            status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING
+                && !sender_pending
+                    .as_ref()
+                    .is_some_and(PendingTurnControl::finished_before_start)
+                && !receiver_pending
+                    .as_ref()
+                    .is_some_and(PendingTurnControl::finished_before_start)
+        })
     {
         handoff.handoff.cancel();
         if let Some(pending) = sender_pending {
-            let _ = pending.wait(Duration::from_secs(1));
+            let _ = pending.wait_while(|| false);
         }
         if let Some(pending) = receiver_pending {
-            let _ = pending.wait(Duration::from_secs(1));
+            let _ = pending.wait_while(|| false);
         }
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
     handoff.handoff.start();
     let sender_result = sender_pending
         .expect("ready sender was queued")
-        .wait(Duration::from_secs(1));
+        .wait_while(|| true);
     let receiver_result = receiver_pending
         .expect("ready receiver was queued")
-        .wait(Duration::from_secs(1));
+        .wait_while(|| true);
     if sender_result == PausedTurnResult::Ready
         && receiver_result == PausedTurnResult::Ready
         && handoff.handoff.done()
@@ -5465,7 +5485,7 @@ fn coordinate_claimed_graph_request(
     receiver: u64,
     request: u64,
     reservation: u64,
-    mut control: impl FnMut(u64, PausedTurnCommand) -> PausedTurnResult,
+    mut control: impl FnMut(u64, PausedTurnCommand, bool) -> PausedTurnResult,
 ) -> u8 {
     if reservation == 0 {
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
@@ -5476,25 +5496,33 @@ fn coordinate_claimed_graph_request(
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     };
     let command = |kind, ids| PausedTurnCommand { kind, ids };
-    if control(sender, command(3, [request, reservation, receiver])) != PausedTurnResult::Ready {
+    if control(sender, command(3, [request, reservation, receiver]), true)
+        != PausedTurnResult::Ready
+    {
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
-    if control(receiver, command(4, [reservation, sender, request])) != PausedTurnResult::Ready {
-        if control(sender, command(9, [request, reservation, 0])) != PausedTurnResult::Ready {
-            std::process::abort();
-        }
-        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
-    }
-    if control(sender, command(5, [reservation, sender, request])) != PausedTurnResult::Ready {
-        if control(receiver, command(8, [reservation, 0, 0])) != PausedTurnResult::Ready
-            || control(sender, command(9, [request, reservation, 0])) != PausedTurnResult::Ready
+    if control(receiver, command(4, [reservation, sender, request]), true)
+        != PausedTurnResult::Ready
+    {
+        if control(sender, command(9, [request, reservation, 0]), false) != PausedTurnResult::Ready
         {
             std::process::abort();
         }
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
-    if control(receiver, command(6, [reservation, sender, request])) != PausedTurnResult::Ready
-        || control(sender, command(7, [request, reservation, 0])) != PausedTurnResult::Ready
+    if control(sender, command(5, [reservation, sender, request]), true) != PausedTurnResult::Ready
+    {
+        if control(receiver, command(8, [reservation, 0, 0]), false) != PausedTurnResult::Ready
+            || control(sender, command(9, [request, reservation, 0]), false)
+                != PausedTurnResult::Ready
+        {
+            std::process::abort();
+        }
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    if control(receiver, command(6, [reservation, sender, request]), false)
+        != PausedTurnResult::Ready
+        || control(sender, command(7, [request, reservation, 0]), false) != PausedTurnResult::Ready
     {
         std::process::abort();
     }
@@ -5580,11 +5608,21 @@ pub(crate) struct ScheduledPairClaim {
 }
 
 impl ScheduledPairClaim {
+    #[cfg(test)]
     fn wait(&self, timeout: Duration) -> bool {
         self.claim.wait(timeout)
     }
 
-    fn control(&self, realm: u64, command: PausedTurnCommand) -> PausedTurnResult {
+    fn wait_while(&self, pending: impl FnMut() -> bool) -> bool {
+        self.claim.wait_while(pending)
+    }
+
+    fn control_while(
+        &self,
+        realm: u64,
+        command: PausedTurnCommand,
+        pending: impl FnMut() -> bool,
+    ) -> PausedTurnResult {
         let target = if realm == self.sender_realm {
             &self.sender
         } else if realm == self.receiver_realm {
@@ -5592,7 +5630,7 @@ impl ScheduledPairClaim {
         } else {
             return PausedTurnResult::Unavailable;
         };
-        self.claim.control(target, command)
+        self.claim.control_while(target, command, pending)
     }
 
     fn concurrent_control_lanes(&self) -> Option<[usize; 2]> {

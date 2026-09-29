@@ -42,7 +42,12 @@ impl workers::PlainSource for InterpreterPlainSource {
             Value::String(value) => workers::PlainNode::String(value.clone()),
             Value::Object(object) => {
                 let data = object.borrow();
-                if data.prototype.is_some()
+                /* Structured clone accepts a null-prototype plain record and materializes an
+                 * ordinary record in the receiver. Its source still has no inherited getter. */
+                if data
+                    .prototype
+                    .as_ref()
+                    .is_some_and(|prototype| !matches!(prototype, Value::Null))
                     || data.primitive.is_some()
                     || data.error_brand
                     || data.arguments_brand

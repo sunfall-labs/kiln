@@ -107,12 +107,10 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
     return kiln_c99_same_key_view(property, &view);
 }
 
-/* The slot on `object` holding the canonical key `ikey`, or `object->count` when there is none.
- * A NULL `ikey` is a spelling the realm never interned, and since every stored key is interned
- * (`kiln_c99_own_slot` is the one place a key is written and it always canonicalizes) that is a
- * key no object has: the scan is skipped rather than run. `KILN_KEYS_CHECK=1` re-runs it by
- * bytes and aborts on a disagreement, which is how "every stored key is interned" is tested
- * rather than assumed. */
+/* The slot on `object` holding `ikey`, or `object->count` when there is none. Ordinary writes
+ * intern keys; a prepared dictionary carries its own key bytes across realms and cannot keep
+ * the sender's canonical pointer. Compare bytes after the fast pointer check for that case.
+ * `KILN_KEYS_CHECK=1` checks the answer independently by spelling. */
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
                                      const kiln_string *key) {
     size_t index;
@@ -126,7 +124,8 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
     found = object->count;
     if (ikey != NULL) {
         for (index = 0; index < object->count; ++index) {
-            if (object->properties[index].key == ikey) {
+            if (object->properties[index].key == ikey ||
+                kiln_c99_same_key_view(&object->properties[index], key)) {
                 found = index;
                 break;
             }
@@ -1027,8 +1026,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         *out = &object->properties[index];
         return KILN_C99_OK;
     }
-    status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
-                              sizeof *object->properties);
+    status = kiln_c99_object_reserve_properties(object, object->count + 1);
     if (status != KILN_C99_OK) {
         return status;
     }

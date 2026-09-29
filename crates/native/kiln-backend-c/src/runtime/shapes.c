@@ -686,6 +686,25 @@ static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
     }
 }
 
+static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
+    if (needed <= object->capacity) return KILN_C99_OK;
+    if (kiln_c99_object_properties_in_block(object)) {
+        kiln_property *properties;
+        size_t capacity = object->capacity > needed / 2 && object->capacity <= SIZE_MAX / 2
+                              ? object->capacity * 2 : needed;
+        if (capacity < needed || capacity > SIZE_MAX / sizeof *properties)
+            return KILN_C99_OUT_OF_MEMORY;
+        properties = (kiln_property *)malloc(capacity * sizeof *properties);
+        if (properties == NULL) return KILN_C99_OUT_OF_MEMORY;
+        memcpy(properties, object->properties, object->count * sizeof *properties);
+        object->properties = properties;
+        object->capacity = capacity;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_reserve((void **)&object->properties, &object->capacity, needed,
+                            sizeof *object->properties);
+}
+
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
     kiln_c99_prototype_touched(object);
     kiln_shape *shape;
@@ -718,7 +737,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             }
         }
         values = kiln_c99_sealed_values_of(object);
-        free(object->properties);
+        kiln_c99_object_properties_free(object);
         object->properties = properties;
         object->count = visible;
         object->capacity = visible;
@@ -741,8 +760,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     }
     total_properties = shape->property_count + active_elements;
     if (total_properties > object->capacity) {
-        status = kiln_c99_reserve((void **)&object->properties, &object->capacity,
-                                  total_properties, sizeof *object->properties);
+        status = kiln_c99_object_reserve_properties(object, total_properties);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -1006,7 +1024,7 @@ static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_objec
         object->inline_slots[i] = KILN_VAL_UNDEFINED;
     for (i = 0; i < object->count; ++i)
         object->inline_slots[i] = kiln_val_from_boundary(object->properties[i].value);
-    free(object->properties);
+    kiln_c99_object_properties_free(object);
     object->properties = NULL;
     object->capacity = 0;
     object->count = 0;
@@ -1062,7 +1080,7 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
         values->values[index] = kiln_val_from_boundary(object->properties[index].value);
         orders[index] = (uint32_t)index + 1;
     }
-    free(object->properties);
+    kiln_c99_object_properties_free(object);
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;

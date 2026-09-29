@@ -183,6 +183,20 @@ impl GraphHandoff {
         state.ready.iter().all(|ready| *ready) && !state.cancelled
     }
 
+    /// Both callbacks may be queued behind unrelated turns. Only cancellation, teardown or a
+    /// callback result may stop readiness; elapsed time is not a failed ownership proof.
+    pub(crate) fn wait_ready_while(&self, mut pending: impl FnMut() -> bool) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while !state.ready.iter().all(|ready| *ready) && !state.cancelled && pending() {
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(10))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        state.ready.iter().all(|ready| *ready) && !state.cancelled && pending()
+    }
+
     pub(crate) fn start(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(state.ready.iter().all(|ready| *ready) && !state.cancelled);

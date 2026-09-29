@@ -496,6 +496,9 @@ typedef struct kiln_gc_heap {
     /* Bootstrap-only direct construction of sealed callable stores stops before program code
      * runs. Zero-initialized with the heap and set by `kiln_c99_builtin_bootstrap_done`. */
     uint8_t bootstrap_complete;
+    /* A transferred dictionary may own key bytes that were never interned in this realm.
+     * Unknown-name reads must still walk it by spelling, including through prototypes. */
+    uint8_t foreign_dictionary_keys;
     /* This realm's Object.prototype own-property store once it exists (`kiln_c99_callable_store`),
      * kept alive by the realm's registry; read live by `kiln_c99_object_prototype_lacks`. */
     const struct kiln_object *object_prototype_store;
@@ -3204,21 +3207,34 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
     case KILN_GC_OBJECT: {
         const kiln_object *object = (const kiln_object *)(block + 1);
         const kiln_shape *shape;
-        if (block->size < sizeof *object || object->properties != NULL || object->count != 0 ||
-            object->capacity != 0 || object->sealed != NULL || object->elements != NULL ||
+        if (block->size < sizeof *object || object->sealed != NULL || object->elements != NULL ||
             object->element_count != 0 || object->element_capacity != 0 ||
             (object->slots == object->inline_slots
                  ? object->slot_capacity != KILN_C99_INLINE_SLOTS
                  : object->slots != (const kiln_val *)(object + 1) ||
                    object->slot_capacity <= KILN_C99_INLINE_SLOTS ||
                    object->slot_capacity > (block->size - sizeof *object) / sizeof(kiln_val)) ||
-            object->shape == NULL ||
             object->module_namespace || object->arguments_brand || object->error_brand ||
             object->layout_token != 0 || object->accessor_count != 0 ||
             object->read_only_seen || object->frozen || object->not_extensible ||
             (object->prototype.tag != KILN_VALUE_UNDEFINED &&
              object->prototype.tag != KILN_VALUE_NULL)) return 0;
         shape = object->shape;
+        if (shape == NULL) {
+            if (!kiln_c99_object_properties_in_block(object) || object->count == 0 ||
+                object->capacity != object->count ||
+                object->count > (block->size - sizeof *object) / sizeof(kiln_property) ||
+                object->slots != object->inline_slots) return 0;
+            for (index = 0; index < object->count; ++index) {
+                const kiln_property *property = &object->properties[index];
+                if (property->key == NULL || !property->enumerable ||
+                    !property->writable || !property->configurable ||
+                    property->symbol_hidden || property->accessor ||
+                    property->refused) return 0;
+            }
+            return 1;
+        }
+        if (object->properties != NULL || object->count != 0 || object->capacity != 0) return 0;
         if ((shape->shared & 1u) == 0 || shape->property_count > object->slot_capacity ||
             shape->special_mask != 0 || shape->accessor_mask != 0 || shape->code_mask != 0)
             return 0;
@@ -3460,6 +3476,15 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
         const kiln_object *object = (const kiln_object *)(block + 1);
         size_t index;
         if (!kiln_c99_graph_inert_finalizer_block(block)) return 0;
+        if (object->shape == NULL) {
+            for (index = 0; index < object->count; ++index) {
+                const kiln_property *property = &object->properties[index];
+                if (!kiln_c99_graph_follow(walk, property->key) ||
+                    !kiln_c99_graph_follow_val(walk,
+                                               kiln_val_from_boundary(property->value))) return 0;
+            }
+            return 1;
+        }
         if (kiln_c99_graph_pointer_names_member(walk, object->shape)) return 0;
         for (index = 0; index < object->shape->property_count; ++index) {
             if (kiln_c99_graph_pointer_names_member(walk, object->shape->keys[index])) return 0;
@@ -6400,7 +6425,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         break;
     }
     case KILN_GC_OBJECT:
-        free(((kiln_object *)payload)->properties);
+        kiln_c99_object_properties_free((kiln_object *)payload);
         if (((kiln_object *)payload)->sealed != NULL) {
             free(kiln_c99_sealed_values_of((kiln_object *)payload));
         } else if (kiln_c99_object_slots_owned((kiln_object *)payload)) {

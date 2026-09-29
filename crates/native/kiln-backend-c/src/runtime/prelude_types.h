@@ -1160,6 +1160,16 @@ typedef struct kiln_object {
     const kiln_sealed_layout *sealed;
 } kiln_object;
 
+/* A prepared graph can keep a dictionary's fixed records in the same movable GC block.
+ * Ordinary dictionaries own a separate malloc buffer. */
+static inline int kiln_c99_object_properties_in_block(const kiln_object *object) {
+    return object->properties == (const kiln_property *)(object + 1);
+}
+
+static inline void kiln_c99_object_properties_free(kiln_object *object) {
+    if (!kiln_c99_object_properties_in_block(object)) free(object->properties);
+}
+
 /* A shaped object's slots can be its fixed prefix, a tail reserved in the same GC block by
  * `kiln_c99_new_object_with_capacity`, or a separately malloc'd array. Only the last one may
  * be handed to realloc/free. Sealed-layout values have their own owner and are handled before

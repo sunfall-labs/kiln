@@ -365,6 +365,26 @@ static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capac
     return KILN_C99_OK;
 }
 
+/* Dictionary keys can be created at run time and therefore cannot be named by a process shape.
+ * Keep their fixed property records inside the movable block; its keys and values are copied
+ * into the same private arena below. Growth after adoption moves only the records to malloc. */
+static int kiln_c99_clone_arena_dictionary(kiln_c99_clone_arena *arena, size_t count,
+                                           kiln_value *out) {
+    kiln_object *object;
+    if (count == 0 || count > (SIZE_MAX - sizeof *object) / sizeof(kiln_property))
+        return KILN_C99_CLONE_BAIL;
+    object = (kiln_object *)kiln_c99_par_alloc(&arena->storage, KILN_GC_OBJECT,
+                                               sizeof *object + count * sizeof(kiln_property));
+    if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_object_init(object, 0);
+    object->shape = NULL;
+    object->properties = (kiln_property *)(object + 1);
+    object->count = count;
+    object->capacity = count;
+    *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
                                       int is_numeric, kiln_value *out) {
     size_t inline_capacity = sizeof(((kiln_array *)0)->inline_elements) / sizeof(kiln_val);
@@ -414,14 +434,22 @@ static int kiln_c99_clone_safe_object(const kiln_object *source) {
     /* Sealed intrinsic stores are not plain-message graphs: their function values and process
      * descriptors must never be encoded as an empty realm-owned dictionary. */
     if (source->sealed != NULL || source->elements != NULL || source->accessor_count != 0 ||
-        source->prototype.tag != KILN_VALUE_UNDEFINED || source->arguments_brand ||
+        (source->prototype.tag != KILN_VALUE_UNDEFINED &&
+         source->prototype.tag != KILN_VALUE_NULL) || source->arguments_brand ||
         source->error_brand || source->module_namespace ||
         (shape != NULL && (source->properties != NULL || shape->has_symbol_key ||
-                           shape->special_mask != 0))) return 0;
+                           shape->special_mask != 0 ||
+                           shape->property_count > source->slot_capacity ||
+                           (shape->property_count != 0 && source->slots == NULL)))) return 0;
     if (shape == NULL) {
+        if (source->count > source->capacity ||
+            (source->count != 0 && source->properties == NULL)) return 0;
         for (index = 0; index < source->count; ++index) {
             const kiln_property *property = &source->properties[index];
-            if (!property->enumerable || !property->writable ||
+            if (property->key == NULL ||
+                (property->key->flags & (KILN_STRING_SYMBOL_KEY |
+                                         KILN_STRING_PRIVATE_KEY)) != 0 ||
+                !property->enumerable || !property->writable ||
                 !property->configurable || property->accessor || property->refused) return 0;
         }
     }
@@ -529,6 +557,19 @@ static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_sha
     return walk;
 }
 
+/* A private arena is deliberately absent from the sender's GC index. The ordinary boxed-to-
+ * boundary conversion checks that index under stress, so construct these two known arena kinds
+ * directly when a dictionary record needs a boundary value. */
+static kiln_value kiln_c99_clone_arena_boundary(kiln_val value) {
+    if (KILN_VAL_IS_OBJECT(value))
+        return kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)KILN_VAL_PTR(value),
+                              NULL, 0);
+    if ((value & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)
+        return kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)KILN_VAL_PTR(value),
+                              NULL, 0);
+    return kiln_val_to_boundary(value);
+}
+
 /* One value: `*out` is its copy, or the status is KILN_C99_CLONE_BAIL. */
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
                                    kiln_val *out) {
@@ -595,6 +636,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
     if (KILN_VAL_IS_OBJECT(value) && kind == KILN_GC_OBJECT) {
         kiln_object *source = (kiln_object *)ptr;
         kiln_shape *shape = source->shape;
+        kiln_shape *source_shape = shape;
         kiln_value made;
         kiln_object *copy;
         kiln_val copy_val;
@@ -602,9 +644,16 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         size_t i;
         if (!kiln_c99_clone_safe_object(source)) return KILN_C99_CLONE_BAIL;
         if (table->arena != NULL) {
-            if (shape == NULL || (shape->shared & 1u) == 0)
-                return KILN_C99_CLONE_BAIL;
-            status = kiln_c99_clone_arena_object(table->arena, shape->property_count, &made);
+            if (shape == NULL || (shape->shared & 1u) == 0) {
+                size_t members = shape == NULL ? source->count : shape->property_count;
+                status = members == 0
+                             ? kiln_c99_clone_arena_object(table->arena, 0, &made)
+                             : kiln_c99_clone_arena_dictionary(table->arena, members,
+                                                               &made);
+                shape = members == 0 ? kiln_c99_shape_root() : NULL;
+            } else {
+                status = kiln_c99_clone_arena_object(table->arena, shape->property_count, &made);
+            }
         } else {
             if (shape == NULL) shape = kiln_c99_clone_list_shape(source, kiln_c99_shape_root());
             status = shape == NULL ? kiln_c99_new_object(&made)
@@ -646,11 +695,23 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 copy->slots[i] = cloned;
             }
         } else {
-            count = source->count;
+            count = source_shape == NULL ? source->count : source_shape->property_count;
             if (count > 0) {
-                kiln_property *properties = (kiln_property *)malloc(count * sizeof *properties);
-                if (properties == NULL) return KILN_C99_OUT_OF_MEMORY;
-                memcpy(properties, source->properties, count * sizeof *properties);
+                kiln_property *properties = copy->properties;
+                if (table->arena == NULL) {
+                    properties = (kiln_property *)malloc(count * sizeof *properties);
+                    if (properties == NULL) return KILN_C99_OUT_OF_MEMORY;
+                }
+                if (source_shape == NULL) {
+                    memcpy(properties, source->properties, count * sizeof *properties);
+                } else {
+                    for (i = 0; i < count; ++i) {
+                        memset(&properties[i], 0, sizeof properties[i]);
+                        properties[i].key = source_shape->keys[i];
+                        properties[i].enumerable = 1;
+                        properties[i].value = kiln_val_to_boundary(source->slots[i]);
+                    }
+                }
                 for (i = 0; i < count; ++i) {
                     properties[i].writable = 1;
                     properties[i].configurable = 1;
@@ -661,6 +722,15 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 copy->shape = NULL;
             }
             for (i = 0; i < count; ++i) {
+                if (table->arena != NULL) {
+                    kiln_val cloned_key;
+                    status = kiln_c99_clone_data_val(
+                        table, KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX,
+                                                copy->properties[i].key), depth + 1,
+                        &cloned_key);
+                    if (status != KILN_C99_OK) return status;
+                    copy->properties[i].key = (const kiln_string *)KILN_VAL_PTR(cloned_key);
+                }
                 kiln_value item = copy->properties[i].value;
                 kiln_val cloned;
                 if (item.tag != KILN_VALUE_OBJECT && item.tag != KILN_VALUE_ARRAY &&
@@ -678,7 +748,9 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 /* Read the array again: the walk allocated, and the object it belongs to is
                  * the one that owns it, so the pointer is the same, but this keeps the store
                  * next to the only load that can see it. */
-                copy->properties[i].value = kiln_val_to_boundary(cloned);
+                copy->properties[i].value = table->arena != NULL
+                                                ? kiln_c99_clone_arena_boundary(cloned)
+                                                : kiln_val_to_boundary(cloned);
             }
         }
         *out = copy_val;

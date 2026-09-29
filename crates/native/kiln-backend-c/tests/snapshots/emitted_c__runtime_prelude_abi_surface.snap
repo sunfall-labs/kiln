@@ -991,6 +991,8 @@ typedef struct kiln_sealed_values {
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
 #define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
+static inline int kiln_c99_object_properties_in_block(const kiln_object *object) {
+static inline void kiln_c99_object_properties_free(kiln_object *object) {
 static inline int kiln_c99_object_slots_owned(const kiln_object *object) {
 static inline kiln_val *kiln_c99_object_slots_resize(const kiln_object *object, size_t capacity) {
 static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *object) {
@@ -2411,6 +2413,7 @@ static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t af
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
 static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
 static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
+static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static uint32_t *kiln_c99_sealed_orders(const kiln_object *object) {
 static uint32_t *kiln_c99_sealed_extra_orders(const kiln_object *object) {
@@ -3369,12 +3372,14 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
 static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *base) {
 static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
 static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
+static int kiln_c99_clone_arena_dictionary(kiln_c99_clone_arena *arena, size_t count,
 static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
 static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *seen,
 static int kiln_c99_clone_plain_graph_for_message(kiln_value source) {
 static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
+static kiln_value kiln_c99_clone_arena_boundary(kiln_val value) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph,
 static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
