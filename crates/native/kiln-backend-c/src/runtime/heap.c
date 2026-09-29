@@ -1931,11 +1931,21 @@ enum {
     KILN_PROFILE_SIDE_COUNT
 };
 
+enum { KILN_PROFILE_SOURCE_LIMIT = 128 };
+typedef struct kiln_c99_heap_profile_source {
+    const char *name;
+    uint64_t count;
+    uint64_t payload;
+    uint64_t capturing;
+} kiln_c99_heap_profile_source;
+
 static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
                                         uint64_t counts[KILN_GC_KIND_COUNT],
                                         uint64_t bytes[KILN_GC_KIND_COUNT],
                                         uint64_t closures[4],
-                                        uint64_t side[KILN_PROFILE_SIDE_COUNT]) {
+                                        uint64_t side[KILN_PROFILE_SIDE_COUNT],
+                                        kiln_c99_heap_profile_source *sources,
+                                        size_t *source_count) {
     uint32_t kind = block->kind & KILN_GC_KIND_MASK;
     if (kind == KILN_GC_NONE || kind >= KILN_GC_KIND_COUNT ||
         (block->kind & KILN_GC_FLAG_DEAD) != 0) return;
@@ -1962,6 +1972,23 @@ static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
     }
     if (kind == KILN_GC_CLOSURE && block->size >= sizeof(kiln_closure)) {
         const kiln_closure *closure = (const kiln_closure *)(block + 1);
+        const char *name = closure->diagnostic_source != NULL
+                               ? closure->diagnostic_source : "<runtime>";
+        size_t source;
+        for (source = 0; source < *source_count; ++source) {
+            if (sources[source].name == name || strcmp(sources[source].name, name) == 0) break;
+        }
+        if (source == *source_count && source < KILN_PROFILE_SOURCE_LIMIT - 1) {
+            sources[source].name = name;
+            ++*source_count;
+        }
+        if (source == *source_count) {
+            source = KILN_PROFILE_SOURCE_LIMIT - 1;
+            sources[source].name = "<other>";
+        }
+        ++sources[source].count;
+        sources[source].payload += block->size;
+        sources[source].capturing += closure->upvalue_count != 0;
         /* These are an opportunity bound, not a sharing proof: a site must also execute once
          * per realm and all its metadata and observable identity need a realm-safe owner. */
         ++closures[closure->upvalue_count != 0 ? 0 : closure->arrow ? 1 : 2];
@@ -1975,7 +2002,9 @@ static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const c
                                         uint64_t counts[KILN_GC_KIND_COUNT],
                                         uint64_t bytes[KILN_GC_KIND_COUNT],
                                         uint64_t closures[4],
-                                        uint64_t side[KILN_PROFILE_SIDE_COUNT]) {
+                                        uint64_t side[KILN_PROFILE_SIDE_COUNT],
+                                        kiln_c99_heap_profile_source *sources,
+                                        size_t *source_count) {
     size_t word;
     for (word = 0; word < chunk->bitmap_words; ++word) {
         uint64_t bits = chunk->bitmap[word];
@@ -1985,7 +2014,7 @@ static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const c
             bits &= bits - 1;
             if (address + sizeof(kiln_gc_block) <= limit)
                 kiln_c99_heap_profile_count((const kiln_gc_block *)address, counts, bytes,
-                                            closures, side);
+                                            closures, side, sources, source_count);
         }
     }
 }
@@ -2094,6 +2123,8 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
     uint64_t bytes[KILN_GC_KIND_COUNT] = {0};
     uint64_t closures[4] = {0};
     uint64_t side[KILN_PROFILE_SIDE_COUNT] = {0};
+    kiln_c99_heap_profile_source sources[KILN_PROFILE_SOURCE_LIMIT] = {{0}};
+    size_t source_count = 0;
     uint64_t total_count = 0, total_bytes = 0;
     size_t slabs = 0, promoted = 0, full = 0;
     uint32_t kind;
@@ -2102,14 +2133,16 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
     kiln_gc_slab *slab;
     kiln_nursery_chunk *chunk;
     for (block = heap->head; block != NULL; block = block->next)
-        kiln_c99_heap_profile_count(block, counts, bytes, closures, side);
+        kiln_c99_heap_profile_count(block, counts, bytes, closures, side,
+                                    sources, &source_count);
     for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
         uint32_t index;
         ++slabs;
         for (index = 0; index < slab->fresh; ++index) {
             block = kiln_c99_gc_slab_slot(slab, index);
             if (block->size != KILN_GC_SLOT_FREE)
-                kiln_c99_heap_profile_count(block, counts, bytes, closures, side);
+                kiln_c99_heap_profile_count(block, counts, bytes, closures, side,
+                                            sources, &source_count);
         }
     }
     for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
@@ -2124,15 +2157,18 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         kiln_c99_introspect_flush(&line);
         kiln_c99_heap_profile_pages(chunk, heap->serial, pass, promoted);
         ++promoted;
-        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures, side);
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures, side,
+                                    sources, &source_count);
     }
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
         ++full;
-        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures, side);
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures, side,
+                                    sources, &source_count);
     }
     if (heap->nursery.active && heap->nursery.region != NULL)
         kiln_c99_heap_profile_chunk((const kiln_nursery_chunk *)heap->nursery.region,
-                                    heap->nursery.bump, counts, bytes, closures, side);
+                                    heap->nursery.bump, counts, bytes, closures, side,
+                                    sources, &source_count);
     for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
         total_count += counts[kind];
         total_bytes += bytes[kind];
@@ -2171,6 +2207,20 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         kiln_c99_introspect_field(&line, "arrows_no_upvalues", closures[1]);
         kiln_c99_introspect_field(&line, "plain_no_upvalues", closures[2]);
         kiln_c99_introspect_field(&line, "runtime_source", closures[3]);
+        kiln_c99_introspect_flush(&line);
+    }
+    for (kind = 0; kind < source_count +
+                           (sources[KILN_PROFILE_SOURCE_LIMIT - 1].count != 0); ++kind) {
+        size_t source = kind < source_count ? kind : KILN_PROFILE_SOURCE_LIMIT - 1;
+        line.len = 0;
+        kiln_c99_introspect_text(&line, "kiln heap-profile closure-source");
+        kiln_c99_introspect_field(&line, "serial", heap->serial);
+        kiln_c99_introspect_field(&line, "pass", pass);
+        kiln_c99_introspect_field(&line, "count", sources[source].count);
+        kiln_c99_introspect_field(&line, "payload", sources[source].payload);
+        kiln_c99_introspect_field(&line, "capturing", sources[source].capturing);
+        kiln_c99_introspect_text(&line, " source=");
+        kiln_c99_introspect_text(&line, sources[source].name);
         kiln_c99_introspect_flush(&line);
     }
     for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
