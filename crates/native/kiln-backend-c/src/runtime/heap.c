@@ -3044,6 +3044,19 @@ static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
     }
 }
 
+/* Ordinary allocations keep large blocks out of the nursery to avoid wasting a chunk. A
+ * direct actor factory intends to move its sealed chunks as one group, so a block that fits
+ * a fresh chunk should stay inside that group instead of becoming an unmovable large block.
+ * The capsule proof still rejects unsupported kinds and outgoing edges. The ordinary small
+ * allocation path returns before reading candidate state. */
+static inline int kiln_c99_nursery_accepts_block(const kiln_gc_heap *heap, size_t bytes) {
+    const kiln_gc_nursery *nursery = &heap->nursery;
+    if (bytes <= nursery->capacity >> 2) return 1;
+    return heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+           nursery->base != NULL && nursery->limit >= nursery->base &&
+           bytes <= (size_t)(nursery->limit - nursery->base);
+}
+
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
@@ -3052,7 +3065,8 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
     if (heap == NULL || size > ((size_t)-1) - sizeof(kiln_gc_block)) return NULL;
     kiln_c99_gc_alloc_due(heap);
 
-    if (!kiln_c99_gc_is_tenured_kind(kind) && heap->nursery.active && (payload + sizeof(kiln_gc_block) <= (heap->nursery.capacity >> 2))) {
+    if (!kiln_c99_gc_is_tenured_kind(kind) && heap->nursery.active &&
+        kiln_c99_nursery_accepts_block(heap, payload + sizeof(kiln_gc_block))) {
         size_t total = sizeof(kiln_gc_block) + payload;
         total = (total + 15) & ~((size_t)15);
         if (heap->nursery.bump + total > heap->nursery.limit) kiln_c99_nursery_turn_chunk(heap);
@@ -3146,7 +3160,7 @@ static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, 
     kiln_gc_block *block;
     size_t bit_idx;
     if (kiln_c99_gc_is_tenured_kind(kind) || !nursery->active ||
-        sizeof(kiln_gc_block) + payload > (nursery->capacity >> 2) ||
+        !kiln_c99_nursery_accepts_block(heap, sizeof(kiln_gc_block) + payload) ||
         nursery->bump + total > nursery->limit) {
         return NULL;
     }
@@ -7686,9 +7700,8 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
     for (index = 0; index < count; ++index) {
         size_t payload = sizeof(kiln_string) + lens[index] + 1;
         size_t slot = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
-        /* The same ceiling the general path applies: a block worth a quarter of a chunk is one
-         * the nursery does not want, and one this cannot place either. */
-        if (sizeof(kiln_gc_block) + payload > (nursery->capacity >> 2)) return 0;
+        /* The same ceiling the general path applies, including direct actor candidates. */
+        if (!kiln_c99_nursery_accepts_block(heap, sizeof(kiln_gc_block) + payload)) return 0;
         total += slot;
     }
     if (nursery->bump + total > nursery->limit) {
