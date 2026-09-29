@@ -1150,17 +1150,8 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
     free(candidate);
 }
 
-static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
-    /* Every field is written below before anything can observe the object, so the block is
-     * taken unzeroed: the zeroing was a second pass over two hundred bytes per object. */
-    kiln_object *object;
-    if (tail_slots > (SIZE_MAX - sizeof(kiln_object)) / sizeof(kiln_val))
-        return KILN_C99_OUT_OF_MEMORY;
-    object = (kiln_object *)kiln_c99_gc_alloc_hot(
-        KILN_GC_OBJECT, sizeof *object + tail_slots * sizeof(kiln_val), 0);
-    if (object == NULL) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
+/* Both the realm allocator and a private graph arena use this exact object layout. */
+static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;
@@ -1185,6 +1176,18 @@ static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
     object->elements = NULL;
     object->element_count = 0;
     object->element_capacity = 0;
+}
+
+static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
+    /* Every field is written by the initializer before anything can observe the object, so
+     * the block is taken unzeroed. */
+    kiln_object *object;
+    if (tail_slots > (SIZE_MAX - sizeof(kiln_object)) / sizeof(kiln_val))
+        return KILN_C99_OUT_OF_MEMORY;
+    object = (kiln_object *)kiln_c99_gc_alloc_hot(
+        KILN_GC_OBJECT, sizeof *object + tail_slots * sizeof(kiln_val), 0);
+    if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_object_init(object, tail_slots);
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }

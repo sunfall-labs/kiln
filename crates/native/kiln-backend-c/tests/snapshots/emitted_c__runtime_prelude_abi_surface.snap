@@ -2416,6 +2416,7 @@ static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint6
 static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
 static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
 static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
+static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
 static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
@@ -2448,6 +2449,7 @@ static int kiln_c99_new_array(kiln_value *out) {
 static uint64_t kiln_c99_array_candidate_id(const kiln_array *array) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 #define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
+static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
@@ -3341,17 +3343,23 @@ static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_s
 static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
 static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status) {
 #define KILN_C99_CLONE_INLINE 32
+typedef struct kiln_c99_clone_arena {
 typedef struct kiln_c99_clone_table {
 #define KILN_C99_CLONE_MAX_DEPTH 512
 static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
 static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
 static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
+static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *base) {
+static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena, int adopted) {
+static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
+static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
 static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
-static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph) {
+static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph,
 static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
+static int kiln_c99_clone_data_arena(kiln_value *out, kiln_value source,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,

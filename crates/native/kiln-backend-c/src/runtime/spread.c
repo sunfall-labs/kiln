@@ -239,12 +239,20 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
  * the heap only past `KILN_C99_CLONE_INLINE` entries. */
 #define KILN_C99_CLONE_INLINE 32
 
+typedef struct kiln_c99_clone_arena {
+    kiln_c99_par_arena storage;
+    void **side_bases;
+    size_t side_count;
+    size_t side_capacity;
+} kiln_c99_clone_arena;
+
 typedef struct kiln_c99_clone_table {
     kiln_val *keys;
     kiln_val *values;
     size_t capacity;
     size_t count;
     int candidate_graph;
+    kiln_c99_clone_arena *arena;
     kiln_val inline_keys[KILN_C99_CLONE_INLINE];
     kiln_val inline_values[KILN_C99_CLONE_INLINE];
 } kiln_c99_clone_table;
@@ -304,6 +312,93 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
         at = (at + 1) & (table->capacity - 1);
     }
     return 0;
+}
+
+static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *base) {
+    if (arena->side_count == arena->side_capacity) {
+        size_t capacity = arena->side_capacity == 0 ? 4 : arena->side_capacity * 2;
+        void **grown;
+        if (capacity < arena->side_capacity || capacity > SIZE_MAX / sizeof *grown)
+            return KILN_C99_OUT_OF_MEMORY;
+        grown = (void **)realloc(arena->side_bases, capacity * sizeof *grown);
+        if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+        arena->side_bases = grown;
+        arena->side_capacity = capacity;
+    }
+    arena->side_bases[arena->side_count++] = base;
+    return KILN_C99_OK;
+}
+
+/* Before adoption the builder owns every side buffer and chunk. After adoption each array's
+ * finalizer owns its side buffer and the destination heap owns the chunks. */
+static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena, int adopted) {
+    size_t index;
+    if (adopted && arena->storage.current != NULL) abort();
+    if (!adopted)
+        for (index = 0; index < arena->side_count; ++index) free(arena->side_bases[index]);
+    free(arena->side_bases);
+    arena->side_bases = NULL;
+    arena->side_count = arena->side_capacity = 0;
+    if (!adopted) {
+        kiln_c99_par_arena_seal(&arena->storage);
+        kiln_c99_arena_chunks_free(arena->storage.filled);
+    }
+    arena->storage.filled = NULL;
+}
+
+static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
+                                       kiln_value *out) {
+    size_t tail = capacity > KILN_C99_INLINE_SLOTS ? capacity : 0;
+    kiln_object *object;
+    if (capacity > KILN_SHAPE_MAX_FAST_PROPERTIES) return KILN_C99_CLONE_BAIL;
+    if (tail > (SIZE_MAX - sizeof *object) / sizeof(kiln_val)) return KILN_C99_OUT_OF_MEMORY;
+    object = (kiln_object *)kiln_c99_par_alloc(&arena->storage, KILN_GC_OBJECT,
+                                               sizeof *object + tail * sizeof(kiln_val));
+    if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_object_init(object, tail);
+    *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
+                                      int is_numeric, kiln_value *out) {
+    size_t inline_capacity = sizeof(((kiln_array *)0)->inline_elements) / sizeof(kiln_val);
+    size_t in_block = capacity > inline_capacity && capacity <= KILN_C99_ARRAY_INBLOCK_MAX
+                          ? capacity : 0;
+    kiln_array *array;
+    array = (kiln_array *)kiln_c99_par_alloc(&arena->storage, KILN_GC_ARRAY,
+                                             sizeof *array + in_block * sizeof(kiln_val));
+    if (array == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_array_init(array, is_numeric);
+    if (in_block != 0) {
+        array->elements = (kiln_val *)(array + 1);
+        array->capacity = in_block;
+    } else if (capacity != 0 && capacity <= inline_capacity) {
+        array->elements = array->inline_elements;
+        array->capacity = inline_capacity;
+    } else if (capacity != 0) {
+        kiln_c99_candidate_array_elements *header;
+        int status;
+        if (capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val))
+            return KILN_C99_OUT_OF_MEMORY;
+        header = (kiln_c99_candidate_array_elements *)malloc(
+            sizeof *header + capacity * sizeof(kiln_val));
+        if (header == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_clone_arena_track_side(arena, header);
+        if (status != KILN_C99_OK) {
+            free(header);
+            return status;
+        }
+        header->candidate_id = arena->storage.candidate_id;
+        header->owner = array;
+        header->capacity = capacity;
+        header->generation = 1;
+        array->elements = (kiln_val *)(header + 1);
+        array->capacity = capacity;
+        array->candidate_elements = 1;
+    }
+    *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
+    return KILN_C99_OK;
 }
 
 /* Exactly the representation whose reads cannot invoke program code. The clone and the Rust
@@ -376,9 +471,24 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
             (source->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0)
             return KILN_C99_CLONE_BAIL;
         if (kiln_c99_clone_table_get(table, value, out)) return KILN_C99_OK;
-        copy = kiln_c99_gc_alloc_units(source->unit_len,
-                                       kiln_string_is_utf16(source) ? KILN_STRING_UTF16
-                                                                     : KILN_STRING_LATIN1);
+        if (table->arena != NULL) {
+            size_t storage;
+            uint32_t flags = kiln_string_is_utf16(source) ? KILN_STRING_UTF16
+                                                            : KILN_STRING_LATIN1;
+            if (!kiln_string_storage_size(source->unit_len, flags, &storage))
+                return KILN_C99_OUT_OF_MEMORY;
+            copy = (kiln_string *)kiln_c99_par_alloc(&table->arena->storage,
+                                                     KILN_GC_STRING, storage);
+            if (copy != NULL) {
+                copy->unit_len = source->unit_len;
+                copy->flags = flags;
+                copy->data = copy + 1;
+            }
+        } else {
+            copy = kiln_c99_gc_alloc_units(source->unit_len,
+                                           kiln_string_is_utf16(source) ? KILN_STRING_UTF16
+                                                                         : KILN_STRING_LATIN1);
+        }
         if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
         width = kiln_string_is_utf16(source) ? sizeof(uint16_t) : sizeof(uint8_t);
         if (source->unit_len != 0)
@@ -418,9 +528,15 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         size_t count;
         size_t i;
         if (!kiln_c99_clone_safe_object(source)) return KILN_C99_CLONE_BAIL;
-        if (shape == NULL) shape = kiln_c99_clone_list_shape(source, kiln_c99_shape_root());
-        status = shape == NULL ? kiln_c99_new_object(&made)
-                               : kiln_c99_new_object_with_capacity(&made, shape->property_count);
+        if (table->arena != NULL) {
+            if (shape == NULL || (shape->shared & 1u) == 0)
+                return KILN_C99_CLONE_BAIL;
+            status = kiln_c99_clone_arena_object(table->arena, shape->property_count, &made);
+        } else {
+            if (shape == NULL) shape = kiln_c99_clone_list_shape(source, kiln_c99_shape_root());
+            status = shape == NULL ? kiln_c99_new_object(&made)
+                                   : kiln_c99_new_object_with_capacity(&made, shape->property_count);
+        }
         if (status != KILN_C99_OK) return status;
         copy_val = kiln_val_from_boundary(made);
         copy = (kiln_object *)KILN_VAL_PTR(copy_val);
@@ -503,7 +619,9 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         size_t count = source->count;
         size_t i;
         if (!kiln_c99_clone_safe_array(source)) return KILN_C99_CLONE_BAIL;
-        status = kiln_c99_new_array_with_capacity(&made, count, source->is_numeric);
+        status = table->arena != NULL
+                     ? kiln_c99_clone_arena_array(table->arena, count, source->is_numeric, &made)
+                     : kiln_c99_new_array_with_capacity(&made, count, source->is_numeric);
         if (status != KILN_C99_OK) return status;
         copy_val = kiln_val_from_boundary(made);
         copy = (kiln_array *)KILN_VAL_PTR(copy_val);
@@ -532,7 +650,8 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
     return KILN_C99_CLONE_BAIL;
 }
 
-static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph) {
+static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph,
+                                     kiln_c99_clone_arena *arena) {
     kiln_c99_clone_table table;
     kiln_val root = KILN_VAL_UNDEFINED;
     int status;
@@ -542,6 +661,7 @@ static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int can
     table.capacity = KILN_C99_CLONE_INLINE;
     table.count = 0;
     table.candidate_graph = candidate_graph;
+    table.arena = arena;
     status = kiln_c99_clone_data_val(&table, kiln_val_from_boundary(source), 0, &root);
     if (table.keys != table.inline_keys) {
         free(table.keys);
@@ -555,7 +675,12 @@ static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int can
 /* Candidate-copy mode owns every string value it reaches. A future private arena can reuse
  * the same graph walk with an arena allocator; this helper does not publish the copy to JS. */
 static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
-    return kiln_c99_clone_data_graph(out, source, 1);
+    return kiln_c99_clone_data_graph(out, source, 1, NULL);
+}
+
+static int kiln_c99_clone_data_arena(kiln_value *out, kiln_value source,
+                                     kiln_c99_clone_arena *arena) {
+    return kiln_c99_clone_data_graph(out, source, 1, arena);
 }
 
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
@@ -565,7 +690,7 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
     if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER &&
         kiln_c99_as_number(args[1]) == 1.0)
         return KILN_C99_OK; /* The shared Rust worker codec handles plain messages. */
-    status = kiln_c99_clone_data_graph(out, args[0], 0);
+    status = kiln_c99_clone_data_graph(out, args[0], 0, NULL);
     return status == KILN_C99_CLONE_BAIL ? KILN_C99_OK : status;
 }
 

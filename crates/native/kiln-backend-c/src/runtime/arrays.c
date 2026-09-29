@@ -132,6 +132,21 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
  * for the general allocator's large path anyway. */
 #define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
 
+/* Shared by the realm allocator and the private graph arena's allocation policy. */
+static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
+    array->elements = NULL;
+    array->count = 0;
+    array->capacity = 0;
+    array->properties = kiln_c99_undefined();
+    array->frozen = 0;
+    array->not_extensible = 0;
+    array->match_index = -1;
+    array->match_input = kiln_c99_undefined();
+    array->match_groups = kiln_c99_undefined();
+    array->is_numeric = is_numeric;
+    array->candidate_elements = 0;
+}
+
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {
     /* A count known here buys the elements a place inside the array's own block: one allocation
      * instead of a collected block plus a `malloc`, and one free instead of a `free` inside the
@@ -145,17 +160,7 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    array->elements = NULL;
-    array->count = 0;
-    array->capacity = 0;
-    array->properties = kiln_c99_undefined();
-    array->frozen = 0;
-    array->not_extensible = 0;
-    array->match_index = -1;
-    array->match_input = kiln_c99_undefined();
-    array->match_groups = kiln_c99_undefined();
-    array->is_numeric = is_numeric;
-    array->candidate_elements = 0;
+    kiln_c99_array_init(array, is_numeric);
     if (in_block > 0) {
         array->elements = (kiln_val *)(array + 1);
         array->capacity = in_block;

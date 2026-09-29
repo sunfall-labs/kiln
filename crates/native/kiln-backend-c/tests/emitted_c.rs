@@ -1076,8 +1076,9 @@ fn runtime_prelude_size() {
     // Direct sealed-store construction and shared-shape incoming-edge inspection bring it to
     // 62,449 lines. The provider capsule registry adds only declarations here.
     // A multi-chunk graph capsule and provisional collector retention bring it to 63,172.
+    // The private graph clone's arena allocator and side-buffer rollback bring it to 63,597.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 63_500;
+    const CEILING_LINES: usize = 64_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

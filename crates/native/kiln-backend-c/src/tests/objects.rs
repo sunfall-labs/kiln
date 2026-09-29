@@ -2578,7 +2578,7 @@ static int clone_candidate_entry(void *context) {
     if (kiln_c99_clone_data_raw(&copy_value, &source, 1) != KILN_C99_OK ||
         copy_value.tag != KILN_VALUE_OBJECT) return 4;
     if (!kiln_c99_actor_candidate_end(heap, 1)) return 5;
-    copy = kiln_c99_object_of(copy_value);
+    copy = (kiln_object *)(uintptr_t)copy_value.bits;
     if (copy == original || copy->shape != &shape ||
         copy->slot_capacity != 12 || copy->slots != (kiln_val *)(copy + 1) ||
         copy->slots[0] != original->slots[0] || copy->slots[11] != original->slots[11]) return 6;
@@ -2658,7 +2658,7 @@ static int private_clone_entry(void *context) {
         copy->slots[3] == original->slots[3] ||
         copy->slots[4] != kiln_val_from_boundary(copy_value) ||
         copy->slots[0] == original->slots[0]) return 9;
-    array = kiln_c99_array_of(kiln_val_to_boundary(copy->slots[0]));
+    array = (kiln_array *)KILN_VAL_PTR(copy->slots[0]);
     if (array == NULL || array->count != 128 || array->candidate_elements == 0 ||
         array->elements[0] != copy->slots[1] || array->elements[1] != copy->slots[1] ||
         array->elements[2] != copy->slots[2] || array->elements[3] != copy->slots[3]) return 10;
@@ -2684,6 +2684,128 @@ int main(void) {
     assert!(
         run.status.success(),
         "candidate clone move eligibility failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_plain_graph_clone_builds_outside_the_sender_heap() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int arena_clone_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_gc_heap arena_heap;
+    kiln_c99_clone_arena arena = {0};
+    static kiln_shape shape;
+    kiln_value source, source_array, text, copy_value;
+    kiln_object *original, *copy;
+    kiln_array *array;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    size_t sender_count;
+    uint32_t sender_epoch;
+    uint64_t reservation = 918;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 12;
+    for (size_t index = 0; index < 12; ++index) shape.keys[index] = kiln_c99_key_empty;
+    text = kiln_c99_copy_text("caf\xC3\xA9", 5);
+    if (text.tag != KILN_VALUE_STRING ||
+        kiln_c99_new_array_with_capacity(&source_array, 128, 0) != KILN_C99_OK) return 2;
+    for (size_t index = 0; index < 128; ++index)
+        if (kiln_c99_array_push(source_array, index == 0 ? text : kiln_c99_number((double)index))
+            != KILN_C99_OK) return 3;
+    if (kiln_c99_new_object_with_capacity(&source, 12) != KILN_C99_OK) return 4;
+    original = kiln_c99_object_of(source);
+    original->shape = &shape;
+    original->slots[0] = kiln_val_from_boundary(source_array);
+    original->slots[1] = kiln_val_from_boundary(text);
+    original->slots[2] = kiln_val_from_boundary(source);
+    for (size_t index = 3; index < 12; ++index)
+        original->slots[index] = kiln_val_from_boundary(kiln_c99_number((double)index));
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    sender_count = heap->count;
+    original->slots[3] = KILN_VAL_HOLE;
+    if (!kiln_c99_graph_candidate_open(&arena.storage, heap, 2 * heap->nursery.capacity))
+        return 13;
+    if (kiln_c99_clone_data_arena(&copy_value, source, &arena) != KILN_C99_CLONE_BAIL ||
+        arena.side_count != 1 || heap->count != sender_count) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        return 14;
+    }
+    kiln_c99_clone_arena_dispose(&arena, 0);
+    original->slots[3] = kiln_val_from_boundary(kiln_c99_number(3));
+    if (!kiln_c99_graph_candidate_open(&arena.storage, heap, 2 * heap->nursery.capacity))
+        return 5;
+    if (kiln_c99_clone_data_arena(&copy_value, source, &arena) != KILN_C99_OK ||
+        copy_value.tag != KILN_VALUE_OBJECT) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        return 6;
+    }
+    kiln_c99_par_arena_seal(&arena.storage);
+    chunk = arena.storage.filled;
+    copy = (kiln_object *)(uintptr_t)copy_value.bits;
+    if (chunk == NULL || chunk->next != NULL || arena.side_count != 1 ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL ||
+        copy == original || copy->slots[2] != kiln_val_from_boundary(copy_value)) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        return 7;
+    }
+    array = (kiln_array *)KILN_VAL_PTR(copy->slots[0]);
+    if (array == NULL || array->count != 128 || array->candidate_elements == 0 ||
+        array->elements[0] != copy->slots[1] || copy->slots[1] == original->slots[1]) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        return 8;
+    }
+    sender_epoch = heap->epoch;
+    kiln_c99_gc_collect(heap, 1);
+    if (heap->epoch <= sender_epoch ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        return 15;
+    }
+    kiln_c99_gc_heap_init(&arena_heap);
+    if (!kiln_c99_heap_adopt_chunks(&arena_heap, chunk)) {
+        kiln_c99_clone_arena_dispose(&arena, 0);
+        kiln_c99_nursery_destroy(&arena_heap.nursery);
+        return 9;
+    }
+    kiln_c99_clone_arena_dispose(&arena, 1);
+    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL ||
+        kiln_c99_gc_lookup_interior(&arena_heap, (uintptr_t)copy) == NULL ||
+        !kiln_c99_graph_capsule_prepare(&arena_heap, chunk, copy_value, &capsule)) return 10;
+    if (!kiln_c99_graph_capsule_receiver_preflight(heap, &capsule.needs, reservation) ||
+        !kiln_c99_graph_capsule_detach(&arena_heap, &capsule)) return 16;
+    if (kiln_c99_gc_lookup_interior(&arena_heap, (uintptr_t)copy) != NULL ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL) return 17;
+    kiln_c99_graph_capsule_adopt(heap, &capsule, reservation);
+    if (heap->realm.graph_inbox_root.bits != copy_value.bits ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) == NULL) return 18;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_nursery_destroy(&arena_heap.nursery);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 11;
+    result = kiln_realm_enter(realm, arena_clone_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 12;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "plain-graph-private-arena");
+    assert!(
+        run.status.success(),
+        "private arena clone failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
