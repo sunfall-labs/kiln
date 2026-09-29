@@ -38,6 +38,7 @@ declare module "kiln:actors" {
   }): Promise<ActorOwner<T>>;
   export function connectActor<T extends Actor>(address: ActorAddress<T>): ActorRef<T>;
   export function isolate<T>(factory: () => T): Isolated<T>;
+  export function prepareTransfer<T>(value: T): Isolated<T>;
   export function transfer<T>(value: Isolated<T>): TransferTicket<T>;
   export function transfer(value: ArrayBuffer): TransferTicket<ArrayBuffer>;
 }

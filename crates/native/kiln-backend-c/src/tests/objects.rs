@@ -3835,6 +3835,7 @@ static int actor_prepare_entry(void *context) {
 int main(void) {
     uint64_t realm;
     int result;
+    setenv("KILN_GC_STRESS", "1", 1);
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 6;
     result = kiln_realm_enter(realm, actor_prepare_entry, NULL);
     if (result != KILN_C99_OK) return result;

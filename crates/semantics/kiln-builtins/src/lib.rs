@@ -111,7 +111,7 @@ declare_ts_builtins! {
         sample_source_check: "export async function spawnActor",
         presence_test: actors_builtin_source_is_present,
         compilation_test: actors_builtin_compiles_cleanly,
-        exports: ["Actor", "spawnActor", "connectActor", "isolate", "transfer"],
+        exports: ["Actor", "spawnActor", "connectActor", "isolate", "prepareTransfer", "transfer"],
     },
     ActorsCore {
         variant: ActorsCore,
@@ -122,7 +122,7 @@ declare_ts_builtins! {
         sample_source_check: "export abstract class Actor",
         presence_test: actors_core_builtin_source_is_present,
         compilation_test: actors_core_builtin_compiles_cleanly,
-        exports: ["Actor", "isolate", "transfer", "prepareActorMessage", "consumeActorTickets"],
+        exports: ["Actor", "isolate", "prepareTransfer", "transfer", "prepareActorMessage", "consumeActorTickets"],
     },
     ActorsWorker {
         variant: ActorsWorker,

@@ -69,11 +69,17 @@ impl workers::PlainSource for InterpreterPlainSource {
                 }
             }
             Value::Array(array) => {
+                // `sparse` records that a hole existed at some point. A filled array is dense
+                // again, so inspect its current elements instead of that historical flag.
                 if !array.properties.borrow().properties.is_empty()
                     || array.properties.borrow().prototype.is_some()
                     || !array.elements.borrow().is_empty()
                     || array.length.get() != array.items.borrow().len()
-                    || array.sparse.get()
+                    || array
+                        .items
+                        .borrow()
+                        .iter()
+                        .any(|item| matches!(item, Value::Native(Native::Hole, _)))
                 {
                     return None;
                 }
@@ -151,6 +157,7 @@ const OP_ACTOR_BIND_RECEIVER: u32 = 33;
 const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
 const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
 const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
+const OP_ACTOR_PREPARE: u32 = 37;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -271,6 +278,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Only the native collector owns movable candidate chunks. The interpreter
             // retains actor graphs in its private realm table without claiming provenance.
             OP_ACTOR_CANDIDATE_BEGIN | OP_ACTOR_CANDIDATE_END => Value::Boolean(false),
+            // Inspect the engine's own value graph before TypeScript snapshots it. This
+            // rejects accessors, proxies and host objects without invoking their traps.
+            // Null selects the interpreter's private-snapshot path; native returns whether
+            // its off-heap arena was prepared.
+            OP_ACTOR_PREPARE => {
+                let accepted = arguments.get(2).is_some_and(|value| {
+                    if !matches!(value, Value::Object(_) | Value::Array(_)) {
+                        return false;
+                    }
+                    let mut source = InterpreterPlainSource::new(value.clone());
+                    workers::encode_plain(&mut source, 0).is_some()
+                });
+                if accepted {
+                    Value::Null
+                } else {
+                    Value::Boolean(false)
+                }
+            }
             // The interpreter has no native candidate chunks or two-realm claim coordinator.
             // These reserved operations fail closed while preserving the shared actor module's
             // DataCloneError and unconsumed-ticket behavior.

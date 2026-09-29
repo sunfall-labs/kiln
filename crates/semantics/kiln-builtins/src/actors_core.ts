@@ -14,12 +14,16 @@ export type Ticket = {
   restore(value: any): void;
 };
 const tickets = new WeakMap<object, Ticket>();
+// The interpreter snapshots into its own heap. Native prepared handles own an off-heap arena
+// instead and never enter this table.
+const preparedSnapshots = new WeakMap<object, any>();
 const isolatedMark = Symbol.for("kiln.actor.isolated");
 const ticketMark = Symbol.for("kiln.actor.ticket");
 const ISOLATE = 26;
 const ISOLATED_HAS = 27;
 const CANDIDATE_BEGIN = 28;
 const CANDIDATE_END = 29;
+const PREPARE = 37;
 
 function isolatedOp(operation: number, ...args: any[]): any {
   const port = (globalThis as any).MessagePort;
@@ -30,7 +34,7 @@ function isolatedOp(operation: number, ...args: any[]): any {
 
 function isIsolated(value: any): boolean {
   return value !== null && typeof value === "object" && value[isolatedMark] === true
-    && isolatedOp(ISOLATED_HAS, value) === true;
+    && (preparedSnapshots.has(value) || isolatedOp(ISOLATED_HAS, value) === true);
 }
 
 declare const isolatedBrand: unique symbol;
@@ -42,6 +46,43 @@ function dataCloneError(message: string): Error {
   const error = new Error(message);
   error.name = "DataCloneError";
   return error;
+}
+
+function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {
+  if (value === null || value === undefined || typeof value === "number" ||
+      typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value !== "object" || depth > 512) {
+    throw dataCloneError("prepareTransfer accepts only plain data graphs");
+  }
+  if (seen.has(value)) return;
+  seen.add(value);
+  const array = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (array ? prototype !== Array.prototype
+            : prototype !== Object.prototype && prototype !== null) {
+    throw dataCloneError("prepareTransfer accepts only ordinary objects and arrays");
+  }
+  const keys = Reflect.ownKeys(value);
+  for (const key of keys) {
+    if (array && key === "length") continue;
+    if (typeof key !== "string") throw dataCloneError("prepareTransfer cannot copy symbol keys");
+    if (array) {
+      const index = Number(key);
+      if (!Number.isSafeInteger(index) || index < 0 || String(index) !== key ||
+          index >= value.length) {
+        throw dataCloneError("prepareTransfer cannot copy array properties");
+      }
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !descriptor.configurable ||
+        !descriptor.writable || !("value" in descriptor)) {
+      throw dataCloneError("prepareTransfer cannot copy this property descriptor");
+    }
+    checkPreparedData(descriptor.value, seen, depth + 1);
+  }
+  if (array && keys.length !== value.length + 1) {
+    throw dataCloneError("prepareTransfer cannot copy a sparse array");
+  }
 }
 
 export function isolate<T>(factory: () => T): Isolated<T> {
@@ -84,6 +125,24 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   return handle;
 }
 
+export function prepareTransfer<T>(value: T): Isolated<T> {
+  if (value === null || typeof value !== "object") {
+    throw dataCloneError("prepareTransfer requires an ordinary object or array graph");
+  }
+  const handle: any = { __uncloneable: () => {} };
+  const prepared = isolatedOp(PREPARE, handle, value);
+  if (prepared === null) {
+    // The interpreter has no movable GC arena. Its private snapshot stays behind the handle,
+    // then ordinary message cloning establishes the receiver's independent ownership.
+    checkPreparedData(value);
+    preparedSnapshots.set(handle, structuredClone(value));
+  } else if (prepared !== true) {
+    throw dataCloneError("prepareTransfer cannot snapshot this graph");
+  }
+  Object.defineProperty(handle, isolatedMark, { value: true });
+  return handle;
+}
+
 export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T> {
   const markedHandle = value !== null && typeof value === "object"
     && (value as any)[isolatedMark] === true;
@@ -101,7 +160,10 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
     get value() { return retained; },
     graph,
     get consumed() { return used; },
-    consume() { used = true; retained = undefined; suspended = false; },
+    consume() {
+      if (retained !== undefined && graph) preparedSnapshots.delete(retained);
+      used = true; retained = undefined; suspended = false;
+    },
     suspend() {
       if (!graph || used || suspended) throw dataCloneError("transfer ticket is unavailable");
       const handle = retained;
@@ -137,11 +199,22 @@ export function prepareActorMessage(
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
     if (ticket.value === undefined) throw dataCloneError("transfer ticket is unavailable");
     if (ticket.graph) {
+      if (localTicket === ticket && preparedSnapshots.has(ticket.value)) {
+        if (seen.has(ticket.value) || consumed.length !== 0 || buffers.length !== 0) {
+          throw dataCloneError("an actor call accepts one graph ticket");
+        }
+        seen.set(ticket.value, true);
+        consumed.push(ticket);
+        return preparedSnapshots.get(ticket.value);
+      }
       // A symbol property is only a cross-plan hint and can be forged. Moving a graph needs
       // the ticket issued by this module's private WeakMap until the engine authenticates
       // cross-plan tickets itself.
       if (onGraphTicket && localTicket === ticket) return onGraphTicket(ticket.value, ticket);
       throw dataCloneError("graph transfer needs ownership proof");
+    }
+    if (consumed.some((entry) => entry.graph)) {
+      throw dataCloneError("an actor call cannot mix graph and buffer tickets");
     }
     if (!(ticket.value instanceof ArrayBuffer)) throw dataCloneError("transfer ticket has no ArrayBuffer");
     buffers.push(ticket.value);

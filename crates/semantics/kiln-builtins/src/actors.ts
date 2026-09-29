@@ -2,7 +2,7 @@ import { Worker, MessageChannel, MessagePort } from "node:worker_threads";
 import { Actor, prepareActorMessage, consumeActorTickets, type Ticket } from "kiln:actors/core";
 import { actorWorkerEntry } from "kiln:actors/worker";
 
-export { Actor, isolate, transfer } from "kiln:actors/core";
+export { Actor, isolate, prepareTransfer, transfer } from "kiln:actors/core";
 export type { Isolated, TransferTicket } from "kiln:actors/core";
 
 // The evaluator lends these hooks only while the engine-owned module initializes. Capture
@@ -158,6 +158,9 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                 graphTicket = ticket;
                 return { [graphMarker]: reservation };
               });
+              if (graphTicket && consumed.some((ticket) => ticket.graph)) {
+                throw namedError("DataCloneError", "an actor call accepts one graph ticket");
+              }
               if (graphTicket) {
                 if (buffers.length !== 0) throw namedError("DataCloneError", "graph transfer needs ownership proof");
                 const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot,

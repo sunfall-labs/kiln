@@ -22,9 +22,18 @@ then call methods through `owner.ref.call(name, args)`. `owner.ref.address` can 
 another realm and passed to `connectActor`; only the owner can stop the actor. Relative module
 paths need `new URL(path, import.meta.url)` so they resolve at the call site.
 
-`isolate` now takes a factory and returns a handle. `transfer` returns a ticket consumed when a
-message is accepted. `ArrayBuffer` tickets move the buffer; object graph tickets currently reject
-with `DataCloneError` until Kiln can prove sole ownership. There is no identity fallback.
+`prepareTransfer(value)` snapshots a supported plain data graph and leaves `value` usable.
+`transfer(handle)` makes a ticket consumed when an actor accepts that snapshot. Native Kiln
+prepares the copy in a private arena and moves its storage to the actor; the interpreter keeps
+a private snapshot and clones it into the accepted message. Dense arrays, ordinary objects,
+cycles, strings, numbers, booleans, `null` and `undefined` are supported. Accessors, symbol keys,
+custom prototypes, sparse arrays and host objects raise `DataCloneError`; native Kiln can also
+refuse a property layout it cannot move. One graph ticket is accepted per call.
+
+`isolate(factory)` is the separate direct ownership path. Native Kiln moves it only after
+proving that no sender alias remains; the interpreter currently refuses direct graph moves.
+`transfer(buffer)` moves an `ArrayBuffer` without copying its bytes. A failed acceptance keeps
+the ticket and source usable.
 
 The package includes ambient TypeScript declarations for `kiln:actors`. Direct imports can add
 `@kiln/concurrency` to `compilerOptions.types`; package imports get the declarations through

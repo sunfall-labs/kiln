@@ -204,6 +204,15 @@ and must not be described as a zero-copy graph creation. It does not change `iso
 direct-move guarantee or turn a failed direct move into a clone. The accepted graph and matching
 interpreter behavior are specified before the operation becomes public.
 
+**2026-09-28 implementation amendment.** `prepareTransfer` is public for supported ordinary
+object and dense-array graphs. Native preparation copies into a private arena and the claimed
+actor transaction moves that arena; the interpreter keeps an opaque private snapshot and
+clones it into the accepted actor message. Both leave the input usable, consume one ticket on
+acceptance, and reject unsupported graphs with `DataCloneError`. A call currently accepts one
+graph ticket and cannot mix it with an `ArrayBuffer` ticket. The accepted types and current
+native layout refusals are documented with `@kiln/concurrency`. This operation does not widen
+the direct `isolate(factory)` proof.
+
 ### Module and package boundary
 
 `kiln:actors` is the authoritative engine-owned extension. `KILN_EXTENSIONS=0` and

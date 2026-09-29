@@ -421,7 +421,8 @@ static int kiln_c99_clone_safe_object(const kiln_object *source) {
     if (shape == NULL) {
         for (index = 0; index < source->count; ++index) {
             const kiln_property *property = &source->properties[index];
-            if (!property->enumerable || property->accessor || property->refused) return 0;
+            if (!property->enumerable || !property->writable ||
+                !property->configurable || property->accessor || property->refused) return 0;
         }
     }
     return 1;
@@ -673,7 +674,21 @@ static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int can
         free(table.values);
     }
     if (status != KILN_C99_OK) return status;
-    *out = kiln_val_to_boundary(root);
+    if (arena != NULL) {
+        /* The private arena is deliberately absent from the sender's heap table. The ordinary
+         * boxed-to-boundary conversion checks that table under GC stress, so construct only
+         * the two root kinds this arena allocator can have without consulting the sender. */
+        if (KILN_VAL_IS_OBJECT(root))
+            *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)KILN_VAL_PTR(root),
+                                  NULL, 0);
+        else if ((root & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)
+            *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)KILN_VAL_PTR(root),
+                                  NULL, 0);
+        else
+            return KILN_C99_CLONE_BAIL;
+    } else {
+        *out = kiln_val_to_boundary(root);
+    }
     return KILN_C99_OK;
 }
 
