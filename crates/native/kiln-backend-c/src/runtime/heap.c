@@ -3731,13 +3731,44 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 
 typedef struct kiln_c99_graph_walk {
     const kiln_gc_heap *heap;
-    kiln_gc_ptrset members;
+    kiln_nursery_chunk *const *chunks;
+    size_t chunk_count;
+    const kiln_gc_block *large_head;
     kiln_gc_ptrset reached;
     kiln_c99_graph_side_set sides;
     kiln_gc_block **queue;
     size_t queued;
     size_t capacity;
 } kiln_c99_graph_walk;
+
+/* Candidate chunks were checked as complete bump allocations before this walk. Their bitmap
+ * already names every valid block start, so a second hash table of every block is unnecessary.
+ * Large inline strings belong only when they are in this factory's separately checked list. */
+static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
+                                     const kiln_gc_block *block) {
+    const kiln_nursery_chunk *chunk;
+    size_t index;
+    uintptr_t address;
+    if (block == NULL) return 0;
+    if ((block->kind & KILN_GC_FLAG_LARGE) != 0) {
+        const kiln_gc_block *large;
+        for (large = walk->large_head; large != NULL; large = large->next)
+            if (large == block) return 1;
+        return 0;
+    }
+    chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
+    for (index = 0; index < walk->chunk_count; ++index) {
+        size_t bit;
+        if (walk->chunks[index] != chunk) continue;
+        address = (uintptr_t)block;
+        if (address < (uintptr_t)chunk->base || address >= (uintptr_t)chunk->limit ||
+            ((address - (uintptr_t)chunk->base) & 15) != 0) return 0;
+        bit = (size_t)((address - (uintptr_t)chunk->base) >> 4);
+        return bit >> 6 < chunk->bitmap_words &&
+               (chunk->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0;
+    }
+    return 0;
+}
 
 static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
                                     size_t bytes, const void *owner) {
@@ -3814,7 +3845,7 @@ static int kiln_c99_graph_side_span_compare(const void *left, const void *right)
 static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
     kiln_gc_block *block = kiln_c99_gc_lookup(walk->heap, payload);
     if (block == NULL || (const void *)(block + 1) != payload ||
-        !kiln_c99_gc_ptrset_contains(&walk->members, block)) return 0;
+        !kiln_c99_graph_is_member(walk, block)) return 0;
     if (kiln_c99_gc_ptrset_contains(&walk->reached, block)) return 1;
     if (walk->queued == walk->capacity ||
         kiln_c99_gc_ptrset_insert(&walk->reached, block) != KILN_C99_OK) return 0;
@@ -3825,7 +3856,7 @@ static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload)
 static int kiln_c99_graph_pointer_names_member(const kiln_c99_graph_walk *walk,
                                                 const void *pointer) {
     const kiln_gc_block *block = kiln_c99_gc_lookup_interior(walk->heap, (uintptr_t)pointer);
-    return block != NULL && kiln_c99_gc_ptrset_contains(&walk->members, block);
+    return kiln_c99_graph_is_member(walk, block);
 }
 
 static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
@@ -3972,16 +4003,17 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     kiln_c99_graph_walk walk = {0};
     size_t index;
     size_t seen = 0;
-    size_t enumerated = 0;
     size_t rooted_count;
     uint64_t id = 0;
     int result = 0;
     if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
     walk.heap = heap;
+    walk.chunks = chunks;
+    walk.chunk_count = count;
+    walk.large_head = large_head;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
         const kiln_nursery_chunk *it;
-        const char *cursor;
         int found = 0;
         size_t previous;
         if (chunk == NULL || chunk->candidate_id == 0 || chunk->candidate_epoch != heap->epoch ||
@@ -3995,19 +4027,6 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         }
         if (!found || seen > SIZE_MAX - chunk->alloc_count) goto done;
         seen += chunk->alloc_count;
-        /* The checked chunk count bounds this private proof table. Reserve before inserting
-         * its blocks so growing the candidate does not repeatedly rehash prior chunks. */
-        if (seen > SIZE_MAX / 2) goto done;
-        if (walk.members.capacity < seen * 2 &&
-            kiln_c99_gc_ptrset_grow(&walk.members, seen) != KILN_C99_OK) goto done;
-        for (cursor = chunk->base; cursor < chunk->limit;) {
-            kiln_gc_block *block = (kiln_gc_block *)cursor;
-            size_t payload = block->size == 0 ? 1 : block->size;
-            size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
-            ++enumerated;
-            if (kiln_c99_gc_ptrset_insert(&walk.members, block) != KILN_C99_OK) goto done;
-            cursor += total;
-        }
     }
     {
         const kiln_nursery_chunk *it;
@@ -4023,11 +4042,9 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             if ((large->kind & (KILN_GC_FLAG_LARGE | KILN_GC_KIND_MASK)) !=
                     (KILN_GC_FLAG_LARGE | KILN_GC_STRING) ||
                 !kiln_c99_gc_ptrset_contains(&heap->large_table, large) ||
-                !kiln_c99_graph_inline_string(large) || seen == SIZE_MAX ||
-                kiln_c99_gc_ptrset_insert(&walk.members, (void *)large) != KILN_C99_OK)
+                !kiln_c99_graph_inline_string(large) || seen == SIZE_MAX)
                 goto done;
             ++seen;
-            ++enumerated;
         }
     }
     if (seen > SIZE_MAX / sizeof *walk.queue || seen > SIZE_MAX / 2 ||
@@ -4039,7 +4056,6 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     for (index = 0; index < walk.queued; ++index) {
         if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
     }
-    if (enumerated != seen) goto done;
     rooted_count = walk.queued;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
@@ -4078,7 +4094,6 @@ done:
     }
     free(walk.sides.spans);
     free(walk.queue);
-    free(walk.members.table);
     free(walk.reached.table);
     return result;
 }
