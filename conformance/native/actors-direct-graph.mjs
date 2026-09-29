@@ -28,12 +28,31 @@ try {
   if (repeatedReply[0] !== repeatedReply[1] || repeatedReply[2] !== repeatedReply ||
       repeatedReply[0].value !== 9) throw new Error('graph identity changed');
 
+  const sparse = transfer(isolate(() => {
+    const array = [];
+    array.length = 4;
+    array[3] = 17;
+    return array;
+  }));
+  let sparseReply;
+  try { sparseReply = await owner.ref.call('echo', [sparse]); }
+  catch (error) { throw new Error(`sparse transfer: ${error.message}`); }
+  if (sparseReply.length !== 4 || 0 in sparseReply || 1 in sparseReply || 2 in sparseReply ||
+      sparseReply[3] !== 17) {
+    throw new Error('sparse graph changed');
+  }
+
   let retained;
   const aliased = transfer(isolate(() => { retained = { answer: 17 }; return retained; }));
   let refused = false;
   try { await owner.ref.call('echo', [aliased]); }
   catch (error) { refused = error.name === 'DataCloneError'; }
   if (!refused || retained.answer !== 17) throw new Error('retained alias moved');
+  retained = undefined;
+  let retried;
+  try { retried = await owner.ref.call('echo', [aliased]); }
+  catch (error) { throw new Error(`refused-ticket retry: ${error.message}`); }
+  if (retried.answer !== 17) throw new Error('refused ticket could not be retried');
 
   let retainedChild;
   const childAlias = transfer(isolate(() => ({ child: retainedChild = { value: 21 } })));

@@ -72,10 +72,20 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
         let pendingGraphReservation = 0;
         let graphReplyClosed = false;
         let graphTicket: Ticket | undefined;
+        let graphClaimInFlight = false;
+        let graphStatusInFlight = false;
         let suspendedGraphHandle: any;
         let graphFailure: any = namedError("DataCloneError", "graph transfer needs ownership proof");
         let deferredCompletion: { error: any; value: any } | undefined;
         let graphPollScheduled = false;
+        let graphCancelRequested = false;
+        const requestGraphCancel = (): void => {
+          if (graphCancelRequested || !pendingGraphRequest) return;
+          try {
+            internals.workerOp(GRAPH_CANCEL, pendingGraphRequest);
+            graphCancelRequested = true;
+          } catch { /* A later terminal wake can retry this request. */ }
+        };
         const scheduleGraphPoll = (): void => {
           if (graphPollScheduled || settled || !pendingGraphRequest) return;
           graphPollScheduled = true;
@@ -83,11 +93,20 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
         };
         const pollGraph = (): void => {
           graphPollScheduled = false;
-          if (settled || !pendingGraphRequest) return;
+          if (settled || !pendingGraphRequest || graphStatusInFlight) return;
           let status: any;
+          graphStatusInFlight = true;
           try { status = internals.workerOp(GRAPH_STATUS, pendingGraphRequest); }
           catch { scheduleGraphPoll(); return; }
+          finally { graphStatusInFlight = false; }
           if (status === 0) {
+            if (deferredCompletion && !graphCancelRequested) {
+              requestGraphCancel();
+              // A synchronous cancellation may already have made status terminal. Recheck
+              // once; a still-pending coordinator will wake this reply when it finishes.
+              scheduleGraphPoll();
+              return;
+            }
             // The host wakes this reply port when the request becomes terminal. A closed
             // reply port cannot receive that wake, so only that path needs a timer retry.
             if (graphReplyClosed) scheduleGraphPoll();
@@ -123,15 +142,17 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
         };
         const finish = (error: any, value?: any): void => {
           if (settled) return;
-          if (pendingGraphRequest) {
+          if (pendingGraphRequest || graphClaimInFlight || graphStatusInFlight) {
             // Abort, close and a fast reply all wait for the ownership transaction's terminal
             // status. Request cancellation is safe before unlink; after publication it cannot
             // restore sender ownership, so status 4 must consume the ticket instead.
             // The reply's close follows its resolve/reject message. Preserve that first
             // terminal result while the ownership status catches up.
             deferredCompletion ??= { error, value };
-            try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
-            pollGraph();
+            if (pendingGraphRequest && !graphStatusInFlight) {
+              requestGraphCancel();
+              pollGraph();
+            }
             return;
           }
           settled = true;
@@ -184,6 +205,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                 if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
                 if (settled) return;
                 suspendedGraphHandle = graphTicket.suspend();
+                graphClaimInFlight = true;
                 try {
                   const request = internals.workerOp(GRAPH_REQUEST, internals.portEndpoint(sender),
                     suspendedGraphHandle, reservation, id, internals.portEndpoint(reply.port1));
@@ -192,6 +214,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                     pendingGraphReservation = reservation;
                   }
                 } catch { /* A failed claim keeps the refusal and restores the ticket. */ }
+                finally { graphClaimInFlight = false; }
                 throw namedError("DataCloneError", "graph transfer needs ownership proof");
               } else {
                 const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
@@ -204,7 +227,9 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                 pollGraph();
               } else {
                 try { sender.postMessage({ kind: "cancel", id }); } catch {}
-                finish(error);
+                const completion = deferredCompletion;
+                deferredCompletion = undefined;
+                finish(completion?.error || error, completion?.value);
               }
             }
           } else if (message?.kind === "resolve") finish(null, message.value);
