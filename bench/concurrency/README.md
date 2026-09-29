@@ -105,9 +105,10 @@ Details that matter when reading the numbers:
 - **4.** The floor is 100 ms (10 ticks of 10 ms); everything above it is scheduling. Peak RSS
   includes each runtime's baseline.
 - **5.** The pool rows include copying the input into typed arrays: that is what a pool of isolates
-  has to pay. kiln's `parallelMap` accepts only callbacks its typed pool can prove numeric (ADR
-  0058); others fall back to the sequential lowering and the `KILN_PARALLELISM=1` row then matches
-  the default one.
+  has to pay. kiln's `parallelMap` runs a callback across the pool when its purity proof admits
+  its captured reads, heap reads, allocations and calls (ADR 0069). A callback the proof declines
+  runs sequentially; `kiln build --explain-parallel` names the reason. The
+  `KILN_PARALLELISM=1` row shows the one-worker sequential path.
 - **7.** This is an end-to-end native launcher measurement: wall time includes the process launch,
   realm setup and teardown, timer turns, and two result files per realm. The runner checks all
   output files and statuses before accepting a timing. Before trying 100,000 realms, it projects

@@ -34,7 +34,7 @@ Spawn it from the calling module. `module` must be a URL or absolute path;
 
 ```js
 // main.mjs
-import { spawnActor, connectActor, transfer } from 'kiln:actors';
+import { spawnActor, connectActor, prepareTransfer, transfer } from 'kiln:actors';
 import { share } from 'kiln:shared';
 
 const owner = await spawnActor({
@@ -54,6 +54,11 @@ try {
 
   const record = share({ owner: 'Ada' });
   console.log(await ref.call('readOwner', [record])); // Ada
+
+  const source = { owner: 'Grace' };
+  const snapshot = prepareTransfer(source);
+  source.owner = 'Changed';
+  console.log(await ref.call('readOwner', [transfer(snapshot)])); // Grace
 } finally {
   await owner.stop();
 }
@@ -73,10 +78,19 @@ in its source graph.
   and arrays. Later sends retain that shared graph without copying its fields.
   The source object remains independent. See [ADR 0073](adr/0073-user-shared-values-are-frozen-graphs.md)
   for accepted values and property rules.
+- `prepareTransfer(value)` snapshots a supported plain object or dense-array graph
+  into private storage. The original and its aliases remain usable. Passing
+  `transfer(handle)` to an actor moves the snapshot once; preparation copies the
+  graph, while the native handoff moves its storage without copying the payload
+  again. Cycles and repeated references retain their identity within the
+  snapshot. Accessors, non-default property descriptors and unsupported host
+  objects raise `DataCloneError` during preparation.
 - `isolate(factory)` and `transfer(handle)` are the explicit object-graph move
-  API. A graph that cannot pass the native ownership proof raises
-  `DataCloneError` and leaves its ticket usable in the sender. Use ordinary
-  cloned arguments or shared snapshots when ownership transfer is unnecessary.
+  API for a graph constructed in exclusive storage. The native runtime must
+  prove that the sender has no remaining reference into the graph. A graph that
+  cannot pass that proof raises `DataCloneError` and leaves its ticket usable in
+  the sender. Use `prepareTransfer` when the source must remain usable, or
+  ordinary cloned arguments when a separate copy is sufficient.
 
 The address is a cloneable call capability. `connectActor(address)` grants
 calls; only the `owner` returned by `spawnActor` can stop the actor. Calls from
@@ -90,6 +104,17 @@ methods release a lane between turns. `Atomics.wait` throws `TypeError` inside
 an actor because a synchronous wait could occupy the lane needed by its
 notifier; use actor messages for coordination. Ordinary `node:worker_threads`
 retain dedicated threads and their synchronous `Atomics.wait` behavior.
+
+## Capacity today
+
+The scheduler uses a bounded set of lanes for asynchronous actors, so keeping
+more actors alive does not require one OS thread per actor. The current native
+implementation still builds a separate Node and module bootstrap graph for each
+actor. On the 2026-09-28 Linux capacity workload, 100 to 1,000 held public
+actors added about 816 KiB of RSS per actor, and a warm `spawnActor` took about
+2–3 ms to become ready. Use [the capacity benchmark](../bench/concurrency/README.md)
+on your deployment machine when choosing actor counts; these figures are a
+measured limit of this implementation, not an API limit.
 
 These modules are kiln extensions. `KILN_EXTENSIONS=0` removes them without
 changing Node's built-in surface. `@kiln/concurrency` re-exports the actor API
