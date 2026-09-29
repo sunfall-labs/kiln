@@ -110,12 +110,14 @@ retain dedicated threads and their synchronous `Atomics.wait` behavior.
 
 The scheduler uses a bounded set of lanes for asynchronous actors, so keeping
 more actors alive does not require one OS thread per actor. The current native
-implementation still builds a separate Node and module bootstrap graph for each
-actor. On the 2026-09-28 Linux capacity workload, 100 to 1,000 held public
-actors added about 816 KiB of RSS per actor, and a warm `spawnActor` took about
-2–3 ms to become ready. Use [the capacity benchmark](../bench/concurrency/README.md)
-on your deployment machine when choosing actor counts; these figures are a
-measured limit of this implementation, not an API limit.
+implementation still builds most of the Node and module bootstrap graph for each
+actor. In the 2026-09-29 Linux capacity workload, 100 to 1,000 held public
+actors added about 530 KiB of RSS per actor after the process environment layout
+was shared; a warm `spawnActor` took about 2–3 ms to become ready. The earlier
+10,000-actor capacity run used a version that retained more memory per actor.
+Use [the capacity benchmark](../bench/concurrency/README.md) on your deployment
+machine when choosing actor counts; these figures are measured limits of this
+implementation, not API limits.
 
 These modules are kiln extensions. `KILN_EXTENSIONS=0` removes them without
 changing Node's built-in surface. `@kiln/concurrency` re-exports the actor API
