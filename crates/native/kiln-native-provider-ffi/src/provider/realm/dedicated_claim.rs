@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 struct Command {
     value: PausedTurnCommand,
@@ -41,6 +43,7 @@ impl DedicatedGate {
         }
     }
 
+    #[cfg(test)]
     fn claim(&self, id: u64) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if id == 0 || state.claim != 0 || state.closed {
@@ -54,6 +57,28 @@ impl DedicatedGate {
         true
     }
 
+    fn claim_while(&self, id: u64, pending: &mut impl FnMut() -> bool) -> bool {
+        if id == 0 {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.claim != 0 && !state.closed && pending() {
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(10))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        if state.closed || !pending() {
+            return false;
+        }
+        state.claim = id;
+        drop(state);
+        self.wake.notify_one();
+        true
+    }
+
+    #[cfg(test)]
     fn wait_paused(&self, id: u64, deadline: Instant) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         while state.claim == id && !state.paused && !state.closed {
@@ -64,6 +89,18 @@ impl DedicatedGate {
             state = waited.unwrap_or_else(PoisonError::into_inner).0;
         }
         state.claim == id && state.paused && !state.closed
+    }
+
+    fn wait_paused_while(&self, id: u64, pending: &mut impl FnMut() -> bool) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.claim == id && !state.paused && !state.closed && pending() {
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(10))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        state.claim == id && state.paused && !state.closed && pending()
     }
 
     fn control(&self, id: u64, command: PausedTurnCommand) -> PausedTurnResult {
@@ -243,7 +280,10 @@ impl Drop for DedicatedSingleClaim {
     }
 }
 
-pub(crate) fn claim_one(realm: u64, timeout: Duration) -> Option<DedicatedSingleClaim> {
+pub(crate) fn claim_one_while(
+    realm: u64,
+    mut pending: impl FnMut() -> bool,
+) -> Option<DedicatedSingleClaim> {
     if realm == 0 {
         return None;
     }
@@ -252,19 +292,19 @@ pub(crate) fn claim_one(realm: u64, timeout: Duration) -> Option<DedicatedSingle
         Arc::clone(targets.get(&realm)?)
     };
     let id = NEXT_CLAIM.fetch_add(1, Ordering::Relaxed);
-    if id == 0 || !gate.claim(id) {
+    if !gate.claim_while(id, &mut pending) {
         return None;
     }
     let claim = DedicatedSingleClaim { id, realm, gate };
-    if claim.gate.wait_paused(id, Instant::now() + timeout) {
-        Some(claim)
-    } else {
-        None
-    }
+    claim
+        .gate
+        .wait_paused_while(id, &mut pending)
+        .then_some(claim)
 }
 
 /// Claim two dedicated realms in numeric order and acknowledge both boundaries before any
 /// control callback. A failed claim releases every partial reservation.
+#[cfg(test)]
 pub(crate) fn claim_pair(
     sender: u64,
     receiver: u64,
@@ -290,6 +330,35 @@ pub(crate) fn claim_pair(
     let claim = DedicatedPairClaim { id, first, second };
     let deadline = Instant::now() + timeout;
     if claim.first.1.wait_paused(id, deadline) && claim.second.1.wait_paused(id, deadline) {
+        Some(claim)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn claim_pair_while(
+    sender: u64,
+    receiver: u64,
+    mut pending: impl FnMut() -> bool,
+) -> Option<DedicatedPairClaim> {
+    if sender == 0 || receiver == 0 || sender == receiver {
+        return None;
+    }
+    let (first, second) = {
+        let targets = targets().lock().ok()?;
+        let a = (sender, Arc::clone(targets.get(&sender)?));
+        let b = (receiver, Arc::clone(targets.get(&receiver)?));
+        if a.0 < b.0 { (a, b) } else { (b, a) }
+    };
+    let id = NEXT_CLAIM.fetch_add(1, Ordering::Relaxed);
+    if !first.1.claim_while(id, &mut pending) {
+        return None;
+    }
+    let claim = DedicatedPairClaim { id, first, second };
+    if claim.second.1.claim_while(id, &mut pending)
+        && claim.first.1.wait_paused_while(id, &mut pending)
+        && claim.second.1.wait_paused_while(id, &mut pending)
+    {
         Some(claim)
     } else {
         None

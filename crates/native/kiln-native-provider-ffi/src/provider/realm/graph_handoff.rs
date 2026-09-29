@@ -9,7 +9,9 @@ use super::{PausedTurnCommand, PausedTurnResult, active_realm_id, invoke_active_
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -165,6 +167,7 @@ impl GraphHandoff {
         PausedTurnResult::Ready
     }
 
+    #[cfg(test)]
     pub(crate) fn wait_ready(&self, timeout: Duration) -> bool {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return false;

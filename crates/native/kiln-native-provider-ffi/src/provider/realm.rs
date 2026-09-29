@@ -5194,7 +5194,9 @@ fn refuse_graph_claim_request(
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
         return;
     }
-    let result = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
+    let result = if let Ok(claim) = claim_scheduled_realm_pair_while(sender, receiver, || {
+        status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING
+    }) {
         if claim.wait_while(|| status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING) {
             coordinate_scheduled_graph_request(
                 &claim,
@@ -5208,7 +5210,7 @@ fn refuse_graph_claim_request(
             GRAPH_REQUEST_REFUSED
         }
     } else {
-        coordinate_mixed_graph_request(sender, receiver, request, reservation)
+        coordinate_mixed_graph_request(sender, receiver, request, reservation, &status)
             .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
     let _ = status.compare_exchange(
@@ -5265,9 +5267,9 @@ fn refuse_dedicated_graph_claim_request(
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
         return;
     }
-    let result = if let Some(claim) =
-        dedicated_claim::claim_pair(sender, receiver, Duration::from_secs(1))
-    {
+    let result = if let Some(claim) = dedicated_claim::claim_pair_while(sender, receiver, || {
+        status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING
+    }) {
         coordinate_claimed_graph_request(
             sender,
             receiver,
@@ -5276,7 +5278,7 @@ fn refuse_dedicated_graph_claim_request(
             |realm, command, _| claim.control(realm, command),
         )
     } else {
-        coordinate_mixed_graph_request(sender, receiver, request, reservation)
+        coordinate_mixed_graph_request(sender, receiver, request, reservation, &status)
             .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
     let _ = status.compare_exchange(
@@ -5295,6 +5297,7 @@ fn coordinate_mixed_graph_request(
     receiver: u64,
     request: u64,
     reservation: u64,
+    status: &AtomicU8,
 ) -> Option<u8> {
     let (scheduled, dedicated) =
         if scheduled_realm_exists(sender) && dedicated_claim::contains(receiver) {
@@ -5306,9 +5309,10 @@ fn coordinate_mixed_graph_request(
         };
     // Reserve the scheduler ticket first, then wake the dedicated owner. A failure drops the
     // first claim and releases its pause before reporting refusal.
-    let scheduled_claim = claim_scheduled_realm_one(scheduled).ok()?;
-    let dedicated_claim = dedicated_claim::claim_one(dedicated, Duration::from_secs(1))?;
-    if !scheduled_claim.wait(Duration::from_secs(1)) {
+    let live = || status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING;
+    let scheduled_claim = claim_scheduled_realm_one_while(scheduled, live).ok()?;
+    let dedicated_claim = dedicated_claim::claim_one_while(dedicated, live)?;
+    if !scheduled_claim.wait_while(live) {
         return Some(GRAPH_REQUEST_REFUSED);
     }
     Some(coordinate_mixed_claimed_graph_request(
@@ -5320,6 +5324,7 @@ fn coordinate_mixed_graph_request(
         reservation,
         scheduled,
         dedicated,
+        status,
     ))
 }
 
@@ -5420,6 +5425,7 @@ fn coordinate_mixed_claimed_graph_request(
     reservation: u64,
     scheduled: u64,
     dedicated: u64,
+    status: &AtomicU8,
 ) -> u8 {
     if reservation == 0 {
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
@@ -5446,10 +5452,18 @@ fn coordinate_mixed_claimed_graph_request(
         let dedicated_result =
             scope.spawn(|| dedicated_claim.control(dedicated, dedicated_command));
         let scheduled_pending = scheduled_claim.enqueue_control(scheduled_command);
-        if scheduled_pending.is_none() || !handoff.handoff.wait_ready(Duration::from_secs(1)) {
+        if scheduled_pending.is_none()
+            || !handoff.handoff.wait_ready_while(|| {
+                status.load(Ordering::Acquire) == GRAPH_REQUEST_PENDING
+                    && !scheduled_pending
+                        .as_ref()
+                        .is_some_and(PendingTurnControl::finished_before_start)
+                    && !dedicated_result.is_finished()
+            })
+        {
             handoff.handoff.cancel();
             if let Some(pending) = scheduled_pending {
-                let _ = pending.wait(Duration::from_secs(1));
+                let _ = pending.wait_while(|| false);
             }
             let _ = dedicated_result.join();
             return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
@@ -5457,7 +5471,7 @@ fn coordinate_mixed_claimed_graph_request(
         handoff.handoff.start();
         let scheduled_result = scheduled_pending
             .expect("ready scheduled side was queued")
-            .wait(Duration::from_secs(1));
+            .wait_while(|| true);
         let dedicated_result = dedicated_result
             .join()
             .unwrap_or(PausedTurnResult::Unavailable);
@@ -5661,8 +5675,8 @@ struct ScheduledSingleClaim {
 }
 
 impl ScheduledSingleClaim {
-    fn wait(&self, timeout: Duration) -> bool {
-        self.claim.wait(timeout)
+    fn wait_while(&self, pending: impl FnMut() -> bool) -> bool {
+        self.claim.wait_while(pending)
     }
 
     fn enqueue_control(&self, command: PausedTurnCommand) -> Option<PendingTurnControl> {
@@ -5672,11 +5686,48 @@ impl ScheduledSingleClaim {
 
 /// Resolve only opaque provider realm IDs. The returned claim pauses both scheduler bodies;
 /// it is not a graph ownership certificate and carries no C heap or realm pointer.
+#[cfg(test)]
 pub(crate) fn claim_scheduled_realm_pair(
     sender: u64,
     receiver: u64,
 ) -> Result<ScheduledPairClaim, ScheduledRealmClaimError> {
-    let (scheduler, from, to) = {
+    let (scheduler, from, to) = scheduled_pair_targets(sender, receiver)?;
+    let claim = scheduler
+        .claim_pair(&from, &to)
+        .map_err(ScheduledRealmClaimError::Scheduler)?;
+    Ok(ScheduledPairClaim {
+        claim,
+        sender_realm: sender,
+        receiver_realm: receiver,
+        sender: from,
+        receiver: to,
+    })
+}
+
+fn claim_scheduled_realm_pair_while(
+    sender: u64,
+    receiver: u64,
+    pending: impl FnMut() -> bool,
+) -> Result<ScheduledPairClaim, ScheduledRealmClaimError> {
+    let (scheduler, from, to) = scheduled_pair_targets(sender, receiver)?;
+    let claim = scheduler
+        .claim_pair_while(&from, &to, pending)
+        .map_err(ScheduledRealmClaimError::Scheduler)?;
+    Ok(ScheduledPairClaim {
+        claim,
+        sender_realm: sender,
+        receiver_realm: receiver,
+        sender: from,
+        receiver: to,
+    })
+}
+
+fn scheduled_pair_targets(
+    sender: u64,
+    receiver: u64,
+) -> Result<(Arc<PinnedTurnScheduler>, TurnPauseTarget, TurnPauseTarget), ScheduledRealmClaimError>
+{
+    {
         let registry = scheduled_realms()
             .lock()
             .map_err(|_| ScheduledRealmClaimError::UnknownRealm)?;
@@ -5697,22 +5748,25 @@ pub(crate) fn claim_scheduled_realm_pair(
         if !Arc::ptr_eq(&scheduler, &receiver_scheduler) {
             return Err(ScheduledRealmClaimError::DifferentScheduler);
         }
-        (scheduler, from.target.clone(), to.target.clone())
-    };
-    let claim = scheduler
-        .claim_pair(&from, &to)
-        .map_err(ScheduledRealmClaimError::Scheduler)?;
-    Ok(ScheduledPairClaim {
-        claim,
-        sender_realm: sender,
-        receiver_realm: receiver,
-        sender: from,
-        receiver: to,
-    })
+        Ok((scheduler, from.target.clone(), to.target.clone()))
+    }
 }
 
-fn claim_scheduled_realm_one(realm: u64) -> Result<ScheduledSingleClaim, ScheduledRealmClaimError> {
-    let (scheduler, target) = {
+fn claim_scheduled_realm_one_while(
+    realm: u64,
+    pending: impl FnMut() -> bool,
+) -> Result<ScheduledSingleClaim, ScheduledRealmClaimError> {
+    let (scheduler, target) = scheduled_single_target(realm)?;
+    let claim = scheduler
+        .claim_one_while(&target, pending)
+        .map_err(ScheduledRealmClaimError::Scheduler)?;
+    Ok(ScheduledSingleClaim { claim, target })
+}
+
+fn scheduled_single_target(
+    realm: u64,
+) -> Result<(Arc<PinnedTurnScheduler>, TurnPauseTarget), ScheduledRealmClaimError> {
+    {
         let registry = scheduled_realms()
             .lock()
             .map_err(|_| ScheduledRealmClaimError::UnknownRealm)?;
@@ -5723,12 +5777,8 @@ fn claim_scheduled_realm_one(realm: u64) -> Result<ScheduledSingleClaim, Schedul
             .scheduler
             .upgrade()
             .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
-        (scheduler, entry.target.clone())
-    };
-    let claim = scheduler
-        .claim_one(&target)
-        .map_err(ScheduledRealmClaimError::Scheduler)?;
-    Ok(ScheduledSingleClaim { claim, target })
+        Ok((scheduler, entry.target.clone()))
+    }
 }
 
 struct ScheduledRun {

@@ -827,7 +827,19 @@ impl PinnedTurnScheduler {
         if a.id() == b.id() {
             return Err(TurnClaimError::SameRealm);
         }
-        self.claim_targets(vec![a.clone(), b.clone()])
+        self.claim_targets(vec![a.clone(), b.clone()], None)
+    }
+
+    pub fn claim_pair_while(
+        self: &Arc<Self>,
+        a: &TurnPauseTarget,
+        b: &TurnPauseTarget,
+        mut pending: impl FnMut() -> bool,
+    ) -> Result<TurnPairClaim, TurnClaimError> {
+        if a.id() == b.id() {
+            return Err(TurnClaimError::SameRealm);
+        }
+        self.claim_targets(vec![a.clone(), b.clone()], Some(&mut pending))
     }
 
     /// Claim one scheduled realm when its peer has a dedicated owner thread. The caller
@@ -836,12 +848,21 @@ impl PinnedTurnScheduler {
         self: &Arc<Self>,
         target: &TurnPauseTarget,
     ) -> Result<TurnPairClaim, TurnClaimError> {
-        self.claim_targets(vec![target.clone()])
+        self.claim_targets(vec![target.clone()], None)
+    }
+
+    pub fn claim_one_while(
+        self: &Arc<Self>,
+        target: &TurnPauseTarget,
+        mut pending: impl FnMut() -> bool,
+    ) -> Result<TurnPairClaim, TurnClaimError> {
+        self.claim_targets(vec![target.clone()], Some(&mut pending))
     }
 
     fn claim_targets(
         self: &Arc<Self>,
         mut targets: Vec<TurnPauseTarget>,
+        mut pending: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<TurnPairClaim, TurnClaimError> {
         if targets.is_empty()
             || targets
@@ -853,16 +874,28 @@ impl PinnedTurnScheduler {
         targets.sort_by_key(TurnPauseTarget::id);
         let claim = {
             let mut state = self.pause.state.lock().expect("turn pause lock poisoned");
-            if targets.iter().any(|target| {
-                TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active
-            }) {
-                return Err(TurnClaimError::Unavailable);
-            }
-            if targets
-                .iter()
-                .any(|target| state.entries.contains_key(&target.id()))
-            {
-                return Err(TurnClaimError::Busy);
+            loop {
+                if targets.iter().any(|target| {
+                    TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active
+                }) || pending.as_mut().is_some_and(|live| !live())
+                {
+                    return Err(TurnClaimError::Unavailable);
+                }
+                if !targets
+                    .iter()
+                    .any(|target| state.entries.contains_key(&target.id()))
+                {
+                    break;
+                }
+                if pending.is_none() {
+                    return Err(TurnClaimError::Busy);
+                }
+                state = self
+                    .pause
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(10))
+                    .expect("turn pause wait poisoned")
+                    .0;
             }
             let claim = state.next_claim;
             state.next_claim = state
@@ -2669,5 +2702,56 @@ mod tests {
             owner
         );
         assert_eq!(handle.status(), TurnStatus::Cancelled);
+    }
+
+    #[test]
+    fn live_claim_waits_for_busy_realm_and_cancelled_claim_does_not_take_it() {
+        let scheduler = Arc::new(PinnedTurnScheduler::new(1).expect("lane starts"));
+        let realm = scheduler.spawn_pinned(|_, _| |_waker: &Waker| TurnOutcome::Parked);
+        let target = realm.pause_target();
+        let first = scheduler.claim_one(&target).expect("first claim");
+        assert!(first.wait(Duration::from_secs(1)));
+
+        let (started, started_rx) = mpsc::channel();
+        let (answer, answer_rx) = mpsc::channel();
+        let waiting_scheduler = Arc::clone(&scheduler);
+        let waiting_target = target.clone();
+        let waiter = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let next = waiting_scheduler
+                .claim_one_while(&waiting_target, || true)
+                .expect("second live claim");
+            let paused = next.wait_while(|| true);
+            answer.send(paused).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(answer_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(first);
+        assert!(answer_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        waiter.join().unwrap();
+
+        let held = scheduler.claim_one(&target).expect("third claim");
+        assert!(held.wait(Duration::from_secs(1)));
+        let live = Arc::new(AtomicU8::new(1));
+        let cancelled = Arc::clone(&live);
+        let (started, started_rx) = mpsc::channel();
+        let (answer, answer_rx) = mpsc::channel();
+        let waiting_scheduler = Arc::clone(&scheduler);
+        let waiting_target = target.clone();
+        let waiter = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = waiting_scheduler
+                .claim_one_while(&waiting_target, || cancelled.load(Ordering::Acquire) != 0);
+            answer.send(result.err()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(answer_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        live.store(0, Ordering::Release);
+        assert_eq!(
+            answer_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Some(TurnClaimError::Unavailable)
+        );
+        waiter.join().unwrap();
+        drop(held);
     }
 }
