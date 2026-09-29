@@ -11,8 +11,8 @@ bench/concurrency/run.sh --only realms --quick
 
 The latest three-round comparison without the HTTP server workload is
 [`results-2026-09-29-nonserver.md`](results-2026-09-29-nonserver.md). It includes the
-10,000-public-actor and 100,000-scheduled-realm capacity rows. The server workload needs
-loopback sockets and remains in the earlier full report.
+10,000-public-actor and 100,000-scheduled-realm capacity rows. The matching three-round
+HTTP refresh is [`results-2026-09-29-server.md`](results-2026-09-29-server.md).
 
 The separate one-realm-per-connection scheduler probe is
 `python3 bench/concurrency/realm-connections.py --quick` after building the release CLI with
