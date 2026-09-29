@@ -31,5 +31,11 @@ parentPort.on("message", (message) => {
       parentPort.postMessage({ buffer: message.buffer, check }, message.transfer ? [message.buffer] : undefined);
       break;
     }
+    case "buffer-edge": {
+      const bytes = new Uint8Array(message.buffer);
+      const check = bytes.length !== 0 && bytes[0] === 17 && bytes[bytes.length - 1] === 29;
+      parentPort.postMessage({ buffer: message.buffer, check }, [message.buffer]);
+      break;
+    }
   }
 });

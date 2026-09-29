@@ -802,6 +802,8 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         ("1 MB object graph, send + ack (Go: deep copy)", "graph-1mb", "ms_per_op", " ms"),
         ("16 MB ArrayBuffer, round trip, copied", "ab16-copy", "ms_per_op", " ms"),
         ("16 MB ArrayBuffer, round trip, transferred", "ab16-transfer", "ms_per_op", " ms"),
+        ("1 KB ArrayBuffer, round trip, transferred", "ab1k-transfer", "ms_per_op", " ms"),
+        ("100 MB ArrayBuffer, round trip, transferred", "ab100-transfer", "ms_per_op", " ms"),
     ]
     for label, case, metric, unit in msg_rows:
         w(rep.row(label, [rep.cell(case, rt, metric, unit, scope="thread") for rt in ("node", "bun", "go", "kiln")]))
@@ -814,7 +816,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("")
     w("| in-realm `MessageChannel` | node | bun | kiln |")
     w("| --- | --- | --- | --- |")
-    for label, case, metric, unit in msg_rows:
+    for label, case, metric, unit in msg_rows[:5]:
         w(rep.row(label.replace(" (Go: deep copy)", ""), [rep.cell(case, rt, metric, unit, scope="realm") for rt in ("node", "bun", "kiln")]))
     w("")
     w("The public actor call uses the same 1 MB graph in both modes. `prepareTransfer` makes a "

@@ -6,6 +6,8 @@
 //   graph-1mb           -- a ~1 MB object graph (structured clone), acknowledged with its sum.
 //   ab16-copy           -- a 16 MB ArrayBuffer, copied there and copied back.
 //   ab16-transfer       -- the same buffer, transferred there and transferred back.
+//   ab1k-transfer       -- a 1 KB ArrayBuffer, transferred out and back.
+//   ab100-transfer      -- a 100 MB ArrayBuffer, transferred out and back.
 import { Worker } from "node:worker_threads";
 import { arg, buildGraph, emit, fillBuffer, perOp, smallMessage, touchBuffer, walkGraph } from "./common.mjs";
 
@@ -74,6 +76,25 @@ for (const variant of ["ab16-copy", "ab16-transfer"].filter(want)) {
     check = reply.check;
   });
   emit({ case: variant, ms_per_op: per, checksum: String(check) });
+}
+
+// The ownership handoff should not depend on payload size. Touch only boundary bytes here and
+// in the worker, outside the transfer mechanism being measured.
+for (const [variant, size] of [["ab1k-transfer", 1 << 10], ["ab100-transfer", 100 << 20]].filter(([name]) => want(name))) {
+  let buffer = new ArrayBuffer(size);
+  let bytes = new Uint8Array(buffer);
+  bytes[0] = 17;
+  bytes[size - 1] = 29;
+  let ok = true;
+  const per = await perOp(budget, 2, async () => {
+    const outgoing = buffer;
+    const reply = await request({ kind: "buffer-edge", buffer }, [buffer]);
+    buffer = reply.buffer;
+    bytes = new Uint8Array(buffer);
+    if (outgoing.byteLength !== 0 || !reply.check || buffer.byteLength !== size ||
+        bytes[0] !== 17 || bytes[size - 1] !== 29) ok = false;
+  });
+  emit({ case: variant, ms_per_op: per, checksum: ok ? "ok" : "mismatch" });
 }
 
 await worker.terminate();
