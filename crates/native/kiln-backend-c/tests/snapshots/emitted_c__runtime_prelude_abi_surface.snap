@@ -2144,6 +2144,7 @@ static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t i
 enum {
 enum { KILN_PROFILE_SOURCE_LIMIT = 128 };
 typedef struct kiln_c99_heap_profile_source {
+static void kiln_c99_heap_profile_object(const kiln_gc_block *block, uint64_t serial) {
 static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
 static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const char *limit,
 #if !defined(MADV_DONTNEED) && defined(__linux__)
