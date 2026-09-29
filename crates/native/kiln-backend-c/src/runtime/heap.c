@@ -371,6 +371,15 @@ typedef struct kiln_c99_graph_side_set {
     uintptr_t hi;
 } kiln_c99_graph_side_set;
 
+/* A native resource owned by a JavaScript object without making that object a GC root. The
+ * collector releases it after marking proves the handle dead, before sweeping its block. */
+typedef struct kiln_gc_weak_resource {
+    struct kiln_gc_weak_resource *next;
+    kiln_value handle;
+    void *payload;
+    void (*dispose)(void *);
+} kiln_gc_weak_resource;
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -431,6 +440,7 @@ typedef struct kiln_gc_heap {
      * from the GC tracer; a facade leaves the chain in its finalizer. */
     kiln_shared_facade *shared_facades;
     kiln_collection *weak_collections;
+    kiln_gc_weak_resource *weak_resources;
     kiln_key_table keys;
     /* Canonical pointers for the keys the HTTP path writes on every request and response. See
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
@@ -6517,6 +6527,79 @@ static int kiln_c99_gc_weak_key_live(kiln_gc_heap *heap, const kiln_value *key) 
     return block == NULL || block->mark == heap->epoch;
 }
 
+static kiln_gc_weak_resource *kiln_c99_gc_weak_resource_find(kiln_gc_heap *heap,
+                                                               kiln_value handle) {
+    kiln_gc_weak_resource *entry;
+    if (heap == NULL || handle.tag != KILN_VALUE_OBJECT) return NULL;
+    for (entry = heap->weak_resources; entry != NULL; entry = entry->next)
+        if (entry->handle.bits == handle.bits) return entry;
+    return NULL;
+}
+
+/* Registration is fallible and occurs only after the private resource has been built. A handle
+ * cannot name a foreign or interior block; its identity remains stable in this nonmoving heap. */
+static int kiln_c99_gc_weak_resource_register(kiln_gc_heap *heap, kiln_value handle,
+                                                void *payload, void (*dispose)(void *)) {
+    kiln_gc_weak_resource *entry;
+    kiln_gc_block *block;
+    if (heap == NULL || handle.tag != KILN_VALUE_OBJECT || payload == NULL || dispose == NULL ||
+        kiln_c99_gc_weak_resource_find(heap, handle) != NULL) return 0;
+    block = kiln_c99_gc_lookup(heap, (const void *)(uintptr_t)handle.bits);
+    if (block == NULL || (const void *)(block + 1) != (const void *)(uintptr_t)handle.bits ||
+        (block->kind & KILN_GC_KIND_MASK) != KILN_GC_OBJECT) return 0;
+    entry = (kiln_gc_weak_resource *)malloc(sizeof *entry);
+    if (entry == NULL) return 0;
+    entry->handle = handle;
+    entry->payload = payload;
+    entry->dispose = dispose;
+    entry->next = heap->weak_resources;
+    heap->weak_resources = entry;
+    return 1;
+}
+
+static void kiln_c99_gc_weak_resource_release(kiln_gc_heap *heap, kiln_value handle) {
+    kiln_gc_weak_resource **link;
+    if (heap == NULL) return;
+    link = &heap->weak_resources;
+    while (*link != NULL) {
+        kiln_gc_weak_resource *entry = *link;
+        if (entry->handle.tag == handle.tag && entry->handle.bits == handle.bits) {
+            *link = entry->next;
+            entry->dispose(entry->payload);
+            free(entry);
+            return;
+        }
+        link = &entry->next;
+    }
+}
+
+static void kiln_c99_gc_weak_resources_sweep(kiln_gc_heap *heap) {
+    kiln_gc_weak_resource **link = &heap->weak_resources;
+    while (*link != NULL) {
+        kiln_gc_weak_resource *entry = *link;
+        kiln_gc_block *block = kiln_c99_gc_lookup(heap,
+                                    (const void *)(uintptr_t)entry->handle.bits);
+        if (block != NULL && block->mark == heap->epoch) {
+            link = &entry->next;
+            continue;
+        }
+        *link = entry->next;
+        entry->dispose(entry->payload);
+        free(entry);
+    }
+}
+
+static void kiln_c99_gc_weak_resources_dispose_all(kiln_gc_heap *heap) {
+    kiln_gc_weak_resource *entry = heap->weak_resources;
+    heap->weak_resources = NULL;
+    while (entry != NULL) {
+        kiln_gc_weak_resource *next = entry->next;
+        entry->dispose(entry->payload);
+        free(entry);
+        entry = next;
+    }
+}
+
 /* WeakMap entries are ephemerons: a live key makes its value live, and that value may in turn
  * make another weak key live. Repeat to a fixed point before clearing dead entries or sweeping.
  * WeakSet stores its key as its value; marking it after the key is proved live changes nothing. */
@@ -6905,7 +6988,10 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_c99_gc_mark_promise_jobs(heap);
     if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
     kiln_c99_gc_drain(heap);
-    if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons(heap);
+    if (!heap->mark_failed) {
+        kiln_c99_gc_weak_ephemerons(heap);
+        if (!heap->mark_failed) kiln_c99_gc_weak_resources_sweep(heap);
+    }
 
     if (!heap->mark_failed) {
         kiln_c99_key_purge(heap);
@@ -7073,6 +7159,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     if (heap == NULL || heap->fallback) return;
     /* First, while this realm's keys and shapes are all still allocated: no site may name one. */
     kiln_c99_gc_forget_realm_local(heap);
+    kiln_c99_gc_weak_resources_dispose_all(heap);
     /* A realm that was building the shared region and never sealed it: nobody will use it. */
     kiln_c99_region_abandon(heap);
     /* The realm's modifications of built-ins end with it (`kiln_c99_builtin_store_epoch`). */

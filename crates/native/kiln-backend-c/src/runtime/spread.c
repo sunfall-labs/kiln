@@ -756,6 +756,43 @@ static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap 
     return 1;
 }
 
+static void kiln_c99_prepared_graph_drop(void *payload) {
+    kiln_c99_clone_arena *arena = (kiln_c99_clone_arena *)payload;
+    kiln_c99_clone_arena_dispose(arena);
+    free(arena);
+}
+
+/* The JavaScript handle is only a weak key. It contains no graph pointer, and its collection
+ * releases an abandoned arena before the handle's block is swept. */
+static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
+                                           kiln_value source, size_t budget) {
+    kiln_c99_clone_arena *arena;
+    int status;
+    if (heap == NULL || handle.tag != KILN_VALUE_OBJECT ||
+        kiln_c99_gc_weak_resource_find(heap, handle) != NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    arena = (kiln_c99_clone_arena *)calloc(1, sizeof *arena);
+    if (arena == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_clone_arena_prepare(arena, heap, source, budget);
+    if (status != KILN_C99_OK) {
+        free(arena);
+        return status;
+    }
+    if (!kiln_c99_gc_weak_resource_register(heap, handle, arena,
+                                              kiln_c99_prepared_graph_drop)) {
+        kiln_c99_prepared_graph_drop(arena);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    return KILN_C99_OK;
+}
+
+static kiln_c99_clone_arena *kiln_c99_prepared_graph_find(kiln_gc_heap *heap,
+                                                            kiln_value handle) {
+    kiln_gc_weak_resource *entry = kiln_c99_gc_weak_resource_find(heap, handle);
+    return entry != NULL && entry->dispose == kiln_c99_prepared_graph_drop
+               ? (kiln_c99_clone_arena *)entry->payload : NULL;
+}
+
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
     int status;
     *out = kiln_c99_undefined();

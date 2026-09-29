@@ -2771,6 +2771,7 @@ static int arena_clone_entry(void *context) {
     {
         char bytes[160];
         size_t before;
+        kiln_value handle;
         memset(bytes, 'x', sizeof bytes);
         heap->stress = 0;
         if (kiln_c99_new_array_with_capacity(&source_array, 2048, 0) != KILN_C99_OK)
@@ -2788,6 +2789,17 @@ static int arena_clone_entry(void *context) {
         kiln_c99_clone_arena_dispose(&arena);
         if (arena.storage.filled != NULL || arena.side_count != 0 ||
             heap->count != before) return 22;
+        if (kiln_c99_new_object(&handle) != KILN_C99_OK ||
+            kiln_c99_prepared_graph_create(heap, handle, source_array,
+                                            4 * heap->nursery.capacity) != KILN_C99_OK ||
+            kiln_c99_prepared_graph_find(heap, handle) == NULL) return 24;
+        heap->mid_turn = 0;
+        heap->realm.isolated_request_handle = handle;
+        kiln_c99_gc_collect(heap, 1);
+        if (kiln_c99_prepared_graph_find(heap, handle) == NULL) return 25;
+        heap->realm.isolated_request_handle = kiln_c99_undefined();
+        kiln_c99_gc_collect(heap, 1);
+        if (kiln_c99_prepared_graph_find(heap, handle) != NULL) return 26;
     }
     return 0;
 }
@@ -2804,6 +2816,72 @@ int main(void) {
     assert!(
         run.status.success(),
         "private arena clone failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_weak_native_resource_follows_handle_lifetime() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int disposed_resources;
+static void dispose_resource(void *payload) {
+    ++disposed_resources;
+    free(payload);
+}
+static int weak_resource_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value handle;
+    int *payload;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->mid_turn = 0;
+    if (kiln_c99_new_object(&handle) != KILN_C99_OK) return 2;
+    payload = (int *)malloc(sizeof *payload);
+    if (payload == NULL ||
+        !kiln_c99_gc_weak_resource_register(heap, handle, payload, dispose_resource) ||
+        kiln_c99_gc_weak_resource_register(heap, handle, payload, dispose_resource)) return 3;
+    heap->realm.isolated_request_handle = handle;
+    kiln_c99_gc_collect(heap, 1);
+    if (disposed_resources != 0 || kiln_c99_gc_weak_resource_find(heap, handle) == NULL)
+        return 4;
+    heap->realm.isolated_request_handle = kiln_c99_undefined();
+    kiln_c99_gc_collect(heap, 1);
+    if (disposed_resources != 1 || kiln_c99_gc_weak_resource_find(heap, handle) != NULL)
+        return 5;
+    if (kiln_c99_new_object(&handle) != KILN_C99_OK) return 6;
+    payload = (int *)malloc(sizeof *payload);
+    if (payload == NULL ||
+        !kiln_c99_gc_weak_resource_register(heap, handle, payload, dispose_resource)) return 7;
+    kiln_c99_gc_weak_resource_release(heap, handle);
+    if (disposed_resources != 2 || kiln_c99_gc_weak_resource_find(heap, handle) != NULL)
+        return 8;
+    if (kiln_c99_new_object(&handle) != KILN_C99_OK) return 9;
+    payload = (int *)malloc(sizeof *payload);
+    if (payload == NULL ||
+        !kiln_c99_gc_weak_resource_register(heap, handle, payload, dispose_resource)) return 10;
+    heap->realm.isolated_request_handle = handle;
+    kiln_c99_gc_weak_resources_dispose_all(heap);
+    return disposed_resources == 3 ? 0 : 13;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 11;
+    result = kiln_realm_enter(realm, weak_resource_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 12;
+    return disposed_resources == 3 ? 0 : 14;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "weak-native-resource-lifetime");
+    assert!(
+        run.status.success(),
+        "weak native resource lifetime failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
