@@ -398,6 +398,9 @@ typedef struct kiln_gc_heap {
     int stress;
     int trace;
     int collecting;
+    /* Optional two-turn retained-heap sample for the first few realms. */
+    uint8_t profile_pass;
+    uint8_t profile_selected;
     /* Nonzero only while one synchronous actor `isolate` factory owns fresh nursery chunks.
      * The factory's allocations are still ordinary heap objects, but no unrelated allocation
      * can enter a chunk tagged with this ID. Nested factories use the outer scope and cannot
@@ -1106,10 +1109,26 @@ static void kiln_c99_introspect_dump(kiln_gc_heap *heap) {
     }
 }
 
+static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass);
+
 static int kiln_c99_gc_hook_introspect(void *opaque) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     int status;
     if (heap == NULL || heap->fallback) return 0;
+    if (heap->profile_pass < 3) {
+        if (heap->profile_pass == 0) {
+            static uint32_t selected;
+            const char *setting = getenv("KILN_HEAP_PROFILE");
+            heap->profile_selected = setting != NULL && setting[0] == '1' && setting[1] == '\0' &&
+                __atomic_fetch_add(&selected, 1, __ATOMIC_RELAXED) < 4;
+            if (!heap->profile_selected) heap->profile_pass = 3;
+        }
+        if (heap->profile_selected) {
+            ++heap->profile_pass;
+            kiln_c99_heap_profile_dump(heap, heap->profile_pass);
+            if (heap->profile_pass == 2) heap->profile_pass = 3;
+        }
+    }
     status = kiln_c99_introspect_armed ? KILN_C99_INTROSPECT_ARMED : 0;
     if (kiln_c99_introspect_pending) {
         kiln_c99_introspect_pending = 0;
@@ -1900,6 +1919,119 @@ static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t i
     return (kiln_gc_block *)((char *)slab + slab->first_slot_offset +
                               (size_t)index * slab->slot_size);
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
+                                        uint64_t counts[KILN_GC_KIND_COUNT],
+                                        uint64_t bytes[KILN_GC_KIND_COUNT]) {
+    uint32_t kind = block->kind & KILN_GC_KIND_MASK;
+    if (kind == KILN_GC_NONE || kind >= KILN_GC_KIND_COUNT ||
+        (block->kind & KILN_GC_FLAG_DEAD) != 0) return;
+    ++counts[kind];
+    bytes[kind] += block->size;
+}
+
+static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const char *limit,
+                                        uint64_t counts[KILN_GC_KIND_COUNT],
+                                        uint64_t bytes[KILN_GC_KIND_COUNT]) {
+    size_t word;
+    for (word = 0; word < chunk->bitmap_words; ++word) {
+        uint64_t bits = chunk->bitmap[word];
+        while (bits != 0) {
+            size_t bit = (word << 6) + (size_t)__builtin_ctzll(bits);
+            const char *address = chunk->base + (bit << 4);
+            bits &= bits - 1;
+            if (address + sizeof(kiln_gc_block) <= limit)
+                kiln_c99_heap_profile_count((const kiln_gc_block *)address, counts, bytes);
+        }
+    }
+}
+
+/* Read-only, opt-in sampling at two turn boundaries. A public actor's second boundary includes
+ * its target module and constructor, which the bootstrap-complete hook cannot see. The kind
+ * totals are payload rather than RSS; chunk and slab counts expose the allocator residency that
+ * a small live graph can keep behind it. */
+static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
+    static const char *names[KILN_GC_KIND_COUNT] = {
+        "none", "string", "sliced_string", "bytes", "object", "closure", "cell", "array",
+        "shared_facade", "generator", "promise", "settler", "bound", "collection",
+        "proxy", "date", "regexp", "symbol", "typed_buffer", "typed_array", "data_view",
+        "commonjs_require", "method_store", "node_server", "node_socket",
+        "node_client_request", "node_response", "node_completion", "node_fs_completion",
+        "node_process_completion", "next_tick", "timer"
+    };
+    uint64_t counts[KILN_GC_KIND_COUNT] = {0};
+    uint64_t bytes[KILN_GC_KIND_COUNT] = {0};
+    uint64_t total_count = 0, total_bytes = 0;
+    size_t slabs = 0, promoted = 0, full = 0;
+    uint32_t kind;
+    kiln_c99_introspect_line line;
+    kiln_gc_block *block;
+    kiln_gc_slab *slab;
+    kiln_nursery_chunk *chunk;
+    for (block = heap->head; block != NULL; block = block->next)
+        kiln_c99_heap_profile_count(block, counts, bytes);
+    for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
+        uint32_t index;
+        ++slabs;
+        for (index = 0; index < slab->fresh; ++index) {
+            block = kiln_c99_gc_slab_slot(slab, index);
+            if (block->size != KILN_GC_SLOT_FREE)
+                kiln_c99_heap_profile_count(block, counts, bytes);
+        }
+    }
+    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
+        line.len = 0;
+        kiln_c99_introspect_text(&line, "kiln heap-profile chunk");
+        kiln_c99_introspect_field(&line, "serial", heap->serial);
+        kiln_c99_introspect_field(&line, "pass", pass);
+        kiln_c99_introspect_field(&line, "index", promoted);
+        kiln_c99_introspect_field(&line, "blocks", chunk->alloc_count);
+        kiln_c99_introspect_field(&line, "payload", chunk->alloc_bytes);
+        kiln_c99_introspect_field(&line, "used", (size_t)(chunk->limit - chunk->base));
+        kiln_c99_introspect_flush(&line);
+        ++promoted;
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes);
+    }
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+        ++full;
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes);
+    }
+    if (heap->nursery.active && heap->nursery.region != NULL)
+        kiln_c99_heap_profile_chunk((const kiln_nursery_chunk *)heap->nursery.region,
+                                    heap->nursery.bump, counts, bytes);
+    for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
+        total_count += counts[kind];
+        total_bytes += bytes[kind];
+    }
+    line.len = 0;
+    kiln_c99_introspect_text(&line, "kiln heap-profile");
+    kiln_c99_introspect_field(&line, "serial", heap->serial);
+    kiln_c99_introspect_field(&line, "pass", pass);
+    kiln_c99_introspect_field(&line, "blocks", total_count);
+    kiln_c99_introspect_field(&line, "payload", total_bytes);
+    kiln_c99_introspect_field(&line, "heap_blocks", heap->count);
+    kiln_c99_introspect_field(&line, "heap_payload", heap->bytes);
+    kiln_c99_introspect_field(&line, "slabs", slabs);
+    kiln_c99_introspect_field(&line, "promoted", promoted);
+    kiln_c99_introspect_field(&line, "full", full);
+    kiln_c99_introspect_field(&line, "active", heap->nursery.active);
+    kiln_c99_introspect_field(&line, "spare", heap->nursery.spare_count);
+    kiln_c99_introspect_flush(&line);
+    for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
+        if (counts[kind] == 0) continue;
+        line.len = 0;
+        kiln_c99_introspect_text(&line, "kiln heap-profile");
+        kiln_c99_introspect_field(&line, "serial", heap->serial);
+        kiln_c99_introspect_field(&line, "pass", pass);
+        kiln_c99_introspect_text(&line, " kind=");
+        kiln_c99_introspect_text(&line, names[kind]);
+        kiln_c99_introspect_field(&line, "count", counts[kind]);
+        kiln_c99_introspect_field(&line, "payload", bytes[kind]);
+        kiln_c99_introspect_flush(&line);
+    }
+}
+#endif
 
 static void kiln_c99_gc_slab_unlink_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
     if (slab->free_prev != NULL) slab->free_prev->free_next = slab->free_next;

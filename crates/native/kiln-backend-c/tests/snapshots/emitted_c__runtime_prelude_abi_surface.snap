@@ -2042,6 +2042,7 @@ static void kiln_c99_introspect_field(kiln_c99_introspect_line *line, const char
 static void kiln_c99_introspect_begin(kiln_c99_introspect_line *line, const char *section) {
 static void kiln_c99_introspect_flush(kiln_c99_introspect_line *line) {
 static void kiln_c99_introspect_dump(kiln_gc_heap *heap) {
+static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass);
 static int kiln_c99_gc_hook_introspect(void *opaque) {
 #else
 static volatile int kiln_c99_introspect_pending;
@@ -2133,6 +2134,11 @@ static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size) {
 static void kiln_c99_gc_aligned_free(void *aligned) {
 static int kiln_c99_gc_slab_class(size_t total) {
 static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t index) {
+#if defined(__unix__) || defined(__APPLE__)
+static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
+static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const char *limit,
+static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
+#endif
 static void kiln_c99_gc_slab_unlink_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static void kiln_c99_gc_slab_link_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) {
