@@ -3113,6 +3113,106 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_capsule_keeps_multichunk_strings_through_receiver_gc() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    enum { ITEMS = 1200 };
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_c99_graph_capsule capsule;
+    kiln_nursery_chunk *first;
+    kiln_shape shape;
+    kiln_array *items;
+    kiln_value root;
+    size_t index;
+    uint64_t reservation = 97;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity * 4)) return 1;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 1;
+    shape.keys[0] = kiln_c99_key_empty;
+    items = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY,
+                                              sizeof *items + ITEMS * sizeof(kiln_val));
+    if (items == NULL) return 2;
+    memset(items, 0, sizeof *items);
+    items->elements = (kiln_val *)(items + 1);
+    items->count = ITEMS;
+    items->capacity = ITEMS;
+    items->properties = kiln_c99_undefined();
+    items->match_index = -1;
+    items->match_input = kiln_c99_undefined();
+    items->match_groups = kiln_c99_undefined();
+    for (index = 0; index < ITEMS; ++index) {
+        kiln_object *object = (kiln_object *)kiln_c99_par_alloc(
+            &candidate, KILN_GC_OBJECT, sizeof *object);
+        kiln_string *string = (kiln_string *)kiln_c99_par_alloc(
+            &candidate, KILN_GC_STRING, sizeof *string + 16);
+        int length;
+        if (object == NULL || string == NULL) return 3;
+        memset(object, 0, sizeof *object);
+        object->prototype = kiln_c99_undefined();
+        object->shape = &shape;
+        object->slots = object->inline_slots;
+        object->slot_capacity = KILN_C99_INLINE_SLOTS;
+        object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
+        length = snprintf((char *)(string + 1), 16, "item-%04zu", index);
+        if (length <= 0 || length >= 16) return 4;
+        string->unit_len = (uint32_t)length;
+        string->flags = KILN_STRING_LATIN1;
+        string->data = string + 1;
+        items->elements[index] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
+    }
+    kiln_c99_par_arena_seal(&candidate);
+    first = candidate.filled;
+    if (first == NULL || first->next == NULL ||
+        !kiln_c99_heap_adopt_chunks(&sender, first)) return 5;
+    root = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)items, NULL, 0);
+    if (!kiln_c99_graph_capsule_prepare(&sender, first, root, &capsule) ||
+        capsule.needs.regions < 2) return 6;
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                    reservation) ||
+        !kiln_c99_graph_capsule_detach(&sender, &capsule)) return 7;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)items - 1)->mark != receiver.epoch) return 8;
+    for (index = 0; index < ITEMS; ++index) {
+        kiln_object *object = (kiln_object *)KILN_VAL_PTR(items->elements[index]);
+        kiln_string *string = (kiln_string *)KILN_VAL_PTR(object->slots[0]);
+        if (((kiln_gc_block *)object - 1)->mark != receiver.epoch ||
+            ((kiln_gc_block *)string - 1)->mark != receiver.epoch ||
+            string->unit_len != 9 || memcmp(string->data, "item-", 5) != 0)
+            return 9;
+    }
+    kiln_c99_gc_collect(&receiver, 0);
+    for (index = 0; index < ITEMS; ++index) {
+        kiln_object *object = (kiln_object *)KILN_VAL_PTR(items->elements[index]);
+        kiln_string *string = (kiln_string *)KILN_VAL_PTR(object->slots[0]);
+        if (kiln_c99_gc_lookup(&receiver, object) == NULL ||
+            kiln_c99_gc_lookup(&receiver, string) == NULL ||
+            string->unit_len != 9 || memcmp(string->data, "item-", 5) != 0)
+            return 10;
+    }
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-multichunk-strings-gc");
+    assert!(
+        run.status.success(),
+        "multichunk graph receiver GC failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_detaches_before_receiver_adoption() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
