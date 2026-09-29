@@ -3945,6 +3945,11 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         }
         if (!found || seen > SIZE_MAX - chunk->alloc_count) goto done;
         seen += chunk->alloc_count;
+        /* The checked chunk count bounds this private proof table. Reserve before inserting
+         * its blocks so growing the candidate does not repeatedly rehash prior chunks. */
+        if (seen > SIZE_MAX / 2) goto done;
+        if (walk.members.capacity < seen * 2 &&
+            kiln_c99_gc_ptrset_grow(&walk.members, seen) != KILN_C99_OK) goto done;
         for (cursor = chunk->base; cursor < chunk->limit;) {
             kiln_gc_block *block = (kiln_gc_block *)cursor;
             size_t payload = block->size == 0 ? 1 : block->size;
@@ -3975,7 +3980,8 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             ++enumerated;
         }
     }
-    if (seen > SIZE_MAX / sizeof *walk.queue) goto done;
+    if (seen > SIZE_MAX / sizeof *walk.queue || seen > SIZE_MAX / 2 ||
+        kiln_c99_gc_ptrset_grow(&walk.reached, seen) != KILN_C99_OK) goto done;
     walk.queue = (kiln_gc_block **)malloc(seen * sizeof *walk.queue);
     if (walk.queue == NULL) goto done;
     walk.capacity = seen;
