@@ -1984,6 +1984,7 @@ typedef struct kiln_gc_weak_resource {
 typedef struct kiln_gc_heap {
 static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
+static int kiln_c99_clone_plain_graph_for_message(kiln_value source);
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
 #define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
@@ -3199,6 +3200,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 #define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
+#define KILN_C99_WORKER_OP_ACTOR_PLAIN_MESSAGE 38
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
 static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
@@ -3370,6 +3372,8 @@ static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capac
 static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
+static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *seen,
+static int kiln_c99_clone_plain_graph_for_message(kiln_value source) {
 static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph,

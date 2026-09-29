@@ -88,9 +88,10 @@ Details that matter when reading the numbers:
   kiln's in-realm channel runs at thousands of messages per second and 100,000 would take minutes.
   The per-message rate is what is compared. The 16 MB rows are a round trip: copied both ways, or
   transferred both ways. The actor graph rows keep the actor alive and send the same graph through
-  ordinary clone or a fresh prepared snapshot on each call. They report preparation, handoff and
-  reply, and the complete prepared cost separately. The actor checks the graph by computing the
-  same sum in both cases; preparation is a sender-side copy, not a zero-copy construction.
+  ordinary clone or a fresh prepared snapshot on each call. The ordinary round-trip row returns
+  that graph through the actor result path as well. They report preparation, handoff and reply,
+  and the complete prepared cost separately. The actor checks the graph by computing the same
+  sum in both modes; preparation is a sender-side copy, not a zero-copy construction.
 - **3.** Setup is from the first send until every worker holds the table, with the workers already
   started; the copy row pays one structured clone per worker, the `SharedArrayBuffer` row none.
   This byte-table row does not measure `kiln:shared` frozen object graphs.

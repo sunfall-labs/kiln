@@ -157,7 +157,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                 }
                 graphTicket = ticket;
                 return { [graphMarker]: reservation };
-              });
+              }, true);
               if (graphTicket && consumed.some((ticket) => ticket.graph)) {
                 throw namedError("DataCloneError", "an actor call accepts one graph ticket");
               }

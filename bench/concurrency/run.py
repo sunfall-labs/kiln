@@ -777,6 +777,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("| --- | ---: |")
     for label, case in [
         ("structured clone call", "actor-graph-copy"),
+        ("structured clone round trip", "actor-graph-roundtrip-copy"),
         ("prepare private snapshot", "actor-graph-prepare"),
         ("prepared handoff and reply", "actor-graph-handoff"),
         ("prepared total", "actor-graph-prepared-total"),

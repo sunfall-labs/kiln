@@ -2286,6 +2286,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 #define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
+#define KILN_C99_WORKER_OP_ACTOR_PLAIN_MESSAGE 38
 
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
                                            kiln_value source, size_t budget);
@@ -2663,6 +2664,10 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         *result = kiln_c99_boolean(prepared);
         return KILN_C99_OK;
     }
+    case KILN_C99_WORKER_OP_ACTOR_PLAIN_MESSAGE:
+        *result = kiln_c99_boolean(argc >= 2 &&
+            kiln_c99_clone_plain_graph_for_message(args[1]));
+        return KILN_C99_OK;
     case KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN:
         *result = kiln_c99_boolean(kiln_c99_actor_candidate_begin(kiln_c99_gc_heap()));
         return KILN_C99_OK;

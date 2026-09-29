@@ -1,6 +1,7 @@
 import { Actor } from "kiln:actors";
 
 export class GraphReader extends Actor {
+  echo(value) { return value; }
   sum(items) {
     let sum = 0;
     for (const item of items) {

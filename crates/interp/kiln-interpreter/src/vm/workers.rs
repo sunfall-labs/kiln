@@ -158,6 +158,7 @@ const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
 const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
 const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
 const OP_ACTOR_PREPARE: u32 = 37;
+const OP_ACTOR_PLAIN_MESSAGE: u32 = 38;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -296,6 +297,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Boolean(false)
                 }
             }
+            // Native can inspect its raw object layout without invoking getters. The
+            // interpreter keeps the existing ticket-aware TypeScript preparation path.
+            OP_ACTOR_PLAIN_MESSAGE => Value::Boolean(false),
             // The interpreter has no native candidate chunks or two-realm claim coordinator.
             // These reserved operations fail closed while preserving the shared actor module's
             // DataCloneError and unconsumed-ticket behavior.

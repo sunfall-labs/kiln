@@ -564,6 +564,7 @@ typedef struct kiln_gc_heap {
 static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
                                            kiln_value source, size_t budget);
+static int kiln_c99_clone_plain_graph_for_message(kiln_value source);
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 /* The heap a unit uses when no realm is active: the prelude's own tests, and a launcher turning a

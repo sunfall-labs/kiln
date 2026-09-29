@@ -156,7 +156,7 @@ function serve(): void {
       if (kind === "resolve") {
         const buffers: ArrayBuffer[] = [];
         const consumed: any[] = [];
-        const snapshot = prepareActorMessage(value, buffers, consumed);
+        const snapshot = prepareActorMessage(value, buffers, consumed, new Map(), undefined, true);
         request.reply.postMessage({ kind, value: snapshot }, buffers);
         consumeActorTickets(consumed);
       } else {

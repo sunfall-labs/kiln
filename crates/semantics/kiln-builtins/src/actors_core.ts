@@ -24,6 +24,7 @@ const ISOLATED_HAS = 27;
 const CANDIDATE_BEGIN = 28;
 const CANDIDATE_END = 29;
 const PREPARE = 37;
+const PLAIN_MESSAGE = 38;
 
 function isolatedOp(operation: number, ...args: any[]): any {
   const port = (globalThis as any).MessagePort;
@@ -187,8 +188,14 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
 export function prepareActorMessage(
   value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>(),
   onGraphTicket?: (handle: any, ticket: Ticket) => any,
+  nativePlain = false,
 ): any {
   if (value === null || typeof value !== "object") return value;
+  // Native certifies a complete graph of plain data without invoking any getter or Proxy trap.
+  // It cannot contain a ticket or isolated handle. Sending the original lets postMessage's
+  // shared codec make the one required clone instead of first copying the graph in TypeScript.
+  // A failed certificate preserves the ticket-aware path below, including its getter behavior.
+  if (nativePlain && seen.size === 0 && isolatedOp(PLAIN_MESSAGE, value) === true) return value;
   // The symbol bridges separate dynamic-import plans, but user code can forge a symbol
   // property. Treat it only as a hint: object graphs are refused until the runtime proves
   // ownership, and the only accepted payload is an actual transferable ArrayBuffer.

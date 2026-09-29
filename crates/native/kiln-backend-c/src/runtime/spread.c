@@ -437,6 +437,73 @@ static int kiln_c99_clone_safe_array(const kiln_array *source) {
     return 1;
 }
 
+/* Actor messages need to find transfer tickets before posting. For a native graph containing
+ * only plain data, the sender's TypeScript walk would make an entire temporary copy and the
+ * provider message codec would then copy it again. This read-only certificate lets the actor
+ * pass the original to that codec. A rejected graph takes the existing ticket-aware walk; in
+ * particular, accessors and Proxy traps must not run during this check and then run again when
+ * the message is encoded. The seen set handles shared references and cycles without changing
+ * their identity. No kiln allocation or collection occurs while inspecting these raw slots. */
+static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *seen,
+                                                 unsigned depth) {
+    void *ptr;
+    size_t index;
+    if (KILN_VAL_IS_NUMBER(value) || KILN_VAL_IS_IMMEDIATE(value) ||
+        KILN_VAL_IS_STRING(value)) return 1;
+    if ((value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX &&
+        (value & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) return 1;
+    if (depth > KILN_C99_CLONE_MAX_DEPTH ||
+        (!KILN_VAL_IS_OBJECT(value) &&
+         (value & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX)) return 0;
+    ptr = KILN_VAL_PTR(value);
+    if (ptr == NULL) return 0;
+    if (kiln_c99_gc_ptrset_contains(seen, ptr)) return 1;
+    if (KILN_VAL_IS_OBJECT(value)) {
+        const kiln_object *object = (const kiln_object *)ptr;
+        const kiln_shape *shape;
+        if (kiln_c99_gc_payload_kind(ptr) != KILN_GC_OBJECT ||
+            !kiln_c99_clone_safe_object(object) || object->shape == NULL ||
+            object->properties != NULL) return 0;
+        shape = object->shape;
+        if (shape->property_count > object->slot_capacity ||
+            (shape->property_count != 0 && object->slots == NULL) ||
+            shape->accessor_mask != 0) return 0;
+        if (kiln_c99_gc_ptrset_insert(seen, ptr) != KILN_C99_OK) return 0;
+        for (index = 0; index < shape->property_count; ++index) {
+            const kiln_string *key = shape->keys[index];
+            if (key == NULL || kiln_c99_key_index_key(key) >= 0.0 ||
+                kiln_c99_same_name_key(key, "__proto__") ||
+                !kiln_c99_clone_plain_val_for_message(object->slots[index], seen,
+                                                       depth + 1)) return 0;
+        }
+        return 1;
+    }
+    if (kiln_c99_gc_payload_kind(ptr) == KILN_GC_ARRAY) {
+        const kiln_array *array = (const kiln_array *)ptr;
+        if (!kiln_c99_clone_safe_array(array) || array->count > array->capacity ||
+            (array->count != 0 && array->elements == NULL)) return 0;
+        if (kiln_c99_gc_ptrset_insert(seen, ptr) != KILN_C99_OK) return 0;
+        for (index = 0; index < array->count; ++index) {
+            if (!kiln_c99_clone_plain_val_for_message(array->elements[index], seen,
+                                                       depth + 1)) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int kiln_c99_clone_plain_graph_for_message(kiln_value source) {
+    kiln_gc_ptrset seen = {0};
+    int plain;
+    /* The TypeScript preparation uses Object/Array/Map built-ins. Once a realm changes one,
+     * its observable preparation path must run rather than bypassing the replacement. */
+    if (!kiln_c99_realm_builtins_unmodified() ||
+        (source.tag != KILN_VALUE_OBJECT && source.tag != KILN_VALUE_ARRAY)) return 0;
+    plain = kiln_c99_clone_plain_val_for_message(kiln_val_from_boundary(source), &seen, 0);
+    free(seen.table);
+    return plain;
+}
+
 /* The shape of a copy of the list-mode `source`: the transition walk from `root`, the fresh
  * copy's empty shape, over the source's keys in order -- the shape an object literal with those
  * keys has, and shared with every object built that way (ADR 0071). An object is in list mode
