@@ -3350,7 +3350,7 @@ static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
 static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
 static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
 static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *base) {
-static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena, int adopted) {
+static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
 static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
@@ -3360,6 +3360,8 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
 static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph,
 static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
 static int kiln_c99_clone_data_arena(kiln_value *out, kiln_value source,
+static int kiln_c99_clone_arena_prepare(kiln_c99_clone_arena *arena, kiln_gc_heap *sender,
+static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap *receiver,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,

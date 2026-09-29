@@ -244,6 +244,9 @@ typedef struct kiln_c99_clone_arena {
     void **side_bases;
     size_t side_count;
     size_t side_capacity;
+    kiln_c99_graph_capsule capsule;
+    int certified;
+    int adopted;
 } kiln_c99_clone_arena;
 
 typedef struct kiln_c99_clone_table {
@@ -331,19 +334,21 @@ static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *ba
 
 /* Before adoption the builder owns every side buffer and chunk. After adoption each array's
  * finalizer owns its side buffer and the destination heap owns the chunks. */
-static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena, int adopted) {
+static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
     size_t index;
-    if (adopted && arena->storage.current != NULL) abort();
-    if (!adopted)
+    if (arena->adopted && arena->storage.current != NULL) abort();
+    if (!arena->adopted)
         for (index = 0; index < arena->side_count; ++index) free(arena->side_bases[index]);
     free(arena->side_bases);
     arena->side_bases = NULL;
     arena->side_count = arena->side_capacity = 0;
-    if (!adopted) {
+    if (!arena->adopted) {
         kiln_c99_par_arena_seal(&arena->storage);
         kiln_c99_arena_chunks_free(arena->storage.filled);
     }
     arena->storage.filled = NULL;
+    if (arena->certified) kiln_c99_graph_capsule_dispose(&arena->capsule);
+    memset(arena, 0, sizeof *arena);
 }
 
 static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
@@ -681,6 +686,74 @@ static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
 static int kiln_c99_clone_data_arena(kiln_value *out, kiln_value source,
                                      kiln_c99_clone_arena *arena) {
     return kiln_c99_clone_data_graph(out, source, 1, arena);
+}
+
+/* The view indexes only this arena's chunks. It is never registered as a realm heap, and its
+ * region table is discarded after the outgoing closure certificate has been built. The arena
+ * keeps ownership of the chunks until receiver adoption, including across sender collections. */
+static int kiln_c99_clone_arena_prepare(kiln_c99_clone_arena *arena, kiln_gc_heap *sender,
+                                         kiln_value source, size_t budget) {
+    kiln_gc_heap *view;
+    kiln_nursery_chunk *first;
+    kiln_value root;
+    int status;
+    if (arena == NULL || sender == NULL) return KILN_C99_INVALID_ARGUMENT;
+    memset(arena, 0, sizeof *arena);
+    if (!kiln_c99_graph_candidate_open(&arena->storage, sender, budget))
+        return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_clone_data_arena(&root, source, arena);
+    if (status != KILN_C99_OK) {
+        kiln_c99_clone_arena_dispose(arena);
+        return status;
+    }
+    kiln_c99_par_arena_seal(&arena->storage);
+    first = arena->storage.filled;
+    if (first == NULL) {
+        kiln_c99_clone_arena_dispose(arena);
+        return KILN_C99_CLONE_BAIL;
+    }
+    view = (kiln_gc_heap *)calloc(1, sizeof *view);
+    if (view == NULL) {
+        kiln_c99_clone_arena_dispose(arena);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    view->epoch = 1;
+    view->nursery.capacity = sender->nursery.capacity;
+    view->nursery.bitmap_words = sender->nursery.bitmap_words;
+    if (!kiln_c99_heap_adopt_chunks(view, first)) {
+        free(view->nursery.regions.table);
+        free(view);
+        kiln_c99_clone_arena_dispose(arena);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    /* adopt_chunks reverses the list into the view. Keep that list for rollback and eventual
+     * adoption; the original head no longer reaches every chunk. */
+    arena->storage.filled = view->nursery.full;
+    first = arena->storage.filled;
+    if (!kiln_c99_graph_capsule_prepare(view, first, root, &arena->capsule)) {
+        free(view->nursery.regions.table);
+        free(view);
+        kiln_c99_clone_arena_dispose(arena);
+        return KILN_C99_CLONE_BAIL;
+    }
+    arena->certified = 1;
+    free(view->nursery.regions.table);
+    free(view);
+    return KILN_C99_OK;
+}
+
+/* All fallible receiver work precedes the ownership change. The copied arena has no sender
+ * heap membership or incoming sender edge, so no sender-heap scan or unlink is needed. */
+static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap *receiver,
+                                       uint64_t reservation) {
+    if (arena == NULL || receiver == NULL || !arena->certified || arena->adopted ||
+        !kiln_c99_graph_capsule_receiver_preflight(receiver, &arena->capsule.needs, reservation))
+        return 0;
+    arena->capsule.detached = 1;
+    kiln_c99_graph_capsule_adopt(receiver, &arena->capsule, reservation);
+    arena->adopted = 1;
+    arena->storage.filled = NULL;
+    return 1;
 }
 
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {

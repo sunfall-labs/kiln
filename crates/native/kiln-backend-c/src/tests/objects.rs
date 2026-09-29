@@ -2696,14 +2696,11 @@ fn executable_plain_graph_clone_builds_outside_the_sender_heap() {
     let wrapper = r#"
 static int arena_clone_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
-    kiln_gc_heap arena_heap;
     kiln_c99_clone_arena arena = {0};
     static kiln_shape shape;
     kiln_value source, source_array, text, copy_value;
     kiln_object *original, *copy;
     kiln_array *array;
-    kiln_nursery_chunk *chunk;
-    kiln_c99_graph_capsule capsule;
     size_t sender_count;
     uint32_t sender_epoch;
     uint64_t reservation = 918;
@@ -2734,63 +2731,64 @@ static int arena_clone_entry(void *context) {
     heap->stress_countdown = 1;
     sender_count = heap->count;
     original->slots[3] = KILN_VAL_HOLE;
-    if (!kiln_c99_graph_candidate_open(&arena.storage, heap, 2 * heap->nursery.capacity))
-        return 13;
-    if (kiln_c99_clone_data_arena(&copy_value, source, &arena) != KILN_C99_CLONE_BAIL ||
-        arena.side_count != 1 || heap->count != sender_count) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
-        return 14;
-    }
-    kiln_c99_clone_arena_dispose(&arena, 0);
+    if (kiln_c99_clone_arena_prepare(&arena, heap, source, 2 * heap->nursery.capacity)
+            != KILN_C99_CLONE_BAIL || arena.storage.filled != NULL ||
+        arena.side_count != 0 || heap->count != sender_count) return 14;
     original->slots[3] = kiln_val_from_boundary(kiln_c99_number(3));
-    if (!kiln_c99_graph_candidate_open(&arena.storage, heap, 2 * heap->nursery.capacity))
-        return 5;
-    if (kiln_c99_clone_data_arena(&copy_value, source, &arena) != KILN_C99_OK ||
-        copy_value.tag != KILN_VALUE_OBJECT) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
-        return 6;
-    }
-    kiln_c99_par_arena_seal(&arena.storage);
-    chunk = arena.storage.filled;
+    if (kiln_c99_clone_arena_prepare(&arena, heap, source, 2 * heap->nursery.capacity)
+            != KILN_C99_OK || !arena.certified || arena.side_count != 1) return 6;
+    copy_value = arena.capsule.root;
+    if (copy_value.tag != KILN_VALUE_OBJECT) return 5;
     copy = (kiln_object *)(uintptr_t)copy_value.bits;
-    if (chunk == NULL || chunk->next != NULL || arena.side_count != 1 ||
+    if (arena.storage.filled == NULL || arena.storage.filled->next != NULL ||
         kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL ||
         copy == original || copy->slots[2] != kiln_val_from_boundary(copy_value)) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
+        kiln_c99_clone_arena_dispose(&arena);
         return 7;
     }
     array = (kiln_array *)KILN_VAL_PTR(copy->slots[0]);
     if (array == NULL || array->count != 128 || array->candidate_elements == 0 ||
         array->elements[0] != copy->slots[1] || copy->slots[1] == original->slots[1]) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
+        kiln_c99_clone_arena_dispose(&arena);
         return 8;
     }
     sender_epoch = heap->epoch;
     kiln_c99_gc_collect(heap, 1);
     if (heap->epoch <= sender_epoch ||
         kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
+        kiln_c99_clone_arena_dispose(&arena);
         return 15;
     }
-    kiln_c99_gc_heap_init(&arena_heap);
-    if (!kiln_c99_heap_adopt_chunks(&arena_heap, chunk)) {
-        kiln_c99_clone_arena_dispose(&arena, 0);
-        kiln_c99_nursery_destroy(&arena_heap.nursery);
-        return 9;
-    }
-    kiln_c99_clone_arena_dispose(&arena, 1);
-    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL ||
-        kiln_c99_gc_lookup_interior(&arena_heap, (uintptr_t)copy) == NULL ||
-        !kiln_c99_graph_capsule_prepare(&arena_heap, chunk, copy_value, &capsule)) return 10;
-    if (!kiln_c99_graph_capsule_receiver_preflight(heap, &capsule.needs, reservation) ||
-        !kiln_c99_graph_capsule_detach(&arena_heap, &capsule)) return 16;
-    if (kiln_c99_gc_lookup_interior(&arena_heap, (uintptr_t)copy) != NULL ||
-        kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) != NULL) return 17;
-    kiln_c99_graph_capsule_adopt(heap, &capsule, reservation);
+    if (kiln_c99_clone_arena_adopt(&arena, heap, 0) || arena.adopted ||
+        arena.storage.filled == NULL) return 23;
+    if (!kiln_c99_clone_arena_adopt(&arena, heap, reservation) || !arena.adopted)
+        return 16;
     if (heap->realm.graph_inbox_root.bits != copy_value.bits ||
         kiln_c99_gc_lookup_interior(heap, (uintptr_t)copy) == NULL) return 18;
-    kiln_c99_graph_capsule_dispose(&capsule);
-    kiln_c99_nursery_destroy(&arena_heap.nursery);
+    kiln_c99_clone_arena_dispose(&arena);
+    /* A discarded prepared handle must free every chunk and side buffer. Multiple chunks
+     * also exercise the view's reversed list, not just its first chunk. */
+    {
+        char bytes[160];
+        size_t before;
+        memset(bytes, 'x', sizeof bytes);
+        heap->stress = 0;
+        if (kiln_c99_new_array_with_capacity(&source_array, 2048, 0) != KILN_C99_OK)
+            return 19;
+        for (size_t index = 0; index < 2048; ++index) {
+            kiln_value item = kiln_c99_copy_text(bytes, sizeof bytes);
+            if (item.tag != KILN_VALUE_STRING ||
+                kiln_c99_array_push(source_array, item) != KILN_C99_OK) return 20;
+        }
+        before = heap->count;
+        if (kiln_c99_clone_arena_prepare(&arena, heap, source_array,
+                                          4 * heap->nursery.capacity) != KILN_C99_OK ||
+            arena.capsule.needs.regions < 2 || arena.side_count != 1 ||
+            heap->count != before) return 21;
+        kiln_c99_clone_arena_dispose(&arena);
+        if (arena.storage.filled != NULL || arena.side_count != 0 ||
+            heap->count != before) return 22;
+    }
     return 0;
 }
 int main(void) {
