@@ -14,6 +14,7 @@ export class Counter extends Actor {
     return this.count;
   }
   echo(value) { return value; }
+  holdGraph(value) { return new Promise(() => {}); }
   growTransferredArray(value) {
     if (value.length !== 100000 || value[0] !== 3 || value[99999] !== 3) return null;
     value[200000] = 4;

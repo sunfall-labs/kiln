@@ -7,6 +7,16 @@ const owner = await spawnActor({
   module: new URL('./support/actor-counter.mjs', import.meta.url),
   export: 'Counter', args: [0], mailboxCapacity: 2,
 });
+const beforePost = transfer(isolate(() => ({ answer: 17 })));
+const earlyController = new AbortController();
+const snapshotTrigger = { get value() { earlyController.abort(); return 1; } };
+let earlyAborted = false;
+try { await owner.ref.call('echo', [beforePost, snapshotTrigger], { signal: earlyController.signal }); }
+catch (error) { earlyAborted = error.name === 'AbortError'; }
+if (!earlyAborted) throw new Error('snapshot abort was not observed');
+const retried = await owner.ref.call('echo', [beforePost]);
+if (retried.answer !== 17) throw new Error('unpublished graph ticket was consumed by abort');
+
 const ticket = transfer(isolate(() => ({ answer: 42, values: [1, 2, 3] })));
 const controller = new AbortController();
 const internals = MessagePort[Symbol.for('kiln.messagePort')];
@@ -22,7 +32,9 @@ try {
     }
     return result;
   };
-  try { await owner.ref.call('echo', [ticket], { signal: controller.signal }); }
+  // A completed reply is allowed to win a later abort. Hold the actor's result so this probe
+  // exercises only publication followed by abort, regardless of how the worker is scheduled.
+  try { await owner.ref.call('holdGraph', [ticket], { signal: controller.signal }); }
   catch (error) { aborted = error.name === 'AbortError'; }
 } finally {
   internals.workerOp = original;
@@ -33,7 +45,7 @@ try {
   try { await owner.ref.call('echo', [ticket]); }
   catch (error) { consumed = error.name === 'DataCloneError'; }
   if (!consumed) throw new Error('published graph ticket was restored after abort');
-  console.log('published graph stayed consumed after abort');
+  console.log('unpublished graph retried; published graph stayed consumed after abort');
 } finally {
-  await owner.stop();
+  await owner.stop({ force: true });
 }

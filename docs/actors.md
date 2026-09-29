@@ -87,8 +87,10 @@ in its source graph.
   keys in JavaScript enumeration order. Accessors, non-default property descriptors
   and unsupported host objects raise `DataCloneError` during preparation.
 - `isolate(factory)` and `transfer(handle)` are the explicit object-graph move
-  API for a graph constructed in exclusive storage. The native runtime must
-  prove that the sender has no remaining reference into the graph. A graph that
+  API for a graph constructed in exclusive storage. Both engines prove that
+  the sender has no remaining reference into the graph. Native moves certified
+  heap chunks without copying; the interpreter encodes and reconstructs the
+  verified graph because its ordinary objects cannot cross threads. A graph that
   cannot pass that proof raises `DataCloneError` and leaves its ticket usable in
   the sender. Use `prepareTransfer` when the source must remain usable, or
   ordinary cloned arguments when a separate copy is sufficient.
