@@ -96,8 +96,8 @@ pub struct CallPlan {
     /// Reads of a known binding that is never marked uninitialized: the binding holds
     /// `undefined` and then the closure, so the read needs no dead-zone check.
     pub unchecked: HashSet<ValueId>,
-    /// Reads of a settled binding stored exactly once: the value is the same at every read,
-    /// so a fact checked about it at entry holds for the whole body.
+    /// Reads of a binding initialized once: an entry guard accepting its initialized value
+    /// proves that value stays fixed for the whole body. This does not waive dead-zone checks.
     pub invariant: HashSet<ValueId>,
     /// Per proto: whether its typed entry is proven to return a number, and so hands its
     /// result back as a `double`.
@@ -1914,12 +1914,65 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
         for (owner, vid) in reads.get(binding).into_iter().flatten() {
             values_of(&mut known, *owner).unchecked.insert(*vid);
         }
-        // A settled binding with one store holds one value for the rest of the program: every
-        // read of it, from wherever, answers the same thing.
-        if stores.get(binding).is_some_and(|s| s.len() == 1) {
-            for (owner, vid) in reads.get(binding).into_iter().flatten() {
-                values_of(&mut known, *owner).invariant.insert(*vid);
-            }
+    }
+    // An effectful prefix may call a closure before its captured binding is initialized.
+    // That prevents unconditional dead-zone elimination, but not guarded specialization:
+    // an array entry guard fails on the uninitialized sentinel. Once the sole store has
+    // supplied an array, no later execution can change this cell. Require that store outside
+    // every control-flow cycle, and reject any subsequent uninitialization as well.
+    let mut store_repeats = HashMap::new();
+    for (binding, binding_stores) in &stores {
+        let [store] = binding_stores.as_slice() else {
+            continue;
+        };
+        let graph = graph_of(binding.owner);
+        // Parameters already contain an argument before their first explicit store. An
+        // entry guard could accept that argument even though the sole store is still ahead.
+        if store.owner != binding.owner || binding.slot < graph.parameter_count {
+            continue;
+        }
+        let Some(entry) = graph.block(graph.entry_block) else {
+            continue;
+        };
+        let repeats = *store_repeats
+            .entry((binding.owner, store.block))
+            .or_insert_with(|| {
+                let Some(block) = graph.block(store.block) else {
+                    return true;
+                };
+                let mut pending = block.successors.clone();
+                let mut visited = HashSet::new();
+                while let Some(next) = pending.pop() {
+                    if next == store.block {
+                        return true;
+                    }
+                    if visited.insert(next) {
+                        let Some(block) = graph.block(next) else {
+                            return true;
+                        };
+                        pending.extend(block.successors.iter().copied());
+                    }
+                }
+                false
+            });
+        if repeats
+            || !entry.predecessors.is_empty()
+            || graph.blocks.iter().any(|block| {
+                block
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .any(|(position, (_, op))| {
+                        matches!(op, GraphOp::MarkUninitialized(slot) if *slot == binding.slot)
+                            && (block.id != graph.entry_block
+                                || (store.block == graph.entry_block && position > store.position))
+                    })
+            })
+        {
+            continue;
+        }
+        for (owner, vid) in reads.get(binding).into_iter().flatten() {
+            values_of(&mut known, *owner).invariant.insert(*vid);
         }
     }
     for (binding, index) in &known_bindings {
