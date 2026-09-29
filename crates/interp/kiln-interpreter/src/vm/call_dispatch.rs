@@ -20,11 +20,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `Return`, so pushing anything here would leave a stray value on the caller's stack.
     pub(super) fn invoke(
         &mut self,
-        method: Value,
-        receiver: Value,
-        arguments: Vec<Value>,
+        mut method: Value,
+        mut receiver: Value,
+        mut arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
+        let mut forwarded_call = false;
+        // Resolve `.call` and `.apply` before entering the final callee. A compiled target
+        // pushes a frame whose realm must stay current until that frame returns; entering it
+        // through a temporary native-method scope would restore the old realm too early.
+        while let Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) =
+            &method
+        {
+            forwarded_call = true;
+            let realm = value_realm(&method);
+            let (this_value, forwarded) = self.entering(realm, |vm| {
+                vm.forwarded_function_arguments(*native, &arguments, instruction)
+            })?;
+            method = receiver;
+            receiver = this_value;
+            arguments = forwarded;
+        }
+        if forwarded_call && matches!(&method, Value::Function(_)) {
+            // `call_with_this` records the caller's realm in the saved frame and installs the
+            // closure's realm. The run loop restores the saved realm on `Return`.
+            return self.invoke_dispatch(method, receiver, arguments, instruction);
+        }
+        if forwarded_call {
+            // Native built-ins, proxies and bound functions may call into JavaScript before
+            // returning. Their ordinary call path owns that immediate result and its nested
+            // frame lifetime; sending them through the frame dispatcher changes that contract.
+            return self
+                .call_value(&method, receiver, arguments, instruction)
+                .map(Some);
+        }
         let realm = value_realm(&method);
         self.entering(realm, |vm| {
             vm.invoke_dispatch(method, receiver, arguments, instruction)
@@ -46,14 +75,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 self.mutate_through_proxy(native, &receiver, &arguments, instruction)
                     .map(Some)
-            }
-            Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) => {
-                let (this_value, forwarded) =
-                    self.forwarded_function_arguments(native, &arguments, instruction)?;
-                // `invoke` pushes a compiled target's frame onto the existing VM loop. Calling
-                // `call_value` here recursively runs a fresh loop for every `.call` and can
-                // exhaust the Rust stack before the JavaScript frame limit is reached.
-                self.invoke(receiver, this_value, forwarded, instruction)
             }
             Value::Native(native, _) => {
                 // A typed array reached through one of the generic array methods walks as its
@@ -270,6 +291,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // reached, so both go through one path.
             // A wrapped function ignores it too, and for a stronger reason: a receiver would be
             // one more object crossing the boundary, which the wrapping does not permit.
+            // A proxy keeps the receiver but must run its `apply` trap (or its target), which
+            // the ordinary call path owns.
+            value @ Value::Proxy(_) => self
+                .call_value(&value, receiver, arguments, instruction)
+                .map(Some),
             value if forwards_to_call_value(&value) => self
                 .call_value(&value, receiver, arguments, instruction)
                 .map(Some),
