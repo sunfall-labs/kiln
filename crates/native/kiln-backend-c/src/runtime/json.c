@@ -1036,7 +1036,8 @@ static int kiln_c99_message_decode_val(kiln_c99_message_decode *state, kiln_valu
 }
 
 /* 0: decoded, 1: let the TypeScript decoder handle it, negative: allocation failure. */
-static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, kiln_value *out) {
+static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, int plain_encoded,
+                                         kiln_value *out) {
     kiln_c99_message_decode state;
     size_t ports;
     int status;
@@ -1047,8 +1048,13 @@ static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count,
     state.refs_seen = 0;
     status = kiln_c99_message_word(&state, &ports);
     if (status != KILN_C99_OK || ports != 0) return KILN_C99_CLONE_BAIL;
-    status = kiln_c99_message_plain_val(&state, 0);
-    if (status != KILN_C99_OK || state.at != count) return KILN_C99_CLONE_BAIL;
+    /* The shared Rust plain encoder has already checked every node and emitted only the tags
+     * this decoder accepts. Other token producers still need a full preflight before the first
+     * receiver allocation, so an unsupported message can fall back without a partial graph. */
+    if (!plain_encoded) {
+        status = kiln_c99_message_plain_val(&state, 0);
+        if (status != KILN_C99_OK || state.at != count) return KILN_C99_CLONE_BAIL;
+    }
     state.at = 1;
     status = kiln_c99_new_array(&state.refs);
     if (status != KILN_C99_OK) return status;

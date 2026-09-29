@@ -176,8 +176,8 @@ int kiln_worker_post_plain(uint64_t port, uint64_t root, void *context,
     (void)port; (void)root; (void)context; (void)describe; (void)field;
     return 0;
 }
-int kiln_worker_take(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, void **out_message) {
-    (void)port; (void)out_kind; (void)out_tokens; (void)out_count; (void)out_message;
+int kiln_worker_take(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, uint32_t *out_plain, void **out_message) {
+    (void)port; (void)out_kind; (void)out_tokens; (void)out_count; (void)out_plain; (void)out_message;
     return 0;
 }
 void kiln_worker_message_free(void *message) { (void)message; }

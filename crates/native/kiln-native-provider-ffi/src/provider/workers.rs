@@ -377,6 +377,7 @@ unsafe fn tokens_from_c(tokens: *mut WorkerToken, count: u64) -> Option<Vec<Toke
 struct Received {
     tokens: Vec<WorkerToken>,
     _message: Vec<Token>,
+    plain_encoded: bool,
 }
 
 fn token_to_c(token: &mut Token) -> WorkerToken {
@@ -510,10 +511,10 @@ pub unsafe extern "C" fn kiln_worker_post_plain(
             keys: std::array::from_fn(|_| None),
             key_count: 0,
         };
-        let Some(tokens) = workers::encode_plain(&mut source, root) else {
+        let Some(message) = Message::from_plain(workers::kind::USER, &mut source, root) else {
             return 0;
         };
-        let _ = workers::post(port, Message::new(workers::kind::USER, tokens));
+        let _ = workers::post(port, message);
         1
     })
 }
@@ -531,12 +532,14 @@ pub unsafe extern "C" fn kiln_worker_take(
     out_kind: *mut u32,
     out_tokens: *mut *mut WorkerToken,
     out_count: *mut u64,
+    out_plain: *mut u32,
     out_message: *mut *mut c_void,
 ) -> i32 {
     ffi(|| {
         if out_kind.is_null()
             || out_tokens.is_null()
             || out_count.is_null()
+            || out_plain.is_null()
             || out_message.is_null()
         {
             return INVALID_ARGUMENT;
@@ -544,16 +547,19 @@ pub unsafe extern "C" fn kiln_worker_take(
         let Some(mut message) = workers::take(port) else {
             return 0;
         };
+        let plain_encoded = message.is_plain_encoded();
         let tokens: Vec<WorkerToken> = message.tokens.iter_mut().map(token_to_c).collect();
         let mut received = Box::new(Received {
             tokens,
             _message: message.tokens,
+            plain_encoded,
         });
         // SAFETY: the out-pointers were checked above.
         unsafe {
             out_kind.write(message.kind);
             out_tokens.write(received.tokens.as_mut_ptr());
             out_count.write(received.tokens.len() as u64);
+            out_plain.write(u32::from(received.plain_encoded));
             out_message.write(Box::into_raw(received).cast());
         }
         1
@@ -1443,7 +1449,7 @@ macro_rules! assert_worker_export {
         const _: unsafe extern "C" fn(u64, u64, *mut c_void, WorkerPlainDescribe, WorkerPlainField) -> i32 = kiln_worker_post_plain;
     };
     (realm, kiln_worker_take, worker_take) => {
-        const _: unsafe extern "C" fn(u64, *mut u32, *mut *mut WorkerToken, *mut u64, *mut *mut c_void) -> i32 = kiln_worker_take;
+        const _: unsafe extern "C" fn(u64, *mut u32, *mut *mut WorkerToken, *mut u64, *mut u32, *mut *mut c_void) -> i32 = kiln_worker_take;
     };
     (realm, kiln_worker_message_free, worker_message_free) => {
         const _: unsafe extern "C" fn(*mut c_void) = kiln_worker_message_free;
@@ -1557,9 +1563,23 @@ mod tests {
 
         let (mut kind, mut out, mut count, mut message) =
             (0u32, std::ptr::null_mut(), 0u64, std::ptr::null_mut());
+        let mut plain = 1u32;
         assert_eq!(
-            unsafe { kiln_worker_take(ports[1], &mut kind, &mut out, &mut count, &mut message) },
+            unsafe {
+                kiln_worker_take(
+                    ports[1],
+                    &mut kind,
+                    &mut out,
+                    &mut count,
+                    &mut plain,
+                    &mut message,
+                )
+            },
             1
+        );
+        assert_eq!(
+            plain, 0,
+            "an arbitrary token list is not a certified plain graph"
         );
         assert_eq!(count, 1);
         let received = unsafe { *out };
@@ -1681,10 +1701,24 @@ mod tests {
         assert!(tokens[2].handle.is_null(), "the message took the block");
         let (mut kind, mut out, mut count, mut message) =
             (9u32, std::ptr::null_mut(), 0u64, std::ptr::null_mut());
+        let mut plain = 1u32;
         // SAFETY: writable out-pointers.
         assert_eq!(
-            unsafe { kiln_worker_take(ports[1], &mut kind, &mut out, &mut count, &mut message) },
+            unsafe {
+                kiln_worker_take(
+                    ports[1],
+                    &mut kind,
+                    &mut out,
+                    &mut count,
+                    &mut plain,
+                    &mut message,
+                )
+            },
             1
+        );
+        assert_eq!(
+            plain, 0,
+            "a transferred buffer is not a certified plain graph"
         );
         assert_eq!((kind, count), (0, 4));
         // SAFETY: `count` tokens valid until the free below.

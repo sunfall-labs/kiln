@@ -378,7 +378,7 @@ macro_rules! provider_c_declaration {
         concat!("int ", stringify!($name), "(uint64_t port, uint64_t root, void *context, kiln_worker_plain_describe describe, kiln_worker_plain_field field);\n")
     };
     ($group:ident, $name:ident, worker_take) => {
-        concat!("int ", stringify!($name), "(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, void **out_message);\n")
+        concat!("int ", stringify!($name), "(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, uint32_t *out_plain, void **out_message);\n")
     };
     ($group:ident, $name:ident, worker_message_free) => {
         concat!("void ", stringify!($name), "(void *message);\n")

@@ -246,11 +246,30 @@ pub fn value_tokens(value: Token) -> Vec<Token> {
 pub struct Message {
     pub kind: u32,
     pub tokens: Vec<Token>,
+    /// Set only for a wire produced by `encode_plain`, which has already checked every tag.
+    plain_encoded: bool,
 }
 
 impl Message {
     pub fn new(kind: u32, tokens: Vec<Token>) -> Self {
-        Self { kind, tokens }
+        Self {
+            kind,
+            tokens,
+            plain_encoded: false,
+        }
+    }
+
+    /// Only the complete plain encoder can mark a wire as safe to decode without preflight.
+    pub fn from_plain<S: PlainSource>(kind: u32, source: &mut S, root: S::Handle) -> Option<Self> {
+        Some(Self {
+            kind,
+            tokens: encode_plain(source, root)?,
+            plain_encoded: true,
+        })
+    }
+
+    pub fn is_plain_encoded(&self) -> bool {
+        self.plain_encoded
     }
 
     fn duplicate(&self) -> Option<Message> {
@@ -259,7 +278,11 @@ impl Message {
             .iter()
             .map(Token::duplicate)
             .collect::<Option<Vec<_>>>()?;
-        Some(Self::new(self.kind, tokens))
+        Some(Self {
+            kind: self.kind,
+            tokens,
+            plain_encoded: self.plain_encoded,
+        })
     }
 }
 
@@ -2351,6 +2374,22 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, ["items", "self"]);
+    }
+
+    #[test]
+    fn only_plain_encoded_messages_skip_receiver_preflight() {
+        let (sender, receiver) = channel();
+        let plain = Message::from_plain(kind::USER, &mut PlainFixture, 0).unwrap();
+        assert!(plain.is_plain_encoded());
+        assert!(plain.duplicate().unwrap().is_plain_encoded());
+        assert!(post(sender, plain));
+        assert!(take(receiver).unwrap().is_plain_encoded());
+
+        let arbitrary = Message::new(kind::USER, vec![Token::Number(0.0)]);
+        assert!(!arbitrary.is_plain_encoded());
+        assert!(!arbitrary.duplicate().unwrap().is_plain_encoded());
+        close(sender);
+        close(receiver);
     }
 
     #[test]

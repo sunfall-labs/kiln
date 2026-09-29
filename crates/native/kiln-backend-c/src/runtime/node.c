@@ -2507,17 +2507,18 @@ static int kiln_c99_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_
 
 static int kiln_c99_worker_take(uint64_t port, kiln_value *result) {
     uint32_t kind = 0;
+    uint32_t plain_encoded = 0;
     kiln_worker_token *tokens = NULL;
     uint64_t count = 0, index;
     void *message = NULL;
     kiln_value list, pair, item;
-    int status = kiln_worker_take(port, &kind, &tokens, &count, &message);
+    int status = kiln_worker_take(port, &kind, &tokens, &count, &plain_encoded, &message);
     if (status == 0) {
         *result = kiln_c99_undefined();
         return KILN_C99_OK;
     }
     if (status < 0) KILN_C99_REFUSE("a message the runtime's ports would not hand over");
-    status = kiln_c99_decode_message_data(tokens, (size_t)count, &item);
+    status = kiln_c99_decode_message_data(tokens, (size_t)count, plain_encoded != 0, &item);
     if (status == KILN_C99_OK) {
         kiln_worker_message_free(message);
         status = kiln_c99_new_array(&pair);
