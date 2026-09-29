@@ -2285,6 +2285,11 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RESERVE 34
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
+#define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
+
+static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
+                                           kiln_value source, size_t budget);
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2636,10 +2641,21 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
     case KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS: {
         kiln_c99_realm_state *realm = kiln_c99_realm();
         int found = argc >= 2 && args[1].tag == KILN_VALUE_OBJECT &&
-                    realm->isolated_graphs.tag == KILN_VALUE_COLLECTION &&
-                    kiln_c99_collection_find(kiln_c99_collection_of(realm->isolated_graphs),
-                                             args[1]) >= 0.0;
+                    (kiln_c99_prepared_graph_has(kiln_c99_gc_heap(), args[1]) ||
+                     (realm->isolated_graphs.tag == KILN_VALUE_COLLECTION &&
+                      kiln_c99_collection_find(kiln_c99_collection_of(realm->isolated_graphs),
+                                               args[1]) >= 0.0));
         *result = kiln_c99_boolean(found);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_WORKER_OP_ACTOR_PREPARE: {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        int prepared = argc >= 3 && args[1].tag == KILN_VALUE_OBJECT &&
+                       (args[2].tag == KILN_VALUE_OBJECT ||
+                        args[2].tag == KILN_VALUE_ARRAY) &&
+                       kiln_c99_prepared_graph_create(heap, args[1], args[2],
+                                                       heap->nursery.capacity) == KILN_C99_OK;
+        *result = kiln_c99_boolean(prepared);
         return KILN_C99_OK;
     }
     case KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN:

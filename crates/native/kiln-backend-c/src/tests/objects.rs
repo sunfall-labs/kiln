@@ -3741,6 +3741,7 @@ static void prepared_enter(kiln_gc_heap *heap, uint64_t realm) {
     kiln_test_realm_active = 1;
     graph_active_realm = realm;
 }
+
 int main(void) {
     kiln_gc_heap sender, receiver;
     kiln_value source, handle, root;
@@ -3798,6 +3799,52 @@ int main(void) {
     assert!(
         run.status.success(),
         "actor prepared arena handoff failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_actor_prepare_operation_retains_only_an_opaque_handle() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int actor_prepare_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value args[3], source, handle, result, thrown;
+    kiln_c99_clone_arena *arena;
+    (void)context;
+    if (heap == NULL || kiln_c99_new_object(&source) != KILN_C99_OK ||
+        kiln_c99_new_object(&handle) != KILN_C99_OK) return 1;
+    args[0] = kiln_c99_number(37);
+    args[1] = handle;
+    args[2] = source;
+    if (kiln_c99_worker_op_raw(&result, args, 3, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 2;
+    arena = kiln_c99_prepared_graph_find(heap, handle);
+    if (arena == NULL || arena->capsule.root.bits == source.bits ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)arena->capsule.root.bits) != NULL) return 3;
+    args[0] = kiln_c99_number(27);
+    if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 4;
+    kiln_c99_gc_weak_resource_release(heap, handle);
+    if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(result)) return 5;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 6;
+    result = kiln_realm_enter(realm, actor_prepare_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-prepared-operation");
+    assert!(
+        run.status.success(),
+        "actor preparation operation failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

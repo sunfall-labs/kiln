@@ -3196,6 +3196,9 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RESERVE 34
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
+#define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
+static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {
