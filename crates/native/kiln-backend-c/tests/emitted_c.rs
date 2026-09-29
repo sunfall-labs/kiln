@@ -1087,7 +1087,10 @@ fn runtime_prelude_size() {
     // Full-chunk list ownership helpers replace linear membership/unlink searches (+35 net
     // runtime lines), bringing the measured prelude to 65,509. Only four helper declarations
     // are added to the ABI snapshot; no runtime section is duplicated.
-    const CEILING_LINES: usize = 65_600;
+    // Candidate-group manifests replace sender-wide discovery and duplicate mark-queue code.
+    // Nursery mark queries also check the chunk bitmap after cross-realm ownership changes.
+    // Together the measured prelude is 65,625 lines; these are new helpers, not duplicated parts.
+    const CEILING_LINES: usize = 65_800;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

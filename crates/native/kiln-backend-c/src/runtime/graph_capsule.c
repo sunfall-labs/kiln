@@ -51,7 +51,6 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
                                                      kiln_value root,
                                                      kiln_c99_graph_capsule *out,
                                                      kiln_gc_block *large_head) {
-    kiln_nursery_chunk *it;
     kiln_nursery_chunk **chunks = NULL;
     const kiln_gc_block *block;
     const void *payload;
@@ -86,16 +85,10 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
     } else {
         return 0;
     }
-    for (it = from->nursery.full; it != NULL; it = it->next)
-        if (it->candidate_id == chunk->candidate_id) ++count;
-    if (count == 0 || count > SIZE_MAX / sizeof *chunks) return 0;
-    if (count > 1) {
-        chunks = (kiln_nursery_chunk **)malloc(count * sizeof *chunks);
-        if (chunks == NULL) return 0;
-    }
-    for (it = from->nursery.full; it != NULL; it = it->next) {
+    if (!kiln_c99_candidate_group_snapshot(from, chunk, &chunks, &count)) return 0;
+    for (index = 0; index < count; ++index) {
+        kiln_nursery_chunk *it = chunks[index];
         size_t used;
-        if (it->candidate_id != chunk->candidate_id) continue;
         if (it->limit < it->base ||
             it->limit > (char *)it + from->nursery.capacity ||
             objects > SIZE_MAX - it->alloc_count || bytes > SIZE_MAX - it->alloc_bytes) goto fail;
@@ -104,8 +97,6 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
         objects += it->alloc_count;
         bytes += it->alloc_bytes;
         filled += used;
-        if (count > 1) chunks[index] = it;
-        ++index;
     }
     {
         const kiln_gc_block *large;
@@ -281,6 +272,7 @@ static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_caps
     for (index = 0; index < capsule->needs.regions; ++index) {
         kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
         kiln_c99_nursery_full_remove(&from->nursery, chunk);
+        kiln_c99_candidate_group_remove(chunk);
         kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
         if (chunk->candidate_state != 0) {
             size_t used = (size_t)(chunk->limit - chunk->base);
@@ -352,8 +344,7 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
         kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
         chunk->mark_epoch = 0;
         chunk->candidate_epoch = 0;
-        chunk->candidate_id = 0;
-        chunk->candidate_state = 0;
+        kiln_c99_candidate_chunk_clear(chunk);
         chunk->marked_count = 0;
         chunk->marked_bytes = 0;
         kiln_c99_nursery_full_push(&to->nursery, chunk);

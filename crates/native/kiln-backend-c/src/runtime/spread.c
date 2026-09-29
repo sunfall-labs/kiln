@@ -383,6 +383,7 @@ static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
         kiln_c99_arena_chunks_free(arena->storage.filled);
     }
     arena->storage.filled = NULL;
+    kiln_c99_graph_candidate_close(&arena->storage);
     if (arena->certified) kiln_c99_graph_capsule_dispose(&arena->capsule);
     memset(arena, 0, sizeof *arena);
 }

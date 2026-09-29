@@ -267,6 +267,8 @@ static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
  * whose every block is marked settles without a pass over its words. Clearing and scanning every
  * chunk at every collection is a pass over all of them each time -- quadratic under
  * `KILN_GC_STRESS`, which collects at every allocation and promotes a chunk each time. */
+typedef struct kiln_c99_candidate_group kiln_c99_candidate_group;
+
 typedef struct kiln_nursery_chunk {
     char *base;
     char *limit;
@@ -296,7 +298,21 @@ typedef struct kiln_nursery_chunk {
     uint8_t in_full;
     struct kiln_nursery_chunk *full_prev;
     struct kiln_nursery_chunk *next;
+    /* Candidate membership is separate from the collector's lists: a builder may still be
+     * filling a chunk, and collection or handoff may remove an interior group member. */
+    kiln_c99_candidate_group *candidate_group;
+    struct kiln_nursery_chunk *candidate_prev;
+    struct kiln_nursery_chunk *candidate_next;
 } kiln_nursery_chunk;
+
+struct kiln_c99_candidate_group {
+    uint64_t id;
+    kiln_nursery_chunk *head;
+    size_t count;
+    /* A synchronous factory or private arena pins metadata while its membership can be empty.
+     * Once that builder closes, only member chunks keep the manifest alive. */
+    int builder;
+};
 
 typedef struct kiln_gc_nursery {
     char *base;
@@ -412,6 +428,7 @@ typedef struct kiln_gc_heap {
     uint64_t actor_candidate_id;
     uint64_t actor_candidate_pending_id;
     int actor_candidate_collected;
+    kiln_c99_candidate_group *actor_candidate_group;
     /* The exclusive incoming proof owns this temporary side-span list. It is never a GC root. */
     const kiln_c99_graph_side_set *graph_proof_sides;
     int mark_failed;
@@ -795,10 +812,75 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     chunk->in_full = 0;
     chunk->full_prev = NULL;
     chunk->next = NULL;
+    chunk->candidate_group = NULL;
+    chunk->candidate_prev = NULL;
+    chunk->candidate_next = NULL;
     return chunk;
 }
 
+static kiln_c99_candidate_group *kiln_c99_candidate_group_new(uint64_t id) {
+    kiln_c99_candidate_group *group;
+    if (id == 0) return NULL;
+    group = (kiln_c99_candidate_group *)calloc(1, sizeof *group);
+    if (group != NULL) {
+        group->id = id;
+        group->builder = 1;
+    }
+    return group;
+}
+
+static void kiln_c99_candidate_group_close(kiln_c99_candidate_group *group) {
+    if (group == NULL) return;
+    if (!group->builder) abort();
+    group->builder = 0;
+    if (group->count == 0) free(group);
+}
+
+static void kiln_c99_candidate_group_add(kiln_c99_candidate_group *group,
+                                          kiln_nursery_chunk *chunk) {
+    if (group == NULL || chunk == NULL || chunk->candidate_group != NULL ||
+        group->count == SIZE_MAX) abort();
+    chunk->candidate_group = group;
+    chunk->candidate_id = group->id;
+    chunk->candidate_prev = NULL;
+    chunk->candidate_next = group->head;
+    if (group->head != NULL) group->head->candidate_prev = chunk;
+    group->head = chunk;
+    ++group->count;
+}
+
+static int kiln_c99_candidate_group_contains(const kiln_c99_candidate_group *group,
+                                               const kiln_nursery_chunk *chunk) {
+    if (group == NULL || chunk == NULL || chunk->candidate_group != group ||
+        chunk->candidate_id != group->id) return 0;
+    return chunk->candidate_prev == NULL ? group->head == chunk
+        : chunk->candidate_prev->candidate_group == group &&
+          chunk->candidate_prev->candidate_next == chunk;
+}
+
+static void kiln_c99_candidate_group_remove(kiln_nursery_chunk *chunk) {
+    kiln_c99_candidate_group *group = chunk->candidate_group;
+    if (group == NULL) return;
+    if (!kiln_c99_candidate_group_contains(group, chunk) || group->count == 0) abort();
+    if (chunk->candidate_prev == NULL) group->head = chunk->candidate_next;
+    else chunk->candidate_prev->candidate_next = chunk->candidate_next;
+    if (chunk->candidate_next != NULL)
+        chunk->candidate_next->candidate_prev = chunk->candidate_prev;
+    chunk->candidate_group = NULL;
+    chunk->candidate_prev = NULL;
+    chunk->candidate_next = NULL;
+    if (--group->count == 0 && !group->builder) free(group);
+}
+
+static void kiln_c99_candidate_chunk_clear(kiln_nursery_chunk *chunk) {
+    kiln_c99_candidate_group_remove(chunk);
+    chunk->candidate_id = 0;
+    chunk->candidate_epoch = 0;
+    chunk->candidate_state = 0;
+}
+
 static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    kiln_c99_candidate_group_remove(chunk);
     kiln_c99_gc_ptrset_remove(&nursery->regions, chunk);
     kiln_c99_gc_aligned_free(chunk);
 }
@@ -845,8 +927,46 @@ static kiln_nursery_chunk *kiln_c99_nursery_full_take_all(kiln_gc_nursery *nurse
     return list;
 }
 
+/* Metadata is not a GC root. Collection updates membership before returning storage, so this
+ * snapshot contains exactly the group's remaining sealed chunks, never unrelated heap chunks. */
+static int kiln_c99_candidate_group_snapshot(const kiln_gc_heap *heap,
+                                               kiln_nursery_chunk *seed,
+                                               kiln_nursery_chunk ***out, size_t *out_count) {
+    const kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **chunks;
+    kiln_nursery_chunk *chunk;
+    kiln_nursery_chunk *previous = NULL;
+    size_t count = 0;
+    if (heap == NULL || seed == NULL || out == NULL || out_count == NULL ||
+        !kiln_c99_nursery_full_contains(&heap->nursery, seed)) return 0;
+    group = seed->candidate_group;
+    if (!kiln_c99_candidate_group_contains(group, seed) || group->count == 0 ||
+        group->count > SIZE_MAX / sizeof *chunks) return 0;
+    chunks = (kiln_nursery_chunk **)malloc(group->count * sizeof *chunks);
+    if (chunks == NULL) return 0;
+    for (chunk = group->head; chunk != NULL; chunk = chunk->candidate_next) {
+        if (count == group->count || !kiln_c99_nursery_full_contains(&heap->nursery, chunk) ||
+            chunk->candidate_prev != previous ||
+            !kiln_c99_candidate_group_contains(group, chunk) ||
+            chunk->candidate_epoch != heap->epoch) {
+            free(chunks);
+            return 0;
+        }
+        chunks[count++] = chunk;
+        previous = chunk;
+    }
+    if (count != group->count) {
+        free(chunks);
+        return 0;
+    }
+    *out = chunks;
+    *out_count = count;
+    return 1;
+}
+
 /* Make `chunk`'s region the one allocation bumps through. */
 static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
+    if (chunk->candidate_group != NULL) abort();
     nursery->region = (char *)chunk;
     nursery->base = chunk->base;
     nursery->bump = chunk->base;
@@ -2568,6 +2688,20 @@ static inline void kiln_c99_nursery_note_mark(const kiln_gc_heap *heap, const ki
     chunk->marked_bytes += block->size;
 }
 
+/* Block epochs are realm-local. A transferred nursery block can carry the same header mark
+ * as the receiver's next collection, so the owning chunk's bitmap is the final authority.
+ * Resetting that chunk epoch on handoff invalidates all old marks without touching payloads. */
+static inline int kiln_c99_gc_is_marked(const kiln_gc_heap *heap, const kiln_gc_block *block) {
+    const kiln_nursery_chunk *chunk;
+    size_t bit;
+    if (block == NULL || block->mark != heap->epoch) return 0;
+    if ((block->kind & KILN_GC_FLAG_NURSERY) == 0) return 1;
+    chunk = kiln_c99_nursery_chunk_of(heap, block);
+    if (chunk->mark_epoch != heap->epoch) return 0;
+    bit = (size_t)((const char *)block - chunk->base) >> 4;
+    return (chunk->marks[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0;
+}
+
 /* A nursery block released by hand: its bits go, and its chunk holds one block fewer. */
 static void kiln_c99_nursery_note_release(kiln_gc_heap *heap, const kiln_gc_block *block) {
     kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(heap, block);
@@ -3252,7 +3386,8 @@ static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
         }
     }
     kiln_c99_nursery_use(nursery, chunk);
-    if (heap->actor_candidate_id != 0) chunk->candidate_id = heap->actor_candidate_id;
+    if (heap->actor_candidate_id != 0)
+        kiln_c99_candidate_group_add(heap->actor_candidate_group, chunk);
     kiln_c99_gc_bound(heap, nursery->region, nursery->capacity);
     return 1;
 }
@@ -3610,6 +3745,7 @@ static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_w
 static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
     while (chunks != NULL) {
         kiln_nursery_chunk *next = chunks->next;
+        kiln_c99_candidate_group_remove(chunks);
         kiln_c99_gc_aligned_free(chunks);
         chunks = next;
     }
@@ -3828,9 +3964,8 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 
 typedef struct kiln_c99_graph_walk {
     const kiln_gc_heap *heap;
-    kiln_nursery_chunk *const *chunks;
-    size_t chunk_count;
     const kiln_gc_block *large_head;
+    kiln_gc_ptrset regions;
     kiln_gc_ptrset reached;
     kiln_c99_graph_side_set sides;
     kiln_gc_block **queue;
@@ -3844,7 +3979,6 @@ typedef struct kiln_c99_graph_walk {
 static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
                                      const kiln_gc_block *block) {
     const kiln_nursery_chunk *chunk;
-    size_t index;
     uintptr_t address;
     if (block == NULL) return 0;
     if ((block->kind & KILN_GC_FLAG_LARGE) != 0) {
@@ -3854,9 +3988,8 @@ static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
         return 0;
     }
     chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
-    for (index = 0; index < walk->chunk_count; ++index) {
+    if (chunk != NULL && kiln_c99_gc_ptrset_contains(&walk->regions, chunk)) {
         size_t bit;
-        if (walk->chunks[index] != chunk) continue;
         address = (uintptr_t)block;
         if (address < (uintptr_t)chunk->base || address >= (uintptr_t)chunk->limit ||
             ((address - (uintptr_t)chunk->base) & 15) != 0) return 0;
@@ -4122,33 +4255,27 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     size_t seen = 0;
     size_t rooted_count;
     uint64_t id = 0;
+    const kiln_c99_candidate_group *group = NULL;
     int result = 0;
     if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
     walk.heap = heap;
-    walk.chunks = chunks;
-    walk.chunk_count = count;
     walk.large_head = large_head;
+    if (kiln_c99_gc_ptrset_grow(&walk.regions, count) != KILN_C99_OK) goto done;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
         int found = 0;
-        size_t previous;
         if (chunk == NULL || chunk->candidate_id == 0 || chunk->candidate_epoch != heap->epoch ||
             (id != 0 && chunk->candidate_id != id) ||
             !kiln_c99_gc_ptrset_contains(&heap->nursery.regions, chunk) ||
             !kiln_c99_chunk_sealed_for_move(&heap->nursery, chunk)) goto done;
         id = chunk->candidate_id;
-        for (previous = 0; previous < index; ++previous) if (chunks[previous] == chunk) goto done;
+        if (group == NULL) group = chunk->candidate_group;
+        if (!kiln_c99_candidate_group_contains(group, chunk) || group->count != count ||
+            kiln_c99_gc_ptrset_contains(&walk.regions, chunk) ||
+            kiln_c99_gc_ptrset_insert(&walk.regions, chunk) != KILN_C99_OK) goto done;
         found = kiln_c99_nursery_full_contains(&heap->nursery, chunk);
         if (!found || seen > SIZE_MAX - chunk->alloc_count) goto done;
         seen += chunk->alloc_count;
-    }
-    {
-        const kiln_nursery_chunk *it;
-        size_t group_count = 0;
-        for (it = heap->nursery.full; it != NULL; it = it->next) {
-            if (it->candidate_id == id) ++group_count;
-        }
-        if (group_count != count) goto done;
     }
     {
         const kiln_gc_block *large;
@@ -4208,6 +4335,7 @@ done:
     }
     free(walk.sides.spans);
     free(walk.queue);
+    free(walk.regions.table);
     free(walk.reached.table);
     return result;
 }
@@ -5080,7 +5208,7 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     kiln_gc_block *block;
     kiln_c99_graph_incoming_result result = KILN_C99_GRAPH_OUTGOING_UNPROVEN;
     uint64_t candidate_id;
-    size_t count = 0, index = 0, offset;
+    size_t count = 0, offset;
     uintptr_t word;
     int sides_installed = 0;
     if (!kiln_c99_actor_isolated_request_escrow(heap, request_id)) {
@@ -5094,14 +5222,7 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     chunk = kiln_c99_nursery_chunk_of(heap, block);
     candidate_id = chunk->candidate_id;
     if (candidate_id == 0) goto done;
-    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
-        if (chunk->candidate_id == candidate_id) ++count;
-    if (count == 0 || count > SIZE_MAX / sizeof *chunks) goto done;
-    chunks = (kiln_nursery_chunk **)malloc(count * sizeof *chunks);
-    if (chunks == NULL) goto done;
-    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
-        if (chunk->candidate_id == candidate_id) chunks[index++] = chunk;
-    if (index != count ||
+    if (!kiln_c99_candidate_group_snapshot(heap, chunk, &chunks, &count) ||
         !kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, block + 1, &sides,
                                                      NULL))
         goto done;
@@ -5249,6 +5370,11 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
     for (index = 0; index < count; ++index) {
         kiln_nursery_chunk *chunk = chunks[index];
         kiln_c99_nursery_full_remove(&from->nursery, chunk);
+        if (chunk->candidate_state != 0) {
+            size_t filled = (size_t)(chunk->limit - chunk->base);
+            if (filled > from->nursery.held_bytes) abort();
+            from->nursery.held_bytes -= filled;
+        }
         from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
         kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
         (void)kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk);
@@ -5258,8 +5384,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
             to->nursery.hi = (char *)chunk + to->nursery.capacity;
         kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
         chunk->mark_epoch = 0;
-        chunk->candidate_epoch = 0;
-        chunk->candidate_id = 0;
+        kiln_c99_candidate_chunk_clear(chunk);
         chunk->marked_count = 0;
         chunk->marked_bytes = 0;
         kiln_c99_nursery_full_push(&to->nursery, chunk);
@@ -5451,6 +5576,7 @@ struct kiln_c99_par_arena {
     size_t budget;
     /* Zero for the parallel worker arena; otherwise all its chunks are one graph candidate. */
     uint64_t candidate_id;
+    kiln_c99_candidate_group *candidate_group;
 };
 
 static uint64_t kiln_c99_graph_candidate_next_id;
@@ -5475,10 +5601,20 @@ static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_g
     id = kiln_c99_graph_candidate_new_id();
     if (id == 0) return 0;
     memset(arena, 0, sizeof *arena);
+    arena->candidate_group = kiln_c99_candidate_group_new(id);
+    if (arena->candidate_group == NULL) return 0;
     arena->heap = heap;
     arena->budget = budget;
     arena->candidate_id = id;
     return 1;
+}
+
+/* Close the builder, not its storage. Sealed chunks retain the manifest until collection,
+ * adoption or arena disposal removes them. No allocation may follow this boundary. */
+static void kiln_c99_graph_candidate_close(kiln_c99_par_arena *arena) {
+    if (arena->current != NULL) abort();
+    kiln_c99_candidate_group_close(arena->candidate_group);
+    arena->candidate_group = NULL;
 }
 
 /* A source-language factory can allocate through every C path, including the inlined hot bump
@@ -5493,15 +5629,21 @@ static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
         heap->actor_candidate_id != 0 || heap->actor_candidate_pending_id != 0) return 0;
     id = kiln_c99_graph_candidate_new_id();
     if (id == 0) return 0;
+    heap->actor_candidate_group = kiln_c99_candidate_group_new(id);
+    if (heap->actor_candidate_group == NULL) return 0;
     heap->actor_candidate_id = id;
     heap->actor_candidate_collected = 0;
     if (heap->nursery.bump > heap->nursery.base) kiln_c99_nursery_turn_chunk(heap);
     if (!heap->nursery.active || heap->nursery.region == NULL) {
         heap->actor_candidate_id = 0;
         heap->actor_candidate_collected = 0;
+        kiln_c99_candidate_group_close(heap->actor_candidate_group);
+        heap->actor_candidate_group = NULL;
         return 0;
     }
-    ((kiln_nursery_chunk *)heap->nursery.region)->candidate_id = id;
+    if (((kiln_nursery_chunk *)heap->nursery.region)->candidate_group == NULL)
+        kiln_c99_candidate_group_add(heap->actor_candidate_group,
+                                       (kiln_nursery_chunk *)heap->nursery.region);
     return 1;
 }
 
@@ -5515,6 +5657,7 @@ static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed);
 static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
     uint64_t id;
     kiln_nursery_chunk *chunk;
+    kiln_c99_candidate_group *group;
     if (heap == NULL) return 0;
     if (heap->actor_candidate_id == 0) {
         if (!completed && heap->actor_candidate_pending_id != 0) {
@@ -5524,35 +5667,23 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
         return 0;
     }
     id = heap->actor_candidate_id;
+    group = heap->actor_candidate_group;
     if (heap->nursery.active && heap->nursery.bump > heap->nursery.base)
         kiln_c99_nursery_turn_chunk(heap);
     if (heap->nursery.region != NULL) {
         chunk = (kiln_nursery_chunk *)heap->nursery.region;
-        if (chunk->candidate_id == id) {
-            chunk->candidate_id = 0;
-            chunk->candidate_epoch = 0;
-        }
+        if (chunk->candidate_id == id) kiln_c99_candidate_chunk_clear(chunk);
     }
     heap->actor_candidate_id = 0;
     if (!completed || heap->actor_candidate_collected) {
-        for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-            if (chunk->candidate_id == id) {
-                chunk->candidate_id = 0;
-                chunk->candidate_epoch = 0;
-            }
-        }
-        for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-            if (chunk->candidate_id == id) {
-                chunk->candidate_id = 0;
-                chunk->candidate_epoch = 0;
-            }
-        }
+        while (group->head != NULL) kiln_c99_candidate_chunk_clear(group->head);
+        heap->actor_candidate_group = NULL;
+        kiln_c99_candidate_group_close(group);
     } else {
-        for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-            if (chunk->candidate_id == id) {
-                chunk->candidate_state = 1;
-                heap->nursery.held_bytes += (size_t)(chunk->limit - chunk->base);
-            }
+        for (chunk = group->head; chunk != NULL; chunk = chunk->candidate_next) {
+            if (!kiln_c99_nursery_full_contains(&heap->nursery, chunk)) abort();
+            chunk->candidate_state = 1;
+            heap->nursery.held_bytes += (size_t)(chunk->limit - chunk->base);
         }
         heap->actor_candidate_pending_id = id;
     }
@@ -5565,22 +5696,28 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
  * only while the collector sees live blocks; an abandoned handle costs no permanent space. */
 static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed) {
     kiln_nursery_chunk *chunk;
+    kiln_c99_candidate_group *group;
     uint64_t id;
     if (heap == NULL || (id = heap->actor_candidate_pending_id) == 0) return;
-    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-        if (chunk->candidate_id != id || chunk->candidate_state != 1) continue;
+    group = heap->actor_candidate_group;
+    if (group == NULL || group->id != id) abort();
+    chunk = group->head;
+    while (chunk != NULL) {
+        kiln_nursery_chunk *next = chunk->candidate_next;
+        if (chunk->candidate_state != 1) abort();
         if (!sealed) {
             size_t filled = (size_t)(chunk->limit - chunk->base);
             if (filled > heap->nursery.held_bytes) abort();
             heap->nursery.held_bytes -= filled;
-            chunk->candidate_state = 0;
-            chunk->candidate_id = 0;
-            chunk->candidate_epoch = 0;
+            kiln_c99_candidate_chunk_clear(chunk);
         } else {
             chunk->candidate_state = 2;
         }
+        chunk = next;
     }
     heap->actor_candidate_pending_id = 0;
+    heap->actor_candidate_group = NULL;
+    kiln_c99_candidate_group_close(group);
 }
 
 /* Read once per process: `KILN_PARALLEL_ARENA_KIB`, else 256 MiB. 0 not yet read. */
@@ -5606,6 +5743,7 @@ static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
     if (chunk == NULL) return;
     arena->current = NULL;
     if (arena->bump == chunk->base) {
+        kiln_c99_candidate_group_remove(chunk);
         kiln_c99_gc_aligned_free(chunk);
         return;
     }
@@ -5621,11 +5759,13 @@ static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
 static int kiln_c99_par_arena_refill(kiln_c99_par_arena *arena) {
     size_t capacity = arena->heap->nursery.capacity;
     kiln_nursery_chunk *chunk;
+    if (arena->candidate_id != 0 && arena->candidate_group == NULL) return 0;
     kiln_c99_par_arena_seal(arena);
     if (arena->taken + capacity > arena->budget) return 0;
     chunk = kiln_c99_arena_chunk(capacity, arena->heap->nursery.bitmap_words);
     if (chunk == NULL) return 0;
-    chunk->candidate_id = arena->candidate_id;
+    if (arena->candidate_id != 0)
+        kiln_c99_candidate_group_add(arena->candidate_group, chunk);
     arena->taken += capacity;
     arena->current = chunk;
     arena->bump = chunk->base;
@@ -6314,7 +6454,7 @@ static void kiln_c99_key_purge(kiln_gc_heap *heap) {
             continue;
         }
         block = kiln_c99_gc_lookup(heap, entry->string);
-        if (block == NULL || block->mark != heap->epoch) {
+        if (block == NULL || !kiln_c99_gc_is_marked(heap, block)) {
             kiln_c99_key_delete_at(table, index);
             continue;
         }
@@ -6710,7 +6850,7 @@ static void kiln_c99_gc_release(void *payload) {
 }
 
 static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
-    if (block == NULL || block->mark == heap->epoch) return;
+    if (block == NULL || kiln_c99_gc_is_marked(heap, block)) return;
     block->mark = heap->epoch;
     heap->marked_blocks += 1;
     if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) kiln_c99_nursery_note_mark(heap, block);
@@ -6757,24 +6897,7 @@ static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
 }
 
 static void kiln_c99_gc_mark_now(kiln_gc_heap *heap, const void *payload) {
-    kiln_gc_block *block = kiln_c99_gc_lookup(heap, payload);
-    if (block == NULL || block->mark == heap->epoch) return;
-    block->mark = heap->epoch;
-    heap->marked_blocks += 1;
-    if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) kiln_c99_nursery_note_mark(heap, block);
-    if (heap->stack_len == heap->stack_capacity) {
-        size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
-        kiln_gc_block **grown =
-            (kiln_gc_block **)realloc(heap->stack, wanted * sizeof *heap->stack);
-        if (grown == NULL) {
-            /* A collection that cannot record what it saw must not free anything. */
-            heap->mark_failed = 1;
-            return;
-        }
-        heap->stack = grown;
-        heap->stack_capacity = wanted;
-    }
-    heap->stack[heap->stack_len++] = block;
+    kiln_c99_gc_mark_found(heap, kiln_c99_gc_lookup(heap, payload));
 }
 
 static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
@@ -7262,7 +7385,7 @@ static int kiln_c99_gc_weak_key_live(kiln_gc_heap *heap, const kiln_value *key) 
     kiln_gc_block *block;
     if (key->tag < KILN_VALUE_STRING) return 1;
     block = kiln_c99_gc_lookup(heap, (const void *)(uintptr_t)key->bits);
-    return block == NULL || block->mark == heap->epoch;
+    return block == NULL || kiln_c99_gc_is_marked(heap, block);
 }
 
 static kiln_gc_weak_resource *kiln_c99_gc_weak_resource_find(kiln_gc_heap *heap,
@@ -7317,7 +7440,7 @@ static void kiln_c99_gc_weak_resources_sweep(kiln_gc_heap *heap) {
         kiln_gc_weak_resource *entry = *link;
         kiln_gc_block *block = kiln_c99_gc_lookup(heap,
                                     (const void *)(uintptr_t)entry->handle.bits);
-        if (block != NULL && block->mark == heap->epoch) {
+        if (block != NULL && kiln_c99_gc_is_marked(heap, block)) {
             link = &entry->next;
             continue;
         }
@@ -7350,7 +7473,7 @@ static void kiln_c99_gc_weak_ephemerons(kiln_gc_heap *heap) {
              collection = collection->weak_next) {
             kiln_gc_block *block = kiln_c99_gc_lookup(heap, collection);
             size_t index;
-            if (block == NULL || block->mark != heap->epoch) continue;
+            if (block == NULL || !kiln_c99_gc_is_marked(heap, block)) continue;
             for (index = 0; index < collection->count; ++index) {
                 kiln_entry *entry = &collection->entries[index];
                 if (!entry->dead && kiln_c99_gc_weak_key_live(heap, &entry->key))
@@ -7364,7 +7487,7 @@ static void kiln_c99_gc_weak_ephemerons(kiln_gc_heap *heap) {
          collection = collection->weak_next) {
         kiln_gc_block *block = kiln_c99_gc_lookup(heap, collection);
         size_t index;
-        if (block == NULL || block->mark != heap->epoch) continue;
+        if (block == NULL || !kiln_c99_gc_is_marked(heap, block)) continue;
         for (index = 0; index < collection->count; ++index) {
             kiln_entry *entry = &collection->entries[index];
             if (entry->dead || kiln_c99_gc_weak_key_live(heap, &entry->key)) continue;
@@ -7431,7 +7554,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
     }
     while (block != NULL) {
         kiln_gc_block *next = block->next;
-        if (block->mark != heap->epoch) {
+        if (!kiln_c99_gc_is_marked(heap, block)) {
             kiln_c99_gc_unlink(heap, block);
             kiln_c99_gc_finalize(heap, block);
             heap->freed_blocks += 1;
@@ -7454,7 +7577,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         for (index = 0; index < slab->fresh; ++index) {
             kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
             if (slot->size == KILN_GC_SLOT_FREE) continue;
-            if (slot->mark != heap->epoch) {
+            if (!kiln_c99_gc_is_marked(heap, slot)) {
                 if (kiln_c99_gc_kind_finalized(slot->kind)) kiln_c99_gc_finalize(heap, slot);
                 heap->freed_blocks += 1;
                 heap->freed_bytes += slot->size;
@@ -7599,9 +7722,7 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     chunk->marked_count = 0;
     chunk->marked_bytes = 0;
     chunk->mark_epoch = 0;
-    chunk->candidate_id = 0;
-    chunk->candidate_epoch = 0;
-    chunk->candidate_state = 0;
+    kiln_c99_candidate_chunk_clear(chunk);
     chunk->next = nursery->spare;
     nursery->spare = chunk;
     nursery->spare_count += 1;
@@ -7754,7 +7875,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                     chunk = next;
                     continue;
                 }
-                chunk->candidate_state = 0;
+                kiln_c99_candidate_chunk_clear(chunk);
                 size_t survivors = kiln_c99_nursery_settle(heap, chunk, 0);
                 if (survivors == 0) {
                     reset_bytes += filled;
@@ -7786,6 +7907,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                 current->limit = heap->nursery.bump;
                 current->alloc_count = (size_t)heap->nursery.count;
                 current->alloc_bytes = (size_t)heap->nursery.bytes;
+                kiln_c99_candidate_chunk_clear(current);
                 survivors = kiln_c99_nursery_settle(heap, current, 0);
                 heap->nursery.count = current->alloc_count;
                 heap->nursery.bytes = current->alloc_bytes;
@@ -7956,6 +8078,8 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         }
     }
     kiln_c99_nursery_destroy(&heap->nursery);
+    kiln_c99_candidate_group_close(heap->actor_candidate_group);
+    heap->actor_candidate_group = NULL;
     /* A result retained outside its dead realm may have survived the final sweep. It cannot
      * name a usable realm-local facade after teardown, so release its lease here. */
     for (kiln_shared_facade *facade = heap->shared_facades; facade != NULL; ) {

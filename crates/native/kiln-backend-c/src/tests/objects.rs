@@ -2093,6 +2093,9 @@ int main(void) {
     kiln_c99_nursery_destroy(&another_receiver.nursery);
     kiln_c99_graph_candidate_next_id = UINT64_MAX;
     if (kiln_c99_graph_candidate_open(&graph_a, &sender, sender.nursery.capacity)) return 45;
+    kiln_c99_graph_candidate_close(&arena);
+    kiln_c99_graph_candidate_close(&graph_a);
+    kiln_c99_graph_candidate_close(&graph_b);
     return 0;
 }
 "#;
@@ -2178,6 +2181,7 @@ int main(void) {
     if (!full_list_valid(&sender.nursery, 2)) return 10;
     kiln_c99_nursery_destroy(&sender.nursery);
     kiln_c99_nursery_destroy(&receiver.nursery);
+    kiln_c99_graph_candidate_close(&candidate);
     return 0;
 }
 "#;
@@ -2185,6 +2189,96 @@ int main(void) {
     assert!(
         run.status.success(),
         "interior chunk handoff failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_graph_manifest_survives_partial_collection_and_held_chunk_handoff() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena arena;
+    kiln_val *root, *garbage, *child;
+    kiln_nursery_chunk *first, *dead, *last, **members = NULL, *invalid[3];
+    size_t count = 0;
+    kiln_c99_candidate_group *group;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    sender.fallback = receiver.fallback = 0;
+    sender.enabled = receiver.enabled = 1;
+    if (!kiln_c99_graph_candidate_open(&arena, &sender,
+                                         3 * sender.nursery.capacity)) return 1;
+    root = (kiln_val *)kiln_c99_par_alloc(&arena, KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 2;
+    first = arena.current;
+    kiln_c99_par_arena_seal(&arena);
+    garbage = (kiln_val *)kiln_c99_par_alloc(&arena, KILN_GC_CELL, sizeof *garbage);
+    if (garbage == NULL) return 3;
+    *garbage = KILN_VAL_UNDEFINED;
+    dead = arena.current;
+    kiln_c99_par_arena_seal(&arena);
+    child = (kiln_val *)kiln_c99_par_alloc(&arena, KILN_GC_CELL, sizeof *child);
+    if (child == NULL) return 4;
+    *child = KILN_VAL_TRUE;
+    *root = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, child);
+    last = arena.current;
+    kiln_c99_par_arena_seal(&arena);
+    group = arena.candidate_group;
+    kiln_c99_graph_candidate_close(&arena);
+    if (group->builder || group->count != 3 ||
+        kiln_c99_par_alloc(&arena, KILN_GC_CELL, sizeof *root) != NULL) return 5;
+    if (!kiln_c99_heap_adopt_chunks(&sender, arena.filled) ||
+        !kiln_c99_candidate_group_snapshot(&sender, first, &members, &count) || count != 3 ||
+        !kiln_c99_graph_candidate_closed(&sender, members, count, root)) return 6;
+    invalid[0] = first; invalid[1] = last; invalid[2] = last;
+    if (kiln_c99_graph_candidate_closed(&sender, invalid, 2, root) ||
+        kiln_c99_graph_candidate_closed(&sender, invalid, 3, root)) return 7;
+    for (size_t index = 0; index < count; ++index) {
+        members[index]->candidate_state = 2;
+        sender.nursery.held_bytes += (size_t)(members[index]->limit - members[index]->base);
+    }
+    free(members); members = NULL;
+    sender.realm.graph_inbox_root = kiln_c99_value(KILN_VALUE_CELL,
+        (uint64_t)(uintptr_t)root, NULL, 0);
+    /* The manifest is not a root: the middle chunk is collected, but its two neighbors
+     * retain their sealed allocation layout and the group now enumerates only those two. */
+    kiln_c99_gc_collect(&sender, 1);
+    if (group->count != 2 ||
+        !kiln_c99_candidate_group_snapshot(&sender, first, &members, &count) || count != 2 ||
+        !kiln_c99_graph_candidate_closed(&sender, members, count, root)) return 8;
+    for (size_t index = 0; index < count; ++index)
+        if (members[index] == dead) return 9;
+    if (!kiln_c99_candidate_group_contains(group, first) ||
+        !kiln_c99_candidate_group_contains(group, last)) return 10;
+    sender.realm.graph_inbox_root = kiln_c99_undefined();
+    if (!kiln_c99_heap_move_chunks(&sender, &receiver, members, count) ||
+        sender.nursery.held_bytes != 0 || first->candidate_group != NULL ||
+        last->candidate_group != NULL || first->candidate_state || last->candidate_state)
+        return 11;
+    receiver.realm.graph_inbox_root = kiln_c99_value(KILN_VALUE_CELL,
+        (uint64_t)(uintptr_t)root, NULL, 0);
+    free(members);
+    kiln_c99_gc_collect(&receiver, 1);
+    if (receiver.count != 2) {
+        fprintf(stderr, "receiver retained %zu blocks\n", receiver.count);
+        return 12;
+    }
+    if (!kiln_c99_gc_lookup(&receiver, root)) return 13;
+    if (!kiln_c99_gc_lookup(&receiver, child)) return 14;
+    if (*child != KILN_VAL_TRUE) return 15;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-manifest-collection-handoff");
+    assert!(
+        run.status.success(),
+        "graph manifest lifecycle failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
@@ -2210,6 +2304,7 @@ int main(void) {
     if (cell == NULL) return 2;
     *cell = KILN_VAL_UNDEFINED;
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     batch[0] = chunk;
@@ -2354,6 +2449,7 @@ __attribute__((noinline)) static uint64_t graph_control_request(kiln_gc_heap *he
     string->data = string + 1;
     memcpy((void *)string->data, "root", 4);
     kiln_c99_par_arena_seal(&arena);
+    kiln_c99_graph_candidate_close(&arena);
     chunk = arena.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
     handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
@@ -2622,6 +2718,7 @@ int main(void) {
     kiln_c99_graph_capsule_dispose(&capsule);
     kiln_c99_nursery_destroy(&sender.nursery);
     kiln_c99_nursery_destroy(&receiver.nursery);
+    kiln_c99_graph_candidate_close(&candidate);
     return 0;
 }
 "#;
@@ -3055,6 +3152,7 @@ int main(void) {
     text->data = text + 1;
     memcpy((void *)text->data, "yes", 3);
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
@@ -3167,6 +3265,7 @@ int main(void) {
     object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, date);
     *date = 123456.0;
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
@@ -3287,14 +3386,26 @@ int main(void) {
     first = candidate.filled;
     if (first == NULL || first->next == NULL ||
         !kiln_c99_heap_adopt_chunks(&sender, first)) return 5;
+    kiln_c99_graph_candidate_close(&candidate);
     root = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)items, NULL, 0);
+    for (kiln_nursery_chunk *part = first->candidate_group->head;
+         part != NULL; part = part->candidate_next) {
+        part->candidate_state = 2;
+        sender.nursery.held_bytes += (size_t)(part->limit - part->base);
+    }
+    sender.realm.graph_inbox_root = root;
+    kiln_c99_gc_collect(&sender, 1);
+    sender.realm.graph_inbox_root = kiln_c99_undefined();
+    if (sender.epoch != receiver.epoch + 1) return 13;
     if (!kiln_c99_graph_capsule_prepare(&sender, first, root, &capsule) ||
         capsule.needs.regions < 2) return 6;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
                                                     reservation) ||
         !kiln_c99_graph_capsule_detach(&sender, &capsule)) return 7;
     kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
-    kiln_c99_gc_mark_realm(&receiver);
+    /* Sender marks deliberately equal this receiver collection's epoch. The chunk bitmap
+     * must override those stale marks, including for the array's unmarked children. */
+    kiln_c99_gc_collect(&receiver, 1);
     if (((kiln_gc_block *)items - 1)->mark != receiver.epoch) return 8;
     for (index = 0; index < ITEMS; ++index) {
         kiln_object *object = (kiln_object *)KILN_VAL_PTR(items->elements[index]);
@@ -3304,7 +3415,6 @@ int main(void) {
             string->unit_len != 9 || memcmp(string->data, "item-", 5) != 0)
             return 9;
     }
-    kiln_c99_gc_collect(&receiver, 0);
     if (kiln_c99_gc_lookup(&receiver, orphan) != NULL ||
         kiln_c99_gc_lookup(&receiver, temporary) != NULL) return 12;
     for (index = 0; index < ITEMS; ++index) {
@@ -3356,6 +3466,7 @@ int main(void) {
     if (cell == NULL) return 2;
     *cell = KILN_VAL_UNDEFINED;
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)cell, NULL, 0);
@@ -3437,6 +3548,7 @@ int main(void) {
     string->data = string + 1;
     memcpy((void *)string->data, "root", 4);
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     batch[0] = chunk;
@@ -3721,6 +3833,7 @@ int main(void) {
     free(outside->properties);
     free(outside_collection->entries);
     kiln_c99_nursery_destroy(&heap.nursery);
+    kiln_c99_graph_candidate_close(&candidate);
     return 0;
 }
 "#;
@@ -4315,6 +4428,7 @@ __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap
     string->data = string + 1;
     memcpy((void *)string->data, "root", 4);
     kiln_c99_par_arena_seal(&arena);
+    kiln_c99_graph_candidate_close(&arena);
     chunk = arena.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
     handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
@@ -4550,6 +4664,7 @@ static int graph_request_entry(void *context) {
     if (root == NULL) return 2;
     *root = KILN_VAL_UNDEFINED;
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     if (candidate.filled == NULL || !kiln_c99_heap_adopt_chunks(heap, candidate.filled)) return 3;
     batch[0] = candidate.filled;
     if (kiln_c99_new_object(&handle) != KILN_C99_OK) return 4;
@@ -4616,6 +4731,7 @@ static int graph_provider_entry(void *context) {
     if (root == NULL) return 2;
     *root = KILN_VAL_UNDEFINED;
     kiln_c99_par_arena_seal(&candidate);
+    kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 3;
     batch[0] = chunk;
