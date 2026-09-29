@@ -1923,17 +1923,26 @@ static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t i
 #if defined(__unix__) || defined(__APPLE__)
 static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
                                         uint64_t counts[KILN_GC_KIND_COUNT],
-                                        uint64_t bytes[KILN_GC_KIND_COUNT]) {
+                                        uint64_t bytes[KILN_GC_KIND_COUNT],
+                                        uint64_t closures[4]) {
     uint32_t kind = block->kind & KILN_GC_KIND_MASK;
     if (kind == KILN_GC_NONE || kind >= KILN_GC_KIND_COUNT ||
         (block->kind & KILN_GC_FLAG_DEAD) != 0) return;
     ++counts[kind];
     bytes[kind] += block->size;
+    if (kind == KILN_GC_CLOSURE && block->size >= sizeof(kiln_closure)) {
+        const kiln_closure *closure = (const kiln_closure *)(block + 1);
+        /* These are an opportunity bound, not a sharing proof: a site must also execute once
+         * per realm and all its metadata and observable identity need a realm-safe owner. */
+        ++closures[closure->upvalue_count != 0 ? 0 : closure->arrow ? 1 : 2];
+        if (closure->source == NULL) ++closures[3];
+    }
 }
 
 static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const char *limit,
                                         uint64_t counts[KILN_GC_KIND_COUNT],
-                                        uint64_t bytes[KILN_GC_KIND_COUNT]) {
+                                        uint64_t bytes[KILN_GC_KIND_COUNT],
+                                        uint64_t closures[4]) {
     size_t word;
     for (word = 0; word < chunk->bitmap_words; ++word) {
         uint64_t bits = chunk->bitmap[word];
@@ -1942,7 +1951,8 @@ static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const c
             const char *address = chunk->base + (bit << 4);
             bits &= bits - 1;
             if (address + sizeof(kiln_gc_block) <= limit)
-                kiln_c99_heap_profile_count((const kiln_gc_block *)address, counts, bytes);
+                kiln_c99_heap_profile_count((const kiln_gc_block *)address, counts, bytes,
+                                            closures);
         }
     }
 }
@@ -1962,6 +1972,7 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
     };
     uint64_t counts[KILN_GC_KIND_COUNT] = {0};
     uint64_t bytes[KILN_GC_KIND_COUNT] = {0};
+    uint64_t closures[4] = {0};
     uint64_t total_count = 0, total_bytes = 0;
     size_t slabs = 0, promoted = 0, full = 0;
     uint32_t kind;
@@ -1970,14 +1981,14 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
     kiln_gc_slab *slab;
     kiln_nursery_chunk *chunk;
     for (block = heap->head; block != NULL; block = block->next)
-        kiln_c99_heap_profile_count(block, counts, bytes);
+        kiln_c99_heap_profile_count(block, counts, bytes, closures);
     for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
         uint32_t index;
         ++slabs;
         for (index = 0; index < slab->fresh; ++index) {
             block = kiln_c99_gc_slab_slot(slab, index);
             if (block->size != KILN_GC_SLOT_FREE)
-                kiln_c99_heap_profile_count(block, counts, bytes);
+                kiln_c99_heap_profile_count(block, counts, bytes, closures);
         }
     }
     for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
@@ -1991,15 +2002,15 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         kiln_c99_introspect_field(&line, "used", (size_t)(chunk->limit - chunk->base));
         kiln_c99_introspect_flush(&line);
         ++promoted;
-        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes);
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures);
     }
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
         ++full;
-        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes);
+        kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures);
     }
     if (heap->nursery.active && heap->nursery.region != NULL)
         kiln_c99_heap_profile_chunk((const kiln_nursery_chunk *)heap->nursery.region,
-                                    heap->nursery.bump, counts, bytes);
+                                    heap->nursery.bump, counts, bytes, closures);
     for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
         total_count += counts[kind];
         total_bytes += bytes[kind];
@@ -2018,6 +2029,17 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
     kiln_c99_introspect_field(&line, "active", heap->nursery.active);
     kiln_c99_introspect_field(&line, "spare", heap->nursery.spare_count);
     kiln_c99_introspect_flush(&line);
+    if (counts[KILN_GC_CLOSURE] != 0) {
+        line.len = 0;
+        kiln_c99_introspect_text(&line, "kiln heap-profile closures");
+        kiln_c99_introspect_field(&line, "serial", heap->serial);
+        kiln_c99_introspect_field(&line, "pass", pass);
+        kiln_c99_introspect_field(&line, "capturing", closures[0]);
+        kiln_c99_introspect_field(&line, "arrows_no_upvalues", closures[1]);
+        kiln_c99_introspect_field(&line, "plain_no_upvalues", closures[2]);
+        kiln_c99_introspect_field(&line, "runtime_source", closures[3]);
+        kiln_c99_introspect_flush(&line);
+    }
     for (kind = 1; kind < KILN_GC_KIND_COUNT; ++kind) {
         if (counts[kind] == 0) continue;
         line.len = 0;
