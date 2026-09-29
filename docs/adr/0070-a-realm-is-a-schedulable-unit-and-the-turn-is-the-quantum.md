@@ -4,6 +4,10 @@
 
 Accepted, 2026-09-26. Decided by the project owner.
 
+Amended, 2026-09-28: Node-compatible workers with synchronous waits use dedicated threads;
+async-only actor realms and eligible top-level turns use the bounded scheduler. The amendment
+follows the worker wait liveness counterexample recorded under realms issue 09.
+
 Originally proposed, 2026-09-26.
 
 Supersedes ADR 0057 (region-isolated actors and zero-copy transfer): its goals stand, and its
@@ -48,6 +52,10 @@ Three facts in the code decide the shape:
 and between turns a realm may move to any of them. Everything concurrent in kiln is built from
 realms and three primitives: messages, a shared immutable region, and ownership transfer.**
 
+This is the default for realms whose turns can relinquish their generated stack. A
+Node-compatible worker may synchronously wait with that stack live; the exception below keeps
+its owner thread available for the entire wait and preserves Node's result and progress rules.
+
 ### Realms
 
 - A realm is single-threaded, deterministic and owns its heap, exactly as today. Nothing about the
@@ -67,12 +75,29 @@ realms and three primitives: messages, a shared immutable region, and ownership 
 
 ### The scheduler
 
-One set of scheduler threads, sized to the machine's cores, runs realm turns and the chunks of
-parallel built-ins (ADR 0069) from one work-stealing queue. Tokio remains the I/O reactor
-(ADR 0028); readiness wakes a realm, and the realm's turn is queued on the scheduler. There is no
-second pool, so the machine is never oversubscribed. A call that would block the thread
-(`Atomics.wait`, a synchronous host operation) is handed off so the scheduler thread keeps
-working, as Go does for system calls.
+One set of scheduler threads, sized to the machine's cores, runs eligible realm turns and the
+chunks of parallel built-ins (ADR 0069) from one work-stealing queue. Tokio remains the I/O
+reactor (ADR 0028); readiness wakes a realm, and its turn is queued on the scheduler. Parallel
+chunks have no separate pool. A blocked lane may hand its movable work to a replacement lane;
+its live synchronous stack remains on the original thread.
+
+#### Amendment: a live synchronous stack needs its own thread
+
+The bounded pool serves actors, parallel chunks and eligible top-level realm turns. Actors reject
+synchronous `Atomics.wait` and use messages or `Atomics.waitAsync`, whose waiter wakes a realm
+without holding a lane. Node-compatible `worker_threads` keep dedicated OS threads by default:
+they must accept synchronous waits, including infinite waits, and return through the same nested
+JavaScript and native frames. A blocked scheduled turn may start a replacement lane for movable
+work, but that replacement cannot run pinned notifier turns owned by the occupied lane. Two
+waiting parents with cross-routed pinned children form a deadlock under every finite fixed-lane
+routing rule; issue 09 has a focused waiter-list counterexample.
+
+Thus the cores-plus-reactor thread bound applies to async-only scheduled realms and parallel
+chunks, not to Node worker graphs that may block synchronously. A future stackful, GC-visible
+continuation could change this exception only after proving wait/notify progress, stack rooting,
+TLS and cache reclamation, cancellation, termination, and memory bounds. The investigation in
+`.scratch/realms-and-concurrency/worker-wait-continuation.md` records those gates. It is not a
+prerequisite for actors or Node-compatible workers to work correctly today.
 
 ### The three primitives
 
@@ -96,7 +121,7 @@ shared objects.
 
 | feature | built from |
 | --- | --- |
-| `node:worker_threads` | a realm, A, and C for transfer lists, with Node's semantics |
+| `node:worker_threads` | a dedicated realm thread when synchronous waits are possible, A, and C for transfer lists, with Node's semantics |
 | server scaling (`KILN_WORKERS`) | N realms of the program in one process on the scheduler, sharing B; processes remain available for crash isolation |
 | parallel built-ins (ADR 0069) | chunks on the scheduler over a realm blocked mid-turn, B's read path, and C to join worker arenas |
 | immutable shared structs | B, with an API decided in its own ADR |
@@ -125,8 +150,9 @@ of magnitude to reach tens of kilobytes.
 
 ## Consequences
 
-- One mechanism replaces five. `WorkerPool`, the separate Rayon pool, the fork-only scaling path and
-  the identity `isolate`/`transfer` are replaced or absorbed.
+- One realm and message model replaces five. The separate Rayon pool, the fork-only scaling path and
+  the identity `isolate`/`transfer` are replaced or absorbed; Node workers retain dedicated threads
+  for synchronous stack and wait semantics.
 - `worker_threads` becomes a first-class Node feature instead of a refusal, which the deploy plan
   needs (pino transports, piscina).
 - Server scaling shares one copy of the built-ins across every realm instead of one per process.
