@@ -698,7 +698,7 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                     workers::actor_claim_reservation(a, reservation, call, reply, sender, request)
                 };
                 let queued = receiver.is_some_and(|receiver| {
-                    super::realm::submit_graph_claim_request(receiver, request, reservation)
+                    super::realm::submit_graph_claim_request(receiver, request, reservation, reply)
                 });
                 if !queued && reservation != 0 {
                     workers::actor_unclaim_reservation(reservation, sender, request);

@@ -5093,6 +5093,7 @@ pub(crate) enum ScheduledEvent {
         receiver: u64,
         request: u64,
         reservation: u64,
+        reply: u64,
         status: Arc<AtomicU8>,
     },
 }
@@ -5128,7 +5129,12 @@ fn pending_graph_requests() -> &'static Mutex<PendingGraphRequests> {
 
 /// Called from the sender's generated grant callback. Only IDs cross to the coordinator; the
 /// C heap keeps the handle root in its own pending request until the sender rolls it back.
-pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64, reservation: u64) -> bool {
+pub(crate) fn submit_graph_claim_request(
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    reply: u64,
+) -> bool {
     let sender = active_realm_id();
     if sender == 0 || receiver == 0 || request == 0 {
         return false;
@@ -5153,6 +5159,7 @@ pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64, reservatio
             receiver,
             request,
             reservation,
+            reply,
             status,
         })
         .is_err()
@@ -5189,6 +5196,7 @@ fn refuse_graph_claim_request(
     receiver: u64,
     request: u64,
     reservation: u64,
+    reply: u64,
     status: Arc<AtomicU8>,
 ) {
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
@@ -5213,11 +5221,33 @@ fn refuse_graph_claim_request(
         coordinate_mixed_graph_request(sender, receiver, request, reservation, &status)
             .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
-    let _ = status.compare_exchange(
-        GRAPH_REQUEST_PENDING,
-        result,
-        Ordering::Release,
-        Ordering::Relaxed,
+    if status
+        .compare_exchange(
+            GRAPH_REQUEST_PENDING,
+            result,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        wake_graph_sender(reply, reservation);
+    }
+}
+
+fn wake_graph_sender(reply: u64, reservation: u64) {
+    if reply == 0 || reservation == 0 {
+        return;
+    }
+    // The worker operation authenticated this reply endpoint against the granted actor call.
+    // A numeric wake only prompts GRAPH_STATUS; it is never proof of publication by itself.
+    let _ = kiln_runtime::workers::enqueue(
+        reply,
+        kiln_runtime::workers::Message::new(
+            kiln_runtime::workers::kind::USER,
+            kiln_runtime::workers::value_tokens(kiln_runtime::workers::Token::Number(
+                reservation as f64,
+            )),
+        ),
     );
 }
 
@@ -5238,6 +5268,7 @@ fn dedicated_graph_coordinator() -> Option<GraphCoordinatorSender> {
                             receiver,
                             request,
                             reservation,
+                            reply,
                             status,
                         } = event
                         {
@@ -5246,6 +5277,7 @@ fn dedicated_graph_coordinator() -> Option<GraphCoordinatorSender> {
                                 receiver,
                                 request,
                                 reservation,
+                                reply,
                                 status,
                             );
                         }
@@ -5262,6 +5294,7 @@ fn refuse_dedicated_graph_claim_request(
     receiver: u64,
     request: u64,
     reservation: u64,
+    reply: u64,
     status: Arc<AtomicU8>,
 ) {
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
@@ -5281,12 +5314,17 @@ fn refuse_dedicated_graph_claim_request(
         coordinate_mixed_graph_request(sender, receiver, request, reservation, &status)
             .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
-    let _ = status.compare_exchange(
-        GRAPH_REQUEST_PENDING,
-        result,
-        Ordering::Release,
-        Ordering::Relaxed,
-    );
+    if status
+        .compare_exchange(
+            GRAPH_REQUEST_PENDING,
+            result,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        wake_graph_sender(reply, reservation);
+    }
 }
 
 /// A scheduled top-level realm can call a dedicated actor worker, and a dedicated actor can
@@ -6001,9 +6039,17 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
                     receiver,
                     request,
                     reservation,
+                    reply,
                     status,
                 } => {
-                    refuse_graph_claim_request(sender, receiver, request, reservation, status);
+                    refuse_graph_claim_request(
+                        sender,
+                        receiver,
+                        request,
+                        reservation,
+                        reply,
+                        status,
+                    );
                 }
             }
         }
@@ -6119,9 +6165,17 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                     receiver,
                     request,
                     reservation,
+                    reply,
                     status,
                 } => {
-                    refuse_graph_claim_request(sender, receiver, request, reservation, status);
+                    refuse_graph_claim_request(
+                        sender,
+                        receiver,
+                        request,
+                        reservation,
+                        reply,
+                        status,
+                    );
                 }
             }
         }

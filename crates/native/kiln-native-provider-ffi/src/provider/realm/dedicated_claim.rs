@@ -526,7 +526,7 @@ mod tests {
         }
         unsafe extern "C" fn submit(context: *mut c_void) -> i32 {
             let receiver = unsafe { *context.cast::<u64>() };
-            i32::from(!submit_graph_claim_request(receiver, 73, 1))
+            i32::from(!submit_graph_claim_request(receiver, 73, 1, 0))
         }
         unsafe extern "C" fn poll(context: *mut c_void) -> i32 {
             let observed = unsafe { &mut *context.cast::<u8>() };

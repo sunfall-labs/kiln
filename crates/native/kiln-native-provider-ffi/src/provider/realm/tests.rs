@@ -454,7 +454,7 @@ unsafe extern "C" fn graph_coordinator_identify(session: *mut c_void) -> u64 {
 
 unsafe extern "C" fn graph_coordinator_submit(context: *mut c_void) -> i32 {
     let receiver = unsafe { *context.cast::<u64>() };
-    i32::from(!submit_graph_claim_request(receiver, 41, 0))
+    i32::from(!submit_graph_claim_request(receiver, 41, 0, 0))
 }
 
 unsafe extern "C" fn graph_coordinator_poll(context: *mut c_void) -> i32 {

@@ -69,6 +69,8 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
       return new Promise((resolve, reject) => {
         let settled = false;
         let pendingGraphRequest = 0;
+        let pendingGraphReservation = 0;
+        let graphReplyClosed = false;
         let graphTicket: Ticket | undefined;
         let suspendedGraphHandle: any;
         let graphFailure: any = namedError("DataCloneError", "graph transfer needs ownership proof");
@@ -85,11 +87,17 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
           let status: any;
           try { status = internals.workerOp(GRAPH_STATUS, pendingGraphRequest); }
           catch { scheduleGraphPoll(); return; }
-          if (status === 0) { scheduleGraphPoll(); return; }
+          if (status === 0) {
+            // The host wakes this reply port when the request becomes terminal. A closed
+            // reply port cannot receive that wake, so only that path needs a timer retry.
+            if (graphReplyClosed) scheduleGraphPoll();
+            return;
+          }
           if (status === 4) {
             // The host publishes 4 only after the receiver owns the native root and the
             // sender's escrow entry is gone. A late abort cannot restore this ticket.
             pendingGraphRequest = 0;
+            pendingGraphReservation = 0;
             graphTicket?.consume();
             graphTicket = undefined;
             suspendedGraphHandle = undefined;
@@ -101,10 +109,11 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             return;
           }
           if (status !== 1 && status !== 2 && status !== 3) {
-            scheduleGraphPoll();
+            if (graphReplyClosed) scheduleGraphPoll();
             return;
           }
           pendingGraphRequest = 0;
+          pendingGraphReservation = 0;
           try { sender.postMessage({ kind: "cancel", id }); } catch {}
           const completion = deferredCompletion;
           deferredCompletion = undefined;
@@ -122,7 +131,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             // terminal result while the native ownership status catches up.
             deferredCompletion ??= { error, value };
             try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
-            scheduleGraphPoll();
+            pollGraph();
             return;
           }
           settled = true;
@@ -146,6 +155,10 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
         options?.signal?.addEventListener("abort", abort, { once: true });
         reply.port1.on("message", (message: any) => {
           if (settled) return;
+          if (typeof message === "number") {
+            if (pendingGraphRequest && message === pendingGraphReservation) pollGraph();
+            return;
+          }
           if (message?.kind === "grant") {
             const buffers: ArrayBuffer[] = [];
             const consumed: Ticket[] = [];
@@ -171,7 +184,10 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                 try {
                   const request = internals.workerOp(GRAPH_REQUEST, internals.portEndpoint(sender),
                     suspendedGraphHandle, reservation, id, internals.portEndpoint(reply.port1));
-                  if (Number.isSafeInteger(request) && request > 0) pendingGraphRequest = request;
+                  if (Number.isSafeInteger(request) && request > 0) {
+                    pendingGraphRequest = request;
+                    pendingGraphReservation = reservation;
+                  }
                 } catch { /* An unscheduled realm keeps the refusal and restores the ticket. */ }
                 throw namedError("DataCloneError", "graph transfer needs ownership proof");
               } else {
@@ -182,7 +198,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             } catch (error) {
               if (pendingGraphRequest) {
                 graphFailure = error;
-                scheduleGraphPoll();
+                pollGraph();
               } else {
                 try { sender.postMessage({ kind: "cancel", id }); } catch {}
                 finish(error);
@@ -197,7 +213,10 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
           } else if (message?.kind === "cloneError") finish(namedError("DataCloneError", message.value?.message || "actor result could not be cloned"));
           else if (message?.kind === "closed") finish(namedError("ActorClosedError", "actor stopped"));
         });
-        reply.port1.on("close", () => finish(namedError("ActorClosedError", "actor realm exited")));
+        reply.port1.on("close", () => {
+          graphReplyClosed = true;
+          finish(namedError("ActorClosedError", "actor realm exited"));
+        });
         reply.port1.start();
         try {
           if (sender.postMessage({ kind: "reserve", id, reply: reply.port2 }, [reply.port2]) === undefined) {
