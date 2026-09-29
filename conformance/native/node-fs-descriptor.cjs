@@ -1,5 +1,5 @@
 const fs = require('node:fs');
-const filename = `/var/tmp/kiln-descriptor-${process.pid}.txt`;
+const filename = `${process.env.TMPDIR || '/tmp'}/kiln-descriptor-${process.pid}.txt`;
 const fd = fs.openSync(filename, 'w');
 console.log(fs.writeSync(fd, 'worker'));
 fs.fsyncSync(fd);
