@@ -1941,6 +1941,8 @@ struct ModuleRealmShared {
     template_objects: TemplateObjectCache,
     intrinsics: Rc<Intrinsics>,
     isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
+    actor_realm_id: u64,
+    actor_graph_requests: Rc<RefCell<std::collections::HashMap<u64, u8>>>,
 }
 
 impl Default for ModuleRealmSession {
@@ -1964,6 +1966,8 @@ impl Default for ModuleRealmSession {
                 template_objects: std::collections::HashMap::new(),
                 intrinsics: Rc::new(Intrinsics::default()),
                 isolated_graphs: Rc::new(RefCell::new(Vec::new())),
+                actor_realm_id: kiln_runtime::workers::actor_request_id(),
+                actor_graph_requests: Rc::new(RefCell::new(std::collections::HashMap::new())),
             })),
         }
     }

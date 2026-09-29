@@ -93,7 +93,7 @@ function serve(): void {
   // leaves graph requests unavailable; ordinary cloned actor messages keep working.
   const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
   try { if (internals) internals.workerOp(BIND_RECEIVER, internals.portEndpoint(inbox)); }
-  catch { /* An interpreter or unscheduled realm has no pair-claim coordinator. */ }
+  catch { /* An unavailable host leaves cloned actor messages working. */ }
   capacity = init.capacity;
 
   function releaseGraphReservation(request: Reservation): void {
@@ -123,7 +123,9 @@ function serve(): void {
       const answer = internals.workerOp(
         GRAPH_RECEIVE, request.graphReservation, request.id, internals.portEndpoint(request.reply),
       );
-      if (!Array.isArray(answer) || answer.length !== 2) throw new Error("invalid graph receive result");
+      if (!Array.isArray(answer) || (answer.length !== 2 && answer.length !== 3)) {
+        throw new Error("invalid graph receive result");
+      }
       if (answer[0] === 0) {
         // The publication lease sends a PortWait wake on this inbox when it commits or
         // aborts. Retain the reservation without polling until that message arrives.
@@ -137,16 +139,17 @@ function serve(): void {
       if (!slot || !matchingGraphMarker(slot.holder[slot.key], request.graphReservation)) {
         throw new Error("graph placeholder changed after preflight");
       }
-      // The C inbox retains its root while this existing own data slot is written. Only the
-      // subsequent release acknowledges that the JavaScript mailbox now owns the graph.
-      slot.holder[slot.key] = answer[1];
+      // The native inbox retains its root, or the interpreter reservation retains its wire,
+      // while this existing own data slot is written. Release follows successful assignment.
+      slot.holder[slot.key] = answer[2] === true
+        ? internals.decodeMessage(answer[1])[0] : answer[1];
       request.graphSlot = undefined;
       request.graphWaiting = false;
       releaseGraphReservation(request);
       dispatch();
     } catch {
       // An allocation or assignment failed after publication may be retried because the C
-      // inbox still roots the graph. Never release a possibly published reservation here.
+      // inbox or interpreter reservation still roots the graph. Never release here.
       setTimeout(() => receiveGraph(request), 0);
     }
   }
@@ -240,7 +243,7 @@ function serve(): void {
   inbox.on("message", (message: any) => {
     if (typeof message === "number") {
       // A private wake is advisory; GRAPH_RECEIVE still authenticates the reservation and
-      // native inbox root. An unrelated or forged number cannot grant a graph to a caller.
+      // published payload. An unrelated or forged number cannot grant a graph to a caller.
       for (const request of pending) {
         if (request.graphWaiting && request.graphReservation === message) {
           receiveGraph(request);
@@ -270,7 +273,7 @@ function serve(): void {
               ? findGraphSlot(message.args, graphReservation) : undefined;
           } catch {
             // A malformed clone must not escape the inbox callback with a granted request
-            // still occupying capacity and a native reservation still rooted.
+            // still occupying capacity and a reservation still rooted.
             refuseGraph(request);
             return;
           }

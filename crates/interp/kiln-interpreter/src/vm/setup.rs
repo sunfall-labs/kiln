@@ -40,6 +40,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             current_realm: RealmId::PRIMARY,
             shared_facades: Rc::new(RefCell::new(SharedCache::default())),
             isolated_graphs: Rc::new(RefCell::new(Vec::new())),
+            actor_realm_id: kiln_runtime::workers::actor_request_id(),
+            actor_graph_requests: Rc::new(RefCell::new(std::collections::HashMap::new())),
             async_context: AsyncContext::default(),
             esm_body_pending_checkpoint: false,
             this_value: Value::Undefined,

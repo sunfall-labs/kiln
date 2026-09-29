@@ -414,6 +414,8 @@ struct ActorReservation {
     state: ActorReservationState,
     closing: bool,
     receiver_gone: bool,
+    plain_publication: bool,
+    plain_tokens: Option<Vec<Token>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -434,6 +436,17 @@ pub struct ActorPublicationLease {
 }
 
 impl ActorPublicationLease {
+    /// The interpreter publishes a portable plain wire under the same reservation lease
+    /// that the native coordinator uses for its collector chunks.
+    pub fn publish_plain_tokens(&self, tokens: Vec<Token>) {
+        let mut reservations = lock(actor_reservations());
+        let entry = reservations
+            .get_mut(&self.reservation)
+            .expect("leased actor reservation cannot disappear");
+        assert!(entry.state == ActorReservationState::Publishing && entry.plain_publication);
+        entry.plain_tokens = Some(tokens);
+    }
+
     fn wake_receiver(&self) {
         // A graph invoke may already be parked in the actor's JavaScript mailbox. A numeric
         // message is only a prompt to recheck its host-authenticated reservation, never proof
@@ -545,6 +558,8 @@ fn actor_reserve_for_worker(
                 state: ActorReservationState::Pending,
                 closing: false,
                 receiver_gone: false,
+                plain_publication: false,
+                plain_tokens: None,
             });
             return Some(id);
         }
@@ -619,6 +634,40 @@ pub fn actor_begin_publish(
     sender_request: u64,
     receiver_realm: u64,
 ) -> Option<ActorPublicationLease> {
+    actor_begin_publish_for(
+        reservation,
+        sender_realm,
+        sender_request,
+        receiver_realm,
+        false,
+    )
+}
+
+/// The interpreter uses the same lease, but announces that the host reservation itself owns
+/// the payload. Closing its endpoint can then discard a published wire without waiting for a
+/// native realm teardown that does not exist for interpreter workers.
+pub fn actor_begin_publish_plain(
+    reservation: u64,
+    sender_realm: u64,
+    sender_request: u64,
+    receiver_realm: u64,
+) -> Option<ActorPublicationLease> {
+    actor_begin_publish_for(
+        reservation,
+        sender_realm,
+        sender_request,
+        receiver_realm,
+        true,
+    )
+}
+
+fn actor_begin_publish_for(
+    reservation: u64,
+    sender_realm: u64,
+    sender_request: u64,
+    receiver_realm: u64,
+    plain_publication: bool,
+) -> Option<ActorPublicationLease> {
     if reservation == 0 || sender_realm == 0 || sender_request == 0 || receiver_realm == 0 {
         return None;
     }
@@ -633,6 +682,7 @@ pub fn actor_begin_publish(
         return None;
     }
     entry.state = ActorReservationState::Publishing;
+    entry.plain_publication = plain_publication;
     Some(ActorPublicationLease {
         reservation,
         receiver: entry.receiver,
@@ -704,6 +754,34 @@ pub fn actor_reservation_status(reservation: u64, request: u64, reply: u64, real
         }
         _ => -1,
     }
+}
+
+/// Read the interpreter's published wire only from the receiver named by the grant. Keep the
+/// reservation's copy until release: a failed JavaScript slot assignment can retry safely.
+pub fn actor_plain_tokens(
+    reservation: u64,
+    request: u64,
+    reply: u64,
+    realm: u64,
+) -> Option<Vec<Token>> {
+    let worker = current()?;
+    let reservations = lock(actor_reservations());
+    let entry = reservations.get(&reservation)?;
+    if entry.reader != worker.key
+        || entry.receiver_realm != realm
+        || entry.request != request
+        || entry.reply != reply
+        || entry.closing
+        || entry.state != ActorReservationState::Published
+    {
+        return None;
+    }
+    entry
+        .plain_tokens
+        .as_ref()?
+        .iter()
+        .map(Token::duplicate)
+        .collect()
 }
 
 #[derive(Default)]
@@ -974,7 +1052,25 @@ pub fn close(port: u64) {
                 || entry.receiver == peer
                 || entry.reply == port
                 || entry.reply == peer;
-            if affected && entry.state != ActorReservationState::Pending {
+            if entry.plain_publication && entry.receiver == port {
+                if entry.state == ActorReservationState::Publishing {
+                    entry.closing = true;
+                    entry.receiver_gone = true;
+                    return true;
+                }
+                return false;
+            }
+            if entry.plain_publication && entry.state != ActorReservationState::Pending {
+                // The sender or reply endpoint can close after publication while the actor
+                // still needs this wire. Only its receiving inbox or explicit release owns
+                // the last reference to the reservation.
+                return true;
+            }
+            if affected && entry.state == ActorReservationState::Publishing {
+                entry.closing = true;
+                return true;
+            }
+            if affected && entry.state == ActorReservationState::Published {
                 entry.closing = true;
                 return true;
             }
@@ -2579,6 +2675,20 @@ mod tests {
         assert!(lock(actor_reservations()).contains_key(&reservation));
         actor_revoke_realm(71);
         assert!(!lock(actor_reservations()).contains_key(&reservation));
+        let (plain_sender, plain_receiver) = channel();
+        let plain = actor_reserve_for_worker(receiver, 71, 91, 44, plain_receiver).unwrap();
+        assert_eq!(
+            actor_claim_reservation(sender, plain, 44, plain_sender, 81, 3),
+            Some(71)
+        );
+        let publishing = actor_begin_publish_plain(plain, 81, 3, 71).unwrap();
+        publishing.publish_plain_tokens(vec![Token::Number(0.0), Token::String("plain".into())]);
+        publishing.finish();
+        expect_actor_wake(receiver, plain);
+        close(plain_sender);
+        close(plain_receiver);
+        assert!(lock(actor_reservations()).contains_key(&plain));
+        assert!(!lock(actor_reservations()).get(&plain).unwrap().closing);
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);
@@ -2590,7 +2700,9 @@ mod tests {
         assert_eq!(actor_receiver_for_sender(sender), None);
         assert!(!actor_register(&delegated, &owner, sender));
         close(sender);
+        assert!(lock(actor_reservations()).contains_key(&plain));
         close(receiver);
+        assert!(!lock(actor_reservations()).contains_key(&plain));
     }
 
     #[tokio::test(flavor = "current_thread")]

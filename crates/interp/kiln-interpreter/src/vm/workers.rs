@@ -11,6 +11,7 @@
 use super::*;
 use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
+use std::collections::HashMap;
 
 struct InterpreterPlainSource {
     handles: Vec<Value>,
@@ -32,6 +33,60 @@ impl InterpreterPlainSource {
         self.object_order.push(None);
         handle
     }
+}
+
+/* `encode_plain` retains one handle for the root and one for every object/array edge it
+ * traverses, including repeated references. A closed graph has one escrow root and exactly
+ * those internal edges. With the encoder's temporary handles still live, each node must have
+ * twice as many strong Rc owners as handle occurrences. Any additional owner is a sender
+ * alias; a weak owner could become one after this check, so it also refuses the move. */
+fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
+    let mut owners: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+    for value in &source.handles {
+        let (identity, strong, weak) = match value {
+            Value::Object(object) => {
+                let data = object.borrow();
+                if data.weak_shared_target.is_some()
+                    || !data.finalization_cells.is_empty()
+                    || !data.namespace_cells.is_empty()
+                    || !data.extensible
+                    || data.frozen
+                {
+                    return false;
+                }
+                (
+                    Rc::as_ptr(object) as usize,
+                    Rc::strong_count(object),
+                    Rc::weak_count(object),
+                )
+            }
+            Value::Array(array) => {
+                let properties = array.properties.borrow();
+                if properties.weak_shared_target.is_some()
+                    || !properties.finalization_cells.is_empty()
+                    || !properties.namespace_cells.is_empty()
+                    || !properties.extensible
+                    || properties.frozen
+                    || !array.length_writable.get()
+                    || array.collection_index.borrow().is_some()
+                {
+                    return false;
+                }
+                (
+                    Rc::as_ptr(array) as usize,
+                    Rc::strong_count(array),
+                    Rc::weak_count(array),
+                )
+            }
+            _ => continue,
+        };
+        let entry = owners.entry(identity).or_insert((0, strong, weak));
+        entry.0 += 1;
+    }
+    !owners.is_empty()
+        && owners
+            .values()
+            .all(|(handles, strong, weak)| *weak == 0 && handles.checked_mul(2) == Some(*strong))
 }
 
 fn plain_object_array_index(key: &kiln_string::StringUnits) -> Option<u32> {
@@ -336,18 +391,122 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Native can inspect its raw object layout without invoking getters. The
             // interpreter keeps the existing ticket-aware TypeScript preparation path.
             OP_ACTOR_PLAIN_MESSAGE => Value::Boolean(false),
-            // The interpreter has no native candidate chunks or two-realm claim coordinator.
-            // These reserved operations fail closed while preserving the shared actor module's
-            // DataCloneError and unconsumed-ticket behavior.
-            OP_ACTOR_GRAPH_REQUEST => Value::Number(0.0),
-            OP_ACTOR_GRAPH_STATUS => Value::Number(1.0),
-            OP_ACTOR_GRAPH_RESERVE => Value::Number(0.0),
+            OP_ACTOR_BIND_RECEIVER => Value::Boolean(workers::actor_bind_receiver(
+                endpoint_of(first),
+                self.actor_realm_id,
+            )),
+            OP_ACTOR_GRAPH_RESERVE => Value::Number(
+                workers::actor_reserve(
+                    endpoint_of(first),
+                    self.actor_realm_id,
+                    endpoint_of(arguments.get(2)),
+                    endpoint_of(arguments.get(3)),
+                )
+                .unwrap_or(0) as f64,
+            ),
+            OP_ACTOR_GRAPH_REQUEST => {
+                let sender = endpoint_of(first);
+                let reservation = endpoint_of(arguments.get(3));
+                let call = endpoint_of(arguments.get(4));
+                let reply = endpoint_of(arguments.get(5));
+                let request = workers::actor_request_id();
+                let Some(Value::Object(handle)) = arguments.get(2) else {
+                    return Ok(Value::Number(0.0));
+                };
+                let tokens = {
+                    let isolated = self.isolated_graphs.borrow();
+                    let Some((_, graph)) = isolated.iter().find(|(key, _)| {
+                        key.strong_count() != 0 && key.as_ptr() == Rc::as_ptr(handle)
+                    }) else {
+                        return Ok(Value::Number(0.0));
+                    };
+                    let mut source = InterpreterPlainSource::new(graph.clone());
+                    let Some(tokens) = workers::encode_plain(&mut source, 0) else {
+                        return Ok(Value::Number(0.0));
+                    };
+                    if !plain_graph_exclusive(&source) {
+                        return Ok(Value::Number(0.0));
+                    }
+                    tokens
+                };
+                let Some(receiver) = workers::actor_claim_reservation(
+                    sender,
+                    reservation,
+                    call,
+                    reply,
+                    self.actor_realm_id,
+                    request,
+                ) else {
+                    return Ok(Value::Number(0.0));
+                };
+                let Some(lease) = workers::actor_begin_publish_plain(
+                    reservation,
+                    self.actor_realm_id,
+                    request,
+                    receiver,
+                ) else {
+                    workers::actor_unclaim_reservation(reservation, self.actor_realm_id, request);
+                    return Ok(Value::Number(0.0));
+                };
+                lease.publish_plain_tokens(tokens);
+                self.isolated_graphs
+                    .borrow_mut()
+                    .retain(|(key, _)| key.as_ptr() != Rc::as_ptr(handle));
+                lease.finish();
+                self.actor_graph_requests.borrow_mut().insert(request, 4);
+                Value::Number(request as f64)
+            }
+            OP_ACTOR_GRAPH_STATUS => Value::Number(
+                self.actor_graph_requests
+                    .borrow_mut()
+                    .remove(&endpoint_of(first))
+                    .unwrap_or(1) as f64,
+            ),
+            // The interpreter publication happens in the sender turn. Once op 30 returns a
+            // request ID, rollback is impossible; an abort must still observe status 4 and
+            // consume the ticket, just like a published native chunk transfer.
+            OP_ACTOR_GRAPH_CANCEL => Value::Boolean(false),
             OP_ACTOR_GRAPH_RECEIVE => {
-                Value::Array(ArrayData::new(vec![Value::Number(-1.0), Value::Undefined]))
+                let reservation = endpoint_of(first);
+                let call = endpoint_of(arguments.get(2));
+                let reply = endpoint_of(arguments.get(3));
+                let status = workers::actor_reservation_status(
+                    reservation,
+                    call,
+                    reply,
+                    self.actor_realm_id,
+                );
+                let tokens = (status == 1)
+                    .then(|| {
+                        workers::actor_plain_tokens(reservation, call, reply, self.actor_realm_id)
+                    })
+                    .flatten();
+                let wire = tokens.and_then(|tokens| {
+                    tokens
+                        .into_iter()
+                        .map(|token| match token {
+                            Token::Number(number) => Some(Value::Number(number)),
+                            Token::String(string) => Some(Value::String(string)),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+                Value::Array(ArrayData::new(match wire {
+                    Some(wire) => vec![
+                        Value::Number(1.0),
+                        Value::Array(ArrayData::new(wire)),
+                        Value::Boolean(true),
+                    ],
+                    None => vec![
+                        Value::Number(if status == 0 { 0.0 } else { -1.0 }),
+                        Value::Undefined,
+                    ],
+                }))
             }
-            OP_ACTOR_GRAPH_CANCEL | OP_ACTOR_BIND_RECEIVER | OP_ACTOR_GRAPH_RELEASE => {
-                Value::Boolean(false)
-            }
+            OP_ACTOR_GRAPH_RELEASE => Value::Boolean(workers::actor_release_reservation(
+                endpoint_of(first),
+                self.actor_realm_id,
+            )),
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

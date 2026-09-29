@@ -932,6 +932,8 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         vm.module_realm = Some(Rc::clone(&session.shared));
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
         vm.isolated_graphs = Rc::clone(&session.shared.borrow().isolated_graphs);
+        vm.actor_realm_id = session.shared.borrow().actor_realm_id;
+        vm.actor_graph_requests = Rc::clone(&session.shared.borrow().actor_graph_requests);
         vm.global_objects = session.shared.borrow().global_objects.clone();
     }
     // The realm is built and bootstrapped before the body's first instruction: by this machine

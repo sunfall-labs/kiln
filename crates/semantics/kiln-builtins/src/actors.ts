@@ -94,8 +94,8 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             return;
           }
           if (status === 4) {
-            // The host publishes 4 only after the receiver owns the native root and the
-            // sender's escrow entry is gone. A late abort cannot restore this ticket.
+            // The host publishes 4 only after native adoption or interpreter wire
+            // publication, with the sender escrow gone. A late abort cannot restore it.
             pendingGraphRequest = 0;
             pendingGraphReservation = 0;
             graphTicket?.consume();
@@ -128,7 +128,7 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             // status. Request cancellation is safe before unlink; after publication it cannot
             // restore sender ownership, so status 4 must consume the ticket instead.
             // The reply's close follows its resolve/reject message. Preserve that first
-            // terminal result while the native ownership status catches up.
+            // terminal result while the ownership status catches up.
             deferredCompletion ??= { error, value };
             try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
             pollGraph();
@@ -165,7 +165,10 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             try {
               const reservation = message.graphReservation;
               const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (_handle: any, ticket: Ticket): any => {
-                if (graphTicket || !Number.isSafeInteger(reservation) || reservation <= 0) {
+                if (graphTicket || consumed.length !== 0 || buffers.length !== 0) {
+                  throw namedError("DataCloneError", "graph transfer needs ownership proof");
+                }
+                if (!Number.isSafeInteger(reservation) || reservation <= 0) {
                   throw namedError("DataCloneError", "graph transfer needs ownership proof");
                 }
                 graphTicket = ticket;
@@ -188,12 +191,12 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
                     pendingGraphRequest = request;
                     pendingGraphReservation = reservation;
                   }
-                } catch { /* An unscheduled realm keeps the refusal and restores the ticket. */ }
+                } catch { /* A failed claim keeps the refusal and restores the ticket. */ }
                 throw namedError("DataCloneError", "graph transfer needs ownership proof");
               } else {
                 const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
-                consumeActorTickets(consumed);
                 if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
+                consumeActorTickets(consumed);
               }
             } catch (error) {
               if (pendingGraphRequest) {
