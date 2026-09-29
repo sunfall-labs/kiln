@@ -1079,7 +1079,8 @@ fn runtime_prelude_size() {
     // The private graph clone's arena allocator and side-buffer rollback bring it to 63,597.
     const FLOOR_LINES: usize = 27_100;
     // In-block dictionaries and key copying let prepared graphs carry computed property names.
-    const CEILING_LINES: usize = 64_200;
+    // Standalone large strings add their manifest and receiver-adoption path (64,304 lines).
+    const CEILING_LINES: usize = 64_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

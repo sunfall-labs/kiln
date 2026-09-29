@@ -241,6 +241,9 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
 
 typedef struct kiln_c99_clone_arena {
     kiln_c99_par_arena storage;
+    kiln_gc_block *large_head;
+    size_t large_count;
+    size_t large_bytes;
     void **side_bases;
     size_t side_count;
     size_t side_capacity;
@@ -332,6 +335,33 @@ static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *ba
     return KILN_C99_OK;
 }
 
+/* A string too large for a nursery chunk stays in the same private ownership group. The
+ * receiver adopts its GC block alongside the chunks; before that, only this arena can free it.
+ * Charge the full allocation against the arena's budget, including its block header. */
+static kiln_string *kiln_c99_clone_arena_large_string(kiln_c99_clone_arena *arena,
+                                                       size_t size) {
+    kiln_gc_block *block;
+    size_t total;
+    if (size > SIZE_MAX - sizeof *block || arena->large_count == SIZE_MAX ||
+        arena->large_bytes > SIZE_MAX - size) return NULL;
+    total = sizeof *block + size;
+    if (arena->storage.taken > arena->storage.budget ||
+        total > arena->storage.budget - arena->storage.taken) return NULL;
+    block = (kiln_gc_block *)malloc(total);
+    if (block == NULL) return NULL;
+    block->kind = KILN_GC_STRING | KILN_GC_FLAG_LARGE;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = arena->large_head;
+    if (block->next != NULL) block->next->prev = block;
+    arena->large_head = block;
+    arena->large_count += 1;
+    arena->large_bytes += size;
+    arena->storage.budget -= total;
+    return (kiln_string *)(block + 1);
+}
+
 /* Before adoption the builder owns every side buffer and chunk. After adoption each array's
  * finalizer owns its side buffer and the destination heap owns the chunks. */
 static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
@@ -343,6 +373,12 @@ static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
     arena->side_bases = NULL;
     arena->side_count = arena->side_capacity = 0;
     if (!arena->adopted) {
+        kiln_gc_block *block = arena->large_head;
+        while (block != NULL) {
+            kiln_gc_block *next = block->next;
+            free(block);
+            block = next;
+        }
         kiln_c99_par_arena_seal(&arena->storage);
         kiln_c99_arena_chunks_free(arena->storage.filled);
     }
@@ -591,8 +627,12 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                                                             : KILN_STRING_LATIN1;
             if (!kiln_string_storage_size(source->unit_len, flags, &storage))
                 return KILN_C99_OUT_OF_MEMORY;
-            copy = (kiln_string *)kiln_c99_par_alloc(&table->arena->storage,
-                                                     KILN_GC_STRING, storage);
+            copy = storage > SIZE_MAX - sizeof(kiln_gc_block) ||
+                           storage + sizeof(kiln_gc_block) >
+                               (table->arena->storage.heap->nursery.capacity >> 2)
+                       ? kiln_c99_clone_arena_large_string(table->arena, storage)
+                       : (kiln_string *)kiln_c99_par_alloc(&table->arena->storage,
+                                                           KILN_GC_STRING, storage);
             if (copy != NULL) {
                 copy->unit_len = source->unit_len;
                 copy->flags = flags;
@@ -880,17 +920,36 @@ static int kiln_c99_clone_arena_prepare(kiln_c99_clone_arena *arena, kiln_gc_hea
         kiln_c99_clone_arena_dispose(arena);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    /* adopt_chunks reverses the list into the view. Keep that list for rollback and eventual
-     * adoption; the original head no longer reaches every chunk. */
+    /* adopt_chunks reverses the list. Keep its new head even if a later large-block index
+     * insertion fails, so dispose still owns every chunk. */
     arena->storage.filled = view->nursery.full;
+    view->head = arena->large_head;
+    {
+        kiln_gc_block *large;
+        for (large = arena->large_head; large != NULL; large = large->next) {
+            if (kiln_c99_gc_ptrset_insert(&view->large_table, large) != KILN_C99_OK) {
+                free(view->large_table.table);
+                free(view->nursery.regions.table);
+                free(view);
+                kiln_c99_clone_arena_dispose(arena);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            kiln_c99_gc_bound(view, large, sizeof *large + large->size);
+            view->count += 1;
+            view->bytes += large->size;
+        }
+    }
     first = arena->storage.filled;
-    if (!kiln_c99_graph_capsule_prepare(view, first, root, &arena->capsule)) {
+    if (!kiln_c99_graph_capsule_prepare_with_large(view, first, root, &arena->capsule,
+                                                    arena->large_head)) {
+        free(view->large_table.table);
         free(view->nursery.regions.table);
         free(view);
         kiln_c99_clone_arena_dispose(arena);
         return KILN_C99_CLONE_BAIL;
     }
     arena->certified = 1;
+    free(view->large_table.table);
     free(view->nursery.regions.table);
     free(view);
     return KILN_C99_OK;
@@ -907,6 +966,7 @@ static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap 
     kiln_c99_graph_capsule_adopt(receiver, &arena->capsule, reservation);
     arena->adopted = 1;
     arena->storage.filled = NULL;
+    arena->large_head = NULL;
     return 1;
 }
 

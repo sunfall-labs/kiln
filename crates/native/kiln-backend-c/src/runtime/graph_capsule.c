@@ -7,6 +7,8 @@ typedef struct kiln_c99_graph_capsule_requirements {
     size_t objects;
     size_t bytes;
     size_t filled;
+    size_t large_objects;
+    size_t large_bytes;
     size_t region_capacity;
     size_t bitmap_words;
     int foreign_dictionary_keys;
@@ -15,6 +17,7 @@ typedef struct kiln_c99_graph_capsule_requirements {
 typedef struct kiln_c99_graph_capsule {
     kiln_nursery_chunk *chunk;
     kiln_nursery_chunk **chunks;
+    kiln_gc_block *large_head;
     kiln_value root;
     kiln_c99_graph_capsule_requirements needs;
     uint64_t candidate_id;
@@ -43,14 +46,18 @@ static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
  * exact cell/object/array/date payloads and inline string bytes are supported; the returned
  * requirements contain numbers only and may cross lanes before either heap is changed. */
-static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
-                                          kiln_value root, kiln_c99_graph_capsule *out) {
+static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
+                                                     kiln_nursery_chunk *chunk,
+                                                     kiln_value root,
+                                                     kiln_c99_graph_capsule *out,
+                                                     kiln_gc_block *large_head) {
     kiln_nursery_chunk *it;
     kiln_nursery_chunk **chunks = NULL;
     const kiln_gc_block *block;
     const void *payload;
     uint32_t kind;
     size_t count = 0, index = 0, objects = 0, bytes = 0, filled = 0;
+    size_t large_objects = 0, large_bytes = 0;
     if (from == NULL || chunk == NULL || out == NULL || from->collecting || from->parallel_paused ||
         chunk == (kiln_nursery_chunk *)from->nursery.region ||
         !kiln_c99_gc_ptrset_contains(&from->nursery.regions, chunk) ||
@@ -101,13 +108,31 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
         if (count > 1) chunks[index] = it;
         ++index;
     }
+    {
+        const kiln_gc_block *large;
+        for (large = large_head; large != NULL; large = large->next) {
+            if ((large->kind & (KILN_GC_FLAG_LARGE | KILN_GC_KIND_MASK)) !=
+                    (KILN_GC_FLAG_LARGE | KILN_GC_STRING) ||
+                !kiln_c99_gc_ptrset_contains(&from->large_table, large) ||
+                !kiln_c99_graph_inline_string(large) ||
+                objects == SIZE_MAX || bytes > SIZE_MAX - large->size ||
+                large_objects == SIZE_MAX || large_bytes > SIZE_MAX - large->size)
+                goto fail;
+            ++objects;
+            bytes += large->size;
+            ++large_objects;
+            large_bytes += large->size;
+        }
+    }
     if (index != count || objects > from->count || bytes > from->bytes ||
         filled > from->nursery.full_bytes ||
-        !kiln_c99_graph_candidate_closed(from, count == 1 ? &chunk : chunks, count, payload) ||
+        !kiln_c99_graph_candidate_closed_with_sides(from,
+             count == 1 ? &chunk : chunks, count, payload, NULL, large_head) ||
         !kiln_c99_graph_value_in_batch(from, count == 1 ? &chunk : chunks, count, &root)) goto fail;
     memset(out, 0, sizeof *out);
     out->chunk = chunk;
     out->chunks = chunks;
+    out->large_head = large_head;
     out->root = root;
     out->candidate_id = chunk->candidate_id;
     out->sender_epoch = from->epoch;
@@ -115,6 +140,8 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
     out->needs.objects = objects;
     out->needs.bytes = bytes;
     out->needs.filled = filled;
+    out->needs.large_objects = large_objects;
+    out->needs.large_bytes = large_bytes;
     out->needs.region_capacity = from->nursery.capacity;
     out->needs.bitmap_words = from->nursery.bitmap_words;
     /* The closure proof above validated each block before this scan. Keep the answer in the
@@ -136,6 +163,11 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
 fail:
     free(chunks);
     return 0;
+}
+
+static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
+                                          kiln_value root, kiln_c99_graph_capsule *out) {
+    return kiln_c99_graph_capsule_prepare_with_large(from, chunk, root, out, NULL);
 }
 
 /* ISOLATE is the first operation after the factory boundary. Collection may have occurred
@@ -197,16 +229,23 @@ static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t r
  * not a caller-supplied graph pointer. It allocates region-set capacity before sender unlink. */
 static int kiln_c99_graph_capsule_receiver_preflight(
     kiln_gc_heap *to, const kiln_c99_graph_capsule_requirements *needs, uint64_t reservation_id) {
+    size_t wanted_large;
     if (to == NULL || needs == NULL || needs->regions == 0 || needs->objects == 0 ||
         needs->region_capacity == 0 ||
         needs->regions > SIZE_MAX / needs->region_capacity ||
         needs->filled > needs->regions * needs->region_capacity ||
-        needs->bytes > needs->filled ||
+        needs->large_objects > needs->objects || needs->large_bytes > needs->bytes ||
+        needs->bytes - needs->large_bytes > needs->filled ||
         needs->region_capacity != to->nursery.capacity ||
         needs->bitmap_words != to->nursery.bitmap_words ||
         needs->objects > SIZE_MAX - to->count || needs->bytes > SIZE_MAX - to->bytes ||
         needs->bytes > SIZE_MAX - to->since_collection ||
-        needs->filled > SIZE_MAX - to->nursery.full_bytes) return 0;
+        needs->filled > SIZE_MAX - to->nursery.full_bytes ||
+        needs->large_objects > SIZE_MAX - to->large_table.count) return 0;
+    wanted_large = to->large_table.count + needs->large_objects;
+    if (wanted_large > SIZE_MAX / 2) return 0;
+    if (wanted_large * 2 > to->large_table.capacity &&
+        kiln_c99_gc_ptrset_grow(&to->large_table, wanted_large) != KILN_C99_OK) return 0;
     return kiln_c99_graph_receiver_reserve_id(to, needs->regions, reservation_id);
 }
 
@@ -268,6 +307,8 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
                                          uint64_t reservation_id) {
     kiln_c99_realm_state *realm = &to->realm;
     size_t index;
+    size_t large_count = 0, large_bytes = 0;
+    kiln_gc_block *large;
     if (!capsule->detached || capsule->chunk == NULL ||
         (capsule->needs.regions > 1 && capsule->chunks == NULL) || reservation_id == 0 ||
         to->collecting || to->parallel_paused ||
@@ -286,7 +327,22 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
         capsule->needs.regions > SIZE_MAX - to->nursery.regions.count ||
         to->nursery.regions.count + capsule->needs.regions > SIZE_MAX / 2 ||
         (to->nursery.regions.count + capsule->needs.regions) * 2 >
-            to->nursery.regions.capacity) abort();
+            to->nursery.regions.capacity ||
+        capsule->needs.large_objects > SIZE_MAX - to->large_table.count ||
+        to->large_table.count + capsule->needs.large_objects > SIZE_MAX / 2 ||
+        (to->large_table.count + capsule->needs.large_objects) * 2 >
+            to->large_table.capacity) abort();
+    for (large = capsule->large_head; large != NULL; large = large->next) {
+        if ((large->kind & (KILN_GC_FLAG_LARGE | KILN_GC_KIND_MASK)) !=
+                (KILN_GC_FLAG_LARGE | KILN_GC_STRING) ||
+            kiln_c99_gc_ptrset_contains(&to->large_table, large) ||
+            !kiln_c99_graph_inline_string(large) ||
+            large_count == SIZE_MAX || large_bytes > SIZE_MAX - large->size) abort();
+        ++large_count;
+        large_bytes += large->size;
+    }
+    if (large_count != capsule->needs.large_objects ||
+        large_bytes != capsule->needs.large_bytes) abort();
     for (index = 0; index < capsule->needs.regions; ++index) {
         kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
         if (chunk == NULL || kiln_c99_gc_ptrset_contains(&to->nursery.regions, chunk)) abort();
@@ -308,6 +364,17 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
         chunk->next = to->nursery.full;
         to->nursery.full = chunk;
     }
+    large = capsule->large_head;
+    while (large != NULL) {
+        kiln_gc_block *next = large->next;
+        if (kiln_c99_gc_ptrset_insert(&to->large_table, large) != KILN_C99_OK) abort();
+        kiln_c99_gc_bound(to, large, sizeof *large + large->size);
+        large->prev = NULL;
+        large->next = to->head;
+        if (to->head != NULL) to->head->prev = large;
+        to->head = large;
+        large = next;
+    }
     to->count += capsule->needs.objects;
     to->bytes += capsule->needs.bytes;
     to->since_collection += capsule->needs.bytes;
@@ -316,6 +383,7 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
     realm->graph_inbox_root = capsule->root;
     realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_PUBLISHED;
     capsule->chunk = NULL;
+    capsule->large_head = NULL;
     capsule->detached = 0;
     capsule->adopted = 1;
 }

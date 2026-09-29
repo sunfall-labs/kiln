@@ -2373,8 +2373,9 @@ static kiln_c99_graph_capsule *kiln_c99_prepared_graph_capsule(kiln_gc_heap *hea
 static void kiln_c99_prepared_graph_commit(kiln_gc_heap *heap, kiln_value handle,
 static kiln_nursery_chunk *kiln_c99_graph_capsule_chunk(
 static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
-static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
+static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
 fail:
+static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
 static void kiln_c99_actor_candidate_seal(kiln_gc_heap *heap, kiln_value root) {
 static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t request_id,
 static int kiln_c99_graph_capsule_receiver_preflight(
@@ -3379,6 +3380,7 @@ static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
 static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
 static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
 static int kiln_c99_clone_arena_track_side(kiln_c99_clone_arena *arena, void *base) {
+static kiln_string *kiln_c99_clone_arena_large_string(kiln_c99_clone_arena *arena,
 static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
 static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_arena_dictionary(kiln_c99_clone_arena *arena, size_t count,

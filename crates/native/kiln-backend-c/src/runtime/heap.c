@@ -3533,7 +3533,7 @@ static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
  * chunk. This proof alone never grants permission to move. */
 static int kiln_c99_graph_candidate_closed_with_sides(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
-    const void *root, kiln_c99_graph_side_set *sides) {
+    const void *root, kiln_c99_graph_side_set *sides, const kiln_gc_block *large_head) {
     kiln_c99_graph_walk walk = {0};
     size_t index;
     size_t seen = 0;
@@ -3577,6 +3577,19 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         }
         if (group_count != count) goto done;
     }
+    {
+        const kiln_gc_block *large;
+        for (large = large_head; large != NULL; large = large->next) {
+            if ((large->kind & (KILN_GC_FLAG_LARGE | KILN_GC_KIND_MASK)) !=
+                    (KILN_GC_FLAG_LARGE | KILN_GC_STRING) ||
+                !kiln_c99_gc_ptrset_contains(&heap->large_table, large) ||
+                !kiln_c99_graph_inline_string(large) || seen == SIZE_MAX ||
+                kiln_c99_gc_ptrset_insert(&walk.members, (void *)large) != KILN_C99_OK)
+                goto done;
+            ++seen;
+            ++enumerated;
+        }
+    }
     if (seen > SIZE_MAX / sizeof *walk.queue) goto done;
     walk.queue = (kiln_gc_block **)malloc(seen * sizeof *walk.queue);
     if (walk.queue == NULL) goto done;
@@ -3598,6 +3611,11 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             }
             cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         }
+    }
+    {
+        const kiln_gc_block *large;
+        for (large = large_head; large != NULL; large = large->next)
+            if (!kiln_c99_gc_ptrset_contains(&walk.reached, large)) goto done;
     }
     if (walk.queued + inert_orphans != seen) goto done;
     /* A valid malloc allocation cannot overlap another live allocation. Check the complete
@@ -3624,7 +3642,7 @@ done:
 static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
                                            kiln_nursery_chunk *const *chunks, size_t count,
                                            const void *root) {
-    return kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, root, NULL);
+    return kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, root, NULL, NULL);
 }
 
 typedef enum kiln_c99_graph_incoming_result {
@@ -4511,7 +4529,8 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
         if (chunk->candidate_id == candidate_id) chunks[index++] = chunk;
     if (index != count ||
-        !kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, block + 1, &sides))
+        !kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, block + 1, &sides,
+                                                     NULL))
         goto done;
     if (heap->graph_proof_sides != NULL) goto done;
     heap->graph_proof_sides = &sides;
