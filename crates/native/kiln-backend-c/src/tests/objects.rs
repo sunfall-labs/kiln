@@ -3747,6 +3747,94 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_candidate_dictionary_side_storage_tracks_ownership() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int candidate_dictionary_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value ordinary, candidate;
+    kiln_object *outside, *object;
+    kiln_property *outside_properties;
+    kiln_c99_candidate_object_properties *header;
+    kiln_c99_graph_side_set sides = {0};
+    kiln_nursery_chunk *batch[1];
+    kiln_string *key;
+    uint64_t candidate_id;
+    uintptr_t side_word;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (kiln_c99_new_object(&ordinary) != KILN_C99_OK) return 2;
+    outside = (kiln_object *)(uintptr_t)ordinary.bits;
+    if (kiln_c99_ensure_dictionary(outside) != KILN_C99_OK ||
+        kiln_c99_object_reserve_properties(outside, 16) != KILN_C99_OK ||
+        outside->candidate_properties) return 3;
+    outside_properties = outside->properties;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 4;
+    candidate_id = heap->actor_candidate_id;
+    if (kiln_c99_new_object(&candidate) != KILN_C99_OK) return 5;
+    object = (kiln_object *)(uintptr_t)candidate.bits;
+    if (kiln_c99_ensure_dictionary(object) != KILN_C99_OK ||
+        kiln_c99_object_reserve_properties(object, 16) != KILN_C99_OK ||
+        object->candidate_properties != 1) return 6;
+    header = kiln_c99_object_candidate_header(object);
+    if (header->candidate_id != candidate_id || header->owner != object ||
+        header->capacity != 16 || header->generation != 1) return 7;
+    key = kiln_c99_string_from_utf8("answer", 6);
+    if (key == NULL) return 8;
+    memset(&object->properties[0], 0, sizeof(kiln_property));
+    object->properties[0].key = key;
+    object->properties[0].enumerable = 1;
+    object->properties[0].writable = 1;
+    object->properties[0].configurable = 1;
+    object->properties[0].value = kiln_c99_number(42);
+    object->count = 1;
+    if (kiln_c99_object_reserve_properties(object, 32) != KILN_C99_OK) return 9;
+    header = kiln_c99_object_candidate_header(object);
+    if (header->capacity != 32 || header->generation != 2 ||
+        object->properties[0].key != key) return 10;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 11;
+    batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)object - 1);
+    if (!kiln_c99_graph_inert_finalizer_block((kiln_gc_block *)object - 1)) return 18;
+    if (!kiln_c99_graph_candidate_closed_with_sides(heap, batch, 1, object, &sides, NULL) ||
+        sides.count != 1 || sides.spans[0].owner != object) return 12;
+    heap->graph_proof_sides = &sides;
+    side_word = (uintptr_t)&object->properties[0].value;
+    if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
+        !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 13;
+    outside->properties = object->properties;
+    if (kiln_c99_graph_outside_block(heap, batch, 1,
+            (kiln_gc_block *)outside - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 14;
+    outside->properties = outside_properties;
+    heap->graph_proof_sides = NULL;
+    free(sides.spans);
+    header->candidate_id = 0;
+    if (kiln_c99_graph_candidate_closed(heap, batch, 1, object)) return 15;
+    header->candidate_id = candidate_id;
+    kiln_c99_actor_candidate_finish(heap, 1);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 16;
+    result = kiln_realm_enter(realm, candidate_dictionary_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 17;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-dictionary-side-storage");
+    assert!(
+        run.status.success(),
+        "candidate dictionary storage failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_factory_allocations_have_dedicated_candidate_chunks() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

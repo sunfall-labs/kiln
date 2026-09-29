@@ -153,7 +153,7 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
             const kiln_gc_block *member = (const kiln_gc_block *)cursor;
             if ((member->kind & KILN_GC_KIND_MASK) == KILN_GC_OBJECT) {
                 const kiln_object *object = (const kiln_object *)(member + 1);
-                if (object->shape == NULL && kiln_c99_object_properties_in_block(object))
+                if (object->shape == NULL && object->count != 0)
                     out->needs.foreign_dictionary_keys = 1;
             }
             cursor += (sizeof *member + (member->size == 0 ? 1 : member->size) + 15) & ~(size_t)15;

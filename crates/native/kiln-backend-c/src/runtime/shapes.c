@@ -686,8 +686,62 @@ static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
     }
 }
 
+/* Candidate provenance is attached only when the object and its side buffer were both made
+ * inside the active factory. A pre-existing dictionary keeps its ordinary malloc layout. */
+static uint64_t kiln_c99_object_candidate_id(const kiln_object *object) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_block *block;
+    kiln_nursery_chunk *chunk;
+    if (heap == NULL || heap->actor_candidate_id == 0) return 0;
+    block = kiln_c99_gc_lookup(heap, object);
+    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 0;
+    chunk = kiln_c99_nursery_chunk_of(heap, block);
+    return chunk != NULL && chunk->candidate_id == heap->actor_candidate_id
+               ? heap->actor_candidate_id : 0;
+}
+
 static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
     if (needed <= object->capacity) return KILN_C99_OK;
+    if (object->candidate_properties || object->properties == NULL ||
+        kiln_c99_object_properties_in_block(object)) {
+        uint64_t candidate_id = object->candidate_properties ? 0
+                                    : kiln_c99_object_candidate_id(object);
+        if (object->candidate_properties || candidate_id != 0) {
+            kiln_c99_candidate_object_properties *header;
+            kiln_property *properties;
+            size_t capacity = object->capacity > needed / 2 &&
+                              object->capacity <= SIZE_MAX / 2
+                                  ? object->capacity * 2 : needed;
+            if (capacity < needed ||
+                capacity > (SIZE_MAX - sizeof *header) / sizeof *properties)
+                return KILN_C99_OUT_OF_MEMORY;
+            if (object->candidate_properties) {
+                header = kiln_c99_object_candidate_header(object);
+                if (object->candidate_properties != 1 || header->owner != object ||
+                    header->capacity != object->capacity ||
+                    header->generation == UINT64_MAX) return KILN_C99_OUT_OF_MEMORY;
+                header = (kiln_c99_candidate_object_properties *)realloc(
+                    header, sizeof *header + capacity * sizeof *properties);
+                if (header == NULL) return KILN_C99_OUT_OF_MEMORY;
+                header->generation += 1;
+            } else {
+                header = (kiln_c99_candidate_object_properties *)malloc(
+                    sizeof *header + capacity * sizeof *properties);
+                if (header == NULL) return KILN_C99_OUT_OF_MEMORY;
+                header->candidate_id = candidate_id;
+                header->owner = object;
+                header->generation = 1;
+                if (object->properties != NULL)
+                    memcpy(header + 1, object->properties,
+                           object->count * sizeof *properties);
+                object->candidate_properties = 1;
+            }
+            header->capacity = capacity;
+            object->properties = (kiln_property *)(header + 1);
+            object->capacity = capacity;
+            return KILN_C99_OK;
+        }
+    }
     if (kiln_c99_object_properties_in_block(object)) {
         kiln_property *properties;
         size_t capacity = object->capacity > needed / 2 && object->capacity <= SIZE_MAX / 2
@@ -741,6 +795,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         object->properties = properties;
         object->count = visible;
         object->capacity = visible;
+        object->candidate_properties = 0;
         object->slots = NULL;
         object->slot_capacity = 0;
         object->sealed = NULL;
@@ -1189,6 +1244,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->error_brand = 0;
     object->layout_token = 0;
     object->sealed = NULL;
+    object->candidate_properties = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -1520,6 +1576,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->error_brand = 0;
     object->layout_token = 0;
     object->sealed = NULL;
+    object->candidate_properties = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

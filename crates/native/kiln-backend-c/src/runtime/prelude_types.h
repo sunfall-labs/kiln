@@ -1196,7 +1196,22 @@ typedef struct kiln_object {
      * this full object and its prototype remain owned by the realm. Reads project the descriptor
      * and this object's slots; mutation can materialize the ordinary list in place. */
     const kiln_sealed_layout *sealed;
+    /* A dictionary property buffer allocated inside an actor candidate carries its owner
+     * and allocation provenance immediately before the records. Ordinary stores do not. */
+    uint32_t candidate_properties;
 } kiln_object;
+
+typedef struct kiln_c99_candidate_object_properties {
+    uint64_t candidate_id;
+    kiln_object *owner;
+    size_t capacity;
+    uint64_t generation;
+} kiln_c99_candidate_object_properties;
+
+static inline kiln_c99_candidate_object_properties *kiln_c99_object_candidate_header(
+    const kiln_object *object) {
+    return ((kiln_c99_candidate_object_properties *)object->properties) - 1;
+}
 
 /* A prepared graph can keep a dictionary's fixed records in the same movable GC block.
  * Ordinary dictionaries own a separate malloc buffer. */
@@ -1205,7 +1220,10 @@ static inline int kiln_c99_object_properties_in_block(const kiln_object *object)
 }
 
 static inline void kiln_c99_object_properties_free(kiln_object *object) {
-    if (!kiln_c99_object_properties_in_block(object)) free(object->properties);
+    if (!kiln_c99_object_properties_in_block(object))
+        free(object->candidate_properties ? (void *)kiln_c99_object_candidate_header(object)
+                                          : (void *)object->properties);
+    object->candidate_properties = 0;
 }
 
 /* A shaped object's slots can be its fixed prefix, a tail reserved in the same GC block by
