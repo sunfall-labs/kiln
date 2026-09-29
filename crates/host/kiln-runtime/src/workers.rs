@@ -2647,6 +2647,28 @@ mod tests {
         close(other_sender);
         close(other_receiver);
 
+        // Before the publication lease, closing either reply endpoint revokes the grant.
+        // Both engines must fail preflight without reaching their storage commit operation.
+        for close_sender in [true, false] {
+            let (cancel_sender, cancel_receiver) = channel();
+            let call = if close_sender { 500 } else { 501 };
+            let cancelled =
+                actor_reserve_for_worker(receiver, 71, 91, call, cancel_receiver).unwrap();
+            assert_eq!(
+                actor_claim_reservation(sender, cancelled, call, cancel_sender, 81, call),
+                Some(71)
+            );
+            close(if close_sender {
+                cancel_sender
+            } else {
+                cancel_receiver
+            });
+            assert!(actor_begin_publish(cancelled, 81, call, 71).is_none());
+            assert!(!lock(actor_reservations()).contains_key(&cancelled));
+            close(cancel_sender);
+            close(cancel_receiver);
+        }
+
         assert_eq!(
             actor_claim_reservation(sender, reservation, 42, reply_sender, 81, 1),
             Some(71)

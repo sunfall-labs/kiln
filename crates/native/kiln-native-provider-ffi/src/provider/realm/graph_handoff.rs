@@ -303,6 +303,7 @@ mod tests {
     use std::sync::mpsc;
 
     static SEQUENCE: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     unsafe extern "C" fn fake_control(kind: u32, _: u64, _: u64, _: u64) -> i32 {
         SEQUENCE
@@ -317,59 +318,87 @@ mod tests {
     struct Entry {
         handoff: u64,
         side: u64,
+        expected: PausedTurnResult,
     }
 
     unsafe extern "C" fn enter_handoff(context: *mut c_void) -> i32 {
         let entry = unsafe { &*context.cast::<Entry>() };
-        i32::from(run_active(entry.handoff, entry.side) != PausedTurnResult::Ready)
+        i32::from(run_active(entry.handoff, entry.side) != entry.expected)
+    }
+
+    struct Owners {
+        realms: [u64; 2],
+        callbacks: [(mpsc::Sender<u64>, std::thread::JoinHandle<()>); 2],
+    }
+
+    impl Owners {
+        fn new(expected: PausedTurnResult) -> Self {
+            let (created, ids) = mpsc::channel();
+            let callbacks = std::array::from_fn(|side| {
+                let (go, start) = mpsc::channel();
+                let created = created.clone();
+                let thread = std::thread::spawn(move || {
+                    let mut realm = 0;
+                    assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
+                    created.send((side, realm)).expect("publish realm ID");
+                    let handoff = start.recv().expect("handoff ID");
+                    let entry = Entry {
+                        handoff,
+                        side: side as u64,
+                        expected,
+                    };
+                    assert_eq!(
+                        unsafe {
+                            kiln_realm_enter(
+                                realm,
+                                Some(enter_handoff),
+                                (&raw const entry).cast_mut().cast(),
+                            )
+                        },
+                        0
+                    );
+                    assert_eq!(kiln_realm_destroy(realm), 0);
+                });
+                (go, thread)
+            });
+            let mut realms = [0; 2];
+            for _ in 0..2 {
+                let (side, realm) = ids
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("owner realm");
+                realms[side] = realm;
+            }
+            Self { realms, callbacks }
+        }
+
+        fn start(&self, side: usize, handoff: u64) {
+            self.callbacks[side]
+                .0
+                .send(handoff)
+                .expect("start callback");
+        }
+
+        fn finish(self) {
+            for (_, thread) in self.callbacks {
+                thread.join().expect("owner callback");
+            }
+        }
     }
 
     #[test]
     fn both_owner_callbacks_enter_before_the_detach_sequence() {
+        let _serial = TEST_LOCK.lock().unwrap();
         assert_eq!(kiln_realm_set_graph_control(Some(fake_control)), 0);
         SEQUENCE
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
             .unwrap()
             .clear();
-        let (created, ids) = mpsc::channel();
-        let (sender_go, sender_start) = mpsc::channel();
-        let (receiver_go, receiver_start) = mpsc::channel();
-        let run = |side: u64, start: mpsc::Receiver<u64>, created: mpsc::Sender<(u64, u64)>| {
-            std::thread::spawn(move || {
-                let mut realm = 0;
-                assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
-                created.send((side, realm)).expect("publish realm ID");
-                let handoff = start.recv().expect("handoff ID");
-                let entry = Entry { handoff, side };
-                assert_eq!(
-                    unsafe {
-                        kiln_realm_enter(
-                            realm,
-                            Some(enter_handoff),
-                            (&raw const entry).cast_mut().cast(),
-                        )
-                    },
-                    0
-                );
-                assert_eq!(kiln_realm_destroy(realm), 0);
-            })
-        };
-        let sender_thread = run(0, sender_start, created.clone());
-        let receiver_thread = run(1, receiver_start, created);
-        let first = ids
-            .recv_timeout(Duration::from_secs(1))
-            .expect("first realm");
-        let second = ids
-            .recv_timeout(Duration::from_secs(1))
-            .expect("second realm");
-        let sender = if first.0 == 0 { first.1 } else { second.1 };
-        let receiver = if first.0 == 1 { first.1 } else { second.1 };
-        let handoff = Registration::new(sender, receiver, 7, 11).expect("register handoff");
-        sender_go.send(handoff.id()).expect("start sender callback");
-        receiver_go
-            .send(handoff.id())
-            .expect("start receiver callback");
+        let owners = Owners::new(PausedTurnResult::Ready);
+        let handoff =
+            Registration::new(owners.realms[0], owners.realms[1], 7, 11).expect("register handoff");
+        owners.start(0, handoff.id());
+        owners.start(1, handoff.id());
         let ready = handoff.handoff.wait_ready(Duration::from_secs(10));
         let untouched = SEQUENCE.get().unwrap().lock().unwrap().is_empty();
         if ready {
@@ -377,13 +406,54 @@ mod tests {
         } else {
             handoff.handoff.cancel();
         }
-        let sender_result = sender_thread.join();
-        let receiver_result = receiver_thread.join();
+        owners.finish();
         assert!(ready, "both owner callbacks entered");
         assert!(untouched, "no C mutation before both enter");
-        sender_result.expect("sender callback");
-        receiver_result.expect("receiver callback");
         assert!(handoff.handoff.done());
         assert_eq!(*SEQUENCE.get().unwrap().lock().unwrap(), [3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn cancellation_before_start_releases_ready_and_late_owner_callbacks() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        assert_eq!(kiln_realm_set_graph_control(Some(fake_control)), 0);
+        for entered in 0..=2 {
+            SEQUENCE
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap()
+                .clear();
+            let owners = Owners::new(PausedTurnResult::Unavailable);
+            let handoff = Registration::new(owners.realms[0], owners.realms[1], 7, 11)
+                .expect("register handoff");
+            for side in 0..entered {
+                owners.start(side, handoff.id());
+            }
+            // Observe actual callback entry before cancelling, rather than hoping a sleep
+            // lands between scheduling and mutation. Late callbacks are deliberately withheld.
+            let state = handoff.handoff.state.lock().unwrap();
+            let (state, _) = handoff
+                .handoff
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(10), |state| {
+                    state.ready.iter().filter(|ready| **ready).count() != entered
+                })
+                .unwrap();
+            let observed = state.ready.iter().filter(|ready| **ready).count() == entered;
+            drop(state);
+            assert!(!handoff.handoff.wait_ready_while(|| false));
+            handoff.handoff.cancel();
+            for side in entered..2 {
+                owners.start(side, handoff.id());
+            }
+            owners.finish();
+            assert!(
+                observed,
+                "expected {entered} callbacks to enter before cancellation"
+            );
+            assert!(handoff.handoff.refused_safely());
+            assert!(!handoff.handoff.done());
+            assert!(SEQUENCE.get().unwrap().lock().unwrap().is_empty());
+        }
     }
 }
