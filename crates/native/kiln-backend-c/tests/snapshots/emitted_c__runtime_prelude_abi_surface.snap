@@ -3443,7 +3443,8 @@ static void kiln_c99_clone_arena_dispose(kiln_c99_clone_arena *arena) {
 static int kiln_c99_clone_arena_object(kiln_c99_clone_arena *arena, size_t capacity,
 static int kiln_c99_clone_arena_dictionary(kiln_c99_clone_arena *arena, size_t count,
 static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capacity,
-static int kiln_c99_clone_safe_object(const kiln_object *source) {
+static const kiln_string *kiln_c99_clone_arena_index_key(kiln_c99_clone_arena *arena,
+static int kiln_c99_clone_safe_object(const kiln_object *source, int allow_elements) {
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
 static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *seen,
 static int kiln_c99_clone_plain_graph_for_message(kiln_value source) {

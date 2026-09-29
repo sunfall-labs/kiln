@@ -37,6 +37,12 @@ export class Counter extends Actor {
     return [key, original, typeof original, descriptor?.value, nullPrototype, grew,
             Object.keys(value).length];
   }
+  inspectPreparedNumericObject(value) {
+    const keys = Object.keys(value).join(',');
+    const snapshot = [value[0], value[127].answer, value.label.answer];
+    value[255] = 4;
+    return [keys, ...snapshot, value[255], Object.keys(value).join(',')];
+  }
   sumLinked(value) {
     let count = 0;
     let sum = 0;

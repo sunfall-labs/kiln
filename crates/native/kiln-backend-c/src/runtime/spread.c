@@ -462,14 +462,45 @@ static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capaci
     return KILN_C99_OK;
 }
 
+/* Numeric own keys of an ordinary object are stored separately from its named properties.
+ * A prepared graph can put both in one in-block dictionary, with keys owned by its arena. */
+static const kiln_string *kiln_c99_clone_arena_index_key(kiln_c99_clone_arena *arena,
+                                                          size_t index) {
+    char digits[32];
+    char *start = digits + sizeof digits;
+    size_t length;
+    size_t storage;
+    kiln_string *key;
+    do {
+        *--start = (char)('0' + index % 10);
+        index /= 10;
+    } while (index != 0);
+    length = (size_t)(digits + sizeof digits - start);
+    if (length >= sizeof digits ||
+        !kiln_string_storage_size((uint32_t)length, KILN_STRING_LATIN1, &storage) ||
+        storage == SIZE_MAX) return NULL;
+    key = (kiln_string *)kiln_c99_par_alloc(&arena->storage, KILN_GC_STRING, storage + 1);
+    if (key == NULL) return NULL;
+    key->unit_len = (uint32_t)length;
+    key->flags = KILN_STRING_LATIN1;
+    key->data = key + 1;
+    memcpy((void *)key->data, start, length);
+    ((char *)key->data)[length] = '\0';
+    return key;
+}
+
 /* Exactly the representation whose reads cannot invoke program code. The clone and the Rust
  * message encoder's native descriptor callback share this guard. */
-static int kiln_c99_clone_safe_object(const kiln_object *source) {
+static int kiln_c99_clone_safe_object(const kiln_object *source, int allow_elements) {
     kiln_shape *shape = source->shape;
     size_t index;
     /* Sealed intrinsic stores are not plain-message graphs: their function values and process
      * descriptors must never be encoded as an empty realm-owned dictionary. */
-    if (source->sealed != NULL || source->elements != NULL || source->accessor_count != 0 ||
+    if (source->sealed != NULL ||
+        (source->elements != NULL && !allow_elements) ||
+        source->element_count > source->element_capacity ||
+        (source->element_count != 0 && source->elements == NULL) ||
+        source->element_count > 100000 || source->accessor_count != 0 ||
         (source->prototype.tag != KILN_VALUE_UNDEFINED &&
          source->prototype.tag != KILN_VALUE_NULL) || source->arguments_brand ||
         source->error_brand || source->module_namespace ||
@@ -524,7 +555,7 @@ static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *
         const kiln_object *object = (const kiln_object *)ptr;
         const kiln_shape *shape;
         if (kiln_c99_gc_payload_kind(ptr) != KILN_GC_OBJECT ||
-            !kiln_c99_clone_safe_object(object) || object->shape == NULL ||
+            !kiln_c99_clone_safe_object(object, 0) || object->shape == NULL ||
             object->properties != NULL) return 0;
         shape = object->shape;
         if (shape->property_count > object->slot_capacity ||
@@ -679,11 +710,17 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         kiln_object *copy;
         kiln_val copy_val;
         size_t count;
+        size_t numeric_count = 0;
         size_t i;
-        if (!kiln_c99_clone_safe_object(source)) return KILN_C99_CLONE_BAIL;
+        if (!kiln_c99_clone_safe_object(source, table->arena != NULL))
+            return KILN_C99_CLONE_BAIL;
         if (table->arena != NULL) {
-            if (shape == NULL || (shape->shared & 1u) == 0) {
+            for (i = 0; i < source->element_count; ++i)
+                numeric_count += source->elements[i] != KILN_VAL_HOLE;
+            if (shape == NULL || (shape->shared & 1u) == 0 || numeric_count != 0) {
                 size_t members = shape == NULL ? source->count : shape->property_count;
+                if (numeric_count > SIZE_MAX - members) return KILN_C99_OUT_OF_MEMORY;
+                members += numeric_count;
                 status = members == 0
                              ? kiln_c99_clone_arena_object(table->arena, 0, &made)
                              : kiln_c99_clone_arena_dictionary(table->arena, members,
@@ -733,21 +770,39 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 copy->slots[i] = cloned;
             }
         } else {
-            count = source_shape == NULL ? source->count : source_shape->property_count;
+            size_t named = source_shape == NULL ? source->count : source_shape->property_count;
+            count = numeric_count + named;
             if (count > 0) {
                 kiln_property *properties = copy->properties;
                 if (table->arena == NULL) {
                     properties = (kiln_property *)malloc(count * sizeof *properties);
                     if (properties == NULL) return KILN_C99_OUT_OF_MEMORY;
                 }
+                if (numeric_count != 0) {
+                    size_t at = 0;
+                    for (i = 0; i < source->element_count; ++i) {
+                        const kiln_string *key;
+                        if (source->elements[i] == KILN_VAL_HOLE) continue;
+                        key = kiln_c99_clone_arena_index_key(table->arena, i);
+                        if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
+                        memset(&properties[at], 0, sizeof properties[at]);
+                        properties[at].key = key;
+                        properties[at].enumerable = 1;
+                        properties[at].value = kiln_val_to_boundary(source->elements[i]);
+                        ++at;
+                    }
+                }
                 if (source_shape == NULL) {
-                    memcpy(properties, source->properties, count * sizeof *properties);
+                    if (named != 0)
+                        memcpy(properties + numeric_count, source->properties,
+                               named * sizeof *properties);
                 } else {
-                    for (i = 0; i < count; ++i) {
-                        memset(&properties[i], 0, sizeof properties[i]);
-                        properties[i].key = source_shape->keys[i];
-                        properties[i].enumerable = 1;
-                        properties[i].value = kiln_val_to_boundary(source->slots[i]);
+                    for (i = 0; i < named; ++i) {
+                        kiln_property *property = &properties[numeric_count + i];
+                        memset(property, 0, sizeof *property);
+                        property->key = source_shape->keys[i];
+                        property->enumerable = 1;
+                        property->value = kiln_val_to_boundary(source->slots[i]);
                     }
                 }
                 for (i = 0; i < count; ++i) {
@@ -760,7 +815,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 copy->shape = NULL;
             }
             for (i = 0; i < count; ++i) {
-                if (table->arena != NULL) {
+                if (table->arena != NULL && i >= numeric_count) {
                     kiln_val cloned_key;
                     status = kiln_c99_clone_data_val(
                         table, KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX,
@@ -1076,7 +1131,7 @@ static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
             (is_object ? KILN_GC_OBJECT : KILN_GC_ARRAY)) return 0;
         if (is_object) {
             kiln_object *object = (kiln_object *)pointer;
-            if (!kiln_c99_clone_safe_object(object)) return 0;
+            if (!kiln_c99_clone_safe_object(object, 0)) return 0;
             out->kind = 8;
             out->length = object->shape == NULL ? object->count : object->shape->property_count;
         } else {

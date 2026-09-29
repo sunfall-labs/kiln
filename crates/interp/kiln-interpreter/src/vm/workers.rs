@@ -14,20 +14,34 @@ use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
 
 struct InterpreterPlainSource {
     handles: Vec<Value>,
+    /// Only objects with array-index keys need a view distinct from insertion order.
+    object_order: Vec<Option<Vec<usize>>>,
 }
 
 impl InterpreterPlainSource {
     fn new(root: Value) -> Self {
         Self {
             handles: vec![root],
+            object_order: vec![None],
         }
     }
 
     fn retain(&mut self, value: Value) -> usize {
         let handle = self.handles.len();
         self.handles.push(value);
+        self.object_order.push(None);
         handle
     }
+}
+
+fn plain_object_array_index(key: &kiln_string::StringUnits) -> Option<u32> {
+    let first = key.unit_at(0)?;
+    if first < b'0' as u16 || first > b'9' as u16 {
+        return None;
+    }
+    let text = key.to_scalar_string().ok()?;
+    let number = text.parse::<u32>().ok()?;
+    (number != u32::MAX && number.to_string() == text).then_some(number)
 }
 
 impl workers::PlainSource for InterpreterPlainSource {
@@ -61,12 +75,25 @@ impl workers::PlainSource for InterpreterPlainSource {
                             || !matches!(slot.property, Property::Value(_))
                             || (slot.key.unit_at(0) == Some(b'@' as u16)
                                 && slot.key.unit_at(1) == Some(b'@' as u16))
-                            || slot.key.to_scalar_string().map_or(true, |key| {
-                                key.as_bytes().first().is_some_and(u8::is_ascii_digit)
-                            })
                     })
                 {
                     return None;
+                }
+                let mut indices = data
+                    .properties
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, slot)| {
+                        plain_object_array_index(&slot.key).map(|key| (key, at))
+                    })
+                    .collect::<Vec<_>>();
+                if !indices.is_empty() {
+                    indices.sort_unstable_by_key(|(key, _)| *key);
+                    let mut order = indices.iter().map(|(_, at)| *at).collect::<Vec<_>>();
+                    order.extend((0..data.properties.len()).filter(|at| {
+                        plain_object_array_index(&data.properties[*at].key).is_none()
+                    }));
+                    self.object_order[handle] = Some(order);
                 }
                 workers::PlainNode::Object {
                     identity: Rc::as_ptr(object) as usize,
@@ -97,6 +124,10 @@ impl workers::PlainSource for InterpreterPlainSource {
         match self.handles.get(handle)? {
             Value::Object(object) => {
                 let data = object.borrow();
+                let index = match self.object_order.get(handle)?.as_ref() {
+                    Some(order) => *order.get(index)?,
+                    None => index,
+                };
                 let slot = data.properties.get(index)?;
                 let Property::Value(value) = &slot.property else {
                     return None;

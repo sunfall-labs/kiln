@@ -83,7 +83,8 @@ in its source graph.
   `transfer(handle)` to an actor moves the snapshot once; preparation copies the
   graph, while the native handoff moves its storage without copying the payload
   again. Cycles and repeated references retain their identity within the
-  snapshot. Array holes remain absent. Accessors, non-default property descriptors
+  snapshot. Array holes remain absent, and ordinary objects keep numeric own
+  keys in JavaScript enumeration order. Accessors, non-default property descriptors
   and unsupported host objects raise `DataCloneError` during preparation.
 - `isolate(factory)` and `transfer(handle)` are the explicit object-graph move
   API for a graph constructed in exclusive storage. The native runtime must

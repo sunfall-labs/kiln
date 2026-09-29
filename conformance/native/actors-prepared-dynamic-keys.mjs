@@ -26,5 +26,19 @@ if (moved['computed-41'].answer !== 42) {
   throw new Error('computed shaped key was not transferred');
 }
 
+const numeric = { label: { answer: 11 } };
+numeric[127] = { answer: 3 };
+numeric[0] = 1;
+const numericHandle = prepareTransfer(numeric);
+numeric[0] = 99;
+numeric[127].answer = 8;
+numeric.label.answer = 7;
+const numericResult = await owner.ref.call('inspectPreparedNumericObject', [transfer(numericHandle)]);
+if (numericResult.join('|') !== '0,127,label|1|3|11|4|0,127,255,label' ||
+    numeric[0] !== 99 || numeric[127].answer !== 8 || numeric.label.answer !== 7) {
+  throw new Error('prepared numeric properties lost order, snapshot or receiver growth: ' +
+                  numericResult.join('|'));
+}
+
 await owner.stop();
 console.log('prepared dynamic-key graphs move');
