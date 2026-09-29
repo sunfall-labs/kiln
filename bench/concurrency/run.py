@@ -66,7 +66,7 @@ def log(*parts):
     print(*parts, file=sys.stderr, flush=True)
 
 
-def run_program(argv, env=None, timeout=240):
+def run_program(argv, env=None, timeout=240, rss_limit_kib=None, available_floor_kib=None):
     """Run to completion. Returns (records, wall_ms, maxrss_kib, returncode, stderr_tail).
 
     stdout goes to a file rather than a pipe so that os.wait4 can collect the child's rusage
@@ -76,12 +76,34 @@ def run_program(argv, env=None, timeout=240):
         started = time.perf_counter()
         proc = subprocess.Popen(argv, stdout=out, stderr=err, env=env, cwd=REPO)
         deadline = started + timeout
+        next_memory_check = started
+        memory_abort = None
         status, usage = None, None
         while True:
             pid, st, ru = os.wait4(proc.pid, os.WNOHANG)
             if pid != 0:
                 status, usage = st, ru
                 break
+            if (rss_limit_kib is not None or available_floor_kib is not None) and \
+                    time.perf_counter() >= next_memory_check:
+                next_memory_check = time.perf_counter() + 0.05
+                try:
+                    with open(f"/proc/{proc.pid}/status") as handle:
+                        rss = next(int(line.split()[1]) for line in handle if line.startswith("VmRSS:"))
+                except (OSError, StopIteration):
+                    rss = 0
+                available = available_memory_kib() if available_floor_kib is not None else None
+                if ((rss_limit_kib is not None and rss > rss_limit_kib) or
+                        (available is not None and available_floor_kib is not None and
+                         available < available_floor_kib)):
+                    memory_abort = (f"memory guard: RSS {rss / 1024 / 1024:.1f} GiB, "
+                                    f"available {available / 1024 / 1024:.1f} GiB"
+                                    if available is not None else
+                                    f"memory guard: RSS {rss / 1024 / 1024:.1f} GiB")
+                    kill_tree(proc.pid)
+                    _, status, usage = os.wait4(proc.pid, 0)
+                    status = "memory guard"
+                    break
             if time.perf_counter() > deadline:
                 kill_tree(proc.pid)
                 _, status, usage = os.wait4(proc.pid, 0)
@@ -94,6 +116,8 @@ def run_program(argv, env=None, timeout=240):
         err.seek(0)
         stdout = out.read().decode("utf-8", "replace")
         stderr = err.read().decode("utf-8", "replace")
+        if memory_abort is not None:
+            stderr = (stderr + "\n" + memory_abort).strip()
     records = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -102,7 +126,7 @@ def run_program(argv, env=None, timeout=240):
                 records.append(json.loads(line))
             except ValueError:
                 pass
-    code = status if status == "timeout" else os.waitstatus_to_exitcode(status)
+    code = status if isinstance(status, str) else os.waitstatus_to_exitcode(status)
     return records, wall, usage.ru_maxrss, code, stdout, stderr.strip()[-400:]
 
 
@@ -244,10 +268,13 @@ def tag(records, runtime, **extra):
     return records
 
 
-def simple(runtime, argv, env=None, timeout=240, maxrss_field=None):
-    records, wall, maxrss, code, stdout, err = run_program(argv, env=env, timeout=timeout)
+def simple(runtime, argv, env=None, timeout=240, maxrss_field=None,
+           rss_limit_kib=None, available_floor_kib=None):
+    records, wall, maxrss, code, stdout, err = run_program(
+        argv, env=env, timeout=timeout, rss_limit_kib=rss_limit_kib,
+        available_floor_kib=available_floor_kib)
     if code != 0 or not records:
-        what = "timeout" if code == "timeout" else f"exit {code}"
+        what = code if isinstance(code, str) else f"exit {code}"
         return [{"runtime": runtime, "error": f"{what}: {err or stdout[-200:]}", "argv": " ".join(argv[:3])}]
     for record in records:
         record["maxrss_kib"] = maxrss
@@ -293,12 +320,20 @@ def actor_capacity(binary, counts):
             slope = max(0, (high_rss - low_rss) / (high_n - low_n))
             need = high_rss + slope * (n - high_n)
             available = available_memory_kib()
-            if available is not None and need * 1.5 > available * 0.7:
+            reserve = max(2 * 1024 * 1024, int(need * 0.2))
+            if available is None:
                 records.append({"case": case, "runtime": "kiln", "error":
-                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB needs more than "
-                                f"70% of {available / 1024 / 1024:.1f} GiB available"})
+                                "skipped: available memory could not be measured"})
                 continue
-        result = simple("kiln", [binary, str(n)], timeout=600)
+            if need + reserve > available:
+                records.append({"case": case, "runtime": "kiln", "error":
+                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB plus "
+                                f"{reserve / 1024 / 1024:.1f} GiB reserve exceeds "
+                                f"{available / 1024 / 1024:.1f} GiB available"})
+                continue
+        result = simple("kiln", [binary, str(n)], timeout=600,
+                        rss_limit_kib=available - reserve if n >= 10000 else None,
+                        available_floor_kib=reserve if n >= 10000 else None)
         if not result or result[0].get("case") != case:
             error = (result[0].get("error", "missing actor capacity result")
                      if result else "missing actor capacity result")
@@ -327,15 +362,24 @@ def realm_scaling(binary, counts):
             slope = max(0, (high_rss - low_rss) / (high_n - low_n))
             need = high_rss + slope * (n - high_n)
             available = available_memory_kib()
-            if available is not None and need * 1.5 > available * 0.7:
+            reserve = max(2 * 1024 * 1024, int(need * 0.2))
+            if available is None:
                 records.append({"case": case, "runtime": "kiln", "error":
-                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB needs more than "
-                                f"70% of {available / 1024 / 1024:.1f} GiB available"})
+                                "skipped: available memory could not be measured"})
+                continue
+            if need + reserve > available:
+                records.append({"case": case, "runtime": "kiln", "error":
+                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB plus "
+                                f"{reserve / 1024 / 1024:.1f} GiB reserve exceeds "
+                                f"{available / 1024 / 1024:.1f} GiB available"})
                 continue
         with tempfile.TemporaryDirectory(prefix="kiln-realm-scale-") as out:
             env = dict(os.environ, KILN_REALM_SCHEDULER="1", KILN_REALMS=str(n),
                        KILN_REALMS_OUT=out)
-            _, wall, rss, code, stdout, err = run_program([binary], env=env, timeout=600)
+            _, wall, rss, code, stdout, err = run_program(
+                [binary], env=env, timeout=600,
+                rss_limit_kib=available - reserve if n >= 100000 else None,
+                available_floor_kib=reserve if n >= 100000 else None)
             failure = None
             if code != 0:
                 failure = f"exit {code}: {err or stdout[-200:]}"
@@ -755,7 +799,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w(rep.row("`spawnActor` to ready, warm median", [rep.cell("actor-start", "kiln", "median_ms", " ms")]))
     w(rep.row("first method call after ready, warm median", [rep.cell("actor-start", "kiln", "first_call_ms", " ms")]))
     w("")
-    w("Public actor capacity keeps every spawned realm alive while calling each one. The request window is 64; held RSS and thread count are sampled after all actors are ready. Every reply and stop is checked. The 10,000-actor row runs only when the smaller counts project a safe memory budget.")
+    w("Public actor capacity keeps every spawned realm alive while calling each one. The request window is 64; held RSS and thread count are sampled after all actors are ready. Every reply and stop is checked. The 10,000-actor row runs when the smaller counts project room for a reserve of at least 2 GiB or 20% of projected RSS, whichever is larger; a live memory guard stops it if the reserve is consumed.")
     w("")
     w("| actors alive | spawn to all ready | one call each | stop all | held RSS | held threads |")
     w("| ---: | ---: | ---: | ---: | ---: | ---: |")

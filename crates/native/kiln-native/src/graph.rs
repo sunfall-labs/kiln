@@ -4711,7 +4711,7 @@ static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
     if (session->run == NULL) { free(session); return NULL; }
     snprintf(path, sizeof path, "%s/%llu.out", realms->directory, (unsigned long long)index);
     /* `KILN_REALMS` is a parity harness: keep each realm's output distinct, but do not hold
-     * one file descriptor per idle realm. Ten thousand parked realms must use the scheduler's
+     * one file descriptor per idle realm. A hundred thousand parked realms must use the scheduler's
      * fixed lane count rather than spending their descriptor budget on capture files. */
 #if defined(_WIN32)
     session->output = fopen(path, "wb");
@@ -4827,9 +4827,14 @@ static long kiln_cli_realm_count(void) {
     count = strtol(setting, &end, 10);
     if (end == setting || *end != '\0' || count < 1) return 0;
     /* The dedicated-thread launcher retains its bounded thread count. Scheduled realms share
-     * fixed lanes, so its acceptance and production workloads can hold 10,000 idle realms. */
-    long limit = kiln_cli_scheduler_enabled() ? 10000 : 1024;
-    return count > limit ? limit : count;
+     * fixed lanes, so its acceptance workload can hold 100,000 idle realms. */
+    long limit = kiln_cli_scheduler_enabled() ? 100000 : 1024;
+    if (count > limit) {
+        fprintf(stderr, "kiln: KILN_REALMS=%ld exceeds %ld-realm %s limit\n",
+                count, limit, kiln_cli_scheduler_enabled() ? "scheduled" : "pinned");
+        return -1;
+    }
+    return count;
 }
 
 static int kiln_cli_run_realms(int argc, char **argv, long count) {
@@ -5550,6 +5555,7 @@ int main(int argc, char **argv) {
                                       kiln_cli_worker_identify, kiln_cli_worker_advance,
                                       kiln_cli_worker_finish);
     realms = kiln_cli_realm_count();
+    if (realms < 0) return 1;
     if (realms > 0) return kiln_cli_run_realms(argc, argv, realms);
     workers = kiln_cli_worker_count();
 #ifdef _WIN32
