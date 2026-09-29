@@ -18,6 +18,7 @@ const retried = await owner.ref.call('echo', [beforePost]);
 if (retried.answer !== 17) throw new Error('unpublished graph ticket was consumed by abort');
 
 const ticket = transfer(isolate(() => ({ answer: 42, values: [1, 2, 3] })));
+const closedTicket = transfer(isolate(() => ({ answer: 23 })));
 const controller = new AbortController();
 const internals = MessagePort[Symbol.for('kiln.messagePort')];
 const original = internals.workerOp;
@@ -45,7 +46,22 @@ try {
   try { await owner.ref.call('echo', [ticket]); }
   catch (error) { consumed = error.name === 'DataCloneError'; }
   if (!consumed) throw new Error('published graph ticket was restored after abort');
-  console.log('unpublished graph retried; published graph stayed consumed after abort');
 } finally {
   await owner.stop({ force: true });
+}
+
+let closed = false;
+try { await owner.ref.call('echo', [closedTicket]); }
+catch (error) { closed = error.name === 'ActorClosedError'; }
+if (!closed) throw new Error('stopped actor accepted a graph ticket');
+const replacement = await spawnActor({
+  module: new URL('./support/actor-counter.mjs', import.meta.url),
+  export: 'Counter', args: [0], mailboxCapacity: 2,
+});
+try {
+  const restored = await replacement.ref.call('echo', [closedTicket]);
+  if (restored.answer !== 23) throw new Error('stopped actor consumed an unpublished graph');
+  console.log('unpublished graphs retried after abort and close; published graph stayed consumed');
+} finally {
+  await replacement.stop();
 }
