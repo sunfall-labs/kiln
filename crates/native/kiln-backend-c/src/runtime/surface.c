@@ -437,6 +437,18 @@ static void kiln_c99_register_builtin_keys(void) {
          ++index)
         registered = kiln_c99_register_static_keys_locked(process, &kiln_c99_well_known[index].key,
                                                           NULL, 1);
+    /* The initial process.env keys are a process snapshot, not program literals. Register
+     * their spellings before any realm can own a conflicting local key. A later host change
+     * may add a key; that realm simply leaves the sealed fast path. Register these after the
+     * fixed keys so an unusually large environment cannot keep built-ins from being shared. */
+    if (registered && kiln_c99_environ != NULL) {
+        for (char **entry_ptr = kiln_c99_environ; *entry_ptr != NULL && registered; ++entry_ptr) {
+            const char *eq = strchr(*entry_ptr, '=');
+            if (eq != NULL)
+                registered = kiln_c99_register_static_text(process, *entry_ptr,
+                                                            (size_t)(eq - *entry_ptr));
+        }
+    }
     /* Out of memory leaves the rest to the run-time path; a later copy need not try again. */
     process->builtins_registered = 1;
     kiln_c99_process_unlock(process);

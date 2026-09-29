@@ -1004,6 +1004,7 @@ typedef struct kiln_sealed_property {
 typedef struct kiln_sealed_layout {
 typedef struct kiln_sealed_values {
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
+#define KILN_C99_SEALED_ENV_CODE (UINT64_MAX - UINT64_C(1))
 #define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
 typedef struct kiln_c99_candidate_object_properties {
@@ -2494,6 +2495,8 @@ static int kiln_c99_final_builtin_attrs(const kiln_property *property, uint8_t *
 static int kiln_c99_final_builtin_matches(const kiln_shape *shape, const kiln_object *object) {
 static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_object *object) {
 static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint64_t code) {
+static uint32_t *kiln_c99_sealed_layout_buckets(const kiln_sealed_layout *layout) {
+static int kiln_c99_sealed_layout_index(const kiln_sealed_layout *layout,
 static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
 static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
 static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,

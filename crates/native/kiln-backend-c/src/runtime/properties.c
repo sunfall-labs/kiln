@@ -174,14 +174,10 @@ static int kiln_c99_property_read_own(const kiln_object *object, const kiln_stri
     size_t index;
     if (object->sealed != NULL) {
         uint32_t *orders = kiln_c99_sealed_orders(object);
-        for (index = 0; index < object->sealed->count; ++index) {
-            kiln_property candidate = {.key = object->sealed->entries[index].key};
-            if (orders[index] != 0 &&
-                ((ikey != NULL && candidate.key == ikey) ||
-                 (key != NULL && kiln_c99_same_key_view(&candidate, key)))) {
-                kiln_c99_sealed_property(object, index, out);
-                return 1;
-            }
+        if (kiln_c99_sealed_layout_index(object->sealed, key, ikey, &index) &&
+            orders[index] != 0) {
+            kiln_c99_sealed_property(object, index, out);
+            return 1;
         }
     }
     if (object->shape != NULL) {
@@ -548,12 +544,9 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
     size_t index;
     if (object->sealed != NULL) {
         uint32_t *orders = kiln_c99_sealed_orders(object);
-        for (index = 0; index < object->sealed->count; ++index) {
+        if (kiln_c99_sealed_layout_index(object->sealed, key, ikey, &index) &&
+            orders[index] != 0) {
             const kiln_sealed_property *entry = &object->sealed->entries[index];
-            kiln_property candidate = {.key = entry->key};
-            if (orders[index] == 0 ||
-                !((ikey != NULL && entry->key == ikey) ||
-                  (key != NULL && kiln_c99_same_key_view(&candidate, key)))) continue;
             *found = 1;
             if (entry->writable) object->slots[index] = kiln_val_from_boundary(value);
             else if (strict) return kiln_c99_throw_read_only_key(thrown, key);
@@ -1074,29 +1067,44 @@ static int kiln_c99_sealed_storage_commit(kiln_object *object, const kiln_string
                                            const kiln_string *ikey,
                                            const kiln_property *desired) {
     size_t index;
+    size_t hint;
     uint32_t *orders;
     kiln_sealed_values *values;
     if (object->sealed == NULL || desired->accessor || desired->refused) return 0;
     orders = kiln_c99_sealed_orders(object);
     values = kiln_c99_sealed_values_of(object);
-    for (index = 0; index < object->sealed->count; ++index) {
+    /* Direct bootstrap construction normally writes keys in the descriptor's original
+     * insertion order. Try the next empty slot first: a wide process.env descriptor would
+     * otherwise do a full linear lookup for every one of its keys in every actor realm.
+     * Reordered, repeated and variant keys still take the complete checked lookup below. */
+    hint = values->next_order == 0 ? object->sealed->count : values->next_order - 1;
+    if (hint < object->sealed->count) {
+        kiln_property candidate = {.key = object->sealed->entries[hint].key};
+        if ((ikey != NULL && candidate.key == ikey) ||
+            (key != NULL && kiln_c99_same_key_view(&candidate, key)))
+            index = hint;
+        else if (!kiln_c99_sealed_layout_index(object->sealed, key, ikey, &index))
+            return 0;
+    } else if (!kiln_c99_sealed_layout_index(object->sealed, key, ikey, &index)) {
+        return 0;
+    }
+    {
         const kiln_sealed_property *entry = &object->sealed->entries[index];
-        kiln_property candidate = {.key = entry->key};
-        if (!((ikey != NULL && entry->key == ikey) ||
-              (key != NULL && kiln_c99_same_key_view(&candidate, key)))) continue;
         if (desired->enumerable != entry->enumerable ||
             desired->writable != entry->writable ||
             desired->configurable != entry->configurable ||
             desired->symbol_hidden != entry->symbol_hidden ||
             (orders[index] == 0 && (object->not_extensible || object->frozen ||
                                      values->next_order == 0))) return 0;
-        if (orders[index] == 0) orders[index] = values->next_order++;
+        if (orders[index] == 0) {
+            if (index + 1 != values->next_order) values->dense_order = 0;
+            orders[index] = values->next_order++;
+        }
         object->slots[index] = kiln_val_from_boundary(desired->value);
         if (!entry->writable) object->read_only_seen = 1;
         kiln_c99_prototype_touched(object);
         return 1;
     }
-    return 0;
 }
 
 /* The storage-side commit for a complete own descriptor. The caller computes and validates a

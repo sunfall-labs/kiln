@@ -1100,6 +1100,9 @@ typedef struct kiln_sealed_layout {
     uint32_t tag;
     uint64_t code;
     size_t count;
+    size_t bucket_count;
+    /* A uint32_t open-addressed key index follows entries[count]. Zero is empty; a filled
+     * bucket stores the descriptor index plus one. Both arrays are process-owned and sealed. */
     kiln_sealed_property entries[];
 } kiln_sealed_layout;
 
@@ -1110,12 +1113,16 @@ typedef struct kiln_sealed_layout {
 typedef struct kiln_sealed_values {
     uint32_t next_order;
     uint32_t extra_capacity;
+    uint32_t dense_order;
     kiln_val values[];
 } kiln_sealed_values;
 
 /* The global object's stable site in the complete descriptor table. Other ordinary-object
  * sites will use compiler-assigned identities, never a realm pointer. */
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
+/* `process.env` is built from the host's environment. The complete first-realm layout is
+ * reusable only for later realms with the same keys; an unexpected key materializes locally. */
+#define KILN_C99_SEALED_ENV_CODE (UINT64_MAX - UINT64_C(1))
 
 /* Most bootstrap objects have fewer than eight shaped properties. Keeping sixteen slots in
  * every kiln_object made the many small per-realm objects pay for unused values. Wider objects

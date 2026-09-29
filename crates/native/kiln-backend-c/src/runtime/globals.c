@@ -131,7 +131,13 @@ static int kiln_c99_process_object(kiln_value *out) {
         if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*process, emitter_prototype);
     }
 #endif
-    if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&env);
+        if (status == KILN_C99_OK)
+            (void)kiln_c99_sealed_layout_attach_empty(KILN_VALUE_OBJECT,
+                                                       KILN_C99_SEALED_ENV_CODE,
+                                                       kiln_c99_object_of(env));
+    }
     if (status == KILN_C99_OK && kiln_c99_environ != NULL) {
         for (char **entry_ptr = kiln_c99_environ; *entry_ptr != NULL; ++entry_ptr) {
             const char *entry = *entry_ptr;
@@ -146,7 +152,10 @@ static int kiln_c99_process_object(kiln_value *out) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     break;
                 }
-                status = kiln_c99_put(NULL, env, entry, key_len, val_obj, 0, NULL);
+                /* This is a fresh host-built own store. Defining its final data descriptor
+                 * directly avoids an inherited-property scan for every environment entry,
+                 * including the wide sealed layout's otherwise quadratic own-key search. */
+                status = kiln_c99_commit_own_data(env, entry, key_len, val_obj, 1, 1, 1);
                 if (status != KILN_C99_OK) break;
             }
         }
@@ -156,9 +165,15 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&versions);
 #if defined(KILN_NODE_ENV_PRODUCTION)
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, env, "NODE_ENV", 8,
-                              kiln_c99_copy_text("production", 10), 0, NULL);
+        status = kiln_c99_commit_own_data(env, "NODE_ENV", 8,
+                                          kiln_c99_copy_text("production", 10), 1, 1, 1);
 #endif
+    if (status == KILN_C99_OK) {
+        kiln_object *store = kiln_c99_object_of(env);
+        kiln_c99_sealed_layout_publish(KILN_VALUE_OBJECT, KILN_C99_SEALED_ENV_CODE, store);
+        (void)kiln_c99_sealed_layout_attach(KILN_VALUE_OBJECT,
+                                            KILN_C99_SEALED_ENV_CODE, store);
+    }
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, versions, "node", 4,
                               kiln_c99_copy_text("22.0.0", 6), 0, NULL);

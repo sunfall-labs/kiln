@@ -919,12 +919,19 @@ static void kiln_c99_sealed_property(const kiln_object *object, size_t slot,
  * walks every record, so carrying `next` across that walk avoids repeating each earlier scan. */
 static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t after,
                                           uint32_t *next, kiln_property *out) {
+    const kiln_sealed_values *values = kiln_c99_sealed_values_of(object);
     uint32_t *orders = kiln_c99_sealed_orders(object);
     uint32_t *extras = kiln_c99_sealed_extra_orders(object);
     uint32_t best = UINT32_MAX;
     size_t best_index = 0;
     int best_extra = 0;
     size_t index;
+    if (values->dense_order && object->count == 0) {
+        if (after >= object->sealed->count || orders[after] == 0) return 0;
+        *next = after + 1;
+        kiln_c99_sealed_property(object, after, out);
+        return 1;
+    }
     for (index = 0; index < object->sealed->count; ++index) {
         if (orders[index] > after && orders[index] < best) {
             best = orders[index];
@@ -951,8 +958,14 @@ static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t af
  * cursor above and never restarts it for each record. */
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
                                          kiln_property *out) {
+    const kiln_sealed_values *values = kiln_c99_sealed_values_of(object);
     uint32_t after = 0;
     size_t rank;
+    if (values->dense_order && object->count == 0) {
+        if (at >= object->sealed->count || kiln_c99_sealed_orders(object)[at] == 0) return 0;
+        kiln_c99_sealed_property(object, at, out);
+        return 1;
+    }
     for (rank = 0; rank <= at; ++rank) {
         if (!kiln_c99_sealed_property_after(object, after, &after, out)) return 0;
     }
@@ -1135,6 +1148,36 @@ static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint6
     return NULL;
 }
 
+static uint32_t *kiln_c99_sealed_layout_buckets(const kiln_sealed_layout *layout) {
+    return (uint32_t *)(layout->entries + layout->count);
+}
+
+/* A complete descriptor has immutable, canonical keys, so one process-owned index serves all
+ * realms. The caller still checks its own visibility ordinals and reads its own value slots. */
+static int kiln_c99_sealed_layout_index(const kiln_sealed_layout *layout,
+                                         const kiln_string *key, const kiln_string *ikey,
+                                         size_t *index) {
+    const kiln_string *view = ikey != NULL ? ikey : key;
+    const uint32_t *buckets;
+    size_t slot, probes;
+    if (view == NULL || layout->bucket_count == 0) return 0;
+    buckets = kiln_c99_sealed_layout_buckets(layout);
+    slot = (size_t)kiln_c99_key_hash(view) & (layout->bucket_count - 1);
+    for (probes = 0; probes < layout->bucket_count; ++probes) {
+        uint32_t entry = buckets[slot];
+        kiln_property candidate;
+        if (entry == 0) return 0;
+        candidate = (kiln_property){.key = layout->entries[entry - 1].key};
+        if ((ikey != NULL && candidate.key == ikey) ||
+            kiln_c99_same_key_view(&candidate, view)) {
+            *index = entry - 1;
+            return 1;
+        }
+        slot = (slot + 1) & (layout->bucket_count - 1);
+    }
+    return 0;
+}
+
 /* Adopt a complete process descriptor only when this realm's bootstrap produced exactly the
  * same ordered keys and final attributes. The table never owns values: compact slots remain on
  * this realm's heap, and every later mutation can return to ordinary dictionary storage. */
@@ -1170,6 +1213,7 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
     if (values == NULL) return 0;
     values->next_order = (uint32_t)count + 1;
     values->extra_capacity = 0;
+    values->dense_order = 1;
     orders = (uint32_t *)(values->values + count);
     for (index = 0; index < count; ++index) {
         values->values[index] = kiln_val_from_boundary(object->properties[index].value);
@@ -1209,6 +1253,7 @@ static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
     if (values == NULL) return 0;
     values->next_order = 1;
     values->extra_capacity = 0;
+    values->dense_order = 1;
     orders = (uint32_t *)(values->values + count);
     for (index = 0; index < count; ++index) {
         values->values[index] = KILN_VAL_UNDEFINED;
@@ -1232,17 +1277,29 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
     kiln_sealed_layout *known;
     size_t index;
     size_t bytes;
+    size_t bucket_count = 1;
     if (kiln_c99_sealed_layout_find(tag, code) != NULL || object == NULL ||
         object->shape != NULL || object->properties == NULL ||
-        object->count == 0 || object->count > (SIZE_MAX - sizeof *candidate) /
-                                              sizeof(kiln_sealed_property)) return;
+        object->count == 0 || object->count >= UINT32_MAX ||
+        object->count > SIZE_MAX / 2 ||
+        object->count > (SIZE_MAX - sizeof *candidate) /
+                        sizeof(kiln_sealed_property)) return;
+    while (bucket_count < object->count * 2) {
+        if (bucket_count > SIZE_MAX / 2) return;
+        bucket_count *= 2;
+    }
     bytes = sizeof *candidate + object->count * sizeof(kiln_sealed_property);
+    if (bucket_count > (SIZE_MAX - bytes) / sizeof(uint32_t)) return;
+    bytes += bucket_count * sizeof(uint32_t);
     candidate = (kiln_sealed_layout *)malloc(bytes);
     if (candidate == NULL) return;
     candidate->next = NULL;
     candidate->tag = tag;
     candidate->code = code;
     candidate->count = object->count;
+    candidate->bucket_count = bucket_count;
+    memset(kiln_c99_sealed_layout_buckets(candidate), 0,
+           bucket_count * sizeof(uint32_t));
     for (index = 0; index < object->count; ++index) {
         const kiln_property *property = &object->properties[index];
         kiln_sealed_property *entry = &candidate->entries[index];
@@ -1256,6 +1313,18 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
         entry->writable = (uint8_t)property->writable;
         entry->configurable = (uint8_t)property->configurable;
         entry->symbol_hidden = (uint8_t)property->symbol_hidden;
+        {
+            uint32_t *buckets = kiln_c99_sealed_layout_buckets(candidate);
+            size_t slot = (size_t)kiln_c99_key_hash(entry->key) & (bucket_count - 1);
+            while (buckets[slot] != 0) {
+                if (candidate->entries[buckets[slot] - 1].key == entry->key) {
+                    free(candidate);
+                    return;
+                }
+                slot = (slot + 1) & (bucket_count - 1);
+            }
+            buckets[slot] = (uint32_t)index + 1;
+        }
     }
     process = kiln_c99_process();
     kiln_c99_process_lock(process);
