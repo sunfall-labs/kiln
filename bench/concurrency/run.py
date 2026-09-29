@@ -42,14 +42,16 @@ def config(quick):
     if quick:
         return dict(
             rounds=1, start_warm=10, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=5,
-            msg_budget=300, oneway=100000, inrealm_oneway=10000, shared_ns=[4], queries=2000000,
+            msg_budget=300, oneway=100000, inrealm_oneway=10000,
+            actor_graph_samples=5, shared_ns=[4], queries=2000000,
             task_ns=[10, 1000, 100000], realm_ns=[10, 1000], ticks=10, interval=10,
             pmap_n=10000000, pmap_reps=2,
             server_s=3, server_c=128,
         )
     return dict(
         rounds=3, start_warm=20, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=10,
-        msg_budget=800, oneway=100000, inrealm_oneway=10000, shared_ns=[4, 16], queries=2000000,
+        msg_budget=800, oneway=100000, inrealm_oneway=10000,
+        actor_graph_samples=10, shared_ns=[4, 16], queries=2000000,
         task_ns=[10, 1000, 100000], realm_ns=[10, 1000, 100000], ticks=10, interval=10,
         pmap_n=10000000, pmap_reps=3,
         server_s=5, server_c=128,
@@ -183,7 +185,7 @@ def build_all(kiln, go_cmd, work, selected):
     binaries, failures = {}, {}
     by_workload = {
         "start": ["kiln-start", "start", "actor-start"],
-        "messages": ["inrealm", "messages"],
+        "messages": ["inrealm", "messages", "actor-graph"],
         "shared": ["shared"],
         "tasks": ["tasks"],
         "realms": ["realm-periodic"],
@@ -481,6 +483,9 @@ def jobs_for(cfg, bins):
     add("messages", "kiln", lambda: [dict(r, scope="realm") for r in
                                      simple("kiln", [k["inrealm"], str(cfg["msg_budget"]), str(cfg["inrealm_oneway"])], timeout=300)],
         k["inrealm"])
+    add("messages", "kiln", lambda: simple(
+        "kiln", [k["actor-graph"], str(cfg["actor_graph_samples"])], timeout=300),
+        k["actor-graph"])
 
     # 3. shared dataset
     for n in cfg["shared_ns"]:
@@ -763,6 +768,20 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("| --- | --- | --- | --- |")
     for label, case, metric, unit in msg_rows:
         w(rep.row(label.replace(" (Go: deep copy)", ""), [rep.cell(case, rt, metric, unit, scope="realm") for rt in ("node", "bun", "kiln")]))
+    w("")
+    w("The public actor call uses the same 1 MB graph in both modes. `prepareTransfer` makes a "
+      "private snapshot on the sender; its preparation time is included in the total. The actor "
+      "computes the same checksum for both calls. Actor startup is outside these clocks.")
+    w("")
+    w("| kiln actor graph call | time |")
+    w("| --- | ---: |")
+    for label, case in [
+        ("structured clone call", "actor-graph-copy"),
+        ("prepare private snapshot", "actor-graph-prepare"),
+        ("prepared handoff and reply", "actor-graph-handoff"),
+        ("prepared total", "actor-graph-prepared-total"),
+    ]:
+        w(rep.row(label, [rep.cell(case, "kiln", "ms_per_op", " ms")]))
     w("")
 
     # 3. shared

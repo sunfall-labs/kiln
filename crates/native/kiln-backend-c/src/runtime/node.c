@@ -2650,11 +2650,16 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
     }
     case KILN_C99_WORKER_OP_ACTOR_PREPARE: {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
+        /* This is a ceiling on chunks taken, not an up-front allocation. A nursery-sized
+         * ceiling refused even a 1 MB ordinary graph although the private arena and receiver
+         * transaction both support multiple chunks. Keep the actor budget separate from the
+         * parallel worker budget, whose environment setting has different semantics. */
+        const size_t budget = (size_t)64 * 1024 * 1024;
         int prepared = argc >= 3 && args[1].tag == KILN_VALUE_OBJECT &&
                        (args[2].tag == KILN_VALUE_OBJECT ||
                         args[2].tag == KILN_VALUE_ARRAY) &&
-                       kiln_c99_prepared_graph_create(heap, args[1], args[2],
-                                                       heap->nursery.capacity) == KILN_C99_OK;
+                       kiln_c99_prepared_graph_create(heap, args[1], args[2], budget) ==
+                           KILN_C99_OK;
         *result = kiln_c99_boolean(prepared);
         return KILN_C99_OK;
     }

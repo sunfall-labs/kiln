@@ -65,12 +65,12 @@ below is about the native runtime.
 | # | workload | node / bun | Go | kiln today |
 | --- | --- | --- | --- | --- |
 | 1 | **Worker and actor start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`), plus `spawnActor` to ready and first call (`js/actor-start.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
-| 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun |
-| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; a user object graph in the immutable region awaits issue 11 |
-| 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks **in one realm**, labelled (a realm per task comes with issues 05 and 09) |
+| 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun, plus public actor calls with clone and `prepareTransfer` (`js/actor-graph.mjs`) |
+| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; the separate frozen object-graph API is not measured in this byte-table row |
+| 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks in one realm; workload 7 measures separate scheduled realms |
 | 5 | **Data-parallel map** over 10M numbers: a compute-heavy callback, and a light one | `Array.prototype.map`; a `worker_threads` pool of one worker per core that copies each slice in and transfers it back (`js/pmap-pool.mjs`) | a loop; goroutines over sub-slices | `map`, and `parallelMap` (ADR 0058) natively, plus `parallelMap` with `KILN_PARALLELISM=1` to show whether the parallel lowering ran |
 | 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` in process and thread mode (`js/serve.mjs`); `KILN_WORKERS=1` for scale |
-| 7 | **Separate scheduled realms**: 10, 1,000 and (when memory allows) 100,000 realms each waking ten times | The one-realm async task comparison is workload 4; isolate workers have a different memory budget | Goroutine comparison is workload 4 | `KILN_REALMS=N` with `KILN_REALM_SCHEDULER=1` (`js/realm-periodic.mjs`); every realm's output and status checked |
+| 7 | **Separate scheduled realms**: 10, 1,000 and (when memory allows) 100,000 realms each waking ten times | The one-realm async task comparison is workload 4; isolate workers have a different memory budget | Goroutine comparison is workload 4 | `KILN_REALMS=N` (`js/realm-periodic.mjs`); every realm's output and status checked |
 
 Details that matter when reading the numbers:
 
@@ -87,11 +87,13 @@ Details that matter when reading the numbers:
 - **2.** The one-way case sends 100,000 messages across threads but 10,000 in one realm, because
   kiln's in-realm channel runs at thousands of messages per second and 100,000 would take minutes.
   The per-message rate is what is compared. The 16 MB rows are a round trip: copied both ways, or
-  transferred both ways.
+  transferred both ways. The actor graph rows keep the actor alive and send the same graph through
+  ordinary clone or a fresh prepared snapshot on each call. They report preparation, handoff and
+  reply, and the complete prepared cost separately. The actor checks the graph by computing the
+  same sum in both cases; preparation is a sender-side copy, not a zero-copy construction.
 - **3.** Setup is from the first send until every worker holds the table, with the workers already
   started; the copy row pays one structured clone per worker, the `SharedArrayBuffer` row none.
-  JavaScript can share bytes, never an object graph -- the gap the shared immutable region (08) is
-  for.
+  This byte-table row does not measure `kiln:shared` frozen object graphs.
 - **4.** The floor is 100 ms (10 ticks of 10 ms); everything above it is scheduling. Peak RSS
   includes each runtime's baseline.
 - **5.** The pool rows include copying the input into typed arrays: that is what a pool of isolates
@@ -112,7 +114,7 @@ Details that matter when reading the numbers:
 
 It means the runtime has no way to express that workload yet, rather than a failed run. Workloads
 1-3 use `worker_threads` in kiln, workload 6 has process and thread modes, and workload 7 uses
-the opt-in turn scheduler. A user frozen-value graph has its own API but is not part of the
+the turn scheduler. A user frozen-value graph has its own API but is not part of the
 shared-byte table in workload 3. A failed build or run is reported as a failure, and a checksum
 mismatch is excluded.
 
