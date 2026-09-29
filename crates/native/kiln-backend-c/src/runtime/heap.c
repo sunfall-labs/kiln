@@ -1957,6 +1957,93 @@ static void kiln_c99_heap_profile_chunk(const kiln_nursery_chunk *chunk, const c
     }
 }
 
+/* A promoted chunk may contain very little live payload yet keep most of its pages resident.
+ * Count pages crossed by each bitmap-live block, including its header and the complete payload;
+ * optionally discard pages no block can read again. Only complete body pages qualify: a partial
+ * edge page may also hold the chunk header or bitmap. */
+#if !defined(MADV_DONTNEED) && defined(__linux__)
+#define MADV_DONTNEED 4 /* Linux's stable numeric advice when strict C11 hides the macro. */
+#endif
+static size_t kiln_c99_nursery_occupied_pages(const kiln_nursery_chunk *chunk,
+                                              size_t *complete_pages, int reclaim) {
+    long host_page = sysconf(_SC_PAGESIZE);
+    uintptr_t begin, end;
+    size_t pages, occupied = 0, word;
+    unsigned char *live;
+    if (complete_pages != NULL) *complete_pages = 0;
+    if (host_page <= 0) return 0;
+    begin = ((uintptr_t)chunk->base + (uintptr_t)host_page - 1) /
+            (uintptr_t)host_page * (uintptr_t)host_page;
+    end = (uintptr_t)chunk->limit / (uintptr_t)host_page * (uintptr_t)host_page;
+    if (end <= begin) return 0;
+    pages = (end - begin) / (size_t)host_page;
+    live = (unsigned char *)calloc(pages, 1);
+    if (live == NULL) return 0;
+    for (word = 0; word < chunk->bitmap_words; ++word) {
+        uint64_t bits = chunk->bitmap[word];
+        while (bits != 0) {
+            size_t bit = (word << 6) + (size_t)__builtin_ctzll(bits);
+            const kiln_gc_block *block =
+                (const kiln_gc_block *)(chunk->base + (bit << 4));
+            uintptr_t first = (uintptr_t)block;
+            uintptr_t last;
+            size_t page_index;
+            bits &= bits - 1;
+            if (first < (uintptr_t)chunk->base ||
+                first > (uintptr_t)chunk->limit ||
+                (uintptr_t)chunk->limit - first < sizeof *block ||
+                block->size > (uintptr_t)chunk->limit - first - sizeof *block) {
+                free(live);
+                return 0;
+            }
+            last = first + sizeof *block + block->size;
+            if (last <= begin || first >= end) continue;
+            if (first < begin) first = begin;
+            if (last > end) last = end;
+            for (page_index = (first - begin) / (size_t)host_page;
+                 page_index <= (last - 1 - begin) / (size_t)host_page; ++page_index)
+                live[page_index] = 1;
+        }
+    }
+    for (word = 0; word < pages; ++word) occupied += live[word] != 0;
+    if (reclaim) {
+#ifdef MADV_DONTNEED
+        for (word = 0; word < pages;) {
+            size_t start = word;
+            if (live[word] != 0) { ++word; continue; }
+            while (word < pages && live[word] == 0) ++word;
+            /* These pages contain no bitmap-live block, including an interior block span.
+             * The region remains reserved and its header/bitmap stay on separate pages. */
+            extern int madvise(void *, size_t, int);
+            (void)madvise((void *)(begin + start * (size_t)host_page),
+                          (word - start) * (size_t)host_page, MADV_DONTNEED);
+        }
+#else
+        (void)reclaim;
+#endif
+    }
+    free(live);
+    if (complete_pages != NULL) *complete_pages = pages;
+    return occupied;
+}
+
+static void kiln_c99_heap_profile_pages(const kiln_nursery_chunk *chunk, uint64_t serial,
+                                        uint32_t pass, size_t index) {
+    size_t pages = 0;
+    size_t occupied = kiln_c99_nursery_occupied_pages(chunk, &pages, 0);
+    kiln_c99_introspect_line line;
+    if (pages == 0) return;
+    line.len = 0;
+    kiln_c99_introspect_text(&line, "kiln heap-profile pages");
+    kiln_c99_introspect_field(&line, "serial", serial);
+    kiln_c99_introspect_field(&line, "pass", pass);
+    kiln_c99_introspect_field(&line, "index", index);
+    kiln_c99_introspect_field(&line, "page_size", kiln_c99_region_page());
+    kiln_c99_introspect_field(&line, "complete", pages);
+    kiln_c99_introspect_field(&line, "occupied", occupied);
+    kiln_c99_introspect_flush(&line);
+}
+
 /* Read-only, opt-in sampling at two turn boundaries. A public actor's second boundary includes
  * its target module and constructor, which the bootstrap-complete hook cannot see. The kind
  * totals are payload rather than RSS; chunk and slab counts expose the allocator residency that
@@ -2001,6 +2088,7 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         kiln_c99_introspect_field(&line, "payload", chunk->alloc_bytes);
         kiln_c99_introspect_field(&line, "used", (size_t)(chunk->limit - chunk->base));
         kiln_c99_introspect_flush(&line);
+        kiln_c99_heap_profile_pages(chunk, heap->serial, pass, promoted);
         ++promoted;
         kiln_c99_heap_profile_chunk(chunk, chunk->limit, counts, bytes, closures);
     }
@@ -2052,6 +2140,17 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         kiln_c99_introspect_field(&line, "payload", bytes[kind]);
         kiln_c99_introspect_flush(&line);
     }
+}
+static void kiln_c99_nursery_reclaim_pages(const kiln_nursery_chunk *chunk) {
+#ifdef MADV_DONTNEED
+    (void)kiln_c99_nursery_occupied_pages(chunk, NULL, 1);
+#else
+    (void)chunk;
+#endif
+}
+#else
+static void kiln_c99_nursery_reclaim_pages(const kiln_nursery_chunk *chunk) {
+    (void)chunk;
 }
 #endif
 
@@ -7088,6 +7187,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         kiln_nursery_chunk **pchunk = &heap->nursery.promoted;
         while (*pchunk != NULL) {
             kiln_nursery_chunk *chunk = *pchunk;
+            size_t before = chunk->alloc_count;
             size_t live = kiln_c99_nursery_settle(heap, chunk, orphan_marked);
             survived += chunk->alloc_bytes;
             chunk->live_count = live;
@@ -7098,6 +7198,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
                 *pchunk = chunk->next;
                 kiln_c99_nursery_spare(heap, chunk);
             } else {
+                if (live < before) kiln_c99_nursery_reclaim_pages(chunk);
                 pchunk = &chunk->next;
             }
         }
@@ -7354,6 +7455,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                 } else {
                     promoted_bytes += filled;
                     chunk->live_count = survivors;
+                    kiln_c99_nursery_reclaim_pages(chunk);
                     chunk->next = heap->nursery.promoted;
                     heap->nursery.promoted = chunk;
                     heap->nursery.promotions += survivors;
@@ -7391,6 +7493,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                 } else {
                     kiln_nursery_chunk *promoted = kiln_c99_nursery_seal(&heap->nursery);
                     promoted->live_count = survivors;
+                    kiln_c99_nursery_reclaim_pages(promoted);
                     promoted->next = heap->nursery.promoted;
                     heap->nursery.promoted = promoted;
                     heap->nursery.promotions += survivors;

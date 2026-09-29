@@ -4477,6 +4477,72 @@ int main(void) {
 }
 
 #[test]
+fn executable_promoted_nursery_reclaims_dead_pages_without_touching_live_spans() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int nursery_page_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value root;
+    char short_text[2048], long_text[9000];
+    const kiln_string *kept;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->mid_turn = 0;
+    memset(short_text, 's', sizeof short_text);
+    memset(long_text, 'L', sizeof long_text);
+    for (size_t index = 0; index < 160; ++index) {
+        kiln_value dead = kiln_c99_copy_text(short_text, sizeof short_text);
+        if (dead.tag != KILN_VALUE_STRING) return 2;
+        if (index == 40) {
+            root = kiln_c99_copy_text(long_text, sizeof long_text);
+            if (root.tag != KILN_VALUE_STRING) return 3;
+            heap->realm.graph_inbox_root = root;
+        }
+    }
+    kiln_c99_gc_collect(heap, 1);
+    kept = (const kiln_string *)root.ptr;
+    if (kiln_c99_gc_lookup(heap, kept) == NULL || kept->unit_len != sizeof long_text ||
+        ((const char *)kept->data)[0] != 'L' ||
+        ((const char *)kept->data)[sizeof long_text - 1] != 'L') return 4;
+#if defined(__unix__) || defined(__APPLE__)
+    {
+        kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(
+            heap, (const kiln_gc_block *)kept - 1);
+        size_t complete = 0;
+        size_t occupied;
+        if (chunk == NULL) return 5;
+        occupied = kiln_c99_nursery_occupied_pages(chunk, &complete, 0);
+        if (complete < 10 || occupied >= complete) return 6;
+    }
+#endif
+    kiln_c99_gc_collect(heap, 1);
+    if (kiln_c99_gc_lookup(heap, kept) == NULL ||
+        ((const char *)kept->data)[sizeof long_text - 1] != 'L') return 7;
+    heap->realm.graph_inbox_root = kiln_c99_undefined();
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 8;
+    result = kiln_realm_enter(realm, nursery_page_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-nursery-page-reclaim");
+    assert!(
+        run.status.success(),
+        "promoted nursery page reclamation failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_gc_inactive_nursery_still_finds_filled_chunk_roots() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
