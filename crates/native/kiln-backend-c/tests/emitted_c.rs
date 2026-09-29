@@ -1082,8 +1082,9 @@ fn runtime_prelude_size() {
     // Standalone large strings add their manifest and receiver-adoption path (64,304 lines).
     // The sealed arena view's bounds-checked node, field and UTF-16 readers replace repeated
     // provider calls on shared property reads; about 64,550 lines after that change. No runtime part
-    // was emitted twice. Leave the usual small margin for independent edits to this prelude.
-    const CEILING_LINES: usize = 65_000;
+    // was emitted twice. Candidate-owned shaped-slot buffers add one resize path, ownership
+    // checks and a side-span walker (65,075 lines). Leave a small margin for later edits.
+    const CEILING_LINES: usize = 65_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

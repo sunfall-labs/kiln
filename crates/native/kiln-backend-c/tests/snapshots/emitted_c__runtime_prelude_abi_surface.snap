@@ -1008,10 +1008,13 @@ typedef struct kiln_sealed_values {
 typedef struct kiln_object {
 typedef struct kiln_c99_candidate_object_properties {
 static inline kiln_c99_candidate_object_properties *kiln_c99_object_candidate_header(
+typedef struct kiln_c99_candidate_object_slots {
+static inline kiln_c99_candidate_object_slots *kiln_c99_object_candidate_slots_header(
 static inline int kiln_c99_object_properties_in_block(const kiln_object *object) {
 static inline void kiln_c99_object_properties_free(kiln_object *object) {
 static inline int kiln_c99_object_slots_owned(const kiln_object *object) {
-static inline kiln_val *kiln_c99_object_slots_resize(const kiln_object *object, size_t capacity) {
+static inline void kiln_c99_object_slots_free(kiln_object *object) {
+static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capacity);
 static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *object) {
 typedef struct kiln_shared_facade {
 static uint64_t kiln_c99_builtin_store_epoch;
@@ -2239,6 +2242,7 @@ typedef struct kiln_c99_graph_walk {
 static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
 static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_add_object_side(kiln_c99_graph_walk *walk,
+static int kiln_c99_graph_add_object_slots_side(kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_side_span_compare(const void *left, const void *right) {
 static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
 static int kiln_c99_graph_pointer_names_member(const kiln_c99_graph_walk *walk,
@@ -2470,6 +2474,7 @@ static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
 static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
 static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
 static uint64_t kiln_c99_object_candidate_id(const kiln_object *object) {
+static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capacity) {
 static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static uint32_t *kiln_c99_sealed_orders(const kiln_object *object) {

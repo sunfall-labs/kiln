@@ -19,6 +19,11 @@ export class Counter extends Actor {
     value[200000] = 4;
     return [value.length, value[0], value[99999], value[200000]];
   }
+  growTransferredShape(value) {
+    if (Object.keys(value).length !== 12 || value.s00 !== 0 || value.s11 !== 11) return null;
+    value.s12 = 12; value.s13 = 13; value.s14 = 14; value.s15 = 15; value.s16 = 16;
+    return [Object.keys(value).length, value.s00, value.s08, value.s16];
+  }
   inspectGraph(value) {
     return [Object.getPrototypeOf(value) === Object.prototype, value.answer, value.values.join(',')];
   }

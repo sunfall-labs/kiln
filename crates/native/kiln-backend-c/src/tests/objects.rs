@@ -3835,6 +3835,97 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_candidate_shaped_slots_track_ownership() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int candidate_slots_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value ordinary, candidate;
+    kiln_object *outside, *object;
+    kiln_val *outside_slots, *grown;
+    kiln_shape shape;
+    kiln_c99_candidate_object_slots *header;
+    kiln_c99_graph_side_set sides = {0};
+    kiln_nursery_chunk *batch[1];
+    uint64_t candidate_id;
+    uintptr_t side_word;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (kiln_c99_new_object(&ordinary) != KILN_C99_OK) return 2;
+    outside = (kiln_object *)(uintptr_t)ordinary.bits;
+    grown = kiln_c99_object_slots_resize(outside, 16);
+    if (grown == NULL || outside->candidate_slots != 0) return 3;
+    outside->slots = grown;
+    outside->slot_capacity = 16;
+    outside_slots = grown;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 4;
+    candidate_id = heap->actor_candidate_id;
+    if (kiln_c99_new_object(&candidate) != KILN_C99_OK) return 5;
+    object = (kiln_object *)(uintptr_t)candidate.bits;
+    grown = kiln_c99_object_slots_resize(object, 16);
+    if (grown == NULL || object->candidate_slots != 1) return 6;
+    object->slots = grown;
+    object->slot_capacity = 16;
+    header = kiln_c99_object_candidate_slots_header(object);
+    if (header->candidate_id != candidate_id || header->owner != object ||
+        header->capacity != 16 || header->generation != 1) return 7;
+    for (size_t i = 0; i < 16; ++i) object->slots[i] = KILN_VAL_UNDEFINED;
+    object->slots[0] = kiln_val_from_boundary(kiln_c99_number(42));
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 9;
+    for (size_t i = 0; i < shape.property_count; ++i)
+        shape.keys[i] = kiln_c99_key_empty;
+    object->shape = &shape;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 8;
+    grown = kiln_c99_object_slots_resize(object, 32);
+    if (grown == NULL) return 9;
+    object->slots = grown;
+    object->slot_capacity = 32;
+    header = kiln_c99_object_candidate_slots_header(object);
+    if (header->capacity != 32 || header->generation != 2 ||
+        object->slots[0] != kiln_val_from_boundary(kiln_c99_number(42))) return 10;
+    batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)object - 1);
+    if (!kiln_c99_graph_candidate_closed_with_sides(heap, batch, 1, object, &sides, NULL) ||
+        sides.count != 1 || sides.spans[0].owner != object) return 11;
+    heap->graph_proof_sides = &sides;
+    side_word = (uintptr_t)&object->slots[0];
+    if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
+        !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 12;
+    outside->slots = object->slots;
+    if (kiln_c99_graph_outside_block(heap, batch, 1,
+            (kiln_gc_block *)outside - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 13;
+    outside->slots = outside_slots;
+    heap->graph_proof_sides = NULL;
+    free(sides.spans);
+    header->candidate_id = 0;
+    if (kiln_c99_graph_candidate_closed(heap, batch, 1, object)) return 14;
+    header->candidate_id = candidate_id;
+    kiln_c99_actor_candidate_finish(heap, 1);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 15;
+    result = kiln_realm_enter(realm, candidate_slots_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 16;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-shaped-slots");
+    assert!(
+        run.status.success(),
+        "candidate shaped slots failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_factory_allocations_have_dedicated_candidate_chunks() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

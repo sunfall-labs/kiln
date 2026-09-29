@@ -700,6 +700,48 @@ static uint64_t kiln_c99_object_candidate_id(const kiln_object *object) {
                ? heap->actor_candidate_id : 0;
 }
 
+static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capacity) {
+    kiln_val *slots;
+    uint64_t candidate_id;
+    if (object->sealed != NULL || capacity < object->slot_capacity ||
+        capacity > SIZE_MAX / sizeof(kiln_val)) return NULL;
+    candidate_id = object->candidate_slots ? 0 : kiln_c99_object_candidate_id(object);
+    if (object->candidate_slots ||
+        (candidate_id != 0 && !kiln_c99_object_slots_owned(object))) {
+        kiln_c99_candidate_object_slots *header;
+        if (capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return NULL;
+        if (object->candidate_slots) {
+            header = kiln_c99_object_candidate_slots_header(object);
+            if (object->candidate_slots != 1 || header->owner != object ||
+                header->capacity != object->slot_capacity ||
+                header->generation == UINT64_MAX) return NULL;
+            header = (kiln_c99_candidate_object_slots *)realloc(
+                header, sizeof *header + capacity * sizeof(kiln_val));
+            if (header == NULL) return NULL;
+            header->generation += 1;
+        } else {
+            header = (kiln_c99_candidate_object_slots *)malloc(
+                sizeof *header + capacity * sizeof(kiln_val));
+            if (header == NULL) return NULL;
+            header->candidate_id = candidate_id;
+            header->owner = object;
+            header->generation = 1;
+            if (object->slots != NULL)
+                memcpy(header + 1, object->slots,
+                       object->slot_capacity * sizeof(kiln_val));
+            object->candidate_slots = 1;
+        }
+        header->capacity = capacity;
+        return (kiln_val *)(header + 1);
+    }
+    if (kiln_c99_object_slots_owned(object))
+        return (kiln_val *)realloc(object->slots, capacity * sizeof(kiln_val));
+    slots = (kiln_val *)malloc(capacity * sizeof(kiln_val));
+    if (slots != NULL && object->slots != NULL)
+        memcpy(slots, object->slots, object->slot_capacity * sizeof(kiln_val));
+    return slots;
+}
+
 static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
     if (needed <= object->capacity) return KILN_C99_OK;
     if (object->candidate_properties || object->properties == NULL ||
@@ -846,9 +888,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         pos++;
     }
     object->count = pos;
-    if (kiln_c99_object_slots_owned(object)) {
-        free(object->slots);
-    }
+    kiln_c99_object_slots_free(object);
     object->slots = NULL;
     object->slot_capacity = 0;
     object->shape = NULL;
@@ -1245,6 +1285,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->layout_token = 0;
     object->sealed = NULL;
     object->candidate_properties = 0;
+    object->candidate_slots = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -1577,6 +1618,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->layout_token = 0;
     object->sealed = NULL;
     object->candidate_properties = 0;
+    object->candidate_slots = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
