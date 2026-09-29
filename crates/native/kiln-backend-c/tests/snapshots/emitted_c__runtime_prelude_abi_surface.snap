@@ -2406,6 +2406,7 @@ static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ike
 static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
 static int kiln_c99_ensure_dictionary(kiln_object *object);
 static uint32_t *kiln_c99_sealed_orders(const kiln_object *object);
+static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t after,
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
 static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
 static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
@@ -2413,6 +2414,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static uint32_t *kiln_c99_sealed_orders(const kiln_object *object) {
 static uint32_t *kiln_c99_sealed_extra_orders(const kiln_object *object) {
 static void kiln_c99_sealed_property(const kiln_object *object, size_t slot,
+static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t after,
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
 static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
 static const kiln_property *kiln_c99_property_view(const kiln_object *object, size_t index,

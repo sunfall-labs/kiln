@@ -608,6 +608,8 @@ static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
 
 static int kiln_c99_ensure_dictionary(kiln_object *object);
 static uint32_t *kiln_c99_sealed_orders(const kiln_object *object);
+static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t after,
+                                          uint32_t *next, kiln_property *out);
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
                                          kiln_property *out);
 
@@ -701,6 +703,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         size_t visible = 0;
         size_t at;
         size_t index;
+        uint32_t after = 0;
         uint32_t *orders = kiln_c99_sealed_orders(object);
         for (index = 0; index < object->sealed->count; ++index)
             visible += orders[index] != 0;
@@ -709,7 +712,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         properties = visible == 0 ? NULL : malloc(visible * sizeof *properties);
         if (visible != 0 && properties == NULL) return KILN_C99_OUT_OF_MEMORY;
         for (at = 0; at < visible; ++at) {
-            if (!kiln_c99_sealed_property_nth(object, at, &properties[at])) {
+            if (!kiln_c99_sealed_property_after(object, after, &after, &properties[at])) {
                 free(properties);
                 return KILN_C99_INVALID_ARGUMENT;
             }
@@ -799,43 +802,48 @@ static void kiln_c99_sealed_property(const kiln_object *object, size_t slot,
     out->value = kiln_val_to_boundary(object->slots[slot]);
 }
 
+/* Select the first visible record after an insertion-order number. A dictionary conversion
+ * walks every record, so carrying `next` across that walk avoids repeating each earlier scan. */
+static int kiln_c99_sealed_property_after(const kiln_object *object, uint32_t after,
+                                          uint32_t *next, kiln_property *out) {
+    uint32_t *orders = kiln_c99_sealed_orders(object);
+    uint32_t *extras = kiln_c99_sealed_extra_orders(object);
+    uint32_t best = UINT32_MAX;
+    size_t best_index = 0;
+    int best_extra = 0;
+    size_t index;
+    for (index = 0; index < object->sealed->count; ++index) {
+        if (orders[index] > after && orders[index] < best) {
+            best = orders[index];
+            best_index = index;
+            best_extra = 0;
+        }
+    }
+    for (index = 0; index < object->count; ++index) {
+        if (extras[index] > after && extras[index] < best) {
+            best = extras[index];
+            best_index = index;
+            best_extra = 1;
+        }
+    }
+    if (best == UINT32_MAX) return 0;
+    *next = best;
+    if (best_extra) *out = object->properties[best_index];
+    else kiln_c99_sealed_property(object, best_index, out);
+    return 1;
+}
+
 /* Return the nth visible record in insertion order, including realm-only keys added between
- * descriptor keys. The common completed layout has no extras and follows descriptor order;
- * the general selection keeps bootstrap hook insertions/deletions observable until they leave. */
+ * descriptor keys. Random indexed reads still start from the beginning; conversion uses the
+ * cursor above and never restarts it for each record. */
 static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
                                          kiln_property *out) {
     uint32_t after = 0;
-    uint32_t *orders = kiln_c99_sealed_orders(object);
-    uint32_t *extras = kiln_c99_sealed_extra_orders(object);
     size_t rank;
     for (rank = 0; rank <= at; ++rank) {
-        uint32_t best = UINT32_MAX;
-        size_t best_index = 0;
-        int best_extra = 0;
-        size_t index;
-        for (index = 0; index < object->sealed->count; ++index) {
-            if (orders[index] > after && orders[index] < best) {
-                best = orders[index];
-                best_index = index;
-                best_extra = 0;
-            }
-        }
-        for (index = 0; index < object->count; ++index) {
-            if (extras[index] > after && extras[index] < best) {
-                best = extras[index];
-                best_index = index;
-                best_extra = 1;
-            }
-        }
-        if (best == UINT32_MAX) return 0;
-        after = best;
-        if (rank == at) {
-            if (best_extra) *out = object->properties[best_index];
-            else kiln_c99_sealed_property(object, best_index, out);
-            return 1;
-        }
+        if (!kiln_c99_sealed_property_after(object, after, &after, out)) return 0;
     }
-    return 0;
+    return 1;
 }
 
 /* An own-property walk sees a process-sealed descriptor with realm-owned values, a shared
