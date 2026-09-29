@@ -1046,67 +1046,79 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
  * stay rooted in the invoking generated frame for this synchronous walk. */
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
                                            kiln_worker_plain_node *out) {
-    kiln_value value = kiln_val_to_boundary((kiln_val)handle);
+    kiln_val value = (kiln_val)handle;
+    void *pointer;
     (void)context;
     memset(out, 0, sizeof *out);
-    switch (value.tag) {
-    case KILN_VALUE_UNDEFINED: out->kind = 0; return 1;
-    case KILN_VALUE_NULL: out->kind = 1; return 1;
-    case KILN_VALUE_BOOLEAN: out->kind = value.bits ? 3 : 2; return 1;
-    case KILN_VALUE_NUMBER: out->kind = 4; out->number = kiln_c99_as_number(value); return 1;
-    case KILN_VALUE_STRING:
-        if (value.ptr == NULL) return 0;
-        out->kind = 5;
-        out->text = (const kiln_string *)value.ptr;
+    if (value == KILN_VAL_UNDEFINED) { out->kind = 0; return 1; }
+    if (value == KILN_VAL_NULL) { out->kind = 1; return 1; }
+    if (value == KILN_VAL_FALSE || value == KILN_VAL_TRUE) {
+        out->kind = value == KILN_VAL_TRUE ? 3 : 2;
         return 1;
-    case KILN_VALUE_OBJECT:
-    case KILN_VALUE_ARRAY:
-        if (value.ptr == NULL || kiln_c99_gc_payload_kind(value.ptr) !=
-            (value.tag == KILN_VALUE_OBJECT ? KILN_GC_OBJECT : KILN_GC_ARRAY)) return 0;
-        if (value.tag == KILN_VALUE_OBJECT) {
-            kiln_object *object = kiln_c99_object_of(value);
+    }
+    if (KILN_VAL_IS_NUMBER(value) || value == KILN_QNAN_BASE) {
+        union { uint64_t bits; double number; } decoded = { .bits = value };
+        out->kind = 4;
+        out->number = decoded.number;
+        return 1;
+    }
+    if (KILN_VAL_IS_STRING(value)) {
+        pointer = KILN_VAL_PTR(value);
+        if (pointer == NULL) return 0;
+        out->kind = 5;
+        out->text = (const kiln_string *)pointer;
+        return 1;
+    }
+    if (KILN_VAL_IS_OBJECT(value) || (value & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {
+        int is_object = KILN_VAL_IS_OBJECT(value);
+        pointer = KILN_VAL_PTR(value);
+        if (pointer == NULL || kiln_c99_gc_payload_kind(pointer) !=
+            (is_object ? KILN_GC_OBJECT : KILN_GC_ARRAY)) return 0;
+        if (is_object) {
+            kiln_object *object = (kiln_object *)pointer;
             if (!kiln_c99_clone_safe_object(object)) return 0;
             out->kind = 8;
             out->length = object->shape == NULL ? object->count : object->shape->property_count;
         } else {
-            kiln_array *array = kiln_c99_array_of(value);
+            kiln_array *array = (kiln_array *)pointer;
             if (!kiln_c99_clone_safe_array(array)) return 0;
             out->kind = 9;
             out->length = array->count;
         }
         if (out->length > 9007199254740991ull) return 0;
-        out->identity = (size_t)(uintptr_t)value.ptr;
+        out->identity = (size_t)(uintptr_t)pointer;
         return 1;
-    default: return 0;
     }
+    return 0;
 }
 
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,
                                         kiln_worker_plain_child *out) {
-    kiln_value value = kiln_val_to_boundary((kiln_val)handle);
+    kiln_val value = (kiln_val)handle;
     (void)context;
     memset(out, 0, sizeof *out);
-    if (value.tag == KILN_VALUE_ARRAY) {
-        kiln_array *array = kiln_c99_array_of(value);
-        kiln_value item;
+    /* The shared codec calls `field` only after `describe` accepted this compound handle.
+     * Its children are already boxed machine words in array elements and shaped slots. */
+    if ((value & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {
+        kiln_array *array = (kiln_array *)KILN_VAL_PTR(value);
+        kiln_val item;
         if (index >= array->count) return 0;
-        item = kiln_val_to_boundary(array->elements[index]);
-        if (item.tag == KILN_VALUE_HOLE) out->hole = 1;
-        else out->value = (uint64_t)kiln_val_from_boundary(item);
+        item = array->elements[index];
+        if (item == KILN_VAL_HOLE) out->hole = 1;
+        else out->value = (uint64_t)item;
         return 1;
     }
-    if (value.tag == KILN_VALUE_OBJECT) {
-        kiln_object *object = kiln_c99_object_of(value);
+    if (KILN_VAL_IS_OBJECT(value)) {
+        kiln_object *object = (kiln_object *)KILN_VAL_PTR(value);
         kiln_shape *shape = object->shape;
         const kiln_string *key;
-        kiln_value item;
         if (index >= (shape == NULL ? object->count : shape->property_count)) return 0;
         key = shape == NULL ? object->properties[index].key : shape->keys[index];
         if (key == NULL || kiln_c99_key_index_key(key) >= 0.0) return 0;
-        item = shape == NULL ? object->properties[index].value
-                             : kiln_val_to_boundary(object->slots[index]);
         out->key = key;
-        out->value = (uint64_t)kiln_val_from_boundary(item);
+        out->value = shape == NULL
+            ? (uint64_t)kiln_val_from_boundary(object->properties[index].value)
+            : (uint64_t)object->slots[index];
         return 1;
     }
     return 0;

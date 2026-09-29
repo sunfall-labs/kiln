@@ -13,6 +13,7 @@ default = ["http"]
 http = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dependencies]
+ahash = { workspace = true }
 kiln-artifact-cache = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-number-core = { workspace = true }

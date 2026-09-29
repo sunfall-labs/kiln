@@ -2703,11 +2703,31 @@ static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
 }
 
 /* A site that names a realm-local shape or key registers itself with that realm's heap, which
- * makes it forget them at teardown (`kiln_c99_gc_forget_realm_local`). */
-static int kiln_c99_site_pointer_order(const void *left, const void *right) {
-    uintptr_t a = (uintptr_t)*(kiln_c99_site *const *)left;
-    uintptr_t b = (uintptr_t)*(kiln_c99_site *const *)right;
-    return a < b ? -1 : a > b;
+ * makes it forget them at teardown (`kiln_c99_gc_forget_realm_local`). Keep each list sorted and
+ * unique: a shared site can alternate between realm serials on every cache write, so sorting a
+ * full, duplicate-heavy list only when it fills spends work proportional to message traffic. */
+static size_t kiln_c99_site_slot(kiln_c99_site *const *sites, size_t length,
+                                 const kiln_c99_site *site) {
+    size_t low = 0, high = length;
+    uintptr_t needle = (uintptr_t)site;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if ((uintptr_t)sites[middle] < needle) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+static size_t kiln_c99_private_site_slot(kiln_c99_private_site *const *sites, size_t length,
+                                         const kiln_c99_private_site *site) {
+    size_t low = 0, high = length;
+    uintptr_t needle = (uintptr_t)site;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if ((uintptr_t)sites[middle] < needle) low = middle + 1;
+        else high = middle;
+    }
+    return low;
 }
 
 static int kiln_c99_shape_is_local(const kiln_shape *shape) {
@@ -2743,21 +2763,19 @@ static void kiln_c99_site_forget_local(kiln_c99_site *site) {
  * 0071): the heap frees them at teardown, and first makes every registered site forget them.
  * A site holding only shared shapes -- every site of a program whose keys are all constants --
  * is never registered. `registered` is the serial of the last heap the site joined, so a site
- * two live realms both teach joins each of them; the list is deduplicated before it grows,
+ * two live realms both teach joins each of them; the sorted list contains each site once,
  * which bounds it by the number of distinct sites. `registered` is only a hint against joining
- * twice: two realms racing on it can at worst register the site again, which the list dedups. */
+ * twice: two realms racing on it can at worst reach the current heap's sorted lookup again. */
 static void kiln_c99_gc_register_site(kiln_c99_site *site) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t slot;
     if (heap == NULL || site == NULL || heap->serial == 0 ||
         __atomic_load_n(&site->registered, __ATOMIC_RELAXED) == heap->serial)
         return;
-    if (heap->site_len == heap->site_cap && heap->site_len != 0) {
-        size_t kept = 1, index;
-        qsort(heap->sites, heap->site_len, sizeof *heap->sites, kiln_c99_site_pointer_order);
-        for (index = 1; index < heap->site_len; ++index) {
-            if (heap->sites[index] != heap->sites[kept - 1]) heap->sites[kept++] = heap->sites[index];
-        }
-        heap->site_len = kept;
+    slot = kiln_c99_site_slot(heap->sites, heap->site_len, site);
+    if (slot < heap->site_len && heap->sites[slot] == site) {
+        __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
+        return;
     }
     if (heap->site_len == heap->site_cap) {
         size_t wanted = heap->site_cap == 0 ? 64 : heap->site_cap * 2;
@@ -2770,7 +2788,10 @@ static void kiln_c99_gc_register_site(kiln_c99_site *site) {
         heap->sites = grown;
         heap->site_cap = wanted;
     }
-    heap->sites[heap->site_len++] = site;
+    memmove(heap->sites + slot + 1, heap->sites + slot,
+            (heap->site_len - slot) * sizeof *heap->sites);
+    heap->sites[slot] = site;
+    heap->site_len++;
     __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
 }
 
@@ -2794,17 +2815,13 @@ static void kiln_c99_site_learned(kiln_c99_site *site) {
  * the caller then does not learn. */
 static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t slot;
     if (heap == NULL || site == NULL || heap->serial == 0) return;
     if (__atomic_load_n(&site->registered, __ATOMIC_RELAXED) == heap->serial) return;
-    if (heap->private_site_len == heap->private_site_cap && heap->private_site_len != 0) {
-        size_t kept = 1, index;
-        qsort(heap->private_sites, heap->private_site_len, sizeof *heap->private_sites,
-              kiln_c99_site_pointer_order);
-        for (index = 1; index < heap->private_site_len; ++index) {
-            if (heap->private_sites[index] != heap->private_sites[kept - 1])
-                heap->private_sites[kept++] = heap->private_sites[index];
-        }
-        heap->private_site_len = kept;
+    slot = kiln_c99_private_site_slot(heap->private_sites, heap->private_site_len, site);
+    if (slot < heap->private_site_len && heap->private_sites[slot] == site) {
+        __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
+        return;
     }
     if (heap->private_site_len == heap->private_site_cap) {
         size_t wanted = heap->private_site_cap == 0 ? 64 : heap->private_site_cap * 2;
@@ -2817,7 +2834,10 @@ static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site) {
         heap->private_sites = grown;
         heap->private_site_cap = wanted;
     }
-    heap->private_sites[heap->private_site_len++] = site;
+    memmove(heap->private_sites + slot + 1, heap->private_sites + slot,
+            (heap->private_site_len - slot) * sizeof *heap->private_sites);
+    heap->private_sites[slot] = site;
+    heap->private_site_len++;
     __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
 }
 

@@ -2191,7 +2191,8 @@ __attribute__((noinline)) static void kiln_c99_gc_scan_from_here(kiln_gc_heap *h
 static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
 #if defined(__GNUC__) || defined(__clang__)
 #endif
-static int kiln_c99_site_pointer_order(const void *left, const void *right) {
+static size_t kiln_c99_site_slot(kiln_c99_site *const *sites, size_t length,
+static size_t kiln_c99_private_site_slot(kiln_c99_private_site *const *sites, size_t length,
 static int kiln_c99_shape_is_local(const kiln_shape *shape) {
 static int kiln_c99_key_is_shared(const kiln_string *ikey);
 static int kiln_c99_pic_entry_is_local(const kiln_c99_pic_entry *entry, const kiln_shape *shape) {

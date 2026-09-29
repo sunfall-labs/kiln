@@ -1689,6 +1689,7 @@ dependencies = [
 name = "kiln-runtime"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "bytes",
  "getrandom",
  "h2",

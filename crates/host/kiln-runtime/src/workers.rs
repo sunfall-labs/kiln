@@ -49,6 +49,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
+use ahash::AHashMap;
 use kiln_shared_graph::{Handle as SharedHandle, OpaqueHandle};
 use kiln_string::StringUnits;
 use tokio::sync::Notify;
@@ -132,7 +133,7 @@ pub fn encode_plain<S: PlainSource>(source: &mut S, root: S::Handle) -> Option<V
     fn walk<S: PlainSource>(
         source: &mut S,
         handle: S::Handle,
-        seen: &mut HashMap<usize, usize>,
+        seen: &mut AHashMap<usize, usize>,
         tokens: &mut Vec<Token>,
         depth: usize,
     ) -> Option<()> {
@@ -179,7 +180,9 @@ pub fn encode_plain<S: PlainSource>(source: &mut S, root: S::Handle) -> Option<V
     }
 
     let mut tokens = vec![Token::Number(0.0)];
-    walk(source, root, &mut HashMap::new(), &mut tokens, 0)?;
+    // This table is local to one encode and keyed by runtime-owned object identities. Large
+    // plain graphs visit it for every child, so use the workspace's fast randomized hasher.
+    walk(source, root, &mut AHashMap::new(), &mut tokens, 0)?;
     Some(tokens)
 }
 
