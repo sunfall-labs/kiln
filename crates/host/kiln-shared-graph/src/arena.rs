@@ -15,6 +15,7 @@ pub const BIGINT: u32 = 4;
 pub const STRING: u32 = 5;
 pub const NODE: u32 = 6;
 pub const SHARED: u32 = 7;
+pub const LAYOUT_VERSION: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,6 +39,13 @@ pub struct FieldRecord {
     pub payload: u64,
     pub value_length: u64,
 }
+
+const _: () = {
+    assert!(size_of::<NodeRecord>() == 48);
+    assert!(std::mem::offset_of!(NodeRecord, index_capacity) == 40);
+    assert!(size_of::<FieldRecord>() == 40);
+    assert!(std::mem::offset_of!(FieldRecord, value_length) == 32);
+};
 
 fn key_hash(units: impl IntoIterator<Item = u16>) -> u64 {
     units

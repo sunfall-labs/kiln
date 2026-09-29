@@ -627,6 +627,28 @@ int kiln_shared_graph_release(uint64_t lease) {
     ++kiln_test_shared_releases;
     return 0;
 }
+int kiln_shared_graph_view(uint64_t lease, kiln_shared_arena_view *out) {
+    static struct {
+        kiln_shared_node_record node;
+        kiln_shared_field_record field;
+        uint16_t key;
+    } arena = {
+        .node = { .kind = KILN_SHARED_ARENA_RECORD,
+                  .fields = sizeof(kiln_shared_node_record), .field_count = 1 },
+        .field = { .key_offset = sizeof(kiln_shared_node_record) +
+                                 sizeof(kiln_shared_field_record),
+                   .key_length = 1, .kind = KILN_SHARED_FIELD_NUMBER, .enumerable = 1 },
+        .key = 'x',
+    };
+    double number = 7.0;
+    if (lease == 0 || out == NULL) return -1;
+    memcpy(&arena.field.payload, &number, sizeof number);
+    out->base = (const uint8_t *)&arena;
+    out->length = sizeof arena;
+    out->node_count = 1;
+    out->layout_version = KILN_SHARED_ARENA_LAYOUT_VERSION;
+    return 0;
+}
 int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out) {
     if (lease == 0 || out == NULL) return -1;
     out->array = 0;

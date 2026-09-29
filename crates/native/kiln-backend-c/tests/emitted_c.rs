@@ -1080,7 +1080,10 @@ fn runtime_prelude_size() {
     const FLOOR_LINES: usize = 27_100;
     // In-block dictionaries and key copying let prepared graphs carry computed property names.
     // Standalone large strings add their manifest and receiver-adoption path (64,304 lines).
-    const CEILING_LINES: usize = 64_500;
+    // The sealed arena view's bounds-checked node, field and UTF-16 readers replace repeated
+    // provider calls on shared property reads; about 64,550 lines after that change. No runtime part
+    // was emitted twice. Leave the usual small margin for independent edits to this prelude.
+    const CEILING_LINES: usize = 65_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

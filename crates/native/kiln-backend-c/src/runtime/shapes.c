@@ -1230,6 +1230,7 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     kiln_shared_facade *cached;
     uint64_t lease;
+    kiln_shared_arena_view arena;
     kiln_shared_facade *facade;
     cached = kiln_c99_shared_facade_find(heap, graph, generation, node);
     if (cached != NULL) {
@@ -1239,12 +1240,18 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     if (kiln_c99_shared_facade_reserve(heap) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     lease = kiln_shared_graph_retain(graph, generation, node);
     if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_shared_graph_view(lease, &arena) != 0 || arena.base == NULL ||
+        arena.layout_version != KILN_SHARED_ARENA_LAYOUT_VERSION || node >= arena.node_count) {
+        (void)kiln_shared_graph_release(lease);
+        return KILN_C99_INVALID_ARGUMENT;
+    }
     facade = (kiln_shared_facade *)kiln_c99_gc_alloc_tenured(KILN_GC_SHARED_FACADE, sizeof *facade);
     if (facade == NULL) {
         (void)kiln_shared_graph_release(lease);
         return KILN_C99_OUT_OF_MEMORY;
     }
     facade->lease = lease;
+    facade->arena = arena;
     facade->graph = graph;
     facade->generation = generation;
     facade->node = node;

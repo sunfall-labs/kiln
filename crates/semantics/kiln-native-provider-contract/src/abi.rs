@@ -184,6 +184,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_shared_create, shared_create);
             (realm, kiln_shared_graph_retain, shared_graph_retain);
             (realm, kiln_shared_graph_release, shared_graph_release);
+            (realm, kiln_shared_graph_view, shared_graph_view);
             (realm, kiln_shared_graph_info, shared_graph_info);
             (realm, kiln_shared_graph_find_field, shared_graph_find_field);
             (realm, kiln_shared_graph_field, shared_graph_field);
@@ -252,7 +253,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 61;
+pub const PROVIDER_ABI_VERSION: u32 = 62;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -319,8 +320,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 61);
-        assert_eq!(PROVIDER_EXPORTS.len(), 161);
+        assert_eq!(PROVIDER_ABI_VERSION, 62);
+        assert_eq!(PROVIDER_EXPORTS.len(), 162);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

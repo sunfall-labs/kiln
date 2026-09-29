@@ -6381,6 +6381,9 @@ macro_rules! assert_provider_export {
         (realm, kiln_shared_graph_release, shared_graph_release) => {
             const _: extern "C" fn(u64) -> i32 = shared_graph::kiln_shared_graph_release;
         };
+        (realm, kiln_shared_graph_view, shared_graph_view) => {
+            const _: unsafe extern "C" fn(u64, *mut shared_graph::SharedArenaView) -> i32 = shared_graph::kiln_shared_graph_view;
+        };
         (realm, kiln_shared_graph_info, shared_graph_info) => {
             const _: unsafe extern "C" fn(u64, *mut shared_graph::SharedInfo) -> i32 = shared_graph::kiln_shared_graph_info;
         };

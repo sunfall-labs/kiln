@@ -679,6 +679,41 @@ typedef struct kiln_shared_field_info {
     uint32_t generation;
     uint32_t node;
 } kiln_shared_field_info;
+/* Mirrors kiln-shared-graph's repr(C) sealed records. The provider ABI version changes with
+ * this layout; every read below checks its byte range before copying a record or text. */
+typedef struct kiln_shared_node_record {
+    uint32_t kind;
+    uint32_t null_prototype;
+    uint64_t length;
+    uint64_t fields;
+    uint64_t field_count;
+    uint64_t index;
+    uint64_t index_capacity;
+} kiln_shared_node_record;
+typedef struct kiln_shared_field_record {
+    uint64_t key_offset;
+    uint64_t key_length;
+    uint32_t kind;
+    uint32_t enumerable;
+    uint64_t payload;
+    uint64_t value_length;
+} kiln_shared_field_record;
+typedef struct kiln_shared_arena_view {
+    const uint8_t *base;
+    uint64_t length;
+    uint32_t node_count;
+    uint32_t layout_version;
+} kiln_shared_arena_view;
+_Static_assert(sizeof(kiln_shared_node_record) == 48, "sealed node layout");
+_Static_assert(offsetof(kiln_shared_node_record, index_capacity) == 40, "sealed node offset");
+_Static_assert(sizeof(kiln_shared_field_record) == 40, "sealed field layout");
+_Static_assert(offsetof(kiln_shared_field_record, value_length) == 32, "sealed field offset");
+_Static_assert(sizeof(kiln_shared_arena_view) == 24, "sealed view ABI");
+_Static_assert(offsetof(kiln_shared_arena_view, layout_version) == 20, "sealed view offset");
+#define KILN_SHARED_ARENA_LAYOUT_VERSION 1u
+#define KILN_SHARED_ARENA_RECORD 1u
+#define KILN_SHARED_ARENA_ARRAY 2u
+#define KILN_SHARED_ARENA_EXTERNAL 7u
 #define KILN_SHARED_FIELD_UNDEFINED 0u
 #define KILN_SHARED_FIELD_NULL 1u
 #define KILN_SHARED_FIELD_BOOLEAN 2u
@@ -688,6 +723,7 @@ typedef struct kiln_shared_field_info {
 #define KILN_SHARED_FIELD_NODE 6u
 extern uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node);
 extern int kiln_shared_graph_release(uint64_t lease);
+extern int kiln_shared_graph_view(uint64_t lease, kiln_shared_arena_view *out);
 extern int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out);
 extern int kiln_shared_graph_find_field(uint64_t lease, const uint16_t *key,
                                         uint64_t key_length, uint64_t *out_index);
@@ -1202,6 +1238,7 @@ static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *o
  * registry; the opaque ID is copied into message tokens, never interpreted as a pointer. */
 typedef struct kiln_shared_facade {
     uint64_t lease;
+    kiln_shared_arena_view arena;
     uint32_t graph;
     uint32_t generation;
     uint32_t node;

@@ -17,5 +17,8 @@ let write = 'ok'; try { shared.left.v = 1; } catch (error) { write = error.name;
 let define = 'ok'; try { Object.defineProperty(shared, 'new', {value:1}); } catch (error) { define = error.name; }
 console.log('mutation', write, define, Reflect.set(shared, 'new', 1), Reflect.deleteProperty(shared, 'left'));
 console.log('weak', new WeakMap([[shared, 3]]).get(shared));
+const inner = share({ label: 'nested', amount: 9007199254740993n });
+const outer = share({ first: inner, again: inner });
+console.log('nested', outer.first === inner, outer.again === inner, outer.first.label, String(outer.first.amount));
 function reject(value) { try { share(value); console.log('bad'); } catch (error) { console.log('reject', error.name); } }
 reject(function(){}); reject(new Date()); reject({get x(){return 1}}); reject(new Proxy({},{})); reject({[Symbol('s')]:1}); reject(Object.create({a:1}));

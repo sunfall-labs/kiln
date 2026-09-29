@@ -33,6 +33,23 @@ pub struct SharedFieldInfo {
     pub node: u32,
 }
 
+/// A borrowed view of the sealed, realm-neutral arena. The facade's `lease` owns the graph for
+/// the entire time native code may read this pointer. No pointer is valid after that lease is
+/// released, and the arena contains no pointer into a realm heap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SharedArenaView {
+    pub base: *const u8,
+    pub length: u64,
+    pub node_count: u32,
+    pub layout_version: u32,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<SharedArenaView>() == 24);
+    assert!(std::mem::offset_of!(SharedArenaView, layout_version) == 20);
+};
+
 pub const FIELD_UNDEFINED: u32 = 0;
 pub const FIELD_NULL: u32 = 1;
 pub const FIELD_BOOLEAN: u32 = 2;
@@ -282,6 +299,47 @@ pub extern "C" fn kiln_shared_graph_release(lease: u64) -> i32 {
         return -1;
     };
     reclaim::retire_shared(handle);
+    0
+}
+
+/// Expose fixed-layout, read-only bytes while the caller owns a strong lease. The C facade
+/// keeps the lease until finalization; its property reader keeps that facade live across every
+/// allocation. The pointer is never sent in a message or retained after the lease is dropped.
+///
+/// # Safety
+///
+/// `out` must point to a writable `SharedArenaView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_shared_graph_view(lease: u64, out: *mut SharedArenaView) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let handle = leases()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .held
+        .get(&lease)
+        .cloned();
+    let Some(handle) = handle else {
+        return -1;
+    };
+    let graph = handle.graph();
+    let Ok(length) = u64::try_from(graph.arena_len()) else {
+        return -1;
+    };
+    let Ok(node_count) = u32::try_from(graph.len()) else {
+        return -1;
+    };
+    // SAFETY: `out` was checked and the immutable arena is held by both this temporary handle
+    // and the caller's lease. The caller must release the view before releasing that lease.
+    unsafe {
+        *out = SharedArenaView {
+            base: graph.arena_ptr(),
+            length,
+            node_count,
+            layout_version: kiln_shared_graph::arena::LAYOUT_VERSION,
+        };
+    }
     0
 }
 

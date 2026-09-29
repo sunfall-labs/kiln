@@ -6561,6 +6561,8 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
             (void)kiln_shared_graph_release(facade->lease);
             facade->lease = 0;
         }
+        facade->arena.base = NULL;
+        facade->arena.length = 0;
         break;
     }
     case KILN_GC_OBJECT:
@@ -7393,6 +7395,8 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         kiln_shared_facade *next = facade->next;
         if (facade->lease != 0) (void)kiln_shared_graph_release(facade->lease);
         facade->lease = 0;
+        facade->arena.base = NULL;
+        facade->arena.length = 0;
         facade->owner = NULL;
         facade->previous = NULL;
         facade->next = NULL;
