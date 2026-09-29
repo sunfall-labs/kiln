@@ -532,7 +532,7 @@
                     }
                 }
                 if (slot < array->count) {
-                    array->elements[slot] = kiln_val_from_boundary(recorded);
+                    kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(recorded));
                 }
             }
             {
@@ -2024,7 +2024,7 @@
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                collected->elements[index] = kiln_val_from_boundary(produced);
+                kiln_c99_heap_store_val(collected, &collected->elements[index], kiln_val_from_boundary(produced));
             }
             *result = built;
             return KILN_C99_OK;
@@ -2576,7 +2576,7 @@
         }
         if (slice_len > 0) {
             kiln_array *b_arr = kiln_c99_array_of(built);
-            memcpy(b_arr->elements, array->elements + start, slice_len * sizeof(kiln_val));
+            kiln_c99_heap_copy_vals(b_arr, b_arr->elements, array->elements + start, slice_len);
             b_arr->count = slice_len;
         }
         *result = built;
@@ -2701,11 +2701,11 @@
          * hands its memory to something else. Publishing the count first requires the gap to
          * hold a traceable value already, hence the fill. */
         for (index = 0; index < inserting; ++index) {
-            array->elements[start + index] = KILN_VAL_UNDEFINED;
+            kiln_c99_heap_store_val(array, &array->elements[start + index], KILN_VAL_UNDEFINED);
         }
         array->count = array->count - removing + inserting;
         for (index = 0; index < inserting; ++index) {
-            array->elements[start + index] = kiln_val_from_boundary(args[index + 2]);
+            kiln_c99_heap_store_val(array, &array->elements[start + index], kiln_val_from_boundary(args[index + 2]));
         }
         /* The removed elements, which is what makes `splice` usable as a queue read. */
         *result = removed;
@@ -2788,7 +2788,7 @@
             size_t length = array->count;
             for (index = 0; index < length && index < array->count; ++index) {
                 if (array->elements[index] == KILN_VAL_HOLE) {
-                    built_arr->elements[built_arr->count++] = KILN_VAL_HOLE;
+                    kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE);
                     built_arr->is_numeric = 0;
                     continue;
                 }
@@ -2802,7 +2802,7 @@
                 if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {
                     built_arr->is_numeric = 0;
                 }
-                built_arr->elements[built_arr->count++] = prod;
+                kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], prod);
             }
             *result = built_val;
             return KILN_C99_OK;
@@ -2827,7 +2827,7 @@
                 status = kiln_c99_val_call(host, vcallee, vvisit, 3, depth, thrown, NULL, 0, NULL, &prod);
                 if (status != KILN_C99_OK) return status;
                 if (kiln_c99_val_truthy(prod)) {
-                    built_arr->elements[built_arr->count++] = elem;
+                    kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], elem);
                 }
             }
             *result = built_val;
@@ -3021,11 +3021,11 @@
         for (index = 0; index < array->count; ++index) {
             if (array->elements[index] != KILN_VAL_HOLE &&
                 array->elements[index] != KILN_VAL_UNDEFINED) {
-                array->elements[live++] = array->elements[index];
+                kiln_c99_heap_store_val(array, &array->elements[live++], array->elements[index]);
             }
         }
         for (index = live; index < array->count; ++index) {
-            array->elements[index] = KILN_VAL_UNDEFINED;
+            kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_UNDEFINED);
         }
         if (live > 1) {
             kiln_c99_sort_context ctx;
@@ -3046,8 +3046,8 @@
         size_t half;
         for (half = 0; half * 2 + 1 < array->count; ++half) {
             kiln_val swap = array->elements[half];
-            array->elements[half] = array->elements[array->count - 1 - half];
-            array->elements[array->count - 1 - half] = swap;
+            kiln_c99_heap_store_val(array, &array->elements[half], array->elements[array->count - 1 - half]);
+            kiln_c99_heap_store_val(array, &array->elements[array->count - 1 - half], swap);
         }
         *result = receiver;
         return KILN_C99_OK;
@@ -3156,11 +3156,11 @@
         /* Same ordering as `splice` above, and for the same reason: the opened gap is made
          * traceable and the count published before any conversion allocates into it. */
         for (added = 0; added < argc; ++added) {
-            array->elements[added] = KILN_VAL_UNDEFINED;
+            kiln_c99_heap_store_val(array, &array->elements[added], KILN_VAL_UNDEFINED);
         }
         array->count += argc;
         for (added = 0; added < argc; ++added) {
-            array->elements[added] = kiln_val_from_boundary(args[added]);
+            kiln_c99_heap_store_val(array, &array->elements[added], kiln_val_from_boundary(args[added]));
         }
         *result = kiln_c99_number((double)array->count);
         return KILN_C99_OK;
@@ -3173,7 +3173,7 @@
         size_t end = kiln_c99_relative_index(argc > 2 ? args[2] : kiln_c99_undefined(),
                                              array->count, array->count);
         for (index = start; index < end; ++index) {
-            array->elements[index] = filler_val;
+            kiln_c99_heap_store_val(array, &array->elements[index], filler_val);
         }
         *result = receiver;
         return KILN_C99_OK;

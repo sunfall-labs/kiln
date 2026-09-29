@@ -271,6 +271,8 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
         }
         memcpy(bound->arguments, arguments, count * sizeof *bound->arguments);
     }
+    if (kiln_c99_no_write_depth == 0)
+        kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), (kiln_gc_block *)bound - 1);
     *out = kiln_c99_value(KILN_VALUE_BOUND, (uint64_t)(uintptr_t)bound, NULL, 0);
     return KILN_C99_OK;
 }
@@ -306,6 +308,12 @@ static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_react
         promise->capacity = grown;
     }
     promise->reactions[promise->count] = *reaction;
+    kiln_c99_heap_store_value(promise, &promise->reactions[promise->count].on_fulfilled,
+                              reaction->on_fulfilled);
+    kiln_c99_heap_store_value(promise, &promise->reactions[promise->count].on_rejected,
+                              reaction->on_rejected);
+    kiln_c99_heap_store_value(promise, &promise->reactions[promise->count].derived,
+                              reaction->derived);
     promise->count += 1;
     return KILN_C99_OK;
 }
@@ -376,7 +384,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
         }
     }
     state->state = rejected ? KILN_C99_REJECTED : KILN_C99_FULFILLED;
-    state->value = value;
+    kiln_c99_heap_store_value(state, &state->value, value);
     if (rejected && !state->handled) {
         status = kiln_c99_rejection_track(promise, value);
         if (status != KILN_C99_OK) return status;
@@ -402,7 +410,7 @@ static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects
     if (settler == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    settler->promise = promise;
+    kiln_c99_heap_store_value(settler, &settler->promise, promise);
     settler->rejects = rejects;
     *out = kiln_c99_value(KILN_VALUE_SETTLER, (uint64_t)(uintptr_t)settler, NULL, 0);
     return KILN_C99_OK;

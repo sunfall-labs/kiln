@@ -56,14 +56,14 @@ static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val val
     if (entry == NULL) return 0;
     if (entry->transition_to == NULL) {
         if (entry->slot >= object->slot_capacity) return 0;
-        object->slots[entry->slot] = value;
+        kiln_c99_heap_store_val(object, &object->slots[entry->slot], value);
         return 1;
     }
     if (entry->slot >= object->slot_capacity &&
         kiln_c99_grow_slots(object, (size_t)entry->slot + 1) != KILN_C99_OK) {
         return 0;
     }
-    object->slots[entry->slot] = value;
+    kiln_c99_heap_store_val(object, &object->slots[entry->slot], value);
     object->shape = (kiln_shape *)entry->transition_to;
     return 1;
 }
@@ -125,7 +125,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
             return 0;
         }
         kiln_c99_define_named_teach(site, object->shape, NULL, slot);
-        object->slots[slot] = value;
+        kiln_c99_heap_store_val(object, &object->slots[slot], value);
         *status = KILN_C99_OK;
         return 1;
     }
@@ -139,7 +139,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
             }
         }
         kiln_c99_define_named_teach(site, object->shape, next, next->slot_index);
-        object->slots[next->slot_index] = value;
+        kiln_c99_heap_store_val(object, &object->slots[next->slot_index], value);
         object->shape = next;
         *status = KILN_C99_OK;
         return 1;
@@ -210,7 +210,7 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
         }
     }
     if (scount > 0) {
-        memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+        kiln_c99_heap_copy_vals(dest, dest->slots, object->slots, scount);
     }
     dest->shape = sshape;
     *status = KILN_C99_OK;
@@ -750,10 +750,10 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
              * slots now are the ones it has at the end. A list-mode source's values go into the
              * slots its keys were given, which are in the same order. */
             if (source->shape != NULL) {
-                if (count > 0) memcpy(copy->slots, source->slots, count * sizeof(kiln_val));
+                if (count > 0) kiln_c99_heap_copy_vals(copy, copy->slots, source->slots, count);
             } else {
                 for (i = 0; i < count; ++i) {
-                    copy->slots[i] = kiln_val_from_boundary(source->properties[i].value);
+                    kiln_c99_heap_store_val(copy, &copy->slots[i], kiln_val_from_boundary(source->properties[i].value));
                 }
             }
             copy->shape = shape;
@@ -768,7 +768,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 }
                 status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
                 if (status != KILN_C99_OK) return status;
-                copy->slots[i] = cloned;
+                kiln_c99_heap_store_val(copy, &copy->slots[i], cloned);
             }
         } else {
             size_t named = source_shape == NULL ? source->count : source_shape->property_count;
@@ -864,7 +864,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         if (status != KILN_C99_OK) return status;
         copy_val = kiln_val_from_boundary(made);
         copy = (kiln_array *)KILN_VAL_PTR(copy_val);
-        if (count > 0) memcpy(copy->elements, source->elements, count * sizeof(kiln_val));
+        if (count > 0) kiln_c99_heap_copy_vals(copy, copy->elements, source->elements, count);
         copy->count = count;
         status = kiln_c99_clone_table_put(table, value, copy_val);
         if (status != KILN_C99_OK) return status;
@@ -880,7 +880,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 }
                 status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
                 if (status != KILN_C99_OK) return status;
-                copy->elements[i] = cloned;
+                kiln_c99_heap_store_val(copy, &copy->elements[i], cloned);
             }
         }
         *out = copy_val;
@@ -1374,7 +1374,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                  * been added one at a time, because shapes reached by the same key order are
                  * the same shape pointer regardless of how an object arrived at one. */
                 if (scount > 0) {
-                    memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+                    kiln_c99_heap_copy_vals(dest, dest->slots, object->slots, scount);
                 }
                 dest->shape = sshape;
                 return KILN_C99_OK;
@@ -1411,13 +1411,13 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                     if (slot >= dest->slot_capacity) {
                         break;
                     }
-                    dest->slots[slot] = sval;
+                    kiln_c99_heap_store_val(dest, &dest->slots[slot], sval);
                 } else {
                     int is_double = KILN_VAL_IS_NUMBER(sval);
                     if (kiln_c99_shape_transition(dest->shape, ikey, is_double, &next)) {
                         int grown = kiln_c99_grow_slots(dest, (size_t)next->slot_index + 1);
                         if (grown != KILN_C99_OK) return grown;
-                        dest->slots[next->slot_index] = sval;
+                        kiln_c99_heap_store_val(dest, &dest->slots[next->slot_index], sval);
                         dest->shape = next;
                     } else {
                         break;
@@ -1574,7 +1574,7 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;
-    object->prototype = kiln_c99_undefined();
+    kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_undefined());
     object->frozen = 0;
     object->not_extensible = 0;
     object->module_namespace = 0;
@@ -1590,7 +1590,7 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->shape = kiln_c99_shape_root();
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
-    for (slot = 0; slot < KILN_C99_INLINE_SLOTS; ++slot) object->inline_slots[slot] = KILN_VAL_UNDEFINED;
+    for (slot = 0; slot < KILN_C99_INLINE_SLOTS; ++slot) kiln_c99_heap_store_val(object, &object->inline_slots[slot], KILN_VAL_UNDEFINED);
     object->elements = NULL;
     object->element_count = 0;
     object->element_capacity = 0;
@@ -1617,7 +1617,7 @@ static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *sit
     }
     if (site != NULL && site->shape == object->shape && site->to != NULL && site->number == number) {
         if (site->slot >= object->slot_capacity) return 0;
-        object->slots[site->slot] = value;
+        kiln_c99_heap_store_val(object, &object->slots[site->slot], value);
         object->shape = (kiln_shape *)site->to;
         return 1;
     }
@@ -1643,7 +1643,7 @@ static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *sit
         site->slot = slot;
         site->number = number;
     }
-    object->slots[slot] = value;
+    kiln_c99_heap_store_val(object, &object->slots[slot], value);
     object->shape = next;
     return 1;
 }
@@ -1691,7 +1691,7 @@ static int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_
         scount > object->slot_capacity) {
         return 0;
     }
-    if (scount > 0) memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+    if (scount > 0) kiln_c99_heap_copy_vals(dest, dest->slots, object->slots, scount);
     dest->shape = sshape;
     return 1;
 }
@@ -1720,8 +1720,8 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;
-    array->match_input = kiln_c99_undefined();
-    array->match_groups = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
+    kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
     array->is_numeric = numeric;
     array->candidate_elements = 0;
     if (in_block > 0) {
@@ -1731,8 +1731,8 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
         array->elements = array->inline_elements;
         array->capacity = inline_capacity;
     }
-    if (count > 0 && elements != NULL) memcpy(array->elements, elements, count * sizeof(kiln_val));
-    for (index = 0; elements == NULL && index < count; ++index) array->elements[index] = KILN_VAL_HOLE;
+    if (count > 0 && elements != NULL) kiln_c99_heap_copy_vals(array, array->elements, elements, count);
+    for (index = 0; elements == NULL && index < count; ++index) kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_HOLE);
     array->count = count;
     *out = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, array);
     return 1;
@@ -1881,10 +1881,10 @@ static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out) {
             const kiln_array *inner = (const kiln_array *)KILN_VAL_PTR(answer);
             size_t k;
             for (k = 0; k < inner->count; ++k) {
-                if (inner->elements[k] != KILN_VAL_HOLE) flat->elements[at++] = inner->elements[k];
+                if (inner->elements[k] != KILN_VAL_HOLE) kiln_c99_heap_store_val(flat, &flat->elements[at++], inner->elements[k]);
             }
         } else {
-            flat->elements[at++] = answer;
+            kiln_c99_heap_store_val(flat, &flat->elements[at++], answer);
         }
     }
     flat->count = at;

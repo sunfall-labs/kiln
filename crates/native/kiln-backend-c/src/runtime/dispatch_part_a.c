@@ -2311,7 +2311,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 size_t write = 0;
                 for (index = 0; index < held->count; ++index) {
                     if (!kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[index]), listener))
-                        held->elements[write++] = held->elements[index];
+                        kiln_c99_heap_store_val(held, &held->elements[write++], held->elements[index]);
                 }
                 held->count = write;
             } else if (kiln_c99_is_callable(listener)) {
@@ -3058,7 +3058,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     if (can_reuse) {
                         for (group = 0; group < groups; ++group) {
-                            arr->elements[arr->count++] = regexp->cached_elements[group];
+                            kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], regexp->cached_elements[group]);
                         }
                     } else {
                         for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
@@ -3078,9 +3078,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                 val = kiln_c99_from_units(units + (size_t)from, (size_t)(to - from));
                             }
                             kiln_val bval = kiln_val_from_boundary(val);
-                            arr->elements[arr->count++] = bval;
+                            kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], bval);
                             if (group < 32) {
-                                regexp->cached_elements[group] = bval;
+                                kiln_c99_heap_store_val(regexp, &regexp->cached_elements[group], bval);
                                 regexp->cached_ranges[group * 2] = from;
                                 regexp->cached_ranges[group * 2 + 1] = to;
                             }
@@ -3092,7 +3092,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         }
                     }
                     arr->match_index = ranges[0];
-                    arr->match_input = subject;
+                    kiln_c99_heap_store_value(arr, &arr->match_input, subject);
                     status = kiln_c99_match_groups(regexp, arr, groups);
                     if (status != KILN_C99_OK) {
                         if (ranges != stack_ranges) free(ranges);

@@ -465,7 +465,7 @@ pub(super) fn emit_graph_op(
         GraphOp::StoreCell { slot, value } => {
             writeln!(
                 output,
-                "    *(kiln_val *)KILN_VAL_PTR(locals[{slot}]) = v{};",
+                "    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), v{});",
                 value.0
             )
             .unwrap();
@@ -500,7 +500,7 @@ pub(super) fn emit_graph_op(
         GraphOp::StoreUpvalue { index, value } => {
             writeln!(
                 output,
-                "    *(kiln_val *)KILN_VAL_PTR(upvalues[{index}]) = v{};",
+                "    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(upvalues[{index}]), v{});",
                 value.0
             )
             .unwrap();
@@ -711,7 +711,7 @@ pub(super) fn emit_graph_op(
         GraphOp::StoreGlobal { slot, value } if crate::module_cells::is_cell_global(*slot) => {
             writeln!(
                 output,
-                "    *(kiln_val *)KILN_VAL_PTR({symbol}_globals[{slot}]) = v{};",
+                "    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR({symbol}_globals[{slot}]), v{});",
                 value.0
             )
             .unwrap();
@@ -764,7 +764,7 @@ pub(super) fn emit_graph_op(
             // pointer and the next write through it would dereference the sentinel.
             writeln!(
                 output,
-                "    if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{slot}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{slot}] = KILN_VAL_UNINITIALIZED; }}"
+                "    if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), KILN_VAL_UNINITIALIZED); }} else {{ locals[{slot}] = KILN_VAL_UNINITIALIZED; }}"
             )
             .unwrap();
             if is_used {
@@ -1347,7 +1347,10 @@ pub(super) fn emit_graph_op(
                     };
                     let mut direct_stores = String::new();
                     for (i, (_, val)) in pairs.iter().enumerate() {
-                        direct_stores.push_str(&format!(" obj->inline_slots[{i}] = v{};", val.0));
+                        direct_stores.push_str(&format!(
+                            " kiln_c99_heap_store_val(obj, &obj->inline_slots[{i}], v{});",
+                            val.0
+                        ));
                     }
                     let mut defines = String::new();
                     for (key, value) in pairs {
@@ -1529,7 +1532,10 @@ pub(super) fn emit_graph_op(
                 }
                 let mut assigns = String::new();
                 for (i, elem) in elements.iter().enumerate() {
-                    assigns.push_str(&format!(" arr->elements[{i}] = v{};", elem.0));
+                    assigns.push_str(&format!(
+                        " kiln_c99_heap_store_val(arr, &arr->elements[{i}], v{});",
+                        elem.0
+                    ));
                 }
                 writeln!(output, "    {{ kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, {count}, 1{check_numeric}); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built);{assigns} arr->count = {count}; v{v} = kiln_val_from_boundary(built); }}").unwrap();
             }

@@ -186,6 +186,17 @@ extern kiln_value kiln_c99_null(void);
 extern kiln_value kiln_c99_boolean(int value);
 extern kiln_closure *kiln_c99_closure_of(kiln_value value);
 extern kiln_val *kiln_c99_cell_of(kiln_value value);
+extern void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value);
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
+    const void *owner_payload, kiln_val *slot, kiln_val value) {
+    if (!KILN_VAL_IS_NUMBER(value) && value >= KILN_TAG_STRING_PREFIX)
+        kiln_c99_heap_record_val(owner_payload, value);
+    *slot = value;
+}
+static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell, kiln_val value) {
+    kiln_c99_heap_store_val(cell, cell, value);
+}
+
 extern int kiln_c99_global_object_val(kiln_val *out);
 extern int kiln_c99_make_cell(kiln_value *slot);
 extern void kiln_c99_mark_uninitialized(kiln_value *slot);

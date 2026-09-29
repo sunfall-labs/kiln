@@ -246,7 +246,7 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
                     thrown, (const char *)kiln_string_latin1((const kiln_string *)name.ptr),
                     ((const kiln_string *)name.ptr)->unit_len);
             }
-            recv_obj->properties[recv_index].value = value;
+            kiln_c99_heap_store_value(recv_obj, &recv_obj->properties[recv_index].value, value);
             return KILN_C99_OK;
         }
         if (recv_obj->not_extensible) {
@@ -264,7 +264,7 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
         int status = kiln_c99_own_slot_key(recv_store, (const kiln_string *)name.ptr,
                                            NULL, &slot);
         if (status != KILN_C99_OK) return status;
-        slot->value = value;
+        kiln_c99_heap_store_value(kiln_c99_object_of(recv_store), &slot->value, value);
         return KILN_C99_OK;
     }
     return strict ? kiln_c99_throw_cannot_set(thrown, target) : KILN_C99_OK;

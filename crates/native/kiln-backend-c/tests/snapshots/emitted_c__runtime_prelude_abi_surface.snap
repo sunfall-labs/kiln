@@ -1608,6 +1608,7 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
 static int kiln_c99_install_event_emitter_methods(kiln_value target);
 static int kiln_c99_install_readable_methods(kiln_value target);
@@ -2037,6 +2038,7 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
 static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
 static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words) {
 static kiln_c99_candidate_group *kiln_c99_candidate_group_new(uint64_t id) {
+static void kiln_c99_candidate_group_dispose(kiln_c99_candidate_group *group) {
 static void kiln_c99_candidate_group_close(kiln_c99_candidate_group *group) {
 static void kiln_c99_candidate_group_add(kiln_c99_candidate_group *group,
 static int kiln_c99_candidate_group_contains(const kiln_c99_candidate_group *group,
@@ -2208,6 +2210,15 @@ static void kiln_c99_nursery_note_release(kiln_gc_heap *heap, const kiln_gc_bloc
 static void kiln_c99_gc_note_finalizable(const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
+static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
+static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
+static void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value) {
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
+static void kiln_c99_candidate_record_vals(const void *owner_payload,
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
+static void kiln_c99_candidate_record_property(const void *owner_payload,
 static inline void kiln_c99_gc_keep_alive(const void *payload) {
 typedef char kiln_c99_block_kind_offset_agrees[sizeof(kiln_gc_block) - offsetof(kiln_gc_block, kind) ==
 typedef char kiln_c99_block_kind_mask_agrees[KILN_GC_KIND_MASK == KILN_C99_BLOCK_KIND_MASK ? 1 : -1];
@@ -2268,6 +2279,7 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
 static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
+static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *, const kiln_nursery_chunk *);
 static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
 static int kiln_c99_graph_inert_array_storage(const kiln_gc_block *block,
 static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
@@ -2312,8 +2324,13 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
+typedef struct kiln_c99_candidate_owner_observer {
+static void kiln_c99_candidate_observe_pointer(void *context, const void *pointer) {
+static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
+static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 typedef struct kiln_c99_graph_provider_visit {
 static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
@@ -3858,6 +3875,7 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
 static int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
 static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
+static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell, kiln_val value) {
 static int kiln_c99_val_make_cell(kiln_val *slot) {
 static void kiln_c99_val_make_unit_cell(kiln_val *slot, kiln_val *storage) {
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {

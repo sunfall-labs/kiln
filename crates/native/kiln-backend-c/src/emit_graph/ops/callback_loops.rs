@@ -426,7 +426,7 @@ pub(super) fn reduce_tree(
                  {fold_call} \
                  vacc = prod; \
              }} \
-             level->elements[level->count++] = vacc; \
+             kiln_c99_heap_store_val(level, &level->elements[level->count++], vacc); \
          }} \
          size_t m = level->count; \
          while (m > 1) {{ \
@@ -434,9 +434,9 @@ pub(super) fn reduce_tree(
              for (size_t i = 0; i < pairs; ++i) {{ \
                  kiln_val prod = KILN_VAL_UNDEFINED; \
                  {comb_call} \
-                 level->elements[i] = prod; \
+                 kiln_c99_heap_store_val(level, &level->elements[i], prod); \
              }} \
-             if (m & 1) level->elements[pairs] = level->elements[m - 1]; \
+             if (m & 1) kiln_c99_heap_store_val(level, &level->elements[pairs], level->elements[m - 1]); \
              m = pairs + (m & 1); \
              level->count = m; \
          }} \

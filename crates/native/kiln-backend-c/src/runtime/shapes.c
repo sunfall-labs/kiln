@@ -13,8 +13,8 @@ static int kiln_c99_accessor_pair_new(kiln_value getter, kiln_value setter, kiln
     array->is_numeric = 0;
     status = kiln_c99_array_reserve(array, 2);
     if (status != KILN_C99_OK) return status;
-    array->elements[0] = kiln_val_from_boundary(getter);
-    array->elements[1] = kiln_val_from_boundary(setter);
+    kiln_c99_heap_store_val(array, &array->elements[0], kiln_val_from_boundary(getter));
+    kiln_c99_heap_store_val(array, &array->elements[1], kiln_val_from_boundary(setter));
     array->count = 2;
     *out = kiln_val_from_boundary(pair);
     return KILN_C99_OK;
@@ -590,7 +590,7 @@ static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ike
         object->slot_capacity = new_cap;
     }
     kiln_c99_prototype_touched(object);
-    object->slots[slot] = held;
+    kiln_c99_heap_store_val(object, &object->slots[slot], held);
     object->shape = next;
     if (attrs & KILN_C99_ATTR_ACCESSOR) {
         object->accessor_count += 1;
@@ -632,7 +632,7 @@ static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kil
     }
     if (kiln_c99_val_code(value) == kiln_c99_shape_slot_code(shape, slot)) {
         kiln_c99_prototype_touched(object);
-        object->slots[slot] = value;
+        kiln_c99_heap_store_val(object, &object->slots[slot], value);
         return 1;
     }
     /* The shapes from the one that added `slot` down to `shape`, deepest last. */
@@ -657,7 +657,7 @@ static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kil
     }
     kiln_c99_prototype_touched(object);
     object->shape = rebuilt;
-    object->slots[slot] = value;
+    kiln_c99_heap_store_val(object, &object->slots[slot], value);
     return 1;
 }
 
@@ -682,7 +682,7 @@ static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
         property->getter = kiln_c99_accessor_pair_half(held, 0);
         property->setter = kiln_c99_accessor_pair_half(held, 1);
     } else {
-        property->value = kiln_val_to_boundary(held);
+        kiln_c99_heap_store_value(object, &property->value, kiln_val_to_boundary(held));
     }
 }
 
@@ -917,7 +917,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             object->properties[pos].symbol_hidden = 0;
             object->properties[pos].accessor = 0;
             object->properties[pos].refused = 0;
-            object->properties[pos].value = kiln_val_to_boundary(object->elements[i]);
+            kiln_c99_heap_store_value(object, &object->properties[pos].value, kiln_val_to_boundary(object->elements[i]));
             pos++;
         }
         kiln_c99_object_elements_free(object);
@@ -1171,9 +1171,9 @@ static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_objec
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (i = 0; i < KILN_C99_INLINE_SLOTS; ++i)
-        object->inline_slots[i] = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(object, &object->inline_slots[i], KILN_VAL_UNDEFINED);
     for (i = 0; i < object->count; ++i)
-        object->inline_slots[i] = kiln_val_from_boundary(object->properties[i].value);
+        kiln_c99_heap_store_val(object, &object->inline_slots[i], kiln_val_from_boundary(object->properties[i].value));
     kiln_c99_object_properties_free(object);
     object->properties = NULL;
     object->capacity = 0;
@@ -1387,7 +1387,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;
-    object->prototype = kiln_c99_undefined();
+    kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_undefined());
     object->frozen = 0;
     object->not_extensible = 0;
     object->module_namespace = 0;
@@ -1404,10 +1404,10 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->slots = tail_slots == 0 ? object->inline_slots : (kiln_val *)(object + 1);
     object->slot_capacity = tail_slots == 0 ? KILN_C99_INLINE_SLOTS : tail_slots;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
-        object->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(object, &object->inline_slots[slot_i], KILN_VAL_UNDEFINED);
     }
     for (size_t slot_i = 0; slot_i < tail_slots; ++slot_i)
-        object->slots[slot_i] = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(object, &object->slots[slot_i], KILN_VAL_UNDEFINED);
     object->elements = NULL;
     object->element_count = 0;
     object->element_capacity = 0;
@@ -1721,7 +1721,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->properties = NULL;
     object->count = 0;
     object->capacity = 0;
-    object->prototype = kiln_c99_undefined();
+    kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_undefined());
     object->frozen = 0;
     object->not_extensible = 0;
     object->module_namespace = 0;
@@ -1738,7 +1738,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
-        object->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(object, &object->inline_slots[slot_i], KILN_VAL_UNDEFINED);
     }
     object->elements = NULL;
     object->element_count = 0;

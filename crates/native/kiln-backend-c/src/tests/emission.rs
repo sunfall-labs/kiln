@@ -1293,11 +1293,11 @@ fn emitted_static_object_literal_uses_cached_shape_and_inline_slots() {
         "expected cached shape in emitted source:\n{gen_numbers}"
     );
     assert!(
-        gen_numbers.contains("obj->inline_slots[0] ="),
+        gen_numbers.contains("kiln_c99_heap_store_val(obj, &obj->inline_slots[0],"),
         "expected inline slot 0 store in emitted source:\n{gen_numbers}"
     );
     assert!(
-        gen_numbers.contains("obj->inline_slots[1] ="),
+        gen_numbers.contains("kiln_c99_heap_store_val(obj, &obj->inline_slots[1],"),
         "expected inline slot 1 store in emitted source:\n{gen_numbers}"
     );
     assert!(

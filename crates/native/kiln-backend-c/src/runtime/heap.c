@@ -315,6 +315,11 @@ struct kiln_c99_candidate_group {
     size_t count;
     kiln_c99_candidate_large *large_head;
     size_t large_count;
+    /* Direct-factory owner records are weak and live through later writes, not just the
+     * factory scope. Arena snapshots never expose pointers to their sender and need no ledger. */
+    struct kiln_gc_heap *ledger_heap;
+    kiln_gc_ptrset incoming_owners;
+    int incoming_failed;
     /* A synchronous factory or private arena pins metadata while its membership can be empty.
      * Once that builder closes, only member chunks keep the manifest alive. */
     int builder;
@@ -470,6 +475,11 @@ typedef struct kiln_gc_heap {
     int actor_candidate_collected;
     kiln_c99_candidate_group *actor_candidate_group;
     kiln_c99_candidate_large_map *candidate_large;
+    size_t candidate_ledger_groups;
+    int candidate_ledger_publication_failed;
+    /* Temporary realm-thread observer reuses the audited incoming field inventory. */
+    void (*graph_pointer_observer)(void *, const void *);
+    void *graph_pointer_observer_context;
     /* The exclusive incoming proof owns this temporary side-span list. It is never a GC root. */
     const kiln_c99_graph_side_set *graph_proof_sides;
     int mark_failed;
@@ -870,11 +880,21 @@ static kiln_c99_candidate_group *kiln_c99_candidate_group_new(uint64_t id) {
     return group;
 }
 
+static void kiln_c99_candidate_group_dispose(kiln_c99_candidate_group *group) {
+    if (group->builder || group->count != 0 || group->large_count != 0) abort();
+    if (group->ledger_heap != NULL) {
+        if (group->ledger_heap->candidate_ledger_groups == 0) abort();
+        --group->ledger_heap->candidate_ledger_groups;
+    }
+    free(group->incoming_owners.table);
+    free(group);
+}
+
 static void kiln_c99_candidate_group_close(kiln_c99_candidate_group *group) {
     if (group == NULL) return;
     if (!group->builder) abort();
     group->builder = 0;
-    if (group->count == 0 && group->large_count == 0) free(group);
+    if (group->count == 0 && group->large_count == 0) kiln_c99_candidate_group_dispose(group);
 }
 
 static void kiln_c99_candidate_group_add(kiln_c99_candidate_group *group,
@@ -910,7 +930,8 @@ static void kiln_c99_candidate_group_remove(kiln_nursery_chunk *chunk) {
     chunk->candidate_group = NULL;
     chunk->candidate_prev = NULL;
     chunk->candidate_next = NULL;
-    if (--group->count == 0 && group->large_count == 0 && !group->builder) free(group);
+    if (--group->count == 0 && group->large_count == 0 && !group->builder)
+        kiln_c99_candidate_group_dispose(group);
 }
 
 static void kiln_c99_candidate_chunk_clear(kiln_nursery_chunk *chunk) {
@@ -1091,7 +1112,8 @@ static void kiln_c99_candidate_large_remove(kiln_gc_heap *heap, kiln_gc_block *b
     --map->count;
     block->kind &= ~KILN_GC_FLAG_CANDIDATE_LARGE;
     free(entry);
-    if (group->count == 0 && group->large_count == 0 && !group->builder) free(group);
+    if (group->count == 0 && group->large_count == 0 && !group->builder)
+        kiln_c99_candidate_group_dispose(group);
     if (map->count == 0) {
         free(map->table); free(map); heap->candidate_large = NULL;
     }
@@ -2949,6 +2971,116 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     return NULL;
 }
 
+/* Resolve provenance through live heap indexes before reading a header. An arbitrary tagged
+ * word or stale owner witness cannot authorize a dereference. Ordinary slab values have no
+ * candidate group; large candidates use the cold reverse map. */
+static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
+    const kiln_gc_heap *heap, const kiln_gc_block *block) {
+    if (block == NULL) return NULL;
+    if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) {
+        const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(heap, block);
+        return chunk->candidate_group;
+    }
+    if ((block->kind & KILN_GC_FLAG_CANDIDATE_LARGE) != 0) {
+        const kiln_c99_candidate_large *owner = kiln_c99_candidate_large_find(heap, block);
+        return owner == NULL ? NULL : owner->group;
+    }
+    return NULL;
+}
+
+/* Remember possible owners, not slot addresses: growth can replace side buffers, and clearing
+ * an edge must permit retry. Metadata does not root either endpoint. The admission walker will
+ * inspect the owner's current complete layout. Missing coverage still requires the full scan. */
+static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
+                                                    const void *owner_payload,
+                                                    const void *target_payload) {
+    kiln_gc_block *target, *owner;
+    kiln_c99_candidate_group *group;
+    if (heap == NULL || heap->candidate_ledger_groups == 0 || target_payload == NULL ||
+        kiln_c99_no_write_depth != 0) return;
+    target = kiln_c99_gc_lookup(heap, target_payload);
+    group = kiln_c99_candidate_block_group(heap, target);
+    if (group == NULL || group->ledger_heap != heap || group->incoming_failed) return;
+    owner = kiln_c99_gc_lookup(heap, owner_payload);
+    /* Unit-block cells and native root slots have their own complete realm/provider audit. */
+    if (owner == NULL || kiln_c99_candidate_block_group(heap, owner) == group ||
+        kiln_c99_gc_ptrset_contains(&group->incoming_owners, owner)) return;
+    if (group->incoming_owners.count == SIZE_MAX ||
+        group->incoming_owners.count >= SIZE_MAX / 2 ||
+        kiln_c99_gc_ptrset_insert(&group->incoming_owners, owner) != KILN_C99_OK)
+        group->incoming_failed = 1;
+}
+
+static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
+    const void *owner_payload, kiln_val value) {
+    if (KILN_VAL_IS_NUMBER(value) || value < KILN_TAG_STRING_PREFIX ||
+        kiln_c99_no_write_depth != 0) return;
+    kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
+                                            KILN_VAL_PTR(value));
+}
+
+/* Decoupled emitted units keep the immediate-value skip inline and call this bridge only
+ * for pointer stores. The realm's ledger and worker read-path guard remain runtime-owned. */
+static void kiln_c99_heap_record_val(const void *owner_payload, kiln_val value) {
+    kiln_c99_candidate_record_val_store(owner_payload, value);
+}
+
+/* The slot can live inside its block or an owned side allocation. The owner payload supplies
+ * stable identity across side-buffer growth; the slot address is never retained in metadata. */
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
+    const void *owner_payload, kiln_val *slot, kiln_val value) {
+    kiln_c99_candidate_record_val_store(owner_payload, value);
+    *slot = value;
+}
+
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
+    const void *owner_payload, kiln_value *slot, kiln_value value) {
+    if (value.tag >= KILN_VALUE_STRING && kiln_c99_no_write_depth == 0)
+        kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
+                                                (const void *)(uintptr_t)value.bits);
+    *slot = value;
+}
+
+static void kiln_c99_candidate_record_vals(const void *owner_payload,
+                                            const kiln_val *values, size_t count) {
+    kiln_gc_heap *heap;
+    if (kiln_c99_no_write_depth != 0 || count == 0) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->candidate_ledger_groups == 0) return;
+    for (size_t index = 0; index < count; ++index) {
+        kiln_val value = values[index];
+        if (!KILN_VAL_IS_NUMBER(value) && value >= KILN_TAG_STRING_PREFIX)
+            kiln_c99_candidate_record_pointer_store(heap, owner_payload, KILN_VAL_PTR(value));
+    }
+}
+
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
+    const void *owner_payload, kiln_val *destination, const kiln_val *source, size_t count) {
+    memcpy(destination, source, count * sizeof *source);
+    kiln_c99_candidate_record_vals(owner_payload, destination, count);
+}
+
+static void kiln_c99_candidate_record_property(const void *owner_payload,
+                                                const kiln_property *property) {
+    kiln_gc_heap *heap;
+    if (kiln_c99_no_write_depth != 0) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->candidate_ledger_groups == 0) return;
+    kiln_c99_candidate_record_pointer_store(heap, owner_payload, property->key);
+    if (property->refused) return;
+    if (property->accessor) {
+        if (property->getter.tag >= KILN_VALUE_STRING)
+            kiln_c99_candidate_record_pointer_store(heap, owner_payload,
+                (const void *)(uintptr_t)property->getter.bits);
+        if (property->setter.tag >= KILN_VALUE_STRING)
+            kiln_c99_candidate_record_pointer_store(heap, owner_payload,
+                (const void *)(uintptr_t)property->setter.bits);
+    } else if (property->value.tag >= KILN_VALUE_STRING) {
+        kiln_c99_candidate_record_pointer_store(heap, owner_payload,
+            (const void *)(uintptr_t)property->value.bits);
+    }
+}
+
 /* Keep `payload` a root until here. The collector finds a C frame's pointers by scanning the
  * stack, and a pointer whose last use is behind it has usually left the stack by the time the
  * frame allocates again; a caller that will hand the payload to something after that -- the
@@ -3937,6 +4069,8 @@ static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
     }
 }
 
+static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *, const kiln_nursery_chunk *);
+
 static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
     kiln_gc_nursery *nursery = &heap->nursery;
     kiln_nursery_chunk *chunk;
@@ -3964,6 +4098,13 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
         heap->count += chunk->alloc_count;
         heap->bytes += chunk->alloc_bytes;
         heap->since_collection += chunk->alloc_bytes;
+    }
+    /* All regions must be indexed before inspecting edges between adopted chunks. Workers
+     * skip the realm's ledger; publication records their initialized fields on this thread. */
+    if (heap->candidate_ledger_groups != 0) {
+        chunk = nursery->full;
+        for (size_t index = 0; index < count; ++index, chunk = chunk->next)
+            kiln_c99_candidate_record_chunk_layout(heap, chunk);
     }
     return 1;
 }
@@ -4608,6 +4749,11 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
                                    const void *pointer) {
     uintptr_t address = (uintptr_t)pointer;
     const kiln_c99_graph_side_set *sides = heap->graph_proof_sides;
+    if (heap->graph_pointer_observer != NULL) {
+        heap->graph_pointer_observer(heap->graph_pointer_observer_context, pointer);
+        /* Never short-circuit an OR of fields while observing an owner's full layout. */
+        return 0;
+    }
     kiln_gc_block *block;
     kiln_nursery_chunk *chunk;
     size_t index;
@@ -5002,6 +5148,13 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         }
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
+    case KILN_GC_PROXY: {
+        const kiln_proxy *proxy = (const kiln_proxy *)(block + 1);
+        if (block->size < sizeof *proxy) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->target) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->handler)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
     case KILN_GC_PROMISE: {
         const kiln_promise *promise = (const kiln_promise *)(block + 1);
         if (block->size < sizeof *promise || promise->count > promise->capacity ||
@@ -5248,6 +5401,63 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
     }
 }
 
+/* Construction/publication uses the same field inventory as incoming certification.
+ * This observer cannot run user code or collect, and is installed only on the heap's realm
+ * thread after all published blocks are indexed. Unknown layouts invalidate ledger proof. */
+typedef struct kiln_c99_candidate_owner_observer {
+    kiln_gc_heap *heap;
+    const void *owner;
+} kiln_c99_candidate_owner_observer;
+
+static void kiln_c99_candidate_observe_pointer(void *context, const void *pointer) {
+    kiln_c99_candidate_owner_observer *observer = context;
+    kiln_c99_candidate_record_pointer_store(observer->heap, observer->owner, pointer);
+}
+
+static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
+                                                   const kiln_gc_block *block) {
+    kiln_c99_candidate_owner_observer observer = {heap, block + 1};
+    kiln_c99_graph_incoming_result result;
+    if (heap == NULL || heap->candidate_ledger_groups == 0) return;
+    if (heap->graph_pointer_observer != NULL || heap->graph_proof_sides != NULL) {
+        heap->candidate_ledger_publication_failed = 1;
+        return;
+    }
+    heap->graph_pointer_observer_context = &observer;
+    heap->graph_pointer_observer = kiln_c99_candidate_observe_pointer;
+    result = kiln_c99_graph_outside_block(heap, NULL, 0, block);
+    heap->graph_pointer_observer = NULL;
+    heap->graph_pointer_observer_context = NULL;
+    if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED)
+        heap->candidate_ledger_publication_failed = 1;
+}
+
+static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *heap,
+                                                   const kiln_nursery_chunk *chunk) {
+    if (chunk->limit < chunk->base ||
+        chunk->limit > (const char *)chunk + heap->nursery.capacity) {
+        heap->candidate_ledger_publication_failed = 1;
+        return;
+    }
+    for (size_t word = 0; word < chunk->bitmap_words; ++word) {
+        uint64_t bits = chunk->bitmap[word];
+        while (bits != 0) {
+            size_t bit = (word << 6) + (size_t)__builtin_ctzll(bits);
+            uintptr_t address = (uintptr_t)chunk->base + (bit << 4);
+            const kiln_gc_block *block;
+            bits &= bits - 1;
+            if (address < (uintptr_t)chunk->base || address > (uintptr_t)chunk->limit ||
+                (uintptr_t)chunk->limit - address < sizeof(kiln_gc_block)) {
+                heap->candidate_ledger_publication_failed = 1;
+                return;
+            }
+            block = (const kiln_gc_block *)address;
+            if ((block->kind & KILN_GC_FLAG_DEAD) == 0)
+                kiln_c99_candidate_record_owner_layout(heap, block);
+        }
+    }
+}
+
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
     const kiln_nursery_chunk *chunk, const char *limit) {
@@ -5345,6 +5555,28 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
     }
     return seen_rows == heap->local_edge_count ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
                                                : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+}
+
+/* This is only the ledger's heap-owner observation, not admission. The full outside scan
+ * remains authoritative until every producer and mutation seam has complete store coverage. */
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
+    const kiln_gc_heap *heap, const kiln_c99_candidate_group *group,
+    kiln_nursery_chunk *const *chunks, size_t count) {
+    if (group == NULL || group->ledger_heap != heap || group->incoming_failed ||
+        heap->candidate_ledger_publication_failed)
+        return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+    for (size_t index = 0; index < group->incoming_owners.capacity; ++index) {
+        const void *witness = group->incoming_owners.table[index];
+        uintptr_t address = (uintptr_t)witness;
+        kiln_gc_block *owner;
+        kiln_c99_graph_incoming_result result;
+        if (witness == NULL || address > UINTPTR_MAX - sizeof(kiln_gc_block)) continue;
+        owner = kiln_c99_gc_lookup(heap, (const void *)(address + sizeof(kiln_gc_block)));
+        if (owner == NULL || kiln_c99_candidate_block_group(heap, owner) == group) continue;
+        result = kiln_c99_graph_outside_block(heap, chunks, count, owner);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
@@ -5919,6 +6151,13 @@ static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
     if (id == 0) return 0;
     heap->actor_candidate_group = kiln_c99_candidate_group_new(id);
     if (heap->actor_candidate_group == NULL) return 0;
+    if (heap->candidate_ledger_groups == SIZE_MAX) {
+        kiln_c99_candidate_group_close(heap->actor_candidate_group);
+        heap->actor_candidate_group = NULL;
+        return 0;
+    }
+    heap->actor_candidate_group->ledger_heap = heap;
+    ++heap->candidate_ledger_groups;
     heap->actor_candidate_id = id;
     heap->actor_candidate_collected = 0;
     if (heap->nursery.bump > heap->nursery.base) kiln_c99_nursery_turn_chunk(heap);
@@ -8385,6 +8624,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     kiln_c99_nursery_destroy(&heap->nursery);
     kiln_c99_candidate_group_close(heap->actor_candidate_group);
     heap->actor_candidate_group = NULL;
+    if (heap->candidate_ledger_groups != 0) abort();
     /* A result retained outside its dead realm may have survived the final sweep. It cannot
      * name a usable realm-local facade after teardown, so release its lease here. */
     for (kiln_shared_facade *facade = heap->shared_facades; facade != NULL; ) {

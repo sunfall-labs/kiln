@@ -844,7 +844,7 @@ static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_
     kiln_shape *next;
     if (object->shape != NULL) {
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot) && slot < object->slot_capacity) {
-            object->slots[slot] = member;
+            kiln_c99_heap_store_val(object, &object->slots[slot], member);
             return KILN_C99_OK;
         }
         int is_double = KILN_VAL_IS_NUMBER(member);
@@ -855,7 +855,7 @@ static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_
                     return grown;
                 }
             }
-            object->slots[next->slot_index] = member;
+            kiln_c99_heap_store_val(object, &object->slots[next->slot_index], member);
             object->shape = next;
             return KILN_C99_OK;
         }
@@ -993,19 +993,19 @@ static int kiln_c99_message_decode_val(kiln_c99_message_decode *state, kiln_valu
         array = kiln_c99_array_of(*out);
         /* The collector scans every element below count. Capacity comes from an unzeroed
          * allocation, and the recursive walk may collect before filling the next slot. */
-        for (index = 0; index < length; ++index) array->elements[index] = KILN_VAL_HOLE;
+        for (index = 0; index < length; ++index) kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_HOLE);
         array->count = length;
         for (index = 0; index < length; ++index) {
             kiln_value item;
             if (state->at < state->count && state->tokens[state->at].kind == KILN_WORKER_TOKEN_NUMBER &&
                 state->tokens[state->at].number == 10.0) {
                 ++state->at;
-                array->elements[index] = KILN_VAL_HOLE;
+                kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_HOLE);
                 continue;
             }
             status = kiln_c99_message_decode_val(state, &item, depth + 1);
             if (status != KILN_C99_OK) return status;
-            array->elements[index] = kiln_val_from_boundary(item);
+            kiln_c99_heap_store_val(array, &array->elements[index], kiln_val_from_boundary(item));
         }
         return KILN_C99_OK;
     }
@@ -1135,7 +1135,7 @@ static int kiln_c99_json_build_mirror(kiln_json_build_stack *stack, size_t index
          * through a pointer taken before it grew. */
         held = kiln_c99_array_of(stack->holds);
     }
-    held->elements[slot] = value;
+    kiln_c99_heap_store_val(held, &held->elements[slot], value);
     return KILN_C99_OK;
 }
 

@@ -266,6 +266,8 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
+    const void *owner_payload, kiln_val *slot, kiln_val value);
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
 static int kiln_c99_install_event_emitter_methods(kiln_value target);
 static int kiln_c99_install_readable_methods(kiln_value target);
@@ -827,7 +829,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         queue = kiln_c99_array_of(buffer->value);
         if (queue->count == 0) { *result = kiln_c99_null(); return KILN_C99_OK; }
         *result = kiln_val_to_boundary(queue->elements[0]);
-        for (index = 1; index < queue->count; ++index) queue->elements[index - 1] = queue->elements[index];
+        for (index = 1; index < queue->count; ++index) kiln_c99_heap_store_val(queue, &queue->elements[index - 1], queue->elements[index]);
         queue->count -= 1;
         return KILN_C99_OK;
     }

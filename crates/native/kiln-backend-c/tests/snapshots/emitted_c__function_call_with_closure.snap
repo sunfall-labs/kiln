@@ -81,7 +81,7 @@ static int kiln_module_50bb64be60684e555d9624079376f324_body(kiln_host *host, ki
 kiln_block_0:;
     { int status = kiln_c99_val_make_cell(&locals[0]); if (status != KILN_C99_OK) return status; }
     v3 = UINT64_C(4621819117588971520);
-    *(kiln_val *)KILN_VAL_PTR(locals[0]) = v3;
+    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[0]), v3);
     { kiln_value built; kiln_val captured[1]; captured[0] = locals[0]; int status = kiln_c99_make_closure(&built, kiln_module_50bb64be60684e555d9624079376f324_fn_0, &kiln_module_50bb64be60684e555d9624079376f324_function_name_0, NULL, 0, "kiln_module_50bb64be60684e555d9624079376f324", UINT32_C(0), UINT32_C(1), 0, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(2), UINT32_C(2), UINT32_C(6), UINT32_C(0), captured, UINT32_C(1)); if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->publishes_frame = 0; v5 = kiln_val_from_boundary(built); }
     v7 = UINT64_C(4617315517961601024);
     i7 = 5LL;

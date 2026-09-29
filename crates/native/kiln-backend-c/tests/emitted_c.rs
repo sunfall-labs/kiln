@@ -1092,7 +1092,9 @@ fn runtime_prelude_size() {
     // Together the measured prelude is 65,625 lines; these are new helpers, not duplicated parts.
     // Cold standalone candidate ownership and indexed large-block certificates bring the
     // prelude to 66,012 lines. The ordinary block header remains unchanged.
-    const CEILING_LINES: usize = 66_200;
+    // Candidate lifetime owner recording, store helpers and shared-layout publication
+    // observation add 266 lines (66,278 total). Runtime sections remain emitted once.
+    const CEILING_LINES: usize = 66_400;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -39,8 +39,8 @@ static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value han
     if (proxy == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    proxy->target = target;
-    proxy->handler = handler;
+    kiln_c99_heap_store_value(proxy, &proxy->target, target);
+    kiln_c99_heap_store_value(proxy, &proxy->handler, handler);
     proxy->revoked = 0;
     *out = kiln_c99_value(KILN_VALUE_PROXY, (uint64_t)(uintptr_t)proxy, NULL, 0);
     return KILN_C99_OK;
@@ -263,7 +263,7 @@ static int kiln_c99_collection_put_unleased(kiln_value target, kiln_value key, k
             if (!collection->entries[idx].dead) {
                 kiln_value k = collection->entries[idx].key;
                 if ((k.bits == key.bits && k.tag == key.tag) || kiln_c99_same_value_zero(k, key)) {
-                    collection->entries[idx].value = value;
+                    kiln_c99_heap_store_value(collection, &collection->entries[idx].value, value);
                     return KILN_C99_OK;
                 }
             }
@@ -276,7 +276,7 @@ static int kiln_c99_collection_put_unleased(kiln_value target, kiln_value key, k
             if (collection->entries[index].dead) continue;
             kiln_value k = collection->entries[index].key;
             if ((k.bits == key.bits && k.tag == key.tag) || kiln_c99_same_value_zero(k, key)) {
-                collection->entries[index].value = value;
+                kiln_c99_heap_store_value(collection, &collection->entries[index].value, value);
                 return KILN_C99_OK;
             }
         }
@@ -287,8 +287,8 @@ static int kiln_c99_collection_put_unleased(kiln_value target, kiln_value key, k
         return status;
     }
     new_idx = collection->count;
-    collection->entries[new_idx].key = key;
-    collection->entries[new_idx].value = value;
+    kiln_c99_heap_store_value(collection, &collection->entries[new_idx].key, key);
+    kiln_c99_heap_store_value(collection, &collection->entries[new_idx].value, value);
     collection->entries[new_idx].dead = 0;
     collection->count += 1;
     collection->live += 1;

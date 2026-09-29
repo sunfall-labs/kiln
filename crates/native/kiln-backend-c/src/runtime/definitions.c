@@ -52,7 +52,7 @@ static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kil
             return 1;
         }
         kiln_c99_prototype_touched(object);
-        object->slots[slot] = held;
+        kiln_c99_heap_store_val(object, &object->slots[slot], held);
         *status = KILN_C99_OK;
         return 1;
     }
@@ -105,8 +105,8 @@ static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string 
         halves = kiln_c99_array_of(boxed);
         if (halves->count != 2) return 0;
         kiln_c99_prototype_touched(object);
-        if (getter.tag != KILN_VALUE_UNDEFINED) halves->elements[0] = kiln_val_from_boundary(getter);
-        if (setter.tag != KILN_VALUE_UNDEFINED) halves->elements[1] = kiln_val_from_boundary(setter);
+        if (getter.tag != KILN_VALUE_UNDEFINED) kiln_c99_heap_store_val(halves, &halves->elements[0], kiln_val_from_boundary(getter));
+        if (setter.tag != KILN_VALUE_UNDEFINED) kiln_c99_heap_store_val(halves, &halves->elements[1], kiln_val_from_boundary(setter));
         *status = KILN_C99_OK;
         return 1;
     }
@@ -161,14 +161,14 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
         if (!object->properties[index].accessor) {
             object->properties[index].accessor = 1;
             object->accessor_count += 1;
-            object->properties[index].getter = kiln_c99_undefined();
-            object->properties[index].setter = kiln_c99_undefined();
+            kiln_c99_heap_store_value(object, &object->properties[index].getter, kiln_c99_undefined());
+            kiln_c99_heap_store_value(object, &object->properties[index].setter, kiln_c99_undefined());
         }
         if (getter.tag != KILN_VALUE_UNDEFINED) {
-            object->properties[index].getter = getter;
+            kiln_c99_heap_store_value(object, &object->properties[index].getter, getter);
         }
         if (setter.tag != KILN_VALUE_UNDEFINED) {
-            object->properties[index].setter = setter;
+            kiln_c99_heap_store_value(object, &object->properties[index].setter, setter);
         }
         if (!enumerable) {
             object->properties[index].enumerable = 0;
@@ -404,9 +404,9 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             }
             /* Growing leaves holes, which read as undefined and are not the same thing. */
             for (fill = array->count; fill < slot; ++fill) {
-                array->elements[fill] = KILN_VAL_HOLE;
+                kiln_c99_heap_store_val(array, &array->elements[fill], KILN_VAL_HOLE);
             }
-            array->elements[slot] = kiln_val_from_boundary(value);
+            kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(value));
             if (slot + 1 > array->count) {
                 array->count = slot + 1;
             }

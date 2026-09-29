@@ -635,8 +635,8 @@ static int kiln_c99_node_http_instance(kiln_value *out, kiln_value prototype, ki
     if (status != KILN_C99_OK) return status;
     object = kiln_c99_object_of(*out);
     object->shape = shape;
-    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, response);
-    if (kiln_c99_can_be_prototype(prototype)) object->prototype = prototype;
+    kiln_c99_heap_store_val(object, &object->slots[0], KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, response));
+    if (kiln_c99_can_be_prototype(prototype)) kiln_c99_heap_store_value(object, &object->prototype, prototype);
     return KILN_C99_OK;
 }
 
@@ -686,13 +686,13 @@ static int kiln_c99_node_layout_store(kiln_value target, size_t index, const kil
             if (index < object->shape->property_count && object->shape->keys[index] == key &&
                 index < object->slot_capacity && !object->frozen &&
                 (object->shape->store_mask & (1u << index)) == 0) {
-                object->slots[index] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->slots[index], kiln_val_from_boundary(value));
                 return KILN_C99_OK;
             }
         } else if (index < object->count && object->properties[index].key == key &&
                    !object->properties[index].accessor && object->properties[index].writable &&
                    !object->frozen) {
-            object->properties[index].value = value;
+            kiln_c99_heap_store_value(object, &object->properties[index].value, value);
             return KILN_C99_OK;
         }
     }

@@ -348,7 +348,7 @@ int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *sour
             if (status != KILN_C99_OK) return status;
             kiln_val part = kiln_c99_val_slice_string(source, (size_t)(p - bytes), len);
             if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
-            array->elements[array->count] = part;
+            kiln_c99_heap_store_val(array, &array->elements[array->count], part);
             array->count += 1;
             if (next == NULL) break;
             p = next + 1;
@@ -429,7 +429,7 @@ static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size
             if (status != KILN_C99_OK) return status;
             part = kiln_c99_val_from_ascii(p, len);
             if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
-            array->elements[array->count] = part;
+            kiln_c99_heap_store_val(array, &array->elements[array->count], part);
             array->count += 1;
             if (next == NULL) break;
             p = next + 1;
@@ -813,7 +813,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 int st = kiln_c99_new_array_with_capacity(&built, 1, 0);
                 if (st != KILN_C99_OK) return st;
                 kiln_array *arr = kiln_c99_array_of(built);
-                arr->elements[arr->count++] = kiln_val_from_boundary(receiver);
+                kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], kiln_val_from_boundary(receiver));
                 *result = built;
                 return KILN_C99_OK;
             }
@@ -827,7 +827,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                     if (st != KILN_C99_OK) return st;
                     kiln_array *arr = kiln_c99_array_of(built);
                     for (size_t i = 0; i < taken; ++i) {
-                        arr->elements[arr->count++] = kiln_c99_val_from_unit(kiln_string_unit_at(receiver_string, i));
+                        kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], kiln_c99_val_from_unit(kiln_string_unit_at(receiver_string, i)));
                     }
                     *result = built;
                     return KILN_C99_OK;
@@ -868,7 +868,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                             size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
                             kiln_val part = kiln_c99_val_slice_string(receiver_string, (size_t)(p - (const char *)kiln_string_latin1(receiver_string)), len);
                             if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
-                            arr->elements[arr->count] = part;
+                            kiln_c99_heap_store_val(arr, &arr->elements[arr->count], part);
                             arr->count += 1;
                             if (next == NULL) break;
                             p = next + shown_string->unit_len;

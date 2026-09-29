@@ -155,7 +155,8 @@ static int kiln_c99_make_cell(kiln_value *slot) {
  * overwriting the slot here would drop the box every capture already points at. */
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
     if (slot->tag == KILN_VALUE_CELL) {
-        *kiln_c99_cell_of(*slot) = KILN_VAL_UNINITIALIZED;
+        kiln_c99_heap_store_val(kiln_c99_cell_of(*slot), kiln_c99_cell_of(*slot),
+                                 KILN_VAL_UNINITIALIZED);
     } else {
         *slot = kiln_c99_uninitialized();
     }
@@ -176,7 +177,6 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
                                  uint32_t count) {
     kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc_hot(KILN_GC_CLOSURE, sizeof *closure, 1);
     kiln_val *upvalues = NULL;
-    uint32_t index;
     if (closure == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -192,9 +192,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
             /* The closure owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
             kiln_c99_gc_note_finalizable(closure);
         }
-        for (index = 0; index < count; ++index) {
-            upvalues[index] = captured[index];
-        }
+        kiln_c99_heap_copy_vals(closure, upvalues, captured, count);
     }
     closure->body = body;
     closure->generator = generator;
@@ -205,13 +203,13 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->arrow = arrow != 0;
     closure->strict = strict;
     closure->publishes_frame = 1;
-    closure->captured_this = arrow ? receiver : KILN_VAL_UNDEFINED;
+    kiln_c99_heap_store_val(closure, &closure->captured_this, arrow ? receiver : KILN_VAL_UNDEFINED);
     closure->async_generator = async_generator;
     closure->is_method = is_method;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
-    closure->captured_new_target = new_target;
-    closure->captured_arguments = kiln_c99_undefined();
+    kiln_c99_heap_store_val(closure, &closure->captured_new_target, new_target);
+    kiln_c99_heap_store_value(closure, &closure->captured_arguments, kiln_c99_undefined());
     /* `arrow` is 1 for an arrow that reads the enclosing frame and 2 for one the compiler proved
      * never does (neither it nor any arrow nested in it names `arguments` or `new.target`; the
      * `publishes_frame` fixpoint). Capturing for the second kind built the enclosing call's whole
@@ -229,12 +227,12 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
         }
     }
     closure->region = 0;
-    closure->own_prototype = kiln_c99_undefined();
-    closure->own_store = kiln_c99_undefined();
+    kiln_c99_heap_store_value(closure, &closure->own_prototype, kiln_c99_undefined());
+    kiln_c99_heap_store_value(closure, &closure->own_store, kiln_c99_undefined());
     closure->name = name;
     closure->source = source;
     closure->source_len = source_len;
-    closure->source_value = kiln_c99_undefined();
+    kiln_c99_heap_store_value(closure, &closure->source_value, kiln_c99_undefined());
     closure->diagnostic_source = diagnostic_source;
     closure->arity = arity;
     closure->prologue_resume = prologue_resume;
@@ -283,17 +281,17 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
             closure->strict = strict;
             closure->publishes_frame = publishes_frame;
             closure->region = 1;
-            closure->captured_this = KILN_VAL_UNDEFINED;
+            kiln_c99_heap_store_val(closure, &closure->captured_this, KILN_VAL_UNDEFINED);
             closure->async_generator = async_generator;
             closure->is_method = is_method;
-            closure->captured_new_target = KILN_VAL_UNDEFINED;
-            closure->captured_arguments = kiln_c99_undefined();
-            closure->own_prototype = kiln_c99_undefined();
-            closure->own_store = kiln_c99_undefined();
+            kiln_c99_heap_store_val(closure, &closure->captured_new_target, KILN_VAL_UNDEFINED);
+            kiln_c99_heap_store_value(closure, &closure->captured_arguments, kiln_c99_undefined());
+            kiln_c99_heap_store_value(closure, &closure->own_prototype, kiln_c99_undefined());
+            kiln_c99_heap_store_value(closure, &closure->own_store, kiln_c99_undefined());
             closure->name = name;
             closure->source = source;
             closure->source_len = source_len;
-            closure->source_value = kiln_c99_undefined();
+            kiln_c99_heap_store_value(closure, &closure->source_value, kiln_c99_undefined());
             closure->diagnostic_source = diagnostic_source;
             closure->arity = arity;
             closure->prologue_resume = prologue_resume;

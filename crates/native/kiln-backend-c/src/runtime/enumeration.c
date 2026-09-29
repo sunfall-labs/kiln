@@ -649,7 +649,7 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
             return KILN_C99_OK;
         }
         if (slot >= 0.0 && (size_t)slot < array->count) {
-            array->elements[(size_t)slot] = KILN_VAL_HOLE;
+            kiln_c99_heap_store_val(array, &array->elements[(size_t)slot], KILN_VAL_HOLE);
             array->is_numeric = 0;
         }
         return KILN_C99_OK;
@@ -694,7 +694,7 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
                 return KILN_C99_OK;
             }
             if (elem_idx < object->element_count) {
-                object->elements[elem_idx] = KILN_VAL_HOLE;
+                kiln_c99_heap_store_val(object, &object->elements[elem_idx], KILN_VAL_HOLE);
             }
             *answer = 1;
             return KILN_C99_OK;

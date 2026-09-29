@@ -548,7 +548,7 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
             orders[index] != 0) {
             const kiln_sealed_property *entry = &object->sealed->entries[index];
             *found = 1;
-            if (entry->writable) object->slots[index] = kiln_val_from_boundary(value);
+            if (entry->writable) kiln_c99_heap_store_val(object, &object->slots[index], kiln_val_from_boundary(value));
             else if (strict) return kiln_c99_throw_read_only_key(thrown, key);
             return KILN_C99_OK;
         }
@@ -561,7 +561,7 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
     if (!*found) return KILN_C99_OK;
     if (!object->properties[index].accessor) {
         if (object->properties[index].writable) {
-            object->properties[index].value = value;
+            kiln_c99_heap_store_value(object, &object->properties[index].value, value);
         } else if (strict) {
             return kiln_c99_throw_read_only_key(thrown, key);
         }
@@ -682,7 +682,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                 return status;
             }
             for (at = array->count; at < (size_t)wanted; ++at) {
-                array->elements[at] = KILN_VAL_HOLE;
+                kiln_c99_heap_store_val(array, &array->elements[at], KILN_VAL_HOLE);
             }
             array->count = (size_t)wanted;
             return KILN_C99_OK;
@@ -760,7 +760,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
          * setter's rule and the literal's -- `Object.setPrototypeOf` is the spelling that
          * complains. */
         if (kiln_c99_can_be_prototype(value)) {
-            object->prototype = value;
+            kiln_c99_heap_store_value(object, &object->prototype, value);
         }
         return KILN_C99_OK;
     }
@@ -779,7 +779,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             if (index_num >= 0.0 && index_num < 100000.0) {
                 size_t elem_idx = (size_t)index_num;
                 if (elem_idx < object->element_count && object->elements[elem_idx] != KILN_VAL_HOLE) {
-                    object->elements[elem_idx] = kiln_val_from_boundary(value);
+                    kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
                     return KILN_C99_OK;
                 }
             }
@@ -817,7 +817,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_ensure_dictionary(object);
                     return kiln_c99_put_mode_key(host, target, key, ikey, value, strict, depth, thrown);
                 }
-                object->slots[slot] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->slots[slot], kiln_val_from_boundary(value));
                 return KILN_C99_OK;
             }
         } else if (!object->not_extensible &&
@@ -846,7 +846,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                         object->slots = new_slots;
                         object->slot_capacity = new_cap;
                     }
-                    object->slots[new_slot] = kiln_val_from_boundary(value);
+                    kiln_c99_heap_store_val(object, &object->slots[new_slot], kiln_val_from_boundary(value));
                     object->shape = next_shape;
                     return KILN_C99_OK;
                 }
@@ -864,7 +864,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                     object->elements = new_elements;
                     object->element_capacity = new_cap;
                 }
-                object->elements[elem_idx] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
                 if (elem_idx >= object->element_count) {
                     object->element_count = elem_idx + 1;
                 }
@@ -1051,7 +1051,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         object->properties[position].symbol_hidden = 0;
         object->properties[position].accessor = 0;
         object->properties[position].refused = 0;
-        object->properties[position].value = kiln_c99_undefined();
+        kiln_c99_heap_store_value(object, &object->properties[position].value, kiln_c99_undefined());
         *out = &object->properties[position];
     }
     object->count += 1;
@@ -1100,7 +1100,7 @@ static int kiln_c99_sealed_storage_commit(kiln_object *object, const kiln_string
             if (index + 1 != values->next_order) values->dense_order = 0;
             orders[index] = values->next_order++;
         }
-        object->slots[index] = kiln_val_from_boundary(desired->value);
+        kiln_c99_heap_store_val(object, &object->slots[index], kiln_val_from_boundary(desired->value));
         if (!entry->writable) object->read_only_seen = 1;
         kiln_c99_prototype_touched(object);
         return 1;
@@ -1127,6 +1127,7 @@ static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string
     if (!slot->accessor && desired->accessor) object->accessor_count += 1;
     *slot = *desired;
     slot->key = canonical;
+    kiln_c99_candidate_record_property(object, slot);
     if (!slot->accessor && !slot->writable) object->read_only_seen = 1;
     kiln_c99_prototype_touched(object);
     return KILN_C99_OK;
@@ -1272,7 +1273,7 @@ static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
     if (status != KILN_C99_OK) {
         return status;
     }
-    slot->value = value;
+    kiln_c99_heap_store_value(kiln_c99_object_of(target), &slot->value, value);
     return KILN_C99_OK;
 }
 
@@ -1318,6 +1319,6 @@ static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value
     if (status != KILN_C99_OK) {
         return status;
     }
-    slot->value = value;
+    kiln_c99_heap_store_value(kiln_c99_object_of(target), &slot->value, value);
     return KILN_C99_OK;
 }

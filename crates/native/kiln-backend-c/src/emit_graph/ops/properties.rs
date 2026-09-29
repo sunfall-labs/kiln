@@ -593,7 +593,7 @@ pub(super) fn emit_set_property(
                 else if (shape == kiln_c99_slot_key(&site.entries[3].shape) && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
                 if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
                     kiln_c99_prototype_touched(obj); \
-                    obj->slots[slot] = v{val}; \
+                    kiln_c99_heap_store_val(obj, &obj->slots[slot], v{val}); \
                     {assign_v}\
                     handled = 1; \
                 }} \
@@ -610,7 +610,7 @@ pub(super) fn emit_set_property(
                     if (KILN_LIKELY(shape != NULL && shape == kiln_c99_slot_key(&site.entries[0].shape) && site.entries[0].transition_to == NULL)) {{ \
                         uint32_t s0 = site.entries[0].slot; \
                         if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
-                            kiln_c99_prototype_touched(obj); obj->slots[s0] = v{val}; \
+                            kiln_c99_prototype_touched(obj); kiln_c99_heap_store_val(obj, &obj->slots[s0], v{val}); \
                             {assign_v}\
                             handled = 1; \
                         }} \
@@ -1031,7 +1031,7 @@ pub(super) fn emit_set_computed(
         let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
-                "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; {assign_v}handled = 1; }}",
+                "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; kiln_c99_heap_store_val(arr, &arr->elements[i{k}], v{val}); {assign_v}handled = 1; }}",
                 k = key.0,
                 val = value.0,
                 assign_v = assign_v,
@@ -1047,7 +1047,7 @@ pub(super) fn emit_set_computed(
         let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; {assign_v}handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; kiln_c99_heap_store_val(arr, &arr->elements[slot], v{val}); {assign_v}handled = 1; }}",
                 k = key.0,
                 val = value.0,
                 assign_v = assign_v,

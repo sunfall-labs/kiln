@@ -36,7 +36,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                             kiln_c99_ensure_dictionary(object);
                             return kiln_c99_put_site_key(host, target, key, stable, value, strict, depth, thrown, site);
                         }
-                        object->slots[slot] = kiln_val_from_boundary(value);
+                        kiln_c99_heap_store_val(object, &object->slots[slot], kiln_val_from_boundary(value));
                         return KILN_C99_OK;
                     }
                 } else if (!object->not_extensible && slot < object->slot_capacity &&
@@ -45,7 +45,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                      * falls through. */
                     if (!((next_shape->double_slots_mask & (1u << slot)) &&
                           value.tag != KILN_VALUE_NUMBER)) {
-                        object->slots[slot] = kiln_val_from_boundary(value);
+                        kiln_c99_heap_store_val(object, &object->slots[slot], kiln_val_from_boundary(value));
                         object->shape = (kiln_shape *)next_shape;
                         return KILN_C99_OK;
                     }
@@ -56,7 +56,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                 if (kiln_c99_shape_find_slot(object->shape, stable, &slot) &&
                     (object->shape->store_mask & (1u << slot)) == 0) {
                     if (slot < object->slot_capacity) {
-                        object->slots[slot] = kiln_val_from_boundary(value);
+                        kiln_c99_heap_store_val(object, &object->slots[slot], kiln_val_from_boundary(value));
                         if (kiln_c99_site_count(site) < KILN_C99_PIC_SIZE) {
                             kiln_c99_site_remember_own(site, object->shape, slot);
                         }
@@ -70,7 +70,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
             object->properties[own].key == stable && !object->frozen && !object->module_namespace) {
             kiln_property *property = &object->properties[own];
             if (!property->accessor && property->writable) {
-                property->value = value;
+                kiln_c99_heap_store_value(object, &property->value, value);
                 return KILN_C99_OK;
             }
         }
@@ -333,9 +333,9 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             array->is_numeric = 0;
         }
         for (fill = array->count; fill < slot; ++fill) {
-            array->elements[fill] = KILN_VAL_HOLE;
+            kiln_c99_heap_store_val(array, &array->elements[fill], KILN_VAL_HOLE);
         }
-        array->elements[slot] = kiln_val_from_boundary(value);
+        kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(value));
         if (array->is_numeric && !KILN_VAL_IS_NUMBER(array->elements[slot])) {
             array->is_numeric = 0;
         }
@@ -360,7 +360,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         if (object->shape != NULL && !object->frozen) {
             size_t elem_idx = (size_t)index;
             if (object->elements != NULL && elem_idx < object->element_count && object->elements[elem_idx] != KILN_VAL_HOLE) {
-                object->elements[elem_idx] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
                 return KILN_C99_OK;
             }
             if (!object->not_extensible && (object->prototype.tag == KILN_VALUE_UNDEFINED || !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
@@ -377,7 +377,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                     object->elements = new_elements;
                     object->element_capacity = new_cap;
                 }
-                object->elements[elem_idx] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
                 if (elem_idx >= object->element_count) {
                     object->element_count = elem_idx + 1;
                 }
@@ -622,7 +622,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                 object->elements = new_elements;
                 object->element_capacity = new_cap;
             }
-            object->elements[elem_idx] = kiln_val_from_boundary(value);
+            kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
             if (elem_idx >= object->element_count) {
                 object->element_count = elem_idx + 1;
             }
@@ -643,7 +643,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                         kiln_c99_ensure_dictionary(object);
                         goto fallback_dict;
                     }
-                    object->slots[slot_idx] = kiln_val_from_boundary(value);
+                    kiln_c99_heap_store_val(object, &object->slots[slot_idx], kiln_val_from_boundary(value));
                     return KILN_C99_OK;
                 }
             }
@@ -663,7 +663,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                     object->slots = new_slots;
                     object->slot_capacity = new_cap;
                 }
-                object->slots[new_slot] = kiln_val_from_boundary(value);
+                kiln_c99_heap_store_val(object, &object->slots[new_slot], kiln_val_from_boundary(value));
                 object->shape = next_shape;
                 return KILN_C99_OK;
             }
@@ -683,7 +683,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     }
     slot->accessor = 0;
     slot->refused = 0;
-    slot->value = value;
+    kiln_c99_heap_store_value(kiln_c99_object_of(target), &slot->value, value);
     slot->writable = 1;
     slot->enumerable = key.tag != KILN_VALUE_SYMBOL;
     slot->configurable = 1;
@@ -724,7 +724,7 @@ static int kiln_c99_array_push(kiln_value target, kiln_value value) {
     if (array->is_numeric && !KILN_VAL_IS_NUMBER(v)) {
         array->is_numeric = 0;
     }
-    array->elements[array->count] = v;
+    kiln_c99_heap_store_val(array, &array->elements[array->count], v);
     array->count += 1;
     return KILN_C99_OK;
 }
@@ -738,7 +738,7 @@ static int kiln_c99_array_push_val(kiln_value target, kiln_val value) {
     if (array->is_numeric && !KILN_VAL_IS_NUMBER(value)) {
         array->is_numeric = 0;
     }
-    array->elements[array->count] = value;
+    kiln_c99_heap_store_val(array, &array->elements[array->count], value);
     array->count += 1;
     return KILN_C99_OK;
 }

@@ -21,8 +21,8 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;
-    array->match_input = kiln_c99_undefined();
-    array->match_groups = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
+    kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
     array->is_numeric = 1;
     array->candidate_elements = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
@@ -141,8 +141,8 @@ static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
     array->frozen = 0;
     array->not_extensible = 0;
     array->match_index = -1;
-    array->match_input = kiln_c99_undefined();
-    array->match_groups = kiln_c99_undefined();
+    kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
+    kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
     array->is_numeric = is_numeric;
     array->candidate_elements = 0;
 }

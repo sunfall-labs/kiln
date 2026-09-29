@@ -702,7 +702,7 @@ fn heap_filter_lowering(
                              const kiln_val *in_elems = arr->elements; \
                              size_t n = 0; \
                              int numeric = 1; \
-                             for (size_t i = 0; i < count0; ++i) if (phflt_mask[i]) {{ numeric &= KILN_VAL_IS_NUMBER(in_elems[i]) ? 1 : 0; built_arr->elements[n++] = in_elems[i]; }} \
+                             for (size_t i = 0; i < count0; ++i) if (phflt_mask[i]) {{ numeric &= KILN_VAL_IS_NUMBER(in_elems[i]) ? 1 : 0; kiln_c99_heap_store_val(built_arr, &built_arr->elements[n++], in_elems[i]); }} \
                              built_arr->count = kept; \
                              built_arr->is_numeric = numeric; \
                              v{v} = kiln_val_from_boundary(built_val); \
@@ -907,7 +907,7 @@ fn parallel_filter_lowering(
                                  kiln_array *built_arr = kiln_c99_array_of(built_val); \
                                  const kiln_val *in_elems = arr->elements; \
                                  size_t n = 0; \
-                                 for (size_t i = 0; i < count0; ++i) if (pflt_mask[i]) built_arr->elements[n++] = in_elems[i]; \
+                                 for (size_t i = 0; i < count0; ++i) if (pflt_mask[i]) kiln_c99_heap_store_val(built_arr, &built_arr->elements[n++], in_elems[i]); \
                                  built_arr->count = kept; \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \
@@ -1277,7 +1277,7 @@ fn emit_map_typed(
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
                          if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
-                             built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
+                             kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
                              built_arr->is_numeric = 0; \
                              continue; \
                          }} \
@@ -1292,7 +1292,7 @@ fn emit_map_typed(
                          if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
                              built_arr->is_numeric = 0; \
                          }} \
-                         built_arr->elements[built_arr->count++] = prod; \
+                         kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], prod); \
                      }} \
                      v{v} = kiln_val_from_boundary(built_val); \
                      handled = 1; \
@@ -1384,7 +1384,7 @@ fn emit_filter_typed(
                          kiln_val elem = arr->elements[idx]; \
                          double d_elem; memcpy(&d_elem, &elem, sizeof(d_elem)); \
                          {call} \
-                         if ({truthy}) {{ built_arr->elements[built_arr->count++] = elem; }} \
+                         if ({truthy}) {{ kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], elem); }} \
                      }} \
                      v{v} = kiln_val_from_boundary(built_val); \
                      handled = 1; \
@@ -1406,7 +1406,7 @@ fn emit_filter_typed(
                          }} \
                          if (kiln_c99_val_truthy(prod)) {{ \
                              if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(elem)) built_arr->is_numeric = 0; \
-                             built_arr->elements[built_arr->count++] = elem; \
+                             kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], elem); \
                          }} \
                      }} \
                      v{v} = kiln_val_from_boundary(built_val); \
@@ -2554,7 +2554,7 @@ pub(super) fn emit_call_method(
                      kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
                      if (KILN_LIKELY(!arr->frozen && !arr->not_extensible && arr->count < arr->capacity)) {{ \
                          {numeric_check}\
-                         arr->elements[arr->count++] = {push_arg}; \
+                         kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], {push_arg}); \
                          {typed_ret} \
                          handled = 1; \
                      }} \
@@ -2578,7 +2578,7 @@ pub(super) fn emit_call_method(
                          kiln_array *arr = (kiln_array *)ptr; \
                          if (KILN_LIKELY(!arr->frozen && !arr->not_extensible && arr->count < arr->capacity)) {{ \
                              {numeric_check}\
-                             arr->elements[arr->count++] = {push_arg}; \
+                             kiln_c99_heap_store_val(arr, &arr->elements[arr->count++], {push_arg}); \
                              {typed_ret} \
                              handled = 1; \
                          }} \
@@ -2763,7 +2763,7 @@ pub(super) fn emit_call_method(
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                              for (size_t idx = 0; idx < count0; ++idx) {{ \
                                  if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
-                                     built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
+                                     kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
                                      built_arr->is_numeric = 0; \
                                      continue; \
                                  }} \
@@ -2772,7 +2772,7 @@ pub(super) fn emit_call_method(
                                  if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
                                      built_arr->is_numeric = 0; \
                                  }} \
-                                 built_arr->elements[built_arr->count++] = prod; \
+                                 kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], prod); \
                              }} \
                              v{v} = kiln_val_from_boundary(built_val); \
                              handled = 1; \
@@ -2847,7 +2847,7 @@ pub(super) fn emit_call_method(
                                  {call} \
                                  if (kiln_c99_val_truthy(prod)) {{ \
                                      if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(elem)) built_arr->is_numeric = 0; \
-                                     built_arr->elements[built_arr->count++] = elem; \
+                                     kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], elem); \
                                  }} \
                              }} \
                              v{v} = kiln_val_from_boundary(built_val); \

@@ -75,7 +75,7 @@ static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, s
             return status;
         }
         for (index = 0; index < (size_t)length; ++index) {
-            array->elements[index] = KILN_VAL_HOLE;
+            kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_HOLE);
         }
         array->count = (size_t)length;
         *out = built;
