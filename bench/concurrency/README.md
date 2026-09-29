@@ -64,7 +64,7 @@ below is about the native runtime.
 
 | # | workload | node / bun | Go | kiln today |
 | --- | --- | --- | --- | --- |
-| 1 | **Worker and actor start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`), plus `spawnActor` to ready and first call (`js/actor-start.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
+| 1 | **Worker and actor start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`), plus `spawnActor` to ready and first call (`js/actor-start.mjs`) and up to 10,000 simultaneously held public actors when memory permits (`js/actor-capacity.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
 | 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun, plus public actor calls with clone and `prepareTransfer` (`js/actor-graph.mjs`) |
 | 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; the separate frozen object-graph API is not measured in this byte-table row |
 | 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks in one realm; workload 7 measures separate scheduled realms |
@@ -110,6 +110,11 @@ Details that matter when reading the numbers:
 - **6.** `oha` runs on the same machine and competes for the same cores, so absolute rps is a
   property of this box; the columns are comparable with each other. Requests `oha` cancels at the
   deadline are not counted as errors.
+- **Public actor capacity.** Each `spawnActor` constructs a separate realm; the benchmark keeps
+  every owner alive, calls each once, checks every reply, then stops every owner. It limits pending
+  spawn/call requests to 64, measures the held process RSS and thread count from `/proc`, and
+  protects the 10,000-actor run with the same projected-memory rule. This measures the API users
+  call; the separate realm workload measures the native launcher and its output files.
 
 ## What "not available" means
 

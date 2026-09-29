@@ -43,7 +43,7 @@ def config(quick):
         return dict(
             rounds=1, start_warm=10, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=5,
             msg_budget=300, oneway=100000, inrealm_oneway=10000,
-            actor_graph_samples=5, shared_ns=[4], queries=2000000,
+            actor_graph_samples=5, actor_ns=[10, 100, 1000], shared_ns=[4], queries=2000000,
             task_ns=[10, 1000, 100000], realm_ns=[10, 1000], ticks=10, interval=10,
             pmap_n=10000000, pmap_reps=2,
             server_s=3, server_c=128,
@@ -51,7 +51,7 @@ def config(quick):
     return dict(
         rounds=3, start_warm=20, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=10,
         msg_budget=800, oneway=100000, inrealm_oneway=10000,
-        actor_graph_samples=10, shared_ns=[4, 16], queries=2000000,
+        actor_graph_samples=10, actor_ns=[10, 100, 1000, 10000], shared_ns=[4, 16], queries=2000000,
         task_ns=[10, 1000, 100000], realm_ns=[10, 1000, 100000], ticks=10, interval=10,
         pmap_n=10000000, pmap_reps=3,
         server_s=5, server_c=128,
@@ -184,7 +184,7 @@ def build_all(kiln, go_cmd, work, selected):
     """Build the selected workloads' binaries once. Returns paths and failures."""
     binaries, failures = {}, {}
     by_workload = {
-        "start": ["kiln-start", "start", "actor-start"],
+        "start": ["kiln-start", "start", "actor-start", "actor-capacity"],
         "messages": ["inrealm", "messages", "actor-graph"],
         "shared": ["shared"],
         "tasks": ["tasks"],
@@ -276,6 +276,40 @@ def available_memory_kib():
     except OSError:
         pass
     return min(candidates) if candidates else None
+
+
+def actor_capacity(binary, counts):
+    """Keep public actors alive while checking replies, RSS and bounded scheduler threads."""
+    records = []
+    observed = []
+    for n in counts:
+        case = f"actor-capacity-{n}"
+        if n >= 10000 and (len(observed) < 2 or observed[-1][0] < 1000):
+            records.append({"case": case, "runtime": "kiln", "error":
+                            "skipped: smaller actor counts did not establish a memory slope"})
+            continue
+        if n >= 10000 and len(observed) >= 2:
+            (low_n, low_rss), (high_n, high_rss) = observed[-2:]
+            slope = max(0, (high_rss - low_rss) / (high_n - low_n))
+            need = high_rss + slope * (n - high_n)
+            available = available_memory_kib()
+            if available is not None and need * 1.5 > available * 0.7:
+                records.append({"case": case, "runtime": "kiln", "error":
+                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB needs more than "
+                                f"70% of {available / 1024 / 1024:.1f} GiB available"})
+                continue
+        result = simple("kiln", [binary, str(n)], timeout=600)
+        if not result or result[0].get("case") != case:
+            error = (result[0].get("error", "missing actor capacity result")
+                     if result else "missing actor capacity result")
+            records.append({"case": case, "runtime": "kiln", "error": error})
+            continue
+        record = result[0]
+        records.append(record)
+        rss = record.get("held_rss_kib", -1)
+        if rss >= 0:
+            observed.append((n, rss))
+    return records
 
 
 def realm_scaling(binary, counts):
@@ -463,6 +497,8 @@ def jobs_for(cfg, bins):
     # `node:worker_threads` in kiln (realms issue 06): the same program node and bun run, built.
     add("start", "kiln", lambda: simple("kiln", [k["start"], "start", str(cfg["start_warm"])]), k["start"])
     add("start", "kiln", lambda: simple("kiln", [k["actor-start"], str(cfg["start_warm"])]), k["actor-start"])
+    add("start", "kiln", lambda: actor_capacity(k["actor-capacity"], cfg["actor_ns"]),
+        k["actor-capacity"])
     for n in cfg["mem_ns"]:
         add("start", "kiln", lambda n=n: simple("kiln", [k["start"], "mem", str(n)]), k["start"])
     for n in cfg["kiln_ns"]:
@@ -715,6 +751,18 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w(rep.row("`spawnActor` to ready, first (cold)", [rep.cell("actor-start", "kiln", "cold_ms", " ms")]))
     w(rep.row("`spawnActor` to ready, warm median", [rep.cell("actor-start", "kiln", "median_ms", " ms")]))
     w(rep.row("first method call after ready, warm median", [rep.cell("actor-start", "kiln", "first_call_ms", " ms")]))
+    w("")
+    w("Public actor capacity keeps every spawned realm alive while calling each one. The request window is 64; held RSS and thread count are sampled after all actors are ready. Every reply and stop is checked. The 10,000-actor row runs only when the smaller counts project a safe memory budget.")
+    w("")
+    w("| actors alive | spawn to all ready | one call each | stop all | held RSS | held threads |")
+    w("| ---: | ---: | ---: | ---: | ---: | ---: |")
+    for n in cfg["actor_ns"]:
+        w(rep.row(f"{n:,}", [
+            rep.cell(f"actor-capacity-{n}", "kiln", "spawn_ms", " ms"),
+            rep.cell(f"actor-capacity-{n}", "kiln", "calls_ms", " ms"),
+            rep.cell(f"actor-capacity-{n}", "kiln", "stop_ms", " ms"),
+            rep.cell(f"actor-capacity-{n}", "kiln", "held_rss_kib", " MB", scale=mb),
+            rep.cell(f"actor-capacity-{n}", "kiln", "held_threads", "")]))
     w("")
     w("Deployment comparison: one `KILN_WORKERS` process per worker (process mode, forked by the "
       "supervisor from a process that never built a realm). Timed from spawn to exit of the whole tree, each "
