@@ -1205,10 +1205,11 @@ typedef struct kiln_shared_facade {
     uint32_t graph;
     uint32_t generation;
     uint32_t node;
-    /* Weak, realm-local identity chain. The collector does not trace these links. */
+    /* Weak, realm-local identity chain and hash bucket. The collector traces neither. */
     void *owner;
     struct kiln_shared_facade *previous;
     struct kiln_shared_facade *next;
+    struct kiln_shared_facade *hash_next;
 } kiln_shared_facade;
 
 /* Nonzero once any realm in this process has written an own property onto some built-in's store

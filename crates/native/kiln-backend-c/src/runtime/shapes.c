@@ -1231,12 +1231,12 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     kiln_shared_facade *cached;
     uint64_t lease;
     kiln_shared_facade *facade;
-    for (cached = heap->shared_facades; cached != NULL; cached = cached->next) {
-        if (cached->graph == graph && cached->generation == generation && cached->node == node) {
-            *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)cached, NULL, 0);
-            return KILN_C99_OK;
-        }
+    cached = kiln_c99_shared_facade_find(heap, graph, generation, node);
+    if (cached != NULL) {
+        *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)cached, NULL, 0);
+        return KILN_C99_OK;
     }
+    if (kiln_c99_shared_facade_reserve(heap) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     lease = kiln_shared_graph_retain(graph, generation, node);
     if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
     facade = (kiln_shared_facade *)kiln_c99_gc_alloc_tenured(KILN_GC_SHARED_FACADE, sizeof *facade);
@@ -1253,6 +1253,7 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     facade->next = heap->shared_facades;
     if (facade->next != NULL) facade->next->previous = facade;
     heap->shared_facades = facade;
+    kiln_c99_shared_facade_insert(heap, facade);
     *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)facade, NULL, 0);
     return KILN_C99_OK;
 }

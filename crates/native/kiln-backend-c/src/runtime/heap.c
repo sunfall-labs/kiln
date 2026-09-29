@@ -439,6 +439,9 @@ typedef struct kiln_gc_heap {
     /* Weak identities for graph nodes observed in this realm. Links are deliberately absent
      * from the GC tracer; a facade leaves the chain in its finalizer. */
     kiln_shared_facade *shared_facades;
+    kiln_shared_facade **shared_facade_buckets;
+    size_t shared_facade_capacity;
+    size_t shared_facade_count;
     kiln_collection *weak_collections;
     kiln_gc_weak_resource *weak_resources;
     kiln_key_table keys;
@@ -6459,6 +6462,81 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     }
 }
 
+/* The facade index is weak just like its ownership chain. It remembers identity within one
+ * realm, never keeps a graph or facade alive, and finalization removes the exact entry before
+ * the GC block may be reused. A hash lookup avoids walking every live node of a large graph on
+ * each child read. The realm's exclusive turn lease protects the table. */
+static size_t kiln_c99_shared_facade_hash(uint32_t graph, uint32_t generation, uint32_t node) {
+    uint64_t hash = ((uint64_t)graph << 32) | generation;
+    hash ^= (uint64_t)node * UINT64_C(0x9e3779b97f4a7c15);
+    hash ^= hash >> 33;
+    hash *= UINT64_C(0xff51afd7ed558ccd);
+    hash ^= hash >> 33;
+    return (size_t)hash;
+}
+
+static kiln_shared_facade *kiln_c99_shared_facade_find(kiln_gc_heap *heap, uint32_t graph,
+                                                        uint32_t generation, uint32_t node) {
+    kiln_shared_facade *facade;
+    size_t bucket;
+    if (heap->shared_facade_capacity == 0) return NULL;
+    bucket = kiln_c99_shared_facade_hash(graph, generation, node) &
+             (heap->shared_facade_capacity - 1);
+    for (facade = heap->shared_facade_buckets[bucket]; facade != NULL;
+         facade = facade->hash_next) {
+        if (facade->graph == graph && facade->generation == generation && facade->node == node)
+            return facade;
+    }
+    return NULL;
+}
+
+static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {
+    kiln_shared_facade **buckets;
+    kiln_shared_facade *facade;
+    size_t capacity = heap->shared_facade_capacity;
+    if (capacity != 0 && heap->shared_facade_count + 1 <= capacity - capacity / 4)
+        return KILN_C99_OK;
+    if (capacity > SIZE_MAX / 2) return KILN_C99_OUT_OF_MEMORY;
+    capacity = capacity == 0 ? 16 : capacity * 2;
+    if (capacity > SIZE_MAX / sizeof *buckets) return KILN_C99_OUT_OF_MEMORY;
+    buckets = (kiln_shared_facade **)calloc(capacity, sizeof *buckets);
+    if (buckets == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (facade = heap->shared_facades; facade != NULL; facade = facade->next) {
+        size_t bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation,
+                                                     facade->node) & (capacity - 1);
+        facade->hash_next = buckets[bucket];
+        buckets[bucket] = facade;
+    }
+    free(heap->shared_facade_buckets);
+    heap->shared_facade_buckets = buckets;
+    heap->shared_facade_capacity = capacity;
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_shared_facade_insert(kiln_gc_heap *heap, kiln_shared_facade *facade) {
+    size_t bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation,
+                                                 facade->node) & (heap->shared_facade_capacity - 1);
+    facade->hash_next = heap->shared_facade_buckets[bucket];
+    heap->shared_facade_buckets[bucket] = facade;
+    heap->shared_facade_count++;
+}
+
+static void kiln_c99_shared_facade_remove(kiln_gc_heap *heap, kiln_shared_facade *facade) {
+    kiln_shared_facade **at;
+    size_t bucket;
+    if (heap->shared_facade_capacity == 0) return;
+    bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation, facade->node) &
+             (heap->shared_facade_capacity - 1);
+    for (at = &heap->shared_facade_buckets[bucket]; *at != NULL; at = &(*at)->hash_next) {
+        if (*at == facade) {
+            *at = facade->hash_next;
+            facade->hash_next = NULL;
+            heap->shared_facade_count--;
+            return;
+        }
+    }
+}
+
 /* Inner growth buffers are the owner's, never a value's, so they are released here and only
  * here. A kind whose payload owns a provider handle releases it here too. */
 static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
@@ -6473,6 +6551,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_shared_facade *facade = (kiln_shared_facade *)payload;
         kiln_gc_heap *owner = (kiln_gc_heap *)facade->owner;
         if (owner != NULL) {
+            kiln_c99_shared_facade_remove(owner, facade);
             if (facade->previous != NULL) facade->previous->next = facade->next;
             else owner->shared_facades = facade->next;
             if (facade->next != NULL) facade->next->previous = facade->previous;
@@ -7317,9 +7396,14 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         facade->owner = NULL;
         facade->previous = NULL;
         facade->next = NULL;
+        facade->hash_next = NULL;
         facade = next;
     }
     heap->shared_facades = NULL;
+    free(heap->shared_facade_buckets);
+    heap->shared_facade_buckets = NULL;
+    heap->shared_facade_capacity = 0;
+    heap->shared_facade_count = 0;
     free(heap->large_table.table);
     free(heap->slab_table.table);
     free(heap->stack);
