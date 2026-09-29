@@ -244,6 +244,7 @@ typedef struct kiln_c99_clone_table {
     kiln_val *values;
     size_t capacity;
     size_t count;
+    int candidate_graph;
     kiln_val inline_keys[KILN_C99_CLONE_INLINE];
     kiln_val inline_values[KILN_C99_CLONE_INLINE];
 } kiln_c99_clone_table;
@@ -366,6 +367,28 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
     void *ptr;
     uint32_t kind;
     int status;
+    if (table->candidate_graph && KILN_VAL_IS_STRING(value)) {
+        const kiln_string *source = (const kiln_string *)KILN_VAL_PTR(value);
+        kiln_string *copy;
+        kiln_val cloned;
+        size_t width;
+        if (source == NULL ||
+            (source->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0)
+            return KILN_C99_CLONE_BAIL;
+        if (kiln_c99_clone_table_get(table, value, out)) return KILN_C99_OK;
+        copy = kiln_c99_gc_alloc_units(source->unit_len,
+                                       kiln_string_is_utf16(source) ? KILN_STRING_UTF16
+                                                                     : KILN_STRING_LATIN1);
+        if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
+        width = kiln_string_is_utf16(source) ? sizeof(uint16_t) : sizeof(uint8_t);
+        if (source->unit_len != 0)
+            memcpy((void *)copy->data, source->data, source->unit_len * width);
+        cloned = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, copy);
+        status = kiln_c99_clone_table_put(table, value, cloned);
+        if (status != KILN_C99_OK) return status;
+        *out = cloned;
+        return KILN_C99_OK;
+    }
     if (KILN_VAL_IS_NUMBER(value) || value == KILN_VAL_UNDEFINED || value == KILN_VAL_NULL ||
         KILN_VAL_IS_BOOLEAN(value) || KILN_VAL_IS_STRING(value) ||
         (value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX) {
@@ -423,8 +446,10 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
             for (i = 0; i < count; ++i) {
                 kiln_val item = copy->slots[i];
                 kiln_val cloned;
-                if (KILN_VAL_IS_NUMBER(item) || KILN_VAL_IS_STRING(item) || item == KILN_VAL_UNDEFINED ||
-                    item == KILN_VAL_NULL || KILN_VAL_IS_BOOLEAN(item)) {
+                if (KILN_VAL_IS_NUMBER(item) ||
+                    (!table->candidate_graph && KILN_VAL_IS_STRING(item)) ||
+                    item == KILN_VAL_UNDEFINED || item == KILN_VAL_NULL ||
+                    KILN_VAL_IS_BOOLEAN(item)) {
                     continue;
                 }
                 status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
@@ -449,8 +474,10 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
             for (i = 0; i < count; ++i) {
                 kiln_value item = copy->properties[i].value;
                 kiln_val cloned;
-                if (item.tag != KILN_VALUE_OBJECT && item.tag != KILN_VALUE_ARRAY) {
-                    if (item.tag == KILN_VALUE_NUMBER || item.tag == KILN_VALUE_STRING ||
+                if (item.tag != KILN_VALUE_OBJECT && item.tag != KILN_VALUE_ARRAY &&
+                    !(table->candidate_graph && item.tag == KILN_VALUE_STRING)) {
+                    if (item.tag == KILN_VALUE_NUMBER ||
+                        (!table->candidate_graph && item.tag == KILN_VALUE_STRING) ||
                         item.tag == KILN_VALUE_BOOLEAN || item.tag == KILN_VALUE_NULL ||
                         item.tag == KILN_VALUE_UNDEFINED || item.tag == KILN_VALUE_BIGINT) {
                         continue;
@@ -488,8 +515,10 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
             for (i = 0; i < count; ++i) {
                 kiln_val item = copy->elements[i];
                 kiln_val cloned;
-                if (KILN_VAL_IS_NUMBER(item) || KILN_VAL_IS_STRING(item) || item == KILN_VAL_HOLE ||
-                    item == KILN_VAL_UNDEFINED || item == KILN_VAL_NULL || KILN_VAL_IS_BOOLEAN(item)) {
+                if (KILN_VAL_IS_NUMBER(item) ||
+                    (!table->candidate_graph && KILN_VAL_IS_STRING(item)) ||
+                    item == KILN_VAL_HOLE || item == KILN_VAL_UNDEFINED ||
+                    item == KILN_VAL_NULL || KILN_VAL_IS_BOOLEAN(item)) {
                     continue;
                 }
                 status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
@@ -503,29 +532,41 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
     return KILN_C99_CLONE_BAIL;
 }
 
-static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph) {
     kiln_c99_clone_table table;
     kiln_val root = KILN_VAL_UNDEFINED;
+    int status;
+    memset(table.inline_keys, 0, sizeof table.inline_keys);
+    table.keys = table.inline_keys;
+    table.values = table.inline_values;
+    table.capacity = KILN_C99_CLONE_INLINE;
+    table.count = 0;
+    table.candidate_graph = candidate_graph;
+    status = kiln_c99_clone_data_val(&table, kiln_val_from_boundary(source), 0, &root);
+    if (table.keys != table.inline_keys) {
+        free(table.keys);
+        free(table.values);
+    }
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_to_boundary(root);
+    return KILN_C99_OK;
+}
+
+/* Candidate-copy mode owns every string value it reaches. A future private arena can reuse
+ * the same graph walk with an arena allocator; this helper does not publish the copy to JS. */
+static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
+    return kiln_c99_clone_data_graph(out, source, 1);
+}
+
+static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
     int status;
     *out = kiln_c99_undefined();
     if (argc == 0) return KILN_C99_OK;
     if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER &&
         kiln_c99_as_number(args[1]) == 1.0)
         return KILN_C99_OK; /* The shared Rust worker codec handles plain messages. */
-    memset(table.inline_keys, 0, sizeof table.inline_keys);
-    table.keys = table.inline_keys;
-    table.values = table.inline_values;
-    table.capacity = KILN_C99_CLONE_INLINE;
-    table.count = 0;
-    status = kiln_c99_clone_data_val(&table, kiln_val_from_boundary(args[0]), 0, &root);
-    if (table.keys != table.inline_keys) {
-        free(table.keys);
-        free(table.values);
-    }
-    if (status == KILN_C99_CLONE_BAIL) return KILN_C99_OK;
-    if (status != KILN_C99_OK) return status;
-    *out = kiln_val_to_boundary(root);
-    return KILN_C99_OK;
+    status = kiln_c99_clone_data_graph(out, args[0], 0);
+    return status == KILN_C99_CLONE_BAIL ? KILN_C99_OK : status;
 }
 
 /* Representation callbacks for the provider's shared Rust encoder. They only inspect own

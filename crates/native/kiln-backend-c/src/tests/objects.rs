@@ -2607,6 +2607,89 @@ int main(void) {
 }
 
 #[test]
+fn executable_candidate_clone_owns_nested_strings_and_array_storage() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int private_clone_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    static kiln_shape shape;
+    kiln_value source, source_array, text, empty, wide, copy_value;
+    kiln_object *original, *copy;
+    kiln_array *array;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 12;
+    for (size_t index = 0; index < 12; ++index) shape.keys[index] = kiln_c99_key_empty;
+    text = kiln_c99_copy_text("caf\xC3\xA9", 5);
+    empty = kiln_c99_copy_text("", 0);
+    wide = kiln_c99_copy_text("\xF0\x9F\x99\x82", 4);
+    if (text.tag != KILN_VALUE_STRING || empty.tag != KILN_VALUE_STRING ||
+        wide.tag != KILN_VALUE_STRING || !kiln_string_is_utf16((const kiln_string *)wide.ptr)) return 2;
+    if (kiln_c99_new_array_with_capacity(&source_array, 128, 0) != KILN_C99_OK) return 3;
+    for (size_t index = 0; index < 128; ++index) {
+        kiln_value item = index < 2 ? text : index == 2 ? empty :
+                          index == 3 ? wide : kiln_c99_number((double)index);
+        if (kiln_c99_array_push(source_array, item) != KILN_C99_OK) return 4;
+    }
+    if (kiln_c99_new_object_with_capacity(&source, 12) != KILN_C99_OK) return 5;
+    original = kiln_c99_object_of(source);
+    original->shape = &shape;
+    original->slots[0] = kiln_val_from_boundary(source_array);
+    original->slots[1] = kiln_val_from_boundary(text);
+    original->slots[2] = kiln_val_from_boundary(empty);
+    original->slots[3] = kiln_val_from_boundary(wide);
+    original->slots[4] = kiln_val_from_boundary(source);
+    for (size_t index = 5; index < 12; ++index)
+        original->slots[index] = kiln_val_from_boundary(kiln_c99_number((double)index));
+    if (!kiln_c99_actor_candidate_begin(heap)) return 6;
+    if (kiln_c99_clone_data_candidate(&copy_value, source) != KILN_C99_OK ||
+        copy_value.tag != KILN_VALUE_OBJECT) return 7;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 8;
+    copy = kiln_c99_object_of(copy_value);
+    if (copy == original || copy->slots == original->slots ||
+        copy->slots[1] == original->slots[1] || copy->slots[2] == original->slots[2] ||
+        copy->slots[3] == original->slots[3] ||
+        copy->slots[4] != kiln_val_from_boundary(copy_value) ||
+        copy->slots[0] == original->slots[0]) return 9;
+    array = kiln_c99_array_of(kiln_val_to_boundary(copy->slots[0]));
+    if (array == NULL || array->count != 128 || array->candidate_elements == 0 ||
+        array->elements[0] != copy->slots[1] || array->elements[1] != copy->slots[1] ||
+        array->elements[2] != copy->slots[2] || array->elements[3] != copy->slots[3]) return 10;
+    if (!kiln_string_is_utf16((const kiln_string *)KILN_VAL_PTR(copy->slots[3])) ||
+        memcmp(((const kiln_string *)KILN_VAL_PTR(copy->slots[3]))->data,
+               ((const kiln_string *)wide.ptr)->data, 2 * sizeof(uint16_t)) != 0) return 14;
+    chunk = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)copy - 1);
+    if (!kiln_c99_graph_capsule_prepare(heap, chunk, copy_value, &capsule)) return 11;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_actor_candidate_finish(heap, 1);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 12;
+    result = kiln_realm_enter(realm, private_clone_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 13;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-clone-nested-storage");
+    assert!(
+        run.status.success(),
+        "candidate clone move eligibility failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_moves_inline_object_and_array() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

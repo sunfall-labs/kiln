@@ -3350,6 +3350,8 @@ static int kiln_c99_clone_safe_object(const kiln_object *source) {
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
 static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
+static int kiln_c99_clone_data_graph(kiln_value *out, kiln_value source, int candidate_graph) {
+static int kiln_c99_clone_data_candidate(kiln_value *out, kiln_value source) {
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,
