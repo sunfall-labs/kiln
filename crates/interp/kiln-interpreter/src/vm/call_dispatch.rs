@@ -47,6 +47,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.mutate_through_proxy(native, &receiver, &arguments, instruction)
                     .map(Some)
             }
+            Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) => {
+                let (this_value, forwarded) =
+                    self.forwarded_function_arguments(native, &arguments, instruction)?;
+                // `invoke` pushes a compiled target's frame onto the existing VM loop. Calling
+                // `call_value` here recursively runs a fresh loop for every `.call` and can
+                // exhaust the Rust stack before the JavaScript frame limit is reached.
+                self.invoke(receiver, this_value, forwarded, instruction)
+            }
             Value::Native(native, _) => {
                 // A typed array reached through one of the generic array methods walks as its
                 // elements, the same coercion `call_value` applies to a redirected one. The two

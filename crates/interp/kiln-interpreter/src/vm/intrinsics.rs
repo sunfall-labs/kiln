@@ -1,6 +1,40 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// Prepare the receiver and argument list forwarded by `Function.prototype.call/apply`.
+    /// The ordinary instruction dispatcher can then enter a compiled target by pushing a VM
+    /// frame, without nesting another Rust interpreter run loop for every `.call` in a chain.
+    pub(crate) fn forwarded_function_arguments(
+        &mut self,
+        native: Native,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<(Value, Vec<Value>), ExecutionError> {
+        let this_value = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if native == Native::FunctionCall {
+            return Ok((this_value, arguments.get(1..).unwrap_or_default().to_vec()));
+        }
+        debug_assert_eq!(native, Native::FunctionApply);
+        let rest = match arguments.get(1) {
+            Some(Value::Array(items)) => dense_items(&items.borrow()),
+            Some(Value::Undefined | Value::Null) | None => Vec::new(),
+            Some(other) => {
+                let length = self.read_property(other, "length", instruction)?;
+                let length = length.as_number();
+                let mut list = Vec::new();
+                for index in 0..(if length.is_finite() {
+                    length.max(0.0) as usize
+                } else {
+                    0
+                }) {
+                    list.push(self.read_property(other, &index.to_string(), instruction)?);
+                }
+                list
+            }
+        };
+        Ok((this_value, rest))
+    }
+
     pub(crate) fn dispatch_native(
         &mut self,
         native: Native,
@@ -2268,34 +2302,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Undefined)
             }
             Native::FunctionCall | Native::FunctionApply => {
-                let this_value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let rest = if matches!(native, Native::FunctionCall) {
-                    arguments.get(1..).unwrap_or_default().to_vec()
-                } else {
-                    // `apply` takes one array-like. `null` and `undefined` mean no arguments,
-                    // which is what a forwarding wrapper passes when it has none.
-                    match arguments.get(1) {
-                        Some(Value::Array(items)) => dense_items(&items.borrow()),
-                        Some(Value::Undefined | Value::Null) | None => Vec::new(),
-                        Some(other) => {
-                            let length = self.read_property(other, "length", instruction)?;
-                            let length = length.as_number();
-                            let mut list = Vec::new();
-                            for index in 0..(if length.is_finite() {
-                                length.max(0.0) as usize
-                            } else {
-                                0
-                            }) {
-                                list.push(self.read_property(
-                                    other,
-                                    &index.to_string(),
-                                    instruction,
-                                )?);
-                            }
-                            list
-                        }
-                    }
-                };
+                let (this_value, rest) =
+                    self.forwarded_function_arguments(native, arguments, instruction)?;
                 let callee = receiver.clone();
                 self.call_value(&callee, this_value, rest, instruction)
             }

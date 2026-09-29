@@ -2246,3 +2246,19 @@ An implicit iterator read must hand a Proxy get trap the Symbol.iterator symbol.
 expected_stdout = """
 1,2 symbol
 """
+
+[[test]]
+id = "regress/r48-native-callback-depth"
+group = "regress"
+source = "regress/r48-native-callback-depth.js"
+status = "runnable"
+features = ["functions", "call", "array-methods", "callbacks", "recursion"]
+catches = """
+Function.prototype.call and apply must forward into the existing VM loop, so 150 ordinary calls do not consume 150 Rust frames. Nested array callbacks do consume Rust frames and must throw a catchable RangeError before exhausting the program thread's stack.
+"""
+expected_stdout = """
+call 150
+apply 150
+nested true
+after 5
+"""

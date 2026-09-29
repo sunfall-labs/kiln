@@ -1426,9 +1426,11 @@ impl Default for ExecutionLimits {
             max_call_depth: 10_000,
             // The interpreter *does* recurse in Rust when a built-in calls back into JavaScript
             // -- `map` running a callback that calls `map` -- and that recursion is bounded by
-            // the real stack rather than by a vector. Overflowing it aborts the process, which
-            // is the one failure a compiler must never have, so it is bounded well below.
-            max_native_depth: 192,
+            // the real stack rather than by a vector. A nested array callback at 125 levels
+            // overflowed a 16 MiB program thread before the previous limit of 192 fired.
+            // Leave room for different native paths and Rust frame sizes while reporting a
+            // catchable RangeError instead of aborting the process.
+            max_native_depth: 64,
         }
     }
 }
