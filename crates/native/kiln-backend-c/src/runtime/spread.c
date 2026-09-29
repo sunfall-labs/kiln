@@ -793,6 +793,31 @@ static kiln_c99_clone_arena *kiln_c99_prepared_graph_find(kiln_gc_heap *heap,
                ? (kiln_c99_clone_arena *)entry->payload : NULL;
 }
 
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle) {
+    kiln_c99_clone_arena *arena = kiln_c99_prepared_graph_find(heap, handle);
+    return arena != NULL && arena->certified && !arena->adopted &&
+           !arena->capsule.detached && arena->capsule.chunk != NULL;
+}
+
+static kiln_c99_graph_capsule *kiln_c99_prepared_graph_capsule(kiln_gc_heap *heap,
+                                                               kiln_value handle) {
+    kiln_c99_clone_arena *arena = kiln_c99_prepared_graph_find(heap, handle);
+    return arena != NULL && kiln_c99_prepared_graph_has(heap, handle)
+               ? &arena->capsule : NULL;
+}
+
+/* Receiver publication already owns the chunks. Clearing the arena's ownership before releasing
+ * the weak handle makes its destructor free metadata and side-buffer records only. */
+static void kiln_c99_prepared_graph_commit(kiln_gc_heap *heap, kiln_value handle,
+                                            kiln_c99_graph_capsule *capsule) {
+    kiln_c99_clone_arena *arena = kiln_c99_prepared_graph_find(heap, handle);
+    if (arena == NULL || &arena->capsule != capsule || !capsule->adopted ||
+        capsule->detached || capsule->chunk != NULL) abort();
+    arena->adopted = 1;
+    arena->storage.filled = NULL;
+    kiln_c99_gc_weak_resource_release(heap, handle);
+}
+
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
     int status;
     *out = kiln_c99_undefined();

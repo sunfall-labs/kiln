@@ -560,6 +560,11 @@ typedef struct kiln_gc_heap {
     kiln_c99_realm_state realm;
 } kiln_gc_heap;
 
+/* Defined with the private arena builder in spread.c, after the runtime heap primitives. */
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
+static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
+                                           kiln_value source, size_t budget);
+
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 /* The heap a unit uses when no realm is active: the prelude's own tests, and a launcher turning a
  * realm's failure into text after the realm has left its thread. It never collects. One per
@@ -3719,15 +3724,19 @@ static int kiln_c99_actor_isolated_request_begin(kiln_gc_heap *heap, kiln_value 
     kiln_c99_realm_state *realm;
     kiln_collection *registry;
     double at;
+    int prepared;
     if (heap == NULL || out_id == NULL || handle.tag != KILN_VALUE_OBJECT) return 0;
     realm = &heap->realm;
     if (realm->isolated_request_id != 0 || realm->isolated_escrow_entry != NULL ||
-        realm->isolated_request_next_id == UINT64_MAX ||
-        realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) return 0;
-    registry = kiln_c99_collection_of(realm->isolated_graphs);
-    at = kiln_c99_collection_find(registry, handle);
-    if (at < 0.0 || at >= (double)registry->count ||
-        registry->entries[(size_t)at].dead) return 0;
+        realm->isolated_request_next_id == UINT64_MAX) return 0;
+    prepared = kiln_c99_prepared_graph_has(heap, handle);
+    if (!prepared) {
+        if (realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) return 0;
+        registry = kiln_c99_collection_of(realm->isolated_graphs);
+        at = kiln_c99_collection_find(registry, handle);
+        if (at < 0.0 || at >= (double)registry->count ||
+            registry->entries[(size_t)at].dead) return 0;
+    }
     realm->isolated_request_id = ++realm->isolated_request_next_id;
     realm->isolated_request_handle = handle;
     realm->isolated_request_invalidated = 0;

@@ -3731,6 +3731,79 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_paused_controls_move_prepared_arena() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static void prepared_enter(kiln_gc_heap *heap, uint64_t realm) {
+    kiln_test_heap = heap;
+    kiln_test_generation++;
+    kiln_test_realm_active = 1;
+    graph_active_realm = realm;
+}
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_value source, handle, root;
+    kiln_c99_clone_arena *arena;
+    uint64_t request;
+    size_t sender_count;
+    const uint64_t reservation = 83;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    prepared_enter(&sender, 1);
+    if (kiln_c99_new_object(&source) != KILN_C99_OK ||
+        kiln_c99_new_object(&handle) != KILN_C99_OK ||
+        kiln_c99_prepared_graph_create(&sender, handle, source,
+                                        sender.nursery.capacity) != KILN_C99_OK) return 1;
+    arena = kiln_c99_prepared_graph_find(&sender, handle);
+    if (arena == NULL || !arena->certified || arena->capsule.root.bits == source.bits)
+        return 2;
+    root = arena->capsule.root;
+    sender_count = sender.count;
+    if (!kiln_c99_actor_isolated_request_begin(&sender, handle, &request) ||
+        kiln_c99_graph_paused_control(3, request, reservation, 2) != 0 ||
+        !sender.realm.graph_outgoing_prepared) return 3;
+    prepared_enter(&receiver, 2);
+    if (kiln_c99_graph_paused_control(4, reservation, 1, request) != 0 ||
+        kiln_c99_graph_paused_control(8, reservation, 0, 0) != 0) return 4;
+    prepared_enter(&sender, 1);
+    if (kiln_c99_graph_paused_control(9, request, reservation, 0) != 0 ||
+        !kiln_c99_prepared_graph_has(&sender, handle) ||
+        sender.realm.isolated_request_id != 0 || sender.count != sender_count) return 5;
+    if (!kiln_c99_actor_isolated_request_begin(&sender, handle, &request) ||
+        kiln_c99_graph_paused_control(3, request, reservation, 2) != 0) return 6;
+    prepared_enter(&receiver, 2);
+    if (kiln_c99_graph_paused_control(4, reservation, 1, request) != 0) return 7;
+    prepared_enter(&sender, 1);
+    if (kiln_c99_graph_paused_control(5, reservation, 1, request) != 0 ||
+        sender.count != sender_count || !arena->capsule.detached ||
+        kiln_c99_gc_lookup_interior(&sender, (uintptr_t)root.bits) != NULL) return 8;
+    prepared_enter(&receiver, 2);
+    if (kiln_c99_graph_paused_control(6, reservation, 1, request) != 0 ||
+        receiver.realm.graph_inbox_root.bits != root.bits ||
+        kiln_c99_gc_lookup_interior(&receiver, (uintptr_t)root.bits) == NULL) return 9;
+    prepared_enter(&sender, 1);
+    if (kiln_c99_graph_paused_control(7, request, reservation, 0) != 0 ||
+        kiln_c99_prepared_graph_has(&sender, handle) ||
+        sender.realm.isolated_request_id != 0 ||
+        sender.realm.graph_outgoing_capsule != NULL ||
+        sender.realm.graph_outgoing_prepared || sender.count != sender_count ||
+        kiln_c99_gc_lookup_interior(&sender, (uintptr_t)source.bits) == NULL) return 10;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-paused-prepared-arena");
+    assert!(
+        run.status.success(),
+        "actor prepared arena handoff failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_graph_capsule_certificate_retains_only_escrow() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

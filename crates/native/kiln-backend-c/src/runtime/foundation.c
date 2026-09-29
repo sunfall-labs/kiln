@@ -982,6 +982,7 @@ typedef struct kiln_c99_realm_state {
      * sender's final escrow commit. It is never a GC root or a JavaScript handle. */
     void *graph_outgoing_capsule;
     uint64_t graph_outgoing_reservation;
+    int graph_outgoing_prepared;
     /* One native inbox slot for a future graph handoff. It is a GC root only after the
      * candidate chunks have been linked into this heap; publication itself cannot allocate. */
     uint64_t graph_inbox_next_id;

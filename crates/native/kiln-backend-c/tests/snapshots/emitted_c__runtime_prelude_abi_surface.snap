@@ -1982,6 +1982,8 @@ typedef struct kiln_c99_graph_side_span {
 typedef struct kiln_c99_graph_side_set {
 typedef struct kiln_gc_weak_resource {
 typedef struct kiln_gc_heap {
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
+static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
 #define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
@@ -2355,6 +2357,8 @@ static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
 typedef struct kiln_c99_graph_capsule_requirements {
 typedef struct kiln_c99_graph_capsule {
+static kiln_c99_graph_capsule *kiln_c99_prepared_graph_capsule(kiln_gc_heap *heap,
+static void kiln_c99_prepared_graph_commit(kiln_gc_heap *heap, kiln_value handle,
 static kiln_nursery_chunk *kiln_c99_graph_capsule_chunk(
 static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
@@ -3371,6 +3375,9 @@ static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap 
 static void kiln_c99_prepared_graph_drop(void *payload) {
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
 static kiln_c99_clone_arena *kiln_c99_prepared_graph_find(kiln_gc_heap *heap,
+static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle) {
+static kiln_c99_graph_capsule *kiln_c99_prepared_graph_capsule(kiln_gc_heap *heap,
+static void kiln_c99_prepared_graph_commit(kiln_gc_heap *heap, kiln_value handle,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,
