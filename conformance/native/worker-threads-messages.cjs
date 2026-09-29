@@ -21,11 +21,13 @@ if (isMainThread) {
     // The port goes once the first reply is in: the two channels are ordered only by that.
     await first;
     const { port1, port2 } = new MessageChannel();
+    // The worker may exit before its reply on this separate port is delivered.
+    const exited = new Promise((resolve) => worker.once("exit", resolve));
     worker.postMessage({ port: port2 }, [port2]);
     const overPort = await new Promise((resolve) => port1.once("message", resolve));
     events.push(`over a transferred port ${JSON.stringify(overPort)}`);
     port1.close();
-    events.push(`exit ${await new Promise((resolve) => worker.once("exit", resolve))}`);
+    events.push(`exit ${await exited}`);
     console.log(events.join("\n"));
 
     for (const role of ["throw", "exit", "idle"]) {
