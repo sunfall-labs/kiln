@@ -822,9 +822,11 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     for label, case, metric, unit in msg_rows[:5]:
         w(rep.row(label.replace(" (Go: deep copy)", ""), [rep.cell(case, rt, metric, unit, scope="realm") for rt in ("node", "bun", "kiln")]))
     w("")
-    w("The public actor call uses the same 1 MB graph in both modes. `prepareTransfer` makes a "
-      "private snapshot on the sender; its preparation time is included in the total. The actor "
-      "computes the same checksum for both calls. Actor startup is outside these clocks.")
+    w("The public actor call uses the same 1 MB graph shape in three modes. `prepareTransfer` "
+      "snapshots a prebuilt graph; `isolate(factory)` constructs a fresh graph in movable "
+      "storage. Their preparation and construction times appear separately and in their "
+      "respective totals. The actor computes the same checksum in every mode. Actor startup "
+      "is outside these clocks.")
     w("")
     w("| kiln actor graph call | time |")
     w("| --- | ---: |")
@@ -834,6 +836,9 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         ("prepare private snapshot", "actor-graph-prepare"),
         ("prepared handoff and reply", "actor-graph-handoff"),
         ("prepared total", "actor-graph-prepared-total"),
+        ("direct factory construction", "actor-graph-direct-build"),
+        ("direct handoff and reply", "actor-graph-direct-handoff"),
+        ("direct construction through reply", "actor-graph-direct-total"),
     ]:
         w(rep.row(label, [rep.cell(case, "kiln", "ms_per_op", " ms")]))
     w("")

@@ -3113,7 +3113,7 @@ int main(void) {
 }
 
 #[test]
-fn executable_graph_capsule_keeps_multichunk_strings_through_receiver_gc() {
+fn executable_graph_capsule_keeps_multichunk_strings_with_orphans_through_receiver_gc() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
@@ -3125,6 +3125,9 @@ int main(void) {
     kiln_nursery_chunk *first;
     kiln_shape shape;
     kiln_array *items;
+    kiln_array *orphan;
+    kiln_string *temporary;
+    kiln_c99_candidate_array_elements *orphan_side;
     kiln_value root;
     size_t index;
     uint64_t reservation = 97;
@@ -3167,6 +3170,34 @@ int main(void) {
         string->data = string + 1;
         items->elements[index] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
     }
+    orphan = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY,
+                                               sizeof *orphan);
+    temporary = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
+                                                   sizeof *temporary + 4);
+    if (orphan == NULL || temporary == NULL) return 11;
+    orphan_side = (kiln_c99_candidate_array_elements *)calloc(
+        1, sizeof *orphan_side + 16 * sizeof(kiln_val));
+    if (orphan_side == NULL) return 13;
+    memset(orphan, 0, sizeof *orphan);
+    orphan_side->candidate_id = candidate.candidate_id;
+    orphan_side->owner = orphan;
+    orphan_side->capacity = 16;
+    orphan_side->generation = 1;
+    orphan->elements = (kiln_val *)(orphan_side + 1);
+    orphan->count = 13;
+    orphan->capacity = 16;
+    orphan->candidate_elements = 1;
+    orphan->properties = kiln_c99_undefined();
+    orphan->match_index = -1;
+    orphan->match_input = kiln_c99_undefined();
+    orphan->match_groups = kiln_c99_undefined();
+    temporary->unit_len = 4;
+    temporary->flags = KILN_STRING_LATIN1;
+    temporary->data = temporary + 1;
+    memcpy((void *)temporary->data, "temp", 4);
+    for (index = 0; index < 12; ++index)
+        orphan->elements[index] = items->elements[index];
+    orphan->elements[12] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, temporary);
     kiln_c99_par_arena_seal(&candidate);
     first = candidate.filled;
     if (first == NULL || first->next == NULL ||
@@ -3189,6 +3220,8 @@ int main(void) {
             return 9;
     }
     kiln_c99_gc_collect(&receiver, 0);
+    if (kiln_c99_gc_lookup(&receiver, orphan) != NULL ||
+        kiln_c99_gc_lookup(&receiver, temporary) != NULL) return 12;
     for (index = 0; index < ITEMS; ++index) {
         kiln_object *object = (kiln_object *)KILN_VAL_PTR(items->elements[index]);
         kiln_string *string = (kiln_string *)KILN_VAL_PTR(object->slots[0]);
@@ -3354,7 +3387,7 @@ int main(void) {
 }
 
 #[test]
-fn executable_graph_candidate_closure_rejects_external_and_unreachable_edges() {
+fn executable_graph_candidate_closure_checks_root_and_temporary_edges() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
     let wrapper = r#"
@@ -3417,7 +3450,15 @@ int main(void) {
     ((kiln_gc_block *)next - 1)->kind = KILN_GC_PROXY | KILN_GC_FLAG_NURSERY;
     if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 10;
     ((kiln_gc_block *)next - 1)->kind = saved_kind;
-    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 11;
+    if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 11;
+    saved_edge = *root;
+    *root = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 54;
+    *root = saved_edge;
+    saved_kind = ((kiln_gc_block *)root - 1)->kind;
+    ((kiln_gc_block *)root - 1)->kind = KILN_GC_PROXY | KILN_GC_FLAG_NURSERY;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 55;
+    ((kiln_gc_block *)root - 1)->kind = saved_kind;
     if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 12;
     saved_edge = *root;
     *root = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, next);

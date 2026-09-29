@@ -3682,29 +3682,11 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
     }
 }
 
-/* Generated calls around CANDIDATE_END can leave argument arrays in the candidate chunk. Such
- * an array is movable garbage only if its entire inline payload has no edges or side ownership.
- * A pointer-bearing or otherwise unsupported unreachable block still refuses the whole chunk. */
-static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
-    const kiln_array *array;
-    size_t index;
-    if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_ARRAY ||
-        !kiln_c99_graph_inert_finalizer_block(block)) return 0;
-    array = (const kiln_array *)(block + 1);
-    if (array->candidate_elements != 0) return 0;
-    for (index = 0; index < array->count; ++index) {
-        kiln_val value = array->elements[index];
-        if (!KILN_VAL_IS_NUMBER(value) && value != KILN_VAL_UNDEFINED &&
-            value != KILN_VAL_NULL && value != KILN_VAL_FALSE &&
-            value != KILN_VAL_TRUE && value != KILN_VAL_HOLE) return 0;
-    }
-    return 1;
-}
-
 /* Prove the candidate's exact *outgoing* closure without changing GC marks. Every block is
- * either reachable from `root` with all edges inside the candidate, or an inert orphan array
- * with only immediate values. Incoming C/provider/machine/outside scans still cover the entire
- * chunk. This proof alone never grants permission to move. */
+ * validated through its entire edge and side-storage layout, including unreachable factory
+ * temporaries that travel as garbage. Root-reachable blocks are walked first; then every
+ * remaining block is an additional walk root. Incoming C/provider/machine/outside scans still
+ * cover the entire chunk. This proof alone never grants permission to move. */
 static int kiln_c99_graph_candidate_closed_with_sides(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
     const void *root, kiln_c99_graph_side_set *sides, const kiln_gc_block *large_head) {
@@ -3712,7 +3694,7 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     size_t index;
     size_t seen = 0;
     size_t enumerated = 0;
-    size_t inert_orphans = 0;
+    size_t rooted_count;
     uint64_t id = 0;
     int result = 0;
     if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
@@ -3773,6 +3755,7 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
     }
     if (enumerated != seen) goto done;
+    rooted_count = walk.queued;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
         const char *cursor;
@@ -3780,18 +3763,20 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             const kiln_gc_block *block = (const kiln_gc_block *)cursor;
             size_t payload = block->size == 0 ? 1 : block->size;
             if (!kiln_c99_gc_ptrset_contains(&walk.reached, block)) {
-                if (!kiln_c99_graph_inert_orphan_array(block)) goto done;
-                ++inert_orphans;
+                if (!kiln_c99_graph_follow(&walk, block + 1)) goto done;
             }
             cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         }
+    }
+    for (index = rooted_count; index < walk.queued; ++index) {
+        if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
     }
     {
         const kiln_gc_block *large;
         for (large = large_head; large != NULL; large = large->next)
             if (!kiln_c99_gc_ptrset_contains(&walk.reached, large)) goto done;
     }
-    if (walk.queued + inert_orphans != seen) goto done;
+    if (walk.queued != seen) goto done;
     /* A valid malloc allocation cannot overlap another live allocation. Check the complete
      * certificate once, then retain this order for binary searches in the incoming proof. */
     if (walk.sides.count > 1)
