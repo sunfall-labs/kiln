@@ -213,6 +213,27 @@ static kiln_string *kiln_c99_gc_alloc_units(size_t count, uint32_t flags) {
     return string;
 }
 
+/* A generated literal normally points into immutable module storage. Inside an actor factory
+ * its value must instead belong to the candidate graph: the graph proof cannot infer that an
+ * arbitrary pointer outside the sender heap is a process-owned literal. Copy only at this
+ * boundary; ordinary literal loads still use their static address. */
+kiln_val kiln_c99_candidate_literal(const kiln_string *source) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_string *copy;
+    uint32_t encoding;
+    size_t bytes;
+    if (heap == NULL || heap->actor_candidate_id == 0)
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, source);
+    encoding = kiln_string_is_utf16(source) ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+    if (source->unit_len > SIZE_MAX / (encoding == KILN_STRING_UTF16 ? 2 : 1))
+        return KILN_VAL_UNDEFINED;
+    bytes = (size_t)source->unit_len * (encoding == KILN_STRING_UTF16 ? 2 : 1);
+    copy = kiln_c99_gc_alloc_units(source->unit_len, encoding);
+    if (copy == NULL) return KILN_VAL_UNDEFINED;
+    if (bytes != 0) memcpy((void *)copy->data, source->data, bytes);
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, copy);
+}
+
 static kiln_string *kiln_c99_string_from_utf8(const char *bytes, size_t len) {
     if (kiln_c99_ascii_scan(bytes, len)) {
         kiln_string *string = kiln_c99_gc_alloc_units(len, KILN_STRING_LATIN1);

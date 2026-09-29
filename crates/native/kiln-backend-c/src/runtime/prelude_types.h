@@ -313,12 +313,11 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_NULL:          return KILN_VAL_NULL;
         case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
         case KILN_VALUE_STRING: {
-            if (v.ptr == NULL || v.len == 0) {
+            if (v.ptr == NULL) {
                 return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
             }
-            /* Boundary strings carry the canonical header pointer.  Reading a byte pointer here
-             * would silently reinterpret the first sixteen bytes of the header as text and is
-             * forbidden: there is no legacy recovery path. */
+            /* Preserve even a zero-length string's header: an actor candidate may own that
+             * block. Boundary strings carry canonical header pointers, never byte pointers. */
             return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, v.ptr);
         }
         case KILN_VALUE_FUNCTION:      return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);

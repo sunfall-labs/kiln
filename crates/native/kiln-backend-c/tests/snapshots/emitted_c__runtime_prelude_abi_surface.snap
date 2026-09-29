@@ -2977,6 +2977,7 @@ static kiln_value kiln_c99_static_text(const char *text, size_t len) {
 static inline size_t kiln_c99_utf8_to_utf16_len(const char *text, size_t len) {
 static uint32_t kiln_c99_utf8_next(const char *text, size_t length, size_t *offset);
 static kiln_string *kiln_c99_gc_alloc_units(size_t count, uint32_t flags) {
+kiln_val kiln_c99_candidate_literal(const kiln_string *source) {
 static kiln_string *kiln_c99_string_from_utf8(const char *bytes, size_t len) {
 static kiln_val kiln_c99_val_from_text(const char *bytes, size_t len) {
 static kiln_val kiln_c99_val_from_unit(uint16_t unit) {

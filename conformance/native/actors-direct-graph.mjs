@@ -52,6 +52,16 @@ try {
     throw new Error('numeric-key graph changed');
   }
 
+  const strings = transfer(isolate(() => ({
+    latin1: 'caf\u00e9', wide: '\u03bb\ud83d\ude80', empty: '',
+    values: ['first', 'second'],
+  })));
+  const stringReply = await owner.ref.call('echo', [strings]);
+  if (stringReply.latin1 !== 'caf\u00e9' || stringReply.wide !== '\u03bb\ud83d\ude80' ||
+      stringReply.empty !== '' || stringReply.values.join(',') !== 'first,second') {
+    throw new Error('literal string graph changed');
+  }
+
   let retained;
   const aliased = transfer(isolate(() => { retained = { answer: 17 }; return retained; }));
   let refused = false;

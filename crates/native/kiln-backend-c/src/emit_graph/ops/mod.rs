@@ -328,13 +328,12 @@ pub(super) fn emit_graph_op(
                     writeln!(output, "    v{v} = {val_str};").unwrap();
                 }
             }
-            // A NUL-free literal is a tagged pointer to
-            // its static bytes; one with a NUL inside goes through the per-unit string cache; a
-            // bigint is parsed once into a cached heap value.
+            // Literals use static module storage outside a candidate factory. A direct actor
+            // graph needs its string values in the candidate nursery instead.
             Constant::String(_) => {
                 writeln!(
                     output,
-                    "    v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_string_{index});"
+                    "    v{v} = kiln_c99_candidate_literal(&{symbol}_string_{index}); if (KILN_UNLIKELY(v{v} == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;"
                 )
                 .unwrap();
             }
