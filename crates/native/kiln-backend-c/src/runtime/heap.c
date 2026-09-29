@@ -67,10 +67,10 @@
 /* `kind` carries `kiln_gc_kind` in its low bits and, for a `KILN_GC_STRING` block only, a cached
  * answer to "is this string all ASCII" (ADR 0022: ASCII is exactly the case where a code-unit
  * index equals a byte offset, which is what every position-taking string operation walks UTF-8 to
- * find) in its top two. `KILN_GC_KIND_COUNT` is nowhere near the mask's ~30 low bits, so the two
+ * find) in its top two. `KILN_GC_KIND_COUNT` is nowhere near the mask's 26 low bits, so the two
  * high bits are free; every reader of `block->kind` as a `kiln_gc_kind` must mask with
  * `KILN_GC_KIND_MASK` first. */
-#define KILN_GC_KIND_MASK ((uint32_t)0x07FFFFFFu)
+#define KILN_GC_KIND_MASK ((uint32_t)0x03FFFFFFu)
 #define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
 #define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
 #define KILN_GC_FLAG_NURSERY ((uint32_t)0x20000000u)
@@ -78,6 +78,9 @@
 /* A block malloc'd on its own, outside every slab: with `KILN_GC_FLAG_NURSERY` this lets a header
  * alone say where its block lives, which is what `kiln_c99_gc_release_cell` needs. */
 #define KILN_GC_FLAG_LARGE ((uint32_t)0x08000000u)
+/* Only candidate-owned standalone blocks use the cold owner map. Ordinary headers keep their
+ * existing size; the flag is cleared before ownership leaves this heap. */
+#define KILN_GC_FLAG_CANDIDATE_LARGE ((uint32_t)0x04000000u)
 
 /* The kinds `kiln_c99_gc_finalize` has work for -- exactly its non-empty cases. A sweep asks this
  * before the call, so a dead cell, settler or string costs no call and no read of its payload.
@@ -268,6 +271,7 @@ static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
  * chunk at every collection is a pass over all of them each time -- quadratic under
  * `KILN_GC_STRESS`, which collects at every allocation and promotes a chunk each time. */
 typedef struct kiln_c99_candidate_group kiln_c99_candidate_group;
+typedef struct kiln_c99_candidate_large kiln_c99_candidate_large;
 
 typedef struct kiln_nursery_chunk {
     char *base;
@@ -309,10 +313,29 @@ struct kiln_c99_candidate_group {
     uint64_t id;
     kiln_nursery_chunk *head;
     size_t count;
+    kiln_c99_candidate_large *large_head;
+    size_t large_count;
     /* A synchronous factory or private arena pins metadata while its membership can be empty.
      * Once that builder closes, only member chunks keep the manifest alive. */
     int builder;
 };
+
+/* This metadata belongs only to factory allocations that take the standalone path. It is
+ * ownership bookkeeping, never a GC root. Collector reclamation removes its reverse entry. */
+struct kiln_c99_candidate_large {
+    kiln_gc_block *block;
+    kiln_c99_candidate_group *group;
+    kiln_c99_candidate_large *prev;
+    kiln_c99_candidate_large *next;
+    uint64_t epoch;
+};
+
+typedef struct kiln_c99_candidate_large_map {
+    kiln_c99_candidate_large **table;
+    size_t capacity;
+    size_t count;
+    size_t used;
+} kiln_c99_candidate_large_map;
 
 typedef struct kiln_gc_nursery {
     char *base;
@@ -394,12 +417,17 @@ typedef struct kiln_c99_graph_side_set {
      * cannot accidentally use another candidate's membership answer. */
     kiln_gc_ptrset regions;
     kiln_nursery_chunk *const *region_source;
+    kiln_gc_ptrset large;
+    kiln_gc_block **large_blocks;
+    size_t large_count;
     int foreign_dictionary_keys;
 } kiln_c99_graph_side_set;
 
 static void kiln_c99_graph_side_set_dispose(kiln_c99_graph_side_set *set) {
     free(set->spans);
     free(set->regions.table);
+    free(set->large.table);
+    free(set->large_blocks);
     memset(set, 0, sizeof *set);
 }
 
@@ -441,6 +469,7 @@ typedef struct kiln_gc_heap {
     uint64_t actor_candidate_pending_id;
     int actor_candidate_collected;
     kiln_c99_candidate_group *actor_candidate_group;
+    kiln_c99_candidate_large_map *candidate_large;
     /* The exclusive incoming proof owns this temporary side-span list. It is never a GC root. */
     const kiln_c99_graph_side_set *graph_proof_sides;
     int mark_failed;
@@ -845,7 +874,7 @@ static void kiln_c99_candidate_group_close(kiln_c99_candidate_group *group) {
     if (group == NULL) return;
     if (!group->builder) abort();
     group->builder = 0;
-    if (group->count == 0) free(group);
+    if (group->count == 0 && group->large_count == 0) free(group);
 }
 
 static void kiln_c99_candidate_group_add(kiln_c99_candidate_group *group,
@@ -881,7 +910,7 @@ static void kiln_c99_candidate_group_remove(kiln_nursery_chunk *chunk) {
     chunk->candidate_group = NULL;
     chunk->candidate_prev = NULL;
     chunk->candidate_next = NULL;
-    if (--group->count == 0 && !group->builder) free(group);
+    if (--group->count == 0 && group->large_count == 0 && !group->builder) free(group);
 }
 
 static void kiln_c99_candidate_chunk_clear(kiln_nursery_chunk *chunk) {
@@ -941,20 +970,144 @@ static kiln_nursery_chunk *kiln_c99_nursery_full_take_all(kiln_gc_nursery *nurse
 
 /* Metadata is not a GC root. Collection updates membership before returning storage, so this
  * snapshot contains exactly the group's remaining sealed chunks, never unrelated heap chunks. */
-static int kiln_c99_candidate_group_snapshot(const kiln_gc_heap *heap,
-                                               kiln_nursery_chunk *seed,
+/* A tombstone cannot be a malloc allocation. These tables are cold and heap-local; no
+ * callback or collector treats the owner pointers as reachability. */
+#define KILN_C99_CANDIDATE_LARGE_TOMBSTONE ((kiln_c99_candidate_large *)(uintptr_t)1)
+
+static size_t kiln_c99_candidate_large_hash(const kiln_gc_block *block, size_t capacity) {
+    uint64_t hash = (uint64_t)(uintptr_t)block >> 4;
+    hash ^= hash >> 33;
+    hash *= UINT64_C(0xff51afd7ed558ccd);
+    hash ^= hash >> 33;
+    return (size_t)hash & (capacity - 1);
+}
+
+static kiln_c99_candidate_large **kiln_c99_candidate_large_slot(
+    kiln_c99_candidate_large_map *map, const kiln_gc_block *block) {
+    size_t slot = kiln_c99_candidate_large_hash(block, map->capacity);
+    kiln_c99_candidate_large **deleted = NULL;
+    for (;;) {
+        kiln_c99_candidate_large **entry = &map->table[slot];
+        if (*entry == NULL) return deleted != NULL ? deleted : entry;
+        if (*entry == KILN_C99_CANDIDATE_LARGE_TOMBSTONE) {
+            if (deleted == NULL) deleted = entry;
+        } else if ((*entry)->block == block) {
+            return entry;
+        }
+        slot = (slot + 1) & (map->capacity - 1);
+    }
+}
+
+static kiln_c99_candidate_large *kiln_c99_candidate_large_find(
+    const kiln_gc_heap *heap, const kiln_gc_block *block) {
+    kiln_c99_candidate_large **entry;
+    if (heap->candidate_large == NULL || heap->candidate_large->capacity == 0) return NULL;
+    entry = kiln_c99_candidate_large_slot(heap->candidate_large, block);
+    return *entry == KILN_C99_CANDIDATE_LARGE_TOMBSTONE ? NULL : *entry;
+}
+
+static int kiln_c99_candidate_large_grow(kiln_c99_candidate_large_map *map, size_t wanted) {
+    kiln_c99_candidate_large_map grown = {0};
+    size_t index;
+    if (wanted > SIZE_MAX / 2) return 0;
+    grown.capacity = map->capacity == 0 ? 16 : map->capacity;
+    while (wanted * 2 >= grown.capacity) {
+        if (grown.capacity > SIZE_MAX / 2) return 0;
+        grown.capacity *= 2;
+    }
+    if (grown.capacity > SIZE_MAX / sizeof *grown.table) return 0;
+    grown.table = (kiln_c99_candidate_large **)calloc(grown.capacity, sizeof *grown.table);
+    if (grown.table == NULL) return 0;
+    for (index = 0; index < map->capacity; ++index) {
+        kiln_c99_candidate_large *entry = map->table[index];
+        if (entry == NULL || entry == KILN_C99_CANDIDATE_LARGE_TOMBSTONE) continue;
+        *kiln_c99_candidate_large_slot(&grown, entry->block) = entry;
+        ++grown.count;
+    }
+    grown.used = grown.count;
+    free(map->table);
+    *map = grown;
+    return 1;
+}
+
+static int kiln_c99_candidate_large_add(kiln_gc_heap *heap, kiln_gc_block *block) {
+    kiln_c99_candidate_group *group = heap->actor_candidate_group;
+    kiln_c99_candidate_large_map *map;
+    kiln_c99_candidate_large *entry;
+    kiln_c99_candidate_large **slot;
+    if (group == NULL || !group->builder || group->id != heap->actor_candidate_id) abort();
+    if (group->large_count == SIZE_MAX) return 0;
+    entry = (kiln_c99_candidate_large *)calloc(1, sizeof *entry);
+    if (entry == NULL) return 0;
+    if (heap->candidate_large == NULL) {
+        heap->candidate_large = (kiln_c99_candidate_large_map *)calloc(1,
+                                                        sizeof *heap->candidate_large);
+        if (heap->candidate_large == NULL) { free(entry); return 0; }
+    }
+    map = heap->candidate_large;
+    if (map->count == SIZE_MAX || map->used > SIZE_MAX / 2 ||
+        (map->used * 2 >= map->capacity &&
+         !kiln_c99_candidate_large_grow(map, map->count + 1))) {
+        free(entry);
+        if (map->count == 0) {
+            free(map->table); free(map); heap->candidate_large = NULL;
+        }
+        return 0;
+    }
+    slot = kiln_c99_candidate_large_slot(map, block);
+    if (*slot != NULL && *slot != KILN_C99_CANDIDATE_LARGE_TOMBSTONE) abort();
+    if (*slot == NULL) ++map->used;
+    entry->block = block;
+    entry->group = group;
+    entry->epoch = heap->epoch;
+    entry->next = group->large_head;
+    if (entry->next != NULL) entry->next->prev = entry;
+    group->large_head = entry;
+    ++group->large_count;
+    *slot = entry;
+    ++map->count;
+    block->kind |= KILN_GC_FLAG_CANDIDATE_LARGE;
+    return 1;
+}
+
+static void kiln_c99_candidate_large_remove(kiln_gc_heap *heap, kiln_gc_block *block) {
+    kiln_c99_candidate_large_map *map;
+    kiln_c99_candidate_large **slot;
+    kiln_c99_candidate_large *entry;
+    kiln_c99_candidate_group *group;
+    if ((block->kind & KILN_GC_FLAG_CANDIDATE_LARGE) == 0) return;
+    map = heap->candidate_large;
+    if (map == NULL) abort();
+    slot = kiln_c99_candidate_large_slot(map, block);
+    entry = *slot;
+    if (entry == NULL || entry == KILN_C99_CANDIDATE_LARGE_TOMBSTONE) abort();
+    group = entry->group;
+    if (group->large_count == 0 || map->count == 0) abort();
+    if (entry->prev != NULL) entry->prev->next = entry->next;
+    else group->large_head = entry->next;
+    if (entry->next != NULL) entry->next->prev = entry->prev;
+    --group->large_count;
+    *slot = KILN_C99_CANDIDATE_LARGE_TOMBSTONE;
+    --map->count;
+    block->kind &= ~KILN_GC_FLAG_CANDIDATE_LARGE;
+    free(entry);
+    if (group->count == 0 && group->large_count == 0 && !group->builder) free(group);
+    if (map->count == 0) {
+        free(map->table); free(map); heap->candidate_large = NULL;
+    }
+}
+
+static int kiln_c99_candidate_group_snapshot_owner(const kiln_gc_heap *heap,
+                                               const kiln_c99_candidate_group *group,
                                                kiln_nursery_chunk ***out, size_t *out_count) {
-    const kiln_c99_candidate_group *group;
     kiln_nursery_chunk **chunks;
     kiln_nursery_chunk *chunk;
     kiln_nursery_chunk *previous = NULL;
     size_t count = 0;
-    if (heap == NULL || seed == NULL || out == NULL || out_count == NULL ||
-        !kiln_c99_nursery_full_contains(&heap->nursery, seed)) return 0;
-    group = seed->candidate_group;
-    if (!kiln_c99_candidate_group_contains(group, seed) || group->count == 0 ||
+    if (heap == NULL || group == NULL || out == NULL || out_count == NULL ||
+        (group->count == 0 && group->large_count == 0) ||
         group->count > SIZE_MAX / sizeof *chunks) return 0;
-    chunks = (kiln_nursery_chunk **)malloc(group->count * sizeof *chunks);
+    chunks = (kiln_nursery_chunk **)malloc((group->count == 0 ? 1 : group->count) * sizeof *chunks);
     if (chunks == NULL) return 0;
     for (chunk = group->head; chunk != NULL; chunk = chunk->candidate_next) {
         if (count == group->count || !kiln_c99_nursery_full_contains(&heap->nursery, chunk) ||
@@ -974,6 +1127,15 @@ static int kiln_c99_candidate_group_snapshot(const kiln_gc_heap *heap,
     *out = chunks;
     *out_count = count;
     return 1;
+}
+
+static int kiln_c99_candidate_group_snapshot(const kiln_gc_heap *heap,
+                                               kiln_nursery_chunk *seed,
+                                               kiln_nursery_chunk ***out, size_t *out_count) {
+    if (heap == NULL || seed == NULL ||
+        !kiln_c99_nursery_full_contains(&heap->nursery, seed) ||
+        !kiln_c99_candidate_group_contains(seed->candidate_group, seed)) return 0;
+    return kiln_c99_candidate_group_snapshot_owner(heap, seed->candidate_group, out, out_count);
 }
 
 /* Make `chunk`'s region the one allocation bumps through. */
@@ -3572,6 +3734,12 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
     block->size = size;
     block->prev = NULL;
     block->next = heap->head;
+    if (heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+        !kiln_c99_candidate_large_add(heap, block)) {
+        kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        free(block);
+        return NULL;
+    }
     if (heap->head != NULL) heap->head->prev = block;
     heap->head = block;
     ++heap->count;
@@ -3701,6 +3869,12 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
     block->size = size;
     block->prev = NULL;
     block->next = heap->head;
+    if (heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+        !kiln_c99_candidate_large_add(heap, block)) {
+        kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        free(block);
+        return NULL;
+    }
     if (heap->head != NULL) heap->head->prev = block;
     heap->head = block;
     ++heap->count;
@@ -3976,7 +4150,6 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 
 typedef struct kiln_c99_graph_walk {
     const kiln_gc_heap *heap;
-    const kiln_gc_block *large_head;
     kiln_gc_ptrset regions;
     kiln_gc_ptrset reached;
     kiln_c99_graph_side_set sides;
@@ -3994,10 +4167,7 @@ static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
     uintptr_t address;
     if (block == NULL) return 0;
     if ((block->kind & KILN_GC_FLAG_LARGE) != 0) {
-        const kiln_gc_block *large;
-        for (large = walk->large_head; large != NULL; large = large->next)
-            if (large == block) return 1;
-        return 0;
+        return kiln_c99_gc_ptrset_contains(&walk->sides.large, block);
     }
     chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
     if (chunk != NULL && kiln_c99_gc_ptrset_contains(&walk->regions, chunk)) {
@@ -4012,12 +4182,10 @@ static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
     return 0;
 }
 
-static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
-                                    size_t bytes, const void *owner) {
+static int kiln_c99_graph_append_span(kiln_c99_graph_walk *walk, uintptr_t base,
+                                      size_t bytes, const void *owner) {
     kiln_c99_graph_side_span *grown;
-    if (base > UINTPTR_MAX - bytes ||
-        kiln_c99_gc_lookup_interior(walk->heap, base) != NULL ||
-        kiln_c99_gc_lookup_interior(walk->heap, base + bytes - 1) != NULL) return 0;
+    if (bytes == 0 || base > UINTPTR_MAX - bytes) return 0;
     if (walk->sides.count == walk->sides.capacity) {
         size_t capacity = walk->sides.capacity == 0 ? 4 : walk->sides.capacity * 2;
         if (capacity < walk->sides.capacity ||
@@ -4035,11 +4203,29 @@ static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
     return 1;
 }
 
+static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
+                                    size_t bytes, const void *owner) {
+    if (bytes == 0 || base > UINTPTR_MAX - bytes ||
+        kiln_c99_gc_lookup_interior(walk->heap, base) != NULL ||
+        kiln_c99_gc_lookup_interior(walk->heap, base + bytes - 1) != NULL) return 0;
+    return kiln_c99_graph_append_span(walk, base, bytes, owner);
+}
+
+static uint64_t kiln_c99_graph_block_candidate_id(const kiln_c99_graph_walk *walk,
+                                                  const kiln_gc_block *block) {
+    if ((block->kind & KILN_GC_FLAG_LARGE) != 0) {
+        const kiln_c99_candidate_large *owner = kiln_c99_candidate_large_find(walk->heap, block);
+        return owner == NULL ? 0 : owner->group->id;
+    }
+    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
+    return chunk == NULL ? 0 : chunk->candidate_id;
+}
+
 static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
                                          const kiln_gc_block *block, const kiln_array *array) {
     const kiln_c99_candidate_array_elements *header = kiln_c99_array_candidate_header(array);
-    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
-    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+    uint64_t candidate_id = kiln_c99_graph_block_candidate_id(walk, block);
+    if (candidate_id == 0 || header->candidate_id != candidate_id ||
         header->owner != array || header->capacity != array->capacity ||
         header->generation == 0 ||
         array->capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
@@ -4052,8 +4238,8 @@ static int kiln_c99_graph_add_object_side(kiln_c99_graph_walk *walk,
                                           const kiln_object *object) {
     const kiln_c99_candidate_object_properties *header =
         kiln_c99_object_candidate_header(object);
-    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
-    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+    uint64_t candidate_id = kiln_c99_graph_block_candidate_id(walk, block);
+    if (candidate_id == 0 || header->candidate_id != candidate_id ||
         header->owner != object || header->capacity != object->capacity ||
         header->generation == 0 ||
         object->capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_property)) return 0;
@@ -4066,8 +4252,8 @@ static int kiln_c99_graph_add_object_slots_side(kiln_c99_graph_walk *walk,
                                                 const kiln_object *object) {
     const kiln_c99_candidate_object_slots *header =
         kiln_c99_object_candidate_slots_header(object);
-    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
-    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+    uint64_t candidate_id = kiln_c99_graph_block_candidate_id(walk, block);
+    if (candidate_id == 0 || header->candidate_id != candidate_id ||
         header->owner != object || header->capacity != object->slot_capacity ||
         header->generation == 0 ||
         object->slot_capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
@@ -4080,8 +4266,8 @@ static int kiln_c99_graph_add_object_elements_side(kiln_c99_graph_walk *walk,
                                                    const kiln_object *object) {
     const kiln_c99_candidate_object_elements *header =
         kiln_c99_object_candidate_elements_header(object);
-    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
-    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+    uint64_t candidate_id = kiln_c99_graph_block_candidate_id(walk, block);
+    if (candidate_id == 0 || header->candidate_id != candidate_id ||
         header->owner != object || header->capacity != object->element_capacity ||
         header->generation == 0 ||
         object->element_capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
@@ -4270,9 +4456,17 @@ static int kiln_c99_graph_candidate_closed_with_sides(
     uint64_t id = 0;
     const kiln_c99_candidate_group *group = NULL;
     int result = 0;
-    if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
+    if (heap == NULL || chunks == NULL || root == NULL || heap->collecting) return 0;
+    if (count == 0) {
+        kiln_gc_block *root_block = kiln_c99_gc_lookup(heap, root);
+        kiln_c99_candidate_large *owner;
+        if (root_block == NULL ||
+            (owner = kiln_c99_candidate_large_find(heap, root_block)) == NULL ||
+            owner->epoch != heap->epoch || owner->group->count != 0) return 0;
+        group = owner->group;
+        id = group->id;
+    }
     walk.heap = heap;
-    walk.large_head = large_head;
     if (kiln_c99_gc_ptrset_grow(&walk.regions, count) != KILN_C99_OK) goto done;
     for (index = 0; index < count; ++index) {
         const kiln_nursery_chunk *chunk = chunks[index];
@@ -4291,15 +4485,45 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         seen += chunk->alloc_count;
     }
     {
-        const kiln_gc_block *large;
-        for (large = large_head; large != NULL; large = large->next) {
-            if ((large->kind & (KILN_GC_FLAG_LARGE | KILN_GC_KIND_MASK)) !=
-                    (KILN_GC_FLAG_LARGE | KILN_GC_STRING) ||
-                !kiln_c99_gc_ptrset_contains(&heap->large_table, large) ||
-                !kiln_c99_graph_inline_string(large) || seen == SIZE_MAX)
-                goto done;
-            ++seen;
+        const kiln_c99_candidate_large *entry = group->large_head;
+        const kiln_gc_block *private_large = large_head;
+        size_t large_count = group->large_count;
+        size_t large_index = 0;
+        if (entry != NULL && private_large != NULL) goto done;
+        for (const kiln_gc_block *it = private_large; it != NULL; it = it->next) {
+            if (large_count == SIZE_MAX) goto done;
+            ++large_count;
         }
+        if (large_count > SIZE_MAX / sizeof *walk.sides.large_blocks ||
+            large_count > SIZE_MAX - seen) goto done;
+        if (large_count != 0) {
+            walk.sides.large_blocks = (kiln_gc_block **)malloc(
+                large_count * sizeof *walk.sides.large_blocks);
+            if (walk.sides.large_blocks == NULL ||
+                kiln_c99_gc_ptrset_grow(&walk.sides.large, large_count) != KILN_C99_OK)
+                goto done;
+        }
+        while (entry != NULL || private_large != NULL) {
+            const kiln_gc_block *large = entry != NULL ? entry->block : private_large;
+            if (large_index == large_count ||
+                (large->kind & KILN_GC_FLAG_LARGE) == 0 ||
+                !kiln_c99_gc_ptrset_contains(&heap->large_table, large) ||
+                (entry == NULL && ((large->kind & KILN_GC_KIND_MASK) != KILN_GC_STRING ||
+                                    !kiln_c99_graph_inline_string(large))) ||
+                (entry != NULL && (entry->group != group || entry->epoch != heap->epoch ||
+                    kiln_c99_candidate_large_find(heap, large) != entry)) ||
+                kiln_c99_gc_ptrset_contains(&walk.sides.large, large) ||
+                kiln_c99_gc_ptrset_insert(&walk.sides.large, large) != KILN_C99_OK ||
+                large->size > SIZE_MAX - sizeof *large ||
+                !kiln_c99_graph_append_span(&walk, (uintptr_t)large,
+                                           sizeof *large + large->size, large)) goto done;
+            walk.sides.large_blocks[large_index++] = (kiln_gc_block *)large;
+            if (entry != NULL) entry = entry->next;
+            else private_large = private_large->next;
+        }
+        if (large_index != large_count) goto done;
+        walk.sides.large_count = large_count;
+        seen += large_count;
     }
     if (seen > SIZE_MAX / sizeof *walk.queue || seen > SIZE_MAX / 2 ||
         kiln_c99_gc_ptrset_grow(&walk.reached, seen) != KILN_C99_OK) goto done;
@@ -4323,14 +4547,16 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         }
     }
+    for (index = 0; index < walk.sides.large_count; ++index) {
+        kiln_gc_block *large = walk.sides.large_blocks[index];
+        if (!kiln_c99_gc_ptrset_contains(&walk.reached, large) &&
+            !kiln_c99_graph_follow(&walk, large + 1)) goto done;
+    }
     for (index = rooted_count; index < walk.queued; ++index) {
         if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
     }
-    {
-        const kiln_gc_block *large;
-        for (large = large_head; large != NULL; large = large->next)
-            if (!kiln_c99_gc_ptrset_contains(&walk.reached, large)) goto done;
-    }
+    for (index = 0; index < walk.sides.large_count; ++index)
+        if (!kiln_c99_gc_ptrset_contains(&walk.reached, walk.sides.large_blocks[index])) goto done;
     if (walk.queued != seen) goto done;
     /* A valid malloc allocation cannot overlap another live allocation. Check the complete
      * certificate once, then retain this order for binary searches in the incoming proof. */
@@ -5130,6 +5356,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     result = kiln_c99_graph_scan_local_shapes(heap, chunks, count);
     if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     for (block = heap->head; block != NULL; block = block->next) {
+        if (heap->graph_proof_sides != NULL &&
+            kiln_c99_gc_ptrset_contains(&heap->graph_proof_sides->large, block)) continue;
         result = kiln_c99_graph_outside_block(heap, chunks, count, block);
         if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     }
@@ -5237,6 +5465,7 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
                                                 void *accept_context) {
     kiln_c99_realm_state *realm = &heap->realm;
     kiln_nursery_chunk *chunk;
+    const kiln_c99_candidate_group *group;
     kiln_nursery_chunk **chunks = NULL;
     kiln_c99_graph_side_set sides = {0};
     kiln_gc_block *block;
@@ -5251,12 +5480,20 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     }
     if (realm->isolated_escrow_value.tag < KILN_VALUE_STRING ||
         realm->isolated_escrow_value.bits == 0) goto done;
-    block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)realm->isolated_escrow_value.bits);
-    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) goto done;
-    chunk = kiln_c99_nursery_chunk_of(heap, block);
-    candidate_id = chunk->candidate_id;
+    block = kiln_c99_gc_lookup(heap, (const void *)(uintptr_t)realm->isolated_escrow_value.bits);
+    if (block == NULL) goto done;
+    if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) {
+        chunk = kiln_c99_nursery_chunk_of(heap, block);
+        group = chunk->candidate_group;
+    } else {
+        kiln_c99_candidate_large *owner = kiln_c99_candidate_large_find(heap, block);
+        if (owner == NULL || owner->epoch != heap->epoch) goto done;
+        group = owner->group;
+    }
+    if (group == NULL || group->builder) goto done;
+    candidate_id = group->id;
     if (candidate_id == 0) goto done;
-    if (!kiln_c99_candidate_group_snapshot(heap, chunk, &chunks, &count) ||
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &chunks, &count) ||
         !kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, block + 1, &sides,
                                                      NULL))
         goto done;
@@ -5296,7 +5533,8 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
                     &sides)) {
             result = KILN_C99_GRAPH_OUTGOING_UNPROVEN;
         } else {
-            chunks = NULL; /* The accepted capsule now owns this manifest vector. */
+            chunks = NULL; /* The accepted capsule now owns these manifest vectors. */
+            sides.large_blocks = NULL;
         }
     }
 done:
@@ -5461,7 +5699,7 @@ static int kiln_c99_graph_receiver_reserve_id(kiln_gc_heap *to, size_t chunk_cou
                                               uint64_t reservation_id) {
     kiln_c99_realm_state *realm;
     size_t wanted;
-    if (to == NULL || reservation_id == 0 || chunk_count == 0 || to->collecting ||
+    if (to == NULL || reservation_id == 0 || to->collecting ||
         to->parallel_paused || chunk_count > SIZE_MAX - to->nursery.regions.count) return 0;
     realm = &to->realm;
     wanted = to->nursery.regions.count + chunk_count;
@@ -5670,8 +5908,8 @@ static void kiln_c99_graph_candidate_close(kiln_c99_par_arena *arena) {
 /* A source-language factory can allocate through every C path, including the inlined hot bump
  * and the multi-string run. Give it the ordinary nursery's current chunk, but only after
  * sealing the preceding turn's allocations. This tags exact allocation provenance without
- * treating any escaped object as movable. An allocation that goes to a slab, a large block or
- * a tenured kind remains outside this candidate; outgoing closure will reject its edge.
+ * treating any escaped object as movable. Standalone blocks carry cold owner metadata;
+ * slab and tenured allocations remain outside the candidate and fail outgoing closure.
  * A nested factory keeps working as JavaScript but cannot make a separate candidate. */
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
     uint64_t id;
@@ -5727,6 +5965,8 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
     heap->actor_candidate_id = 0;
     if (!completed || heap->actor_candidate_collected) {
         while (group->head != NULL) kiln_c99_candidate_chunk_clear(group->head);
+        while (group->large_head != NULL)
+            kiln_c99_candidate_large_remove(heap, group->large_head->block);
         heap->actor_candidate_group = NULL;
         kiln_c99_candidate_group_close(group);
     } else {
@@ -5764,6 +6004,10 @@ static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed) {
             chunk->candidate_state = 2;
         }
         chunk = next;
+    }
+    if (!sealed) {
+        while (group->large_head != NULL)
+            kiln_c99_candidate_large_remove(heap, group->large_head->block);
     }
     heap->actor_candidate_pending_id = 0;
     heap->actor_candidate_group = NULL;
@@ -6560,6 +6804,7 @@ static void kiln_c99_gc_release_cell(void *payload) {
     if (block->kind & KILN_GC_FLAG_LARGE) {
         kiln_c99_gc_unlink(heap, block);
         kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        kiln_c99_candidate_large_remove(heap, block);
         free(block);
         return;
     }
@@ -6655,6 +6900,7 @@ static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_he
             if (collection->is_weak)
                 kiln_c99_gc_rehome_weak_collection(to_heap, collection, collection);
         }
+        kiln_c99_candidate_large_remove(from_heap, cur);
         cur->mark = 0; /* Reset mark epoch so target heap's GC tracks it cleanly */
         kiln_c99_gc_ptrset_remove(&from_heap->large_table, cur);
         kiln_c99_gc_ptrset_insert(&to_heap->large_table, cur);
@@ -6895,6 +7141,7 @@ static void kiln_c99_gc_release(void *payload) {
     } else {
         kiln_c99_gc_unlink(heap, block);
         kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        kiln_c99_candidate_large_remove(heap, block);
         free(block);
     }
 }
@@ -7610,12 +7857,19 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             heap->freed_blocks += 1;
             heap->freed_bytes += block->size;
             kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+            kiln_c99_candidate_large_remove(heap, block);
             free(block);
         } else if (orphan_marked) {
+            kiln_c99_candidate_large_remove(heap, block);
             kiln_c99_gc_retain_survivor(block);
             kiln_c99_gc_unlink(heap, block);
             kiln_c99_gc_ptrset_remove(&heap->large_table, block);
         } else {
+            if ((block->kind & KILN_GC_FLAG_CANDIDATE_LARGE) != 0) {
+                kiln_c99_candidate_large *entry = kiln_c99_candidate_large_find(heap, block);
+                if (entry == NULL) abort();
+                entry->epoch = heap->epoch;
+            }
             survived += block->size;
         }
         block = next;
@@ -8127,6 +8381,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
             }
         }
     }
+    if (heap->candidate_large != NULL) abort();
     kiln_c99_nursery_destroy(&heap->nursery);
     kiln_c99_candidate_group_close(heap->actor_candidate_group);
     heap->actor_candidate_group = NULL;

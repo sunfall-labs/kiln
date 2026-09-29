@@ -2148,7 +2148,7 @@ typedef enum kiln_gc_kind {
  * asked on a hit path (an element site telling an array from a typed array, which share a boxing
  * prefix). `heap.c` asserts the offset and mask against the struct. */
 #define KILN_C99_BLOCK_KIND_OFFSET 8u
-#define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x07FFFFFFu)
+#define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x03FFFFFFu)
 static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     /* Every kind is below 256 and the flags live in the top bits, so the kind is the word's low

@@ -1090,7 +1090,9 @@ fn runtime_prelude_size() {
     // Candidate-group manifests replace sender-wide discovery and duplicate mark-queue code.
     // Nursery mark queries also check the chunk bitmap after cross-realm ownership changes.
     // Together the measured prelude is 65,625 lines; these are new helpers, not duplicated parts.
-    const CEILING_LINES: usize = 65_800;
+    // Cold standalone candidate ownership and indexed large-block certificates bring the
+    // prelude to 66,012 lines. The ordinary block header remains unchanged.
+    const CEILING_LINES: usize = 66_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

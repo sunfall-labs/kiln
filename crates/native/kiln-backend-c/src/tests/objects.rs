@@ -2607,6 +2607,169 @@ int main(void) {
 }
 
 #[test]
+fn executable_large_candidate_metadata_is_not_a_collector_root() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap = {0};
+    kiln_c99_candidate_group *group;
+    kiln_gc_block *live, *garbage;
+    kiln_string *text;
+    const size_t bytes = 300000;
+    group = kiln_c99_candidate_group_new(11);
+    live = (kiln_gc_block *)calloc(1, sizeof *live + bytes);
+    garbage = (kiln_gc_block *)calloc(1, sizeof *garbage + bytes);
+    if (group == NULL || live == NULL || garbage == NULL) return 1;
+    live->kind = KILN_GC_STRING | KILN_GC_FLAG_LARGE;
+    live->size = bytes;
+    garbage->kind = KILN_GC_BYTES | KILN_GC_FLAG_LARGE;
+    garbage->size = bytes;
+    garbage->next = live;
+    live->prev = garbage;
+    heap.head = garbage;
+    heap.count = 2;
+    heap.bytes = 2 * bytes;
+    heap.actor_candidate_id = 11;
+    heap.actor_candidate_group = group;
+    if (kiln_c99_gc_ptrset_insert(&heap.large_table, live) != KILN_C99_OK ||
+        kiln_c99_gc_ptrset_insert(&heap.large_table, garbage) != KILN_C99_OK) return 2;
+    kiln_c99_gc_bound(&heap, live, sizeof *live + bytes);
+    kiln_c99_gc_bound(&heap, garbage, sizeof *garbage + bytes);
+    text = (kiln_string *)(live + 1);
+    text->unit_len = (uint32_t)(bytes - sizeof *text);
+    text->flags = KILN_STRING_LATIN1;
+    text->data = text + 1;
+    memset((void *)text->data, 'x', text->unit_len);
+    if (!kiln_c99_candidate_large_add(&heap, live) ||
+        !kiln_c99_candidate_large_add(&heap, garbage)) return 3;
+    if (group->large_count != 2 || heap.candidate_large->count != 2) return 4;
+    /* Explicitly mark just the language root. The reverse owner table and group links must
+     * not keep the factory's unreferenced standalone allocation alive. */
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_now(&heap, text);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_sweep(&heap, 0);
+    if (heap.head != live || heap.count != 1 || group->large_count != 1 ||
+        heap.candidate_large->count != 1 ||
+        kiln_c99_candidate_large_find(&heap, live)->epoch != heap.epoch) return 5;
+    /* A failed factory abandons provenance, preserving the surviving value and its bytes. */
+    if (!kiln_c99_actor_candidate_end(&heap, 0) || heap.candidate_large != NULL ||
+        heap.actor_candidate_group != NULL ||
+        (live->kind & KILN_GC_FLAG_CANDIDATE_LARGE) != 0 ||
+        memcmp(text->data, "xxxxxxxx", 8) != 0) return 6;
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_sweep(&heap, 0);
+    if (heap.head != NULL || heap.count != 0) return 7;
+    free(heap.large_table.table);
+    free(heap.stack);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-large-weak-metadata");
+    assert!(
+        run.status.success(),
+        "large candidate lifetime failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_candidate_large_string_survives_sender_and_receiver_collection() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int large_graph_entry(void *context) {
+    kiln_gc_heap *sender = kiln_c99_gc_heap_uncached();
+    kiln_gc_heap receiver;
+    kiln_c99_graph_capsule capsule;
+    kiln_c99_graph_side_set proof = {0};
+    kiln_nursery_chunk **chunks;
+    kiln_val *cell;
+    kiln_string *text;
+    kiln_value root;
+    size_t count;
+    const size_t length = 300000;
+    int standalone = context != NULL;
+    sender->fallback = 0;
+    sender->enabled = 1;
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_actor_candidate_begin(sender)) return 1;
+    cell = context == (void *)1 ? NULL : (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *cell);
+    text = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof *text + length);
+    if ((!standalone && cell == NULL) || text == NULL) return 2;
+    text->unit_len = length;
+    text->flags = KILN_STRING_LATIN1;
+    text->data = text + 1;
+    memset((void *)text->data, 'q', length);
+    if (cell != NULL) *cell = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    root = standalone
+        ? kiln_c99_value(KILN_VALUE_STRING, (uint64_t)(uintptr_t)text->data,
+                         text->data, text->unit_len)
+        : kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)cell, NULL, 0);
+    if (!kiln_c99_actor_candidate_end(sender, 1)) return 3;
+    kiln_c99_actor_candidate_seal(sender, root);
+    if (sender->actor_candidate_pending_id != 0 ||
+        kiln_c99_candidate_large_find(sender, (kiln_gc_block *)text - 1) == NULL) return 4;
+    sender->realm.graph_inbox_root = root;
+    kiln_c99_gc_collect(sender, 1);
+    sender->realm.graph_inbox_root = kiln_c99_undefined();
+    if (!kiln_c99_candidate_group_snapshot_owner(sender,
+            kiln_c99_candidate_large_find(sender, (kiln_gc_block *)text - 1)->group,
+            &chunks, &count) ||
+        !kiln_c99_graph_candidate_closed_with_sides(sender, chunks, count,
+            standalone ? (void *)text : (void *)cell, &proof, NULL))
+        return 5;
+    sender->graph_proof_sides = &proof;
+    /* Interior and header aliases both forbid a move, including the final string byte. */
+    if (!kiln_c99_graph_in_batch(sender, chunks, count, (kiln_gc_block *)text - 1) ||
+        !kiln_c99_graph_in_batch(sender, chunks, count, (char *)text->data + length - 1)) return 6;
+    if (!kiln_c99_graph_capsule_accept_manifest(&capsule, sender, chunks, count, root, &proof) ||
+        capsule.needs.large_objects != 1 || capsule.large_blocks[0] != (kiln_gc_block *)text - 1)
+        return 7;
+    proof.large_blocks = NULL;
+    sender->graph_proof_sides = NULL;
+    kiln_c99_graph_side_set_dispose(&proof);
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs, 801) ||
+        !kiln_c99_graph_capsule_detach(sender, &capsule)) return 8;
+    if (sender->candidate_large != NULL || kiln_c99_gc_lookup(sender, text) != NULL) return 9;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, 801);
+    /* The sender's last collection epoch equals the receiver's next one. */
+    kiln_c99_gc_collect(&receiver, 1);
+    if (kiln_c99_gc_lookup(&receiver, text) == NULL || text->unit_len != length ||
+        ((char *)text->data)[length - 1] != 'q' ||
+        ((kiln_gc_block *)text - 1)->mark != receiver.epoch) return 10;
+    receiver.realm.graph_inbox_root = kiln_c99_undefined();
+    kiln_c99_gc_collect(&receiver, 1);
+    if (receiver.large_table.count != 0 || receiver.count != 0) return 11;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    free(receiver.large_table.table);
+    free(receiver.stack);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 12;
+    status = kiln_realm_enter(realm, large_graph_entry, NULL);
+    if (status == KILN_C99_OK) status = kiln_realm_enter(realm, large_graph_entry, (void *)1);
+    if (status == KILN_C99_OK) status = kiln_realm_enter(realm, large_graph_entry, (void *)2);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 13;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-large-string-gc");
+    assert!(
+        run.status.success(),
+        "large graph move failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_candidate_scope_contains_ordinary_inline_graph() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

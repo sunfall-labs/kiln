@@ -1158,7 +1158,7 @@ static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
 #define KILN_C99_BLOCK_KIND_OFFSET 8u
-#define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x07FFFFFFu)
+#define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x03FFFFFFu)
 static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #else
@@ -1963,12 +1963,13 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #define KILN_ACTOR_CANDIDATE_GC_DEFER_BYTES ((size_t)64 * 1024 * 1024)
 #define KILN_C99_INTROSPECT_ARMED 1
 #define KILN_C99_INTROSPECT_DUMPED 2
-#define KILN_GC_KIND_MASK ((uint32_t)0x07FFFFFFu)
+#define KILN_GC_KIND_MASK ((uint32_t)0x03FFFFFFu)
 #define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
 #define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
 #define KILN_GC_FLAG_NURSERY ((uint32_t)0x20000000u)
 #define KILN_GC_FLAG_DEAD ((uint32_t)0x10000000u)
 #define KILN_GC_FLAG_LARGE ((uint32_t)0x08000000u)
+#define KILN_GC_FLAG_CANDIDATE_LARGE ((uint32_t)0x04000000u)
 #define KILN_GC_FINALIZED_KINDS                                                                    \
 static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
 #define KILN_GC_FINALIZED_AT_ALLOC                                                                 \
@@ -2000,8 +2001,11 @@ static const char *const kiln_c99_hot_key_text[KILN_C99_HOT_KEY_COUNT] = {
 static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
 #undef KILN_C99_HOT_KEY_LEN
 typedef struct kiln_c99_candidate_group kiln_c99_candidate_group;
+typedef struct kiln_c99_candidate_large kiln_c99_candidate_large;
 typedef struct kiln_nursery_chunk {
 struct kiln_c99_candidate_group {
+struct kiln_c99_candidate_large {
+typedef struct kiln_c99_candidate_large_map {
 typedef struct kiln_gc_nursery {
 typedef struct kiln_c99_local_edge {
 #define KILN_C99_MODIFIED_BUILTIN_WORDS 2
@@ -2043,6 +2047,14 @@ static int kiln_c99_nursery_full_contains(const kiln_gc_nursery *nursery,
 static void kiln_c99_nursery_full_push(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static void kiln_c99_nursery_full_remove(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static kiln_nursery_chunk *kiln_c99_nursery_full_take_all(kiln_gc_nursery *nursery) {
+#define KILN_C99_CANDIDATE_LARGE_TOMBSTONE ((kiln_c99_candidate_large *)(uintptr_t)1)
+static size_t kiln_c99_candidate_large_hash(const kiln_gc_block *block, size_t capacity) {
+static kiln_c99_candidate_large **kiln_c99_candidate_large_slot(
+static kiln_c99_candidate_large *kiln_c99_candidate_large_find(
+static int kiln_c99_candidate_large_grow(kiln_c99_candidate_large_map *map, size_t wanted) {
+static int kiln_c99_candidate_large_add(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_candidate_large_remove(kiln_gc_heap *heap, kiln_gc_block *block) {
+static int kiln_c99_candidate_group_snapshot_owner(const kiln_gc_heap *heap,
 static int kiln_c99_candidate_group_snapshot(const kiln_gc_heap *heap,
 static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static kiln_nursery_chunk *kiln_c99_nursery_seal(kiln_gc_nursery *nursery) {
@@ -2262,7 +2274,9 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
 static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 typedef struct kiln_c99_graph_walk {
 static int kiln_c99_graph_is_member(const kiln_c99_graph_walk *walk,
+static int kiln_c99_graph_append_span(kiln_c99_graph_walk *walk, uintptr_t base,
 static int kiln_c99_graph_add_side(kiln_c99_graph_walk *walk, uintptr_t base,
+static uint64_t kiln_c99_graph_block_candidate_id(const kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_add_object_side(kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_add_object_slots_side(kiln_c99_graph_walk *walk,
