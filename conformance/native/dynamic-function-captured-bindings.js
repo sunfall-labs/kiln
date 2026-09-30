@@ -44,3 +44,7 @@ const dynamicArrow = new Function(
   "let total = 0; items.forEach(i => { total += i; }); return total;",
 );
 console.log("dynamic arrow", dynamicArrow([1, 2, 3]));
+console.log(
+  "dynamic arrow expression",
+  JSON.stringify(new Function("return [1, 2, 3].map(x => x * 2);")()),
+);

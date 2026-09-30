@@ -733,6 +733,8 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                  int asynchronous, int arrow, kiln_value *out,
                                  kiln_value *thrown);
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len);
+static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
+                                       size_t *body_len);
 
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
                                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
@@ -816,12 +818,28 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             const char *body;
             size_t body_len;
             kiln_dyn_lexer_next(lex);
-            if (!kiln_dyn_capture_block(lex, &body, &body_len)) {
+            if (lex->curr.kind == KILN_DYN_LBRACE) {
+                if (!kiln_dyn_capture_block(lex, &body, &body_len)) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                "Unterminated arrow function body");
+                }
+                return kiln_dyn_make_closure(host, scope, name, name_len, body, body_len,
+                                             receiver, 0, 1, out, thrown);
+            }
+            if (!kiln_dyn_capture_expression(lex, &body, &body_len))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                             "Expected arrow function body");
-            }
-            return kiln_dyn_make_closure(host, scope, name, name_len, body, body_len,
-                                         receiver, 0, 1, out, thrown);
+            size_t return_len = body_len + sizeof "return ;";
+            char *return_body = (char *)malloc(return_len);
+            if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
+            memcpy(return_body, "return ", 7);
+            memcpy(return_body + 7, body, body_len);
+            return_body[7 + body_len] = ';';
+            int closure_status = kiln_dyn_make_closure(host, scope, name, name_len,
+                                                       return_body, body_len + 8,
+                                                       receiver, 0, 1, out, thrown);
+            free(return_body);
+            return closure_status;
         }
         if (kiln_dyn_scope_get(scope, name, name_len, out)) {
             return KILN_C99_OK;
@@ -1587,6 +1605,46 @@ static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t
     if (nesting != 0) return 0;
     *body = &lex->src[start];
     *body_len = pos - start - 1;
+    lex->pos = pos;
+    kiln_dyn_lexer_next(lex);
+    return 1;
+}
+
+static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
+                                       size_t *body_len) {
+    size_t start = lex->pos;
+    size_t pos = start;
+    int parens = 0, brackets = 0, braces = 0;
+    while (pos < lex->len) {
+        char c = lex->src[pos];
+        if (c == '\'' || c == '"' || c == '`') {
+            char quote = c;
+            pos++;
+            while (pos < lex->len) {
+                c = lex->src[pos++];
+                if (c == '\\' && pos < lex->len) pos++;
+                else if (c == quote) break;
+            }
+            continue;
+        }
+        if (parens == 0 && brackets == 0 && braces == 0 &&
+            (c == ',' || c == ';' || c == ')' || c == ']' || c == '}')) break;
+        if (c == '(') parens++;
+        else if (c == ')' && parens > 0) parens--;
+        else if (c == '[') brackets++;
+        else if (c == ']' && brackets > 0) brackets--;
+        else if (c == '{') braces++;
+        else if (c == '}' && braces > 0) braces--;
+        pos++;
+    }
+    size_t end = pos;
+    while (end > start && (lex->src[end - 1] == ' ' || lex->src[end - 1] == '\t' ||
+                           lex->src[end - 1] == '\r' || lex->src[end - 1] == '\n')) end--;
+    while (start < end && (lex->src[start] == ' ' || lex->src[start] == '\t' ||
+                           lex->src[start] == '\r' || lex->src[start] == '\n')) start++;
+    if (start == end) return 0;
+    *body = &lex->src[start];
+    *body_len = end - start;
     lex->pos = pos;
     kiln_dyn_lexer_next(lex);
     return 1;
