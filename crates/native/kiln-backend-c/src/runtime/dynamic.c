@@ -755,6 +755,25 @@ static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char *
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
                                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
 
+static int kiln_dyn_body_has_use_strict(const char *body, size_t length) {
+    size_t i = 0;
+    while (i < length && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' ||
+                          body[i] == '\n' || body[i] == '\f')) i++;
+    if (i >= length || (body[i] != '\'' && body[i] != '"')) return 0;
+    char quote = body[i++];
+    static const char directive[] = "use strict";
+    if (length - i < sizeof directive - 1 ||
+        memcmp(body + i, directive, sizeof directive - 1) != 0) return 0;
+    i += sizeof directive - 1;
+    if (i < length && body[i] == quote) {
+        i++;
+    } else {
+        return 0;
+    }
+    while (i < length && (body[i] == ' ' || body[i] == '\t' || body[i] == '\f')) i++;
+    return i == length || body[i] == ';' || body[i] == '\r' || body[i] == '\n';
+}
+
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *out, kiln_value *thrown) {
@@ -1117,7 +1136,8 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline,
                                        closure_name,
                                        "", 0,
-                                       "eval", 0, 0, 0, asynchronous, 0, 0, 0, 0,
+                                       "eval", 0, 0, 0, asynchronous, 0, 0, 0,
+                                       kiln_dyn_body_has_use_strict(&lex->src[bstart], blen),
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) return status;
@@ -1771,6 +1791,84 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *out, kiln_value *thrown) {
     return kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth, out, thrown);
+}
+
+/* Direct eval cannot compile a new native body at run time. It can, however, build a function
+ * expression with the same cell-backed lexical environment the dynamic Function trampoline
+ * already understands. This deliberately accepts one expression and requires it to produce a
+ * function; statement eval needs declaration-instantiation and is not approximated here. Names
+ * arrive in EvalSite order (innermost first), so inserting them in reverse preserves shadowing. */
+int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source,
+                                              const char *const *names,
+                                              const size_t *name_lengths,
+                                              const kiln_value *values, size_t binding_count,
+                                              int strict_context, kiln_value *out, int depth,
+                                              kiln_value *thrown) {
+    kiln_dyn_scope scope;
+    uint8_t *source_owned = NULL;
+    size_t source_len = 0;
+    kiln_dyn_lexer lex;
+    kiln_value completion = kiln_c99_undefined();
+    int status;
+    if (out == NULL || source.tag != KILN_VALUE_STRING ||
+        (binding_count != 0 && (names == NULL || name_lengths == NULL || values == NULL)))
+        return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_string_to_utf8_lossy(source, &source_owned, &source_len);
+    if (status != KILN_C99_OK) return status;
+    kiln_dyn_scope_init(&scope, NULL);
+    for (size_t i = binding_count; i > 0; --i) {
+        size_t index = i - 1;
+        if (names[index] == NULL || values[index].tag != KILN_VALUE_CELL) {
+            status = KILN_C99_INVALID_ARGUMENT;
+            goto direct_eval_done;
+        }
+        if (!kiln_dyn_scope_set(&scope, names[index], name_lengths[index], values[index])) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto direct_eval_done;
+        }
+    }
+    memset(&lex, 0, sizeof(lex));
+    lex.src = (const char *)source_owned;
+    lex.len = source_len;
+    kiln_dyn_lexer_next(&lex);
+    /* This seam is for a function expression only, not a general side-effecting expression that
+     * happens to produce a function. Koa/depd constructs exactly this shape at run time. */
+    if (lex.curr.kind == KILN_DYN_LPAREN) {
+        kiln_dyn_lexer_next(&lex);
+        if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
+            status = KILN_C99_CONTROL_ERROR;
+            goto direct_eval_unsupported;
+        }
+        kiln_dyn_token_free(&lex.curr);
+        memset(&lex, 0, sizeof(lex));
+        lex.src = (const char *)source_owned;
+        lex.len = source_len;
+        kiln_dyn_lexer_next(&lex);
+    } else if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
+        status = KILN_C99_CONTROL_ERROR;
+        goto direct_eval_unsupported;
+    }
+    status = kiln_dyn_eval_expr(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
+                                depth, &completion, thrown);
+    if (status == KILN_C99_OK && lex.curr.kind != KILN_DYN_EOF)
+        status = KILN_C99_CONTROL_ERROR;
+    if (status == KILN_C99_OK && completion.tag != KILN_VALUE_FUNCTION)
+        status = KILN_C99_CONTROL_ERROR;
+    if (status == KILN_C99_OK) {
+        if (strict_context) kiln_c99_closure_of(completion)->strict = 1;
+        *out = completion;
+    }
+    kiln_dyn_token_free(&lex.curr);
+    goto direct_eval_done;
+direct_eval_unsupported:
+    kiln_dyn_token_free(&lex.curr);
+    kiln_c99_note_refusal("native direct eval", 0,
+                          "unsupported direct eval source (expected function expression)",
+                          (size_t)kiln_c99_diagnostic_active_depth);
+direct_eval_done:
+    kiln_dyn_scope_destroy(&scope);
+    free(source_owned);
+    return status;
 }
 
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {

@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use kiln_ir::{Constant, Instruction};
+use kiln_ir::{Constant, EvalAccess, Instruction};
 
 use crate::{
     c_string, diagnostic_source, host_argument_inspection, host_op_code, instruction_diagnostic,
@@ -646,6 +646,83 @@ pub(crate) fn emit_tail_instruction(
                 importer = if *compact { "ku_importer".to_owned() } else { c_string(symbol) },
             )
             .unwrap();
+        }
+        Instruction::DirectEval(site) => {
+            let binding_count = site.bindings.len();
+            let array_count = binding_count.max(1);
+            output.push_str("    int status = KILN_C99_OK;\n");
+            writeln!(output, "    {{ const char *eval_names[{array_count}] = {{").unwrap();
+            for binding in &site.bindings {
+                writeln!(output, "        {},", c_string(&binding.name)).unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        NULL,\n");
+            }
+            writeln!(
+                output,
+                "    }}; size_t eval_name_lengths[{array_count}] = {{"
+            )
+            .unwrap();
+            for binding in &site.bindings {
+                writeln!(output, "        (size_t){},", binding.name.len()).unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        0,\n");
+            }
+            writeln!(
+                output,
+                "    }}; kiln_value eval_binding_values[{array_count}] = {{"
+            )
+            .unwrap();
+            for binding in &site.bindings {
+                let value = match binding.access {
+                    EvalAccess::Cell(slot) => format!("locals[{slot}]"),
+                    EvalAccess::Upvalue(index) => format!("upvalues[{index}]"),
+                };
+                writeln!(output, "        kiln_val_to_boundary({value}),").unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        kiln_c99_undefined(),\n");
+            }
+            output.push_str("    }; kiln_value eval_source = kiln_c99_undefined();\n");
+
+            let fixed_argc = site.argc.map(usize::from);
+            match fixed_argc {
+                Some(argc) => {
+                    if argc > 0 {
+                        output.push_str("    eval_source = kiln_val_to_boundary(stack[0]);\n");
+                    }
+                    if argc > 1 {
+                        writeln!(output, "    kiln_value eval_args[{argc}] = {{").unwrap();
+                        for index in 0..argc {
+                            writeln!(output, "        kiln_val_to_boundary(stack[{index}]),")
+                                .unwrap();
+                        }
+                        output.push_str("    };\n");
+                    }
+                    writeln!(output, "    size_t eval_argc = (size_t){argc};").unwrap();
+                    if argc > 1 {
+                        output.push_str("    const kiln_value *eval_call_args = eval_args;\n");
+                    } else if argc == 1 {
+                        output.push_str("    kiln_value eval_args[1] = { eval_source }; const kiln_value *eval_call_args = eval_args;\n");
+                    } else {
+                        output.push_str("    const kiln_value *eval_call_args = NULL;\n");
+                    }
+                }
+                None => {
+                    output.push_str("    kiln_value eval_spread = kiln_val_to_boundary(stack[0]); kiln_array *eval_array = eval_spread.tag == KILN_VALUE_ARRAY ? kiln_c99_array_of(eval_spread) : NULL; if (eval_array == NULL) return KILN_C99_INVALID_ARGUMENT; eval_source = eval_array->count ? kiln_val_to_boundary(eval_array->elements[0] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : eval_array->elements[0]) : kiln_c99_undefined();\n");
+                    output.push_str("    size_t eval_argc = eval_array != NULL ? eval_array->count : 0; kiln_value eval_args[eval_argc ? eval_argc : 1]; if (eval_array != NULL) for (size_t eval_i = 0; eval_i < eval_argc; ++eval_i) eval_args[eval_i] = kiln_val_to_boundary(eval_array->elements[eval_i] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : eval_array->elements[eval_i]); const kiln_value *eval_call_args = eval_array != NULL ? eval_args : NULL;\n");
+                }
+            }
+            output.push_str("    kiln_value eval_callee = kiln_c99_undefined(); int eval_found = 0; status = kiln_c99_global_binding(host, &eval_callee, \"eval\", 4, &eval_found, depth, thrown); if (status == KILN_C99_THROWN) { ");
+            output.push_str(unwind);
+            output.push_str(" } if (status != KILN_C99_OK) return status; if (!eval_found) { status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"eval is not defined\"); if (status == KILN_C99_THROWN) { ");
+            output.push_str(unwind);
+            output.push_str(" } if (status != KILN_C99_OK) return status; } kiln_value eval_result = kiln_c99_undefined(); if (eval_callee.tag != KILN_VALUE_BUILTIN || eval_callee.bits != KILN_C99_BUILTIN_EVAL) { status = kiln_c99_call(host, &eval_result, eval_callee, kiln_c99_undefined(), eval_call_args, eval_argc, depth, thrown); } else if (eval_source.tag != KILN_VALUE_STRING) { eval_result = eval_source; } else { status = kiln_c99_dynamic_eval_function_expression(host, eval_source, eval_names, eval_name_lengths, eval_binding_values, (size_t)");
+            write!(output, "{binding_count}").unwrap();
+            write!(output, ", {}, &eval_result, depth, thrown); }} if (status == KILN_C99_THROWN) {{ ", i32::from(site.strict)).unwrap();
+            output.push_str(unwind);
+            output.push_str(" } if (status != KILN_C99_OK) return status; sp = 0; stack[sp++] = kiln_val_from_boundary(eval_result); }\n");
         }
         other => unreachable!("the graph lowers {other:?} itself; only the tail comes here"),
     }
