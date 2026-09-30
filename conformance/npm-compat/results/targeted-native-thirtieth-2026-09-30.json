@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "coverage": "9 focused native probes; parity is not the full npm corpus",
+  "source_commit": "6876c88a3aa8ca477b7248e2d8bb45ad4089c9d7",
+  "kiln_sha256": "d3a277aeea2082e203588159504b174af2e16ac02488bd306c2f6f379d16108f",
+  "counts": {
+    "matched": 7,
+    "refused": 0,
+    "diverged": 2,
+    "invalid": 0
+  },
+  "blockers": [
+    "Native guarded literal eval returns intrinsic function after global getter override",
+    "Native namespace reads unwrap correctly but do not observe an exported setter update"
+  ],
+  "raw_log": "target/npm-compat-evidence/bootstrap-native-thirtieth.log",
+  "full_npm_coverage": false
+}
