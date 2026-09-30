@@ -1398,11 +1398,15 @@ extern int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int
     __attribute__((pure)) KILN_C99_RARE_CALL;
 extern int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
     __attribute__((pure)) KILN_C99_RARE_CALL;
+extern int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
+                                                          size_t len) KILN_C99_RARE_CALL;
 #else
 static int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond)
     __attribute__((pure)) KILN_C99_RARE_CALL;
 static int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
     __attribute__((pure)) KILN_C99_RARE_CALL;
+static int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
+                                                          size_t len) KILN_C99_RARE_CALL;
 #endif
 /* Bit `id` of the bitmap's word `word`: a compile-time constant for a named built-in. */
 #define KILN_C99_BIT_OF_BUILTIN(id, word) \
@@ -1678,6 +1682,10 @@ typedef struct kiln_c99_site {
     uint8_t cached_tag;
     uint8_t has_cached_method;
     uint64_t cached_method;
+    /* Exact ASCII property key for cached builtin-method answers. Native method ids can have
+     * aliases, so bootstrap facade checks must be tied to the spelling this site read. */
+    uint8_t cached_member_len;
+    char cached_member[64];
     /* A builtin receiver's method is cached by which builtin it was, and nothing else: it holds
      * while the current realm has not modified that built-in (`kiln_c99_realm_builtin_modified`),
      * a record every realm keeps for itself. */
@@ -1753,10 +1761,18 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_site_has_method(const kiln_c99_sit
 static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c99_site *site,
                                                                           uint8_t tag,
                                                                           uint64_t method,
-                                                                          uint32_t builtin) {
+                                                                          uint32_t builtin,
+                                                                          const char *member,
+                                                                          size_t member_len) {
     uint8_t seen = __atomic_load_n(&site->has_cached_method, __ATOMIC_ACQUIRE);
     if (seen == 1u && site->cached_tag == tag && site->cached_method == method &&
-        site->cached_builtin == builtin)
+        site->cached_builtin == builtin && site->cached_member_len == member_len &&
+        (member_len == 0 || (member_len < sizeof site->cached_member &&
+                             memcmp(site->cached_member, member, member_len) == 0)))
+        return;
+    if (seen == 1u && tag == KILN_VALUE_BUILTIN && site->cached_tag == tag &&
+        site->cached_method == method && site->cached_builtin == builtin &&
+        site->cached_member_len == UINT8_MAX && member_len >= sizeof site->cached_member)
         return;
     if (seen == KILN_C99_SITE_METHOD_WRITING ||
         !__atomic_compare_exchange_n(&site->has_cached_method, &seen,
@@ -1770,6 +1786,24 @@ static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c9
     site->cached_tag = tag;
     site->cached_method = method;
     site->cached_builtin = builtin;
+    if (tag == KILN_VALUE_BUILTIN) {
+        size_t index;
+        if (member == NULL || member_len >= sizeof site->cached_member) {
+            site->cached_member_len = UINT8_MAX;
+        } else {
+            for (index = 0; index < member_len; ++index) {
+                if ((unsigned char)member[index] >= 0x80u) break;
+            }
+            if (index != member_len) {
+                site->cached_member_len = UINT8_MAX;
+            } else {
+                memcpy(site->cached_member, member, member_len);
+                site->cached_member_len = (uint8_t)member_len;
+            }
+        }
+    } else {
+        site->cached_member_len = 0;
+    }
     __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
 }
 

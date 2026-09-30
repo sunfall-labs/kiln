@@ -635,6 +635,36 @@ kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, si
     return kiln_c99_realm_member_answer(builtin, member, len);
 }
 
+/* Cached builtin-method sites carry the exact property spelling because several exposed names
+ * can lower to one native method id. Bootstrap clears program-write authority, but its
+ * `modified_builtins` bits and own stores remain; check this member only for affected builtins. */
+static __attribute__((noinline)) KILN_C99_RARE_CALL int
+kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member, size_t len) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t at;
+    int modified;
+    int untouched;
+    if (heap == NULL || member == NULL) return 0;
+    if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) {
+        modified = (int)((heap->modified_builtins[builtin >> 6] >> (builtin & 63u)) & 1u);
+    } else {
+        modified = heap->modified_builtin_beyond != 0;
+    }
+    if (!modified) return 1;
+    at = kiln_c99_member_answer_at(builtin, member);
+    if (heap->member_answers[at].member == member &&
+        heap->member_answers[at].builtin == builtin &&
+        heap->member_answers[at].serial == heap->builtin_store_serial) {
+        return heap->member_answers[at].untouched;
+    }
+    untouched = !kiln_c99_builtin_store_has_own(builtin, member, len);
+    heap->member_answers[at].member = member;
+    heap->member_answers[at].builtin = builtin;
+    heap->member_answers[at].serial = heap->builtin_store_serial;
+    heap->member_answers[at].untouched = (uint8_t)untouched;
+    return untouched;
+}
+
 /* Issue 30: the prototypes whose members a receiver *kind* answers from a method table (a string's
  * `trim`, an array's `join`, a map's `get`, a regexp's `test`), and so the ones an emitted method
  * fast path -- which answers by name for whichever of these kinds the receiver turns out to be --

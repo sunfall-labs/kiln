@@ -950,6 +950,9 @@ static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
     return kiln_val_from_boundary(kiln_c99_unary(operation, kiln_val_to_boundary(value)));
 }
 
+static inline int kiln_c99_site_member_matches_bytes(const kiln_c99_site *site,
+                                                     const char *member, size_t len);
+
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   const char *key, size_t key_len,
                                   int depth, kiln_value *thrown,
@@ -967,7 +970,13 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             }
         }
         if (KILN_LIKELY(kiln_c99_site_has_method(site) && target.tag == site->cached_tag)) {
-            if (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) {
+            int builtin_key_matches = target.tag != KILN_VALUE_BUILTIN ||
+                ((uint32_t)target.bits == site->cached_builtin &&
+                 kiln_c99_site_member_matches_bytes(site, key, key_len) &&
+                 kiln_c99_realm_cached_builtin_member_untouched(
+                     site->cached_builtin, site->cached_member, site->cached_member_len));
+            if (builtin_key_matches &&
+                (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED)) {
                 *out = kiln_c99_method(site->cached_method);
                 return KILN_C99_OK;
             }
@@ -1002,7 +1011,8 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             target.tag == KILN_VALUE_COLLECTION ||
             target.tag == KILN_VALUE_BUILTIN) {
             kiln_c99_site_cache_method(site, (uint8_t)target.tag, out->bits,
-                                       target.tag == KILN_VALUE_BUILTIN ? (uint32_t)target.bits : 0);
+                                       target.tag == KILN_VALUE_BUILTIN ? (uint32_t)target.bits : 0,
+                                       key, key_len);
         }
     }
     return status;
@@ -1052,18 +1062,51 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
-static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+static inline int kiln_c99_site_member_matches_bytes(const kiln_c99_site *site,
+                                                     const char *member, size_t len) {
+    return site != NULL && member != NULL && len < sizeof site->cached_member &&
+           site->cached_member_len == len && memcmp(site->cached_member, member, len) == 0;
+}
+
+static inline int kiln_c99_site_member_matches_key(const kiln_c99_site *site,
+                                                   const kiln_string *key) {
+    if (site == NULL || key == NULL || key->unit_len >= sizeof site->cached_member ||
+        site->cached_member_len != key->unit_len) return 0;
+    for (size_t index = 0; index < key->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
+        if (unit >= 0x80u || (unsigned char)site->cached_member[index] != unit) return 0;
+    }
+    return 1;
+}
+
+static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t tag,
+                                                  uint64_t method, uint32_t builtin,
+                                                  const kiln_string *key) {
+    char member[64];
+    size_t len = key == NULL ? sizeof member : key->unit_len;
+    if (tag != KILN_VALUE_BUILTIN) {
+        kiln_c99_site_cache_method(site, tag, method, builtin, NULL, 0);
+        return;
+    }
+    if (len >= sizeof member) {
+        kiln_c99_site_cache_method(site, tag, method, builtin, NULL, sizeof member);
+        return;
+    }
+    for (size_t index = 0; index < len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
+        if (unit >= 0x80u) {
+            kiln_c99_site_cache_method(site, tag, method, builtin, NULL, sizeof member);
+            return;
+        }
+        member[index] = (char)unit;
+    }
+    kiln_c99_site_cache_method(site, tag, method, builtin, member, len);
+}
+
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target,
+                                                 const kiln_string *key) {
     if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
-    /* Error.captureStackTrace is replaced by the TypeScript public facade during bootstrap.
-     * Bootstrap stores deliberately do not count as program mutations, so the usual builtin
-     * epoch guard cannot invalidate a cached intrinsic method at these call sites. Resolve this
-     * one through its own property store each time, which also preserves user overrides. */
-    if (ctag == KILN_VALUE_BUILTIN &&
-        site->cached_method == KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE &&
-        kiln_c99_error_name(site->cached_builtin) != NULL) {
-        return 0;
-    }
     /* Issue 30: a kind's remembered method is its table's, which a member the program wrote onto
      * the kind's prototype shadows. One compare while no realm has written onto a built-in. */
     if (ctag != KILN_VALUE_BUILTIN && KILN_UNLIKELY(!kiln_c99_tag_method_pristine(ctag, site->cached_method))) return 0;
@@ -1077,12 +1120,11 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
-        /* `Promise.resolve`, `Object.keys`, `Math.max`: the same builtin at the same site answers
-         * the same method while the current realm has not modified that built-in (ADR 0071): a
-         * realm's own record, consulted only once some realm has modified some built-in. */
-        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
-               (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
-                !kiln_c99_realm_builtin_modified(site->cached_builtin));
+        if (!kiln_c99_site_member_matches_key(site, key) ||
+            !kiln_c99_realm_cached_builtin_member_untouched(
+                site->cached_builtin, site->cached_member, site->cached_member_len)) return 0;
+        return KILN_VAL_IS_BUILTIN(target) &&
+               KILN_VAL_BUILTIN_ID(target) == site->cached_builtin;
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
@@ -1137,7 +1179,7 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
             }
         }
     }
-    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, target))) {
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, target, key))) {
         *out = KILN_VAL_METHOD(site->cached_method);
         return KILN_C99_OK;
     }
@@ -2258,7 +2300,7 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
                                          const char *inst_op, kiln_val *out) {
     kiln_val method = 0;
     int from_cache = 0;
-    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver))) {
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver, key))) {
         method = KILN_VAL_METHOD(site->cached_method);
         from_cache = 1;
     } else if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(receiver))) {
@@ -2295,9 +2337,10 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
             !(KILN_VAL_IS_OBJECT(receiver) &&
               kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT &&
               ((const kiln_object *)KILN_VAL_PTR(receiver))->shape != NULL)) {
-            kiln_c99_site_cache_method(site, (uint8_t)kiln_val_to_boundary(receiver).tag,
-                                       KILN_VAL_METHOD_ID(method),
-                                       KILN_VAL_IS_BUILTIN(receiver) ? KILN_VAL_BUILTIN_ID(receiver) : 0);
+            kiln_c99_site_cache_method_key(site, (uint8_t)kiln_val_to_boundary(receiver).tag,
+                                           KILN_VAL_METHOD_ID(method),
+                                           KILN_VAL_IS_BUILTIN(receiver) ? KILN_VAL_BUILTIN_ID(receiver) : 0,
+                                           key);
         } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver) &&
                    /* A proxy, a generator and a collection are boxed with the object prefix and
                     * are not objects; a site learns a shape only from an object, so a hit -- a
