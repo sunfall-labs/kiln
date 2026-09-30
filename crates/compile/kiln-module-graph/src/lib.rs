@@ -1998,28 +1998,25 @@ where
                             // even when the resolver's `node_builtins` gate is off (the daemon
                             // only enables Node builtins when package metadata says so, but an
                             // explicit `getBuiltinModule("os")` *is* a Node program).
-                            let resolved = if let Some(builtin) =
-                                NodeBuiltin::parse(&request.specifier)
-                            {
-                                ResolvedModule::new(
-                                    builtin.virtual_path(
-                                        self.resolver.project_root(),
-                                    ),
-                                    ResolutionKind::Builtin,
-                                )
-                            } else {
-                                match self.resolver.resolve_for_request(
-                                    &request.specifier,
-                                    &importer,
-                                    NodeRequestKind::Require,
-                                ) {
-                                    Ok(resolved) => resolved,
-                                    Err(error) => {
-                                        // `createRequire` and `getBuiltinModule` execute lazily. An
-                                        // unavailable literal is therefore a catchable runtime
-                                        // failure, just like a dynamic import that cannot be resolved;
-                                        // it must not make graph construction fail eagerly.
-                                        self.record_runtime_failure(
+                            let resolved =
+                                if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
+                                    ResolvedModule::new(
+                                        builtin.virtual_path(self.resolver.project_root()),
+                                        ResolutionKind::Builtin,
+                                    )
+                                } else {
+                                    match self.resolver.resolve_for_request(
+                                        &request.specifier,
+                                        &importer,
+                                        NodeRequestKind::Require,
+                                    ) {
+                                        Ok(resolved) => resolved,
+                                        Err(error) => {
+                                            // `createRequire` and `getBuiltinModule` execute lazily. An
+                                            // unavailable literal is therefore a catchable runtime
+                                            // failure, just like a dynamic import that cannot be resolved;
+                                            // it must not make graph construction fail eagerly.
+                                            self.record_runtime_failure(
                                             path.clone(),
                                             importer.clone(),
                                             request.specifier.clone(),
@@ -2030,10 +2027,10 @@ where
                                                 error
                                             ),
                                         );
-                                        continue;
+                                            continue;
+                                        }
                                     }
-                                }
-                            };
+                                };
                             let runtime_source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if !self.typed_sources {

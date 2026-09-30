@@ -974,6 +974,31 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
     )
 }
 
+/// `import.meta` for native binaries, written in TypeScript over the already-exposed
+/// `process.execPath` (ADR 0005: builtins are TypeScript, not C). Follows Node's
+/// single-executable-application semantics: `filename` is the executable path, `url` is its
+/// `file:` URL, `dirname` is its directory, and `main` is true for the entry module.
+/// The frontend lowers `import.meta` to a `__kilnNativeImportMeta(isEntry)` call when
+/// compiling for a native target; this snippet defines that function.
+fn native_import_meta_bootstrap() -> String {
+    r#"
+if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
+    const __kilnExecPath = globalThis.process.execPath;
+    const __kilnExecUrl = "file://" + __kilnExecPath;
+    const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
+    globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry) {
+        return {
+            url: __kilnExecUrl,
+            filename: __kilnExecPath,
+            dirname: __kilnExecDir,
+            main: isEntry,
+        };
+    };
+}
+"#
+    .to_string()
+}
+
 fn compile_native_builtin_bootstrap(
     node: bool,
     retain_url: bool,
@@ -987,14 +1012,15 @@ fn compile_native_builtin_bootstrap(
     };
     let common_ts_builtins = kiln_builtins::common_bootstrap_source_selected(families);
     let get_builtin_module = native_get_builtin_module_bootstrap();
+    let import_meta = native_import_meta_bootstrap();
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}\n{get_builtin_module}",
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}\n{get_builtin_module}\n{import_meta}",
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}\n{import_meta}"
         )
     };
     let source_digest = Digest::hash(source.as_bytes());
