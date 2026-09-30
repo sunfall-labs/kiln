@@ -360,6 +360,8 @@ export class KeyObject {
     this.symmetricKeySize = type === 'secret' ? this._key.length : undefined;
   }
 
+  get [Symbol.toStringTag](): string { return 'KeyObject'; }
+
   export(): any {
     return Buffer.from(this._key);
   }
@@ -531,6 +533,9 @@ const cryptoDefault = {
   randomFillSync,
   randomUUID,
   timingSafeEqual,
+  subtle: typeof globalThis !== 'undefined' && (globalThis as any).crypto
+    ? (globalThis as any).crypto.subtle
+    : undefined,
 };
 
 // The global `crypto`. The interpreter installs its own, which already carries every one of
