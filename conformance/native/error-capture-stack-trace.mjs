@@ -32,3 +32,14 @@ console.log(
   trimmed[0].getFunctionName(),
   typeof trimmed[0].getFileName() === "string",
 );
+
+const nativeCaptureStackTrace = Error.captureStackTrace;
+let overrideCalls = 0;
+Error.captureStackTrace = (target) => {
+  overrideCalls++;
+  target.stack = "custom capture";
+};
+const customTarget = {};
+Error.captureStackTrace(customTarget);
+Error.captureStackTrace = nativeCaptureStackTrace;
+console.log(overrideCalls, customTarget.stack);
