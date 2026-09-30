@@ -27,3 +27,4 @@ JSON.parse('{"n":1e2,"s":"\\u0061","a":[true,null]}', (_key, value, context) => 
   return value;
 });
 console.log(tokens.join('|'));
+console.log(JSON.parse('{"a":{"old":1},"a":null}', (_key, value) => value).a === null);

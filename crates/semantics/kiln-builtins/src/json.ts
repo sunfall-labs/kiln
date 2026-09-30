@@ -125,7 +125,8 @@
               whitespace();
               position++; // colon: the primitive parser has already validated it
             }
-            record.children[key] = sourceRecord(value[key]);
+            record.children[key] = sourceRecord(value !== null && typeof value === "object"
+              ? value[key] : undefined);
             whitespace();
             if (input[position] !== ',') break;
             position++;
@@ -146,6 +147,7 @@
       const source = sourceRecord(value);
       function visit(holder: any, key: string, record: any): any {
         const value = holder[key];
+        if (record !== undefined && !Object.is(record.value, value)) record = undefined;
         if (value !== null && typeof value === "object") {
           const keys: string[] = [];
           if (Array.isArray(value)) {
