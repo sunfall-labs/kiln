@@ -66,9 +66,11 @@ win.show();
 
 * `kiln:gui` is an extension module subject to ADR 0068: it is guarded by `KILN_EXTENSIONS` and
   absent when `--no-kiln-extensions` is specified.
-* High-level declarative frameworks (such as a native React reconciler package,
-  `@kiln/react-native-gui`) sit entirely in userland or secondary packages, emitting imperative
-  mutations to the underlying `kiln:gui` element tree.
+* High-level declarative frameworks sit entirely in userland or secondary packages. Specifically,
+  the primary declarative bridge is `@kiln/solid-gui`, built on SolidJS 2.0's `@solidjs/universal`
+  (`createRenderer`). Because Solid 2.0 executes components only once and binds fine-grained reactive
+  signals directly to native node properties, it operates with zero Virtual DOM overhead, zero tree diffing,
+  and negligible GC allocation pressure during user interactions.
 * Component definitions, layout property names (`padding`, `spacing`, `alignment`), and event
   signatures adopt standardized, cross-platform TypeScript contracts.
 
@@ -88,8 +90,8 @@ Per ADR 0062, provider requirements are derived strictly from the retained graph
 #### Ported from Perry (`perryts.com`):
 1. **TypeScript Widget Contracts & Schemas:** Interface declarations (`.d.ts`), prop types, and
    event listener types for native controls (`Window`, `VStack`, `HStack`, `Button`, `Text`, etc.).
-2. **Headless React / JSX Reconciler:** The platform-agnostic reconciler implementation that turns
-   JSX trees into imperative widget mutations (`createInstance`, `appendChild`, `commitUpdate`).
+2. **Declarative Component Paradigms:** The widget prop models, event binding patterns, and
+   tree mutation mappings adapted into SolidJS 2.0's 10-method `createRenderer` contract.
 3. **Platform OS C/Rust Glue:** The low-level bridging layer that interacts with OS UI APIs:
    - macOS / iOS: Objective-C / Swift bridging to `NSWindow`, `NSView`, and SwiftUI hosting controllers.
    - Linux: GTK4 C-FFI / `gtk-rs` bindings creating GTK application windows and widgets.
@@ -158,5 +160,10 @@ To uphold Kiln’s core invariant of dual-engine differential parity ([`scripts/
   compiler binary and slows compiler iteration.
 * **Hardcode UI Primitives in Bytecode / HIR:** Rejected. Violates separation of concerns; all UI
   interactions must flow through standard module calls and the HostOps seam.
+* **Virtual DOM / React Reconciler Model (`react-reconciler`):** Rejected. VDOM diffing forces
+  repeated component execution and fiber allocations, creating continuous GC pressure during typing,
+  scrolling, and interactive events. SolidJS 2.0's fine-grained signals execute components once and
+  update scalar properties directly with near-zero GC allocations, while sharing frontend compiler
+  architecture with Kiln via Oxc.
 * **Monolithic Provider Archive:** Rejected. Violates ADR 0062; GUI capabilities must be split into
   an on-demand staticlib package.
