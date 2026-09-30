@@ -389,7 +389,13 @@ fn dce_release_graph(
         let Some(path) = node.path.to_str() else {
             continue;
         };
-        let hir = kiln_frontend_oxc::parse_dce(path, &node.program.program.source, &demanded_names);
+        let is_entry = node.path == graph.entry();
+        let hir = kiln_frontend_oxc::parse_dce_native(
+            path,
+            &node.program.program.source,
+            &demanded_names,
+            is_entry,
+        );
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
@@ -437,6 +443,67 @@ fn dce_release_graph(
         // failure. An unfamiliar export/re-export shape keeps the already
         // reduced graph and its original slot numbering.
         Err(_) => (graph.clone(), demand.clone()),
+    }
+}
+
+/// Re-parse modules with native `import.meta` (Node SEA semantics) without DCE.
+/// Used for non-release profiles where `dce_release_graph` doesn't run: the module
+/// graph is parsed once for both interpreter and native, so native dev builds need
+/// their own re-parse to get runtime `import.meta` values.
+fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
+    let mut replacements = BTreeMap::new();
+
+    for node in graph.modules() {
+        if node.source != ModuleSource::Source {
+            continue;
+        }
+        if node.program.program.source.is_empty() {
+            continue;
+        }
+        // Demand all exports: no DCE, just the import.meta re-lowering.
+        let demanded_names = node
+            .program
+            .exports
+            .iter()
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        let Some(path) = node.path.to_str() else {
+            continue;
+        };
+        let is_entry = node.path == graph.entry();
+        let hir = kiln_frontend_oxc::parse_dce_native(
+            path,
+            &node.program.program.source,
+            &demanded_names,
+            is_entry,
+        );
+        let Ok(mut program) = kiln_ir::compile_module(&hir) else {
+            continue;
+        };
+
+        let mut imports = Vec::new();
+        for mut import in program.imports {
+            let Some(linked) = node
+                .program
+                .imports
+                .iter()
+                .find(|candidate| candidate.local == import.local)
+            else {
+                continue;
+            };
+            import.source.clone_from(&linked.source);
+            import.imported.clone_from(&linked.imported);
+            imports.push(import);
+        }
+        program.imports = imports;
+        program.dependencies.clone_from(&node.program.dependencies);
+
+        replacements.insert(node.path.clone(), program);
+    }
+
+    match graph.replace_programs_and_relink(replacements) {
+        Ok(graph) => graph,
+        Err(_) => graph.clone(),
     }
 }
 
@@ -2391,7 +2458,8 @@ impl NativeBuilder {
         ) {
             dce_release_graph_to_fixpoint(reduced, demand, &selection)?
         } else {
-            (reduced, demand)
+            // Non-release: re-parse for native import.meta without DCE.
+            (native_import_meta_reparse(&reduced), demand)
         };
         let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,

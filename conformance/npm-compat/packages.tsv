@@ -348,6 +348,7 @@ toml	5.0.0	pass		toml
 trim-newlines	5.0.0	wrong-output	expected "\"🦄\"", got "\">�\""	trim-newlines
 tweetnacl	1.0.3	missing-api	Uncaught ReferenceError: TextEncoder is not defined	tweetnacl
 type-detect	4.1.0	wrong-output	type-list mismatch on line 1 (diff truncated on page)	type-detect
+upm	1.3.1	n/a		upm
 url	0.11.4	missing-api	porffor: cannot resolve 'util' from node_modules/object-inspect/util.inspect.js	url
 url-parse	1.5.10	runtime-error	crashed (SIGSEGV)	url-parse
 valibot	1.5.0	pass		valibot
