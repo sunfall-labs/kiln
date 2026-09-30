@@ -399,6 +399,8 @@ extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots, kil
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_PHASE_LANE_RESET 3
@@ -1086,11 +1088,13 @@ static int {wrapper_symbol}_realm_entry(void *opaque) {{
     {wrapper_symbol}_realm_context *context = ({wrapper_symbol}_realm_context *)opaque;
     int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_gc_enter_job();
     status = kiln_realm_gc_register_roots_with_visitor({wrapper_symbol}_gc_result_roots,
                                           {wrapper_symbol}_gc_visit_result, context->result,
                                           KILN_GC_ROOT_SURVIVES_TEARDOWN);
-    if (status != KILN_C99_OK) return status;
-    return {wrapper_symbol}_body(context);
+    if (status == KILN_C99_OK) status = {wrapper_symbol}_body(context);
+    kiln_c99_gc_leave_job();
+    return status;
 }}
 
 static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_result) {{

@@ -3342,7 +3342,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         "typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
-         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    /* In a worker's realm (`node:worker_threads`), one plus the index of the module it runs as its entry; 0 in the program's own. */\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
+         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int weak_job_active;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    /* In a worker's realm (`node:worker_threads`), one plus the index of the module it runs as its entry; 0 in the program's own. */\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
     );
@@ -4358,9 +4358,12 @@ static int kiln_graph_enter_inner(void *opaque) {
     );
     output.push_str(&evaluation);
     output.push_str("    return 0;\n}\n");
-    output.push_str(
-        "static int kiln_graph_enter(void *opaque) {\n    kiln_c99_gc_enter_job();\n    int status = kiln_graph_enter_inner(opaque);\n    kiln_c99_gc_leave_job();\n    return status;\n}\n",
-    );
+    writeln!(
+        output,
+        "static int kiln_graph_enter(void *opaque) {{\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    int status;\n    if (graph == NULL) return -1;\n    if (!graph->weak_job_active) {{ kiln_c99_gc_enter_job(); graph->weak_job_active = 1; }}\n    status = kiln_graph_enter_inner(opaque);\n    if (status != 0 || graph->current_module >= (size_t){} ||\n        graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{\n        kiln_c99_gc_leave_job();\n        graph->weak_job_active = 0;\n    }}\n    return status;\n}}",
+        startup_indices.len()
+    )
+    .unwrap();
     output.push_str(&helper_defs);
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
