@@ -3954,13 +3954,22 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         let Some(projection) = native_commonjs_projection_index(node) else {
             continue;
         };
-        let specifier = builtin.specifier();
-        writeln!(
-            output,
-            "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
-            native_c_string(specifier), specifier.len(), index, index, index, projection
-        )
-        .unwrap();
+        let canonical = builtin.specifier();
+        // Bootstrap/global require has no importing module's fixed table. Publish the same
+        // builtin aliases as importer-scoped require, using the resolver as the authority.
+        let aliases = std::iter::once(canonical).chain(
+            canonical
+                .strip_prefix("node:")
+                .filter(|alias| NodeBuiltin::parse(alias) == Some(builtin)),
+        );
+        for specifier in aliases {
+            writeln!(
+                output,
+                "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
+                native_c_string(specifier), specifier.len(), index, index, index, projection
+            )
+            .unwrap();
+        }
     }
     output.push_str("    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\nstatic int kiln_graph_create_require(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    if (graph == NULL || result == NULL || argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING || (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
