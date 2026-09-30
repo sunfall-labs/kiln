@@ -1,6 +1,6 @@
 // kiln-builtins: node:http implementation (Phase 5.2, ADR 0005)
 
-import { Readable, Writable } from "./stream";
+import { Writable } from "./stream";
 
 const nativeModule =
   typeof process !== "undefined"
@@ -45,26 +45,10 @@ export const METHODS = [
   "UNSUBSCRIBE",
 ];
 
-const NativeIncomingMessage: any =
+export const IncomingMessage: any =
   nativeModule && typeof nativeModule.IncomingMessage === "function"
     ? nativeModule.IncomingMessage
-    : null;
-
-export const IncomingMessage: any = function IncomingMessage(this: any, socket?: any) {
-  Object.assign(this, new Readable());
-  this.socket = socket;
-  this.connection = socket;
-};
-Object.defineProperty(IncomingMessage, "name", { value: "IncomingMessage", configurable: true });
-if (NativeIncomingMessage) {
-  Object.setPrototypeOf(IncomingMessage, NativeIncomingMessage);
-  IncomingMessage.prototype = NativeIncomingMessage.prototype;
-  Object.defineProperty(IncomingMessage.prototype, "constructor", {
-    value: IncomingMessage, writable: true, configurable: true,
-  });
-} else {
-  IncomingMessage.prototype = Readable.prototype;
-}
+    : function IncomingMessage() {};
 if (IncomingMessage.prototype && typeof IncomingMessage.prototype.unpipe !== "function") {
   IncomingMessage.prototype.unpipe = function unpipe() {
     return this;
@@ -85,19 +69,29 @@ const NativeServerResponse: any =
   nativeModule && typeof nativeModule.ServerResponse === "function"
     ? nativeModule.ServerResponse
     : null;
-const legacyResponseMarker = Symbol("kiln legacy ServerResponse receiver");
+const legacyResponseReceivers = new WeakSet<object>();
 
 function legacyResponseMethod(name: string, fallback: Function): void {
   const prototype = NativeServerResponse && NativeServerResponse.prototype;
-  if (!prototype || typeof prototype[name] !== "function") return;
-  const nativeMethod = prototype[name];
+  if (!prototype) return;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+  const nativeMethod = descriptor && typeof descriptor.value === "function"
+    ? descriptor.value
+    : prototype[name];
+  const delegatedMethod = typeof nativeMethod === "function" ? nativeMethod : null;
   const method = function (this: any, ...args: any[]) {
-    return this && this[legacyResponseMarker]
+    return !delegatedMethod || (this && legacyResponseReceivers.has(this))
       ? fallback.apply(this, args)
-      : nativeMethod.apply(this, args);
+      : delegatedMethod.apply(this, args);
   };
   Object.defineProperty(method, "name", { value: name, configurable: true });
-  Object.defineProperty(prototype, name, { value: method, writable: true, configurable: true });
+  Object.defineProperty(method, "length", {
+    value: delegatedMethod ? delegatedMethod.length : fallback.length,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, name, descriptor
+    ? { ...descriptor, value: method }
+    : { value: method, writable: true, configurable: true });
 }
 
 export const ServerResponse: any = function ServerResponse(this: any, req?: any) {
@@ -106,7 +100,7 @@ export const ServerResponse: any = function ServerResponse(this: any, req?: any)
   }
   if (new.target) return new NativeServerResponse(req);
   Object.assign(this, new Writable());
-  Object.defineProperty(this, legacyResponseMarker, { value: true, configurable: true });
+  legacyResponseReceivers.add(this);
   this.req = req;
   this.socket = null;
   this.connection = null;
@@ -164,7 +158,10 @@ if (NativeServerResponse) {
     return Writable.prototype.destroy.call(this, error);
   });
 } else {
-  ServerResponse.prototype = Writable.prototype;
+  ServerResponse.prototype = Object.create(Writable.prototype);
+  Object.defineProperty(ServerResponse.prototype, "constructor", {
+    value: ServerResponse, writable: true, configurable: true,
+  });
 }
 
 export function createServer(...args: any[]): any {

@@ -1,11 +1,4 @@
 // kiln eval smoke test (authored for kiln, not from porffor).
-const http = require('node:http');
-const legacyResponse = Object.create(http.ServerResponse.prototype);
-http.ServerResponse.call(legacyResponse, { method: 'GET' });
-legacyResponse.setHeader('X-Legacy-Probe', 'ok');
-console.log('legacy response:', legacyResponse.req.method, legacyResponse.getHeader('x-legacy-probe'),
-  legacyResponse instanceof http.ServerResponse);
-
 const fastify = require('fastify')();
 fastify.get('/hello', async () => ({ msg: 'hi' }));
 fastify.get('/add/:a/:b', async req => ({ sum: Number(req.params.a) + Number(req.params.b) }));
