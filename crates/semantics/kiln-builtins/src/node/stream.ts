@@ -112,6 +112,12 @@ class EventEmitter {
   }
 }
 
+// Node exposes EventEmitter.prototype.on as an alias of addListener. Keep the alias itself
+// instead of delegating through `this.addListener`: legacy stream subclasses commonly replace
+// `addListener` with their `on` wrapper, which calls Stream.prototype.on.call(this, ...). A
+// dynamic delegation here would recurse through that wrapper forever.
+EventEmitter.prototype.on = EventEmitter.prototype.addListener;
+
 class StreamImplementation extends EventEmitter {
   static Readable: typeof Readable;
   static Writable: typeof Writable;
