@@ -100,6 +100,9 @@ export const ServerResponse: any = function ServerResponse(this: any, req?: any,
   }
   if (new.target) return new NativeServerResponse(req, options);
   Object.assign(this, new Writable(options));
+  // Native response prototypes do not inherit Writable.prototype. The legacy adapter
+  // delegates write/end to Writable, so retain its default hook when the subclass has none.
+  if (typeof this._write !== "function") this._write = Writable.prototype._write;
   legacyResponseReceivers.add(this);
   this.req = req;
   this.socket = null;
