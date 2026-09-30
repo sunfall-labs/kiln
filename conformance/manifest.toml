@@ -32,10 +32,11 @@
 #
 # The pass count is therefore not in this file and cannot be derived from it. It comes from
 # `kiln test conformance/guard`, which runs every probe, prints the distribution of reasons for
-# the ones that fail, and exits non-zero while any of them does. At the time of writing that is
-# 0 of 20 passing, all of them refused during lowering: the interpreter supports no user function
-# calls, no objects and no property access. That number is a measurement and will move; this file
-# is not where it is recorded.
+# the ones that fail, and exits non-zero while any of them does. Remeasured 2026-09-30, that is
+# 20 of 20 passing (recorded in conformance/results/baseline.json; the August 2026 state this
+# comment once described -- 0 of 20, refused during lowering with no heap, no calls and no
+# property access -- is kept in docs/language-coverage.md §1-§7). That number is a measurement
+# and will move; this file is not where it is recorded.
 #
 # `status.sh` still only reports what this file says, and still executes nothing. Its `--gate`
 # checks that something *can* run, which is now true, so the gate that matters is the runner's
@@ -2261,4 +2262,21 @@ call 150
 apply 150
 nested true
 after 5
+"""
+
+[[test]]
+id = "regress/r49-define-properties-symbols"
+group = "regress"
+source = "regress/r49-define-properties-symbols.js"
+status = "runnable"
+features = ["object-statics", "symbols", "accessors", "proxy"]
+catches = """
+`Object.defineProperties` silently dropped symbol-keyed descriptors: the key walk wrapped every key as a string-domain lookup, which never matches a symbol slot, and the apply loop re-wrapped them again, so nothing was defined and no error was raised. Fastify's `Reply.prototype[Symbol(fastify.context)]` getter died on it, failing `server/s04-fastify` in `validate`/`onErrorHook`. The proxy branch named the key by its reserved spelling (`"@@symbol:N"`) instead of the symbol. Recorded from node 26.8.1.\
+"""
+expected_stdout = """
+42 p iter
+Symbol(s),Symbol(Symbol.iterator)
+here
+q,Symbol(s) 1 2
+3 Symbol(s)
 """

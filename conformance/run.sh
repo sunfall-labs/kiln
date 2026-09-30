@@ -16,4 +16,4 @@ fi
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-exec cargo run -p kiln-cli --locked -- --one-shot test conformance --out "$2"
+exec cargo run -p kiln-cli --bin kiln --locked -- --one-shot test conformance --out "$2"

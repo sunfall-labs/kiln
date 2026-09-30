@@ -1,170 +1,474 @@
 {
-  "runner": "kiln-cli 0.0.0",
   "schema": 1,
+  "runner": "kiln-cli 0.1.0",
+  "totals": {
+    "total": 92,
+    "passed": 89,
+    "failed": 0,
+    "unsupported": 0,
+    "skipped": 3,
+    "not_yet_runnable": 0
+  },
   "tests": [
     {
       "id": "effect/01-core",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 450826585
     },
     {
       "id": "effect/02-gen",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 396729931
     },
     {
       "id": "effect/03-ref",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 419230870
     },
     {
       "id": "effect/04-all-foreach",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 471484032
     },
     {
       "id": "effect/05-concurrency",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 388890302
     },
     {
       "id": "effect/06-sleep",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 449221589
     },
     {
       "id": "effect/07-interruption",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 469070260
     },
     {
       "id": "effect/08-scope",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 470712838
     },
     {
       "id": "effect/09-fiber",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 445152944
     },
     {
       "id": "effect/10-tagged-error",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 853591842
     },
     {
       "id": "effect/11-stream",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 815797050
     },
     {
       "id": "effect/12-service-layer",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 665013572
+    },
+    {
+      "id": "effect/13-actor-service",
+      "outcome": "skipped",
+      "elapsed_nanos": 111
+    },
+    {
+      "id": "effect/14-zero-copy-queue",
+      "outcome": "skipped",
+      "elapsed_nanos": 60
+    },
+    {
+      "id": "effect/15-native-parallel",
+      "outcome": "skipped",
+      "elapsed_nanos": 90
     },
     {
       "id": "guard/g01-spread-symbols",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 145865738
     },
     {
       "id": "guard/g02-arrow-arguments",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 160929404
     },
     {
       "id": "guard/g03-class-field-closure",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 156706043
     },
     {
       "id": "guard/g04-generic-forof",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 159533056
     },
     {
       "id": "guard/g05-yieldstar-protocol",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 183053462
     },
     {
       "id": "guard/g06-array-proto-iterator",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 164718314
     },
     {
       "id": "guard/g06b-array-iterator-identity",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 170004015
     },
     {
       "id": "guard/g07-timers-order",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 182627077
     },
     {
       "id": "guard/g08-finally-paths",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 344563185
     },
     {
       "id": "guard/g09-error-subclass",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 360704178
     },
     {
       "id": "guard/g10-builtin-statics",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 325919016
     },
     {
       "id": "guard/g11-proto-on-function",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 370433711
     },
     {
       "id": "guard/g12-private-not-inherited",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 142804679
     },
     {
       "id": "guard/g13-set-mutation",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 345889729
     },
     {
       "id": "guard/g14-generator-return-finally",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 138961666
     },
     {
       "id": "guard/g15-error-stack-cause",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 140467623
     },
     {
       "id": "guard/g16-array-from-iterable",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 294241763
     },
     {
       "id": "guard/g17-set-map-iterator",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 114321470
     },
     {
       "id": "guard/g18-iterator-close",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 167509267
     },
     {
       "id": "guard/g19-subclass-array-map",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 327359449
+    },
+    {
+      "id": "regress/proxy-ownkeys-membership",
+      "outcome": "pass",
+      "elapsed_nanos": 131477163
     },
     {
       "id": "regress/r01-handler-outlives-frame",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 136485663
     },
     {
       "id": "regress/r02-generator-resumed-at-another-depth",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 346207305
     },
     {
       "id": "regress/r03-array-from",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 147401103
     },
     {
       "id": "regress/r04-iterator-close-paths",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 137528667
     },
     {
       "id": "regress/r05-object-spread-order",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 367383763
     },
     {
       "id": "regress/r06-parameter-forms",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 194001733
     },
     {
       "id": "regress/r07-silent-divergences",
-      "outcome": "pass"
+      "outcome": "pass",
+      "elapsed_nanos": 193100781
+    },
+    {
+      "id": "regress/r08-node-async-context",
+      "outcome": "pass",
+      "elapsed_nanos": 124851482
+    },
+    {
+      "id": "regress/r09-sloppy-code-binds-globals-and-this",
+      "outcome": "pass",
+      "elapsed_nanos": 260232785
+    },
+    {
+      "id": "regress/r10-module-code-stays-strict",
+      "outcome": "pass",
+      "elapsed_nanos": 198296941
+    },
+    {
+      "id": "regress/r12-method-prototype",
+      "outcome": "pass",
+      "elapsed_nanos": 380278203
+    },
+    {
+      "id": "regress/r13-math-bigint-tonumber",
+      "outcome": "pass",
+      "elapsed_nanos": 201031556
+    },
+    {
+      "id": "regress/r14-dynamic-import-attributes",
+      "outcome": "pass",
+      "elapsed_nanos": 181356298
+    },
+    {
+      "id": "regress/r15-async-generator-yield-star",
+      "outcome": "pass",
+      "elapsed_nanos": 147001429
+    },
+    {
+      "id": "regress/r16-async-generator-delegation-protocol",
+      "outcome": "pass",
+      "elapsed_nanos": 161081335
+    },
+    {
+      "id": "regress/r17-message-port-delivery-and-transfer",
+      "outcome": "pass",
+      "elapsed_nanos": 447784563
+    },
+    {
+      "id": "regress/r18-worker-threads-receive-message",
+      "outcome": "pass",
+      "elapsed_nanos": 221177444
+    },
+    {
+      "id": "regress/r19-message-port-poll-phase-and-event-slots",
+      "outcome": "pass",
+      "elapsed_nanos": 211710633
+    },
+    {
+      "id": "regress/r20-unhandled-rejection-exits",
+      "outcome": "pass",
+      "elapsed_nanos": 212706516
+    },
+    {
+      "id": "regress/r21-unhandled-rejection-non-error",
+      "outcome": "pass",
+      "elapsed_nanos": 228546455
+    },
+    {
+      "id": "regress/r22-unhandled-rejection-events",
+      "outcome": "pass",
+      "elapsed_nanos": 221598458
+    },
+    {
+      "id": "regress/r23-rejection-handled-late",
+      "outcome": "pass",
+      "elapsed_nanos": 364248210
+    },
+    {
+      "id": "regress/r24-unhandled-rejection-uncaught-exception",
+      "outcome": "pass",
+      "elapsed_nanos": 194269154
+    },
+    {
+      "id": "regress/r25-timer-delay-clamp",
+      "outcome": "pass",
+      "elapsed_nanos": 247053621
+    },
+    {
+      "id": "regress/r26-event-inspect-custom",
+      "outcome": "pass",
+      "elapsed_nanos": 173741658
+    },
+    {
+      "id": "regress/r27-worker-round-trip",
+      "outcome": "pass",
+      "elapsed_nanos": 657283470
+    },
+    {
+      "id": "regress/r28-worker-data",
+      "outcome": "pass",
+      "elapsed_nanos": 414775906
+    },
+    {
+      "id": "regress/r29-worker-transfer-list",
+      "outcome": "pass",
+      "elapsed_nanos": 961707009
+    },
+    {
+      "id": "regress/r30-worker-terminate",
+      "outcome": "pass",
+      "elapsed_nanos": 1347762668
+    },
+    {
+      "id": "regress/r31-worker-error",
+      "outcome": "pass",
+      "elapsed_nanos": 1513943470
+    },
+    {
+      "id": "regress/r32-worker-process-exit",
+      "outcome": "pass",
+      "elapsed_nanos": 992581302
+    },
+    {
+      "id": "regress/r33-worker-atomics",
+      "outcome": "pass",
+      "elapsed_nanos": 1500638965
+    },
+    {
+      "id": "regress/r34-worker-eval",
+      "outcome": "pass",
+      "elapsed_nanos": 1200032457
+    },
+    {
+      "id": "regress/r35-worker-broadcast-channel",
+      "outcome": "pass",
+      "elapsed_nanos": 1060309522
+    },
+    {
+      "id": "regress/r36-dead-closure-captures-import",
+      "outcome": "pass",
+      "elapsed_nanos": 303334029
+    },
+    {
+      "id": "regress/r37-signal-events",
+      "outcome": "pass",
+      "elapsed_nanos": 221907680
+    },
+    {
+      "id": "regress/r38-signal-drain",
+      "outcome": "pass",
+      "elapsed_nanos": 195484096
+    },
+    {
+      "id": "regress/r39-array-element-tostring",
+      "outcome": "pass",
+      "elapsed_nanos": 111897287
+    },
+    {
+      "id": "regress/r40-computed-key-to-property-key",
+      "outcome": "pass",
+      "elapsed_nanos": 120472824
+    },
+    {
+      "id": "regress/r41-class-heritage-checks",
+      "outcome": "pass",
+      "elapsed_nanos": 132038135
+    },
+    {
+      "id": "regress/r42-class-element-key-order",
+      "outcome": "pass",
+      "elapsed_nanos": 129700879
+    },
+    {
+      "id": "regress/r43-spread-pair-keeps-function-name",
+      "outcome": "pass",
+      "elapsed_nanos": 183886243
+    },
+    {
+      "id": "regress/r44-prototype-assigned-undefined",
+      "outcome": "pass",
+      "elapsed_nanos": 224157858
+    },
+    {
+      "id": "regress/r45-extends-bound-function",
+      "outcome": "pass",
+      "elapsed_nanos": 280899338
+    },
+    {
+      "id": "regress/r46-flatmap-skips-answer-holes",
+      "outcome": "pass",
+      "elapsed_nanos": 300913163
+    },
+    {
+      "id": "regress/r47-proxy-iterator-key",
+      "outcome": "pass",
+      "elapsed_nanos": 102955931
+    },
+    {
+      "id": "regress/r48-native-callback-depth",
+      "outcome": "pass",
+      "elapsed_nanos": 134406561
+    },
+    {
+      "id": "regress/r49-define-properties-symbols",
+      "outcome": "pass",
+      "elapsed_nanos": 107868398
+    },
+    {
+      "id": "server/s01-http-hello",
+      "outcome": "pass",
+      "elapsed_nanos": 124643394
+    },
+    {
+      "id": "server/s02-routing-json",
+      "outcome": "pass",
+      "elapsed_nanos": 130443698
+    },
+    {
+      "id": "server/s03-request-body-streams",
+      "outcome": "pass",
+      "elapsed_nanos": 228182009
+    },
+    {
+      "id": "server/s04-fastify",
+      "outcome": "pass",
+      "elapsed_nanos": 2431631068
+    },
+    {
+      "id": "server/s05-express",
+      "outcome": "pass",
+      "elapsed_nanos": 37824054008
+    },
+    {
+      "id": "server/s06-response-framing",
+      "outcome": "pass",
+      "elapsed_nanos": 281553979
+    },
+    {
+      "id": "server/s07-vite-dev-server",
+      "outcome": "pass",
+      "elapsed_nanos": 297421611
+    },
+    {
+      "id": "server/s08-binary-http-chunks",
+      "outcome": "pass",
+      "elapsed_nanos": 222130335
     }
-  ],
-  "totals": {
-    "failed": 0,
-    "not_yet_runnable": 0,
-    "passed": 39,
-    "skipped": 0,
-    "total": 39,
-    "unsupported": 0
-  }
+  ]
 }

@@ -309,8 +309,14 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                     "Property description must be an object");
     }
     if (target.tag == KILN_VALUE_PROXY) {
-        kiln_value key_value = kiln_c99_key_value(view, &stable);
-        if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        /* The trap names its key as the language does: a reserved spelling that
+         * resolves becomes the symbol, so a symbol descriptor arrives as the
+         * symbol rather than `"@@symbol:N"`. Anything else keeps the string. */
+        kiln_value key_value;
+        kiln_value stable_value = kiln_c99_key_value(view, &stable);
+        if (stable_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        if (!kiln_c99_symbol_of_key_view(view, &key_value))
+            key_value = stable_value;
         return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
     }
     if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
@@ -576,6 +582,7 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
     kiln_object *source;
     kiln_value keys;
     size_t index;
+    int pass;
     int status;
     if (descriptors.tag == KILN_VALUE_UNDEFINED) {
         return KILN_C99_OK;
@@ -586,14 +593,30 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
     source = kiln_c99_object_of(descriptors);
     status = kiln_c99_property_key_snapshot(source, &keys);
     if (status != KILN_C99_OK) return status;
+    /* OrdinaryOwnPropertyKeys: the string keys in walk order, then the symbol keys,
+     * mirroring the two passes in `keys.c`. The order is observable -- a later
+     * descriptor overwrites an earlier one, and a proxy trap sees every call in
+     * order -- so walk order is not close enough. */
+    for (pass = 0; pass < 2; ++pass) {
     for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
-        /* Only the enumerable own ones, which is what the language walks -- and the machine's
-         * own `@@` keys are never among them. */
+        /* Only the enumerable own ones, which is what the language walks. A symbol key's
+         * program-visible `enumerable` lives in `symbol_hidden`, its stored bit held at 0
+         * so string walks skip the `@@` spelling -- read that answer, not the stored bit.
+         * A reserved spelling that names no symbol is the machine's own bookkeeping and is
+         * never among the language's keys. */
         const kiln_string *key = (const kiln_string *)
             kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
         kiln_property property;
         kiln_value descriptor;
-        if (!kiln_c99_property_read_own(source, key, key, &property) || !property.enumerable)
+        kiln_value symbol;
+        int is_symbol = kiln_c99_symbol_of_key_view(key, &symbol);
+        if (!is_symbol && kiln_c99_key_is_reserved(key))
+            continue;
+        if (is_symbol ? pass == 0 : pass == 1)
+            continue;
+        if (!kiln_c99_property_read_own(source, key, key, &property))
+            continue;
+        if (is_symbol ? property.symbol_hidden : !property.enumerable)
             continue;
         status = kiln_c99_get_key(host, descriptors, key, key, &descriptor, depth, thrown);
         if (status == KILN_C99_OK) {
@@ -605,6 +628,7 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
         }
         /* A descriptor getter may have changed the source; the next key remains the original
          * snapshot's, while its current descriptor is rechecked above. */
+    }
     }
     return KILN_C99_OK;
 }

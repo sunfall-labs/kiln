@@ -3170,11 +3170,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let mut descriptors = Vec::new();
         // `Object.defineProperties` consumes `[[OwnPropertyKeys]]`, not
-        // `Object.getOwnPropertyNames`: symbol descriptors participate too. Symbols use the
-        // reserved-key representation internally, so ask for the raw own keys here rather than
-        // the string-only reflection view.
-        for key in own_property_keys_including_symbols_units(&self.intrinsics, source) {
-            let key_ref = PropertyKeyRef::Units(&key);
+        // `Object.getOwnPropertyNames`: symbol descriptors participate too. The two halves
+        // keep the wrapper their domain needs for `matches_slot` -- `Units` for names,
+        // `SymbolUnits` for reserved symbol slots -- in the specification's own order,
+        // strings then symbols, so one loop serves both without re-resolving any key's
+        // domain from its spelling.
+        let string_keys = own_property_keys_units(&self.intrinsics, source);
+        let symbol_keys = own_symbol_keys_units(&self.intrinsics, source);
+        let keys = string_keys
+            .iter()
+            .map(|key| ((*key).clone(), PropertyKeyRef::Units(key)))
+            .chain(
+                symbol_keys
+                    .iter()
+                    .map(|key| ((*key).clone(), PropertyKeyRef::SymbolUnits(key))),
+            );
+        for (key, key_ref) in keys {
             if !own_attributes_key(&self.intrinsics, source, key_ref)
                 .is_some_and(|attributes| attributes.enumerable)
             {
@@ -3182,17 +3193,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             let read = self.read_property_key(source, key_ref, instruction)?;
             let descriptor = self.read_descriptor(&read, instruction)?;
-            descriptors.push((key, read, descriptor));
+            descriptors.push((key, key_ref, read, descriptor));
         }
-        for (key, read, descriptor) in descriptors {
-            let key_ref = PropertyKeyRef::Units(&key);
+        for (key, key_ref, read, descriptor) in descriptors {
             // A proxy's `defineProperty` trap takes the descriptor object the program wrote, not
-            // the fields it was read into, so it keeps the route it already had.
+            // the fields it was read into, so it keeps the route it already had. The trap names
+            // its key as the language does: a reserved spelling resolves back into the symbol,
+            // mirroring `own_keys_reflected`, so a symbol descriptor arrives as the symbol
+            // rather than `"@@symbol:N"`. String keys pass through unchanged, and an
+            // unresolvable spelling keeps the string it already had rather than inventing a key.
             if matches!(target, Value::Proxy(_)) {
+                let trap_arg = match key_ref {
+                    PropertyKeyRef::SymbolUnits(units) => self
+                        .symbol_of_key(&units.to_lossy_string())
+                        .map(Value::Symbol)
+                        .unwrap_or_else(|| Value::String(key.clone())),
+                    _ => Value::String(key.clone()),
+                };
                 self.dispatch_native(
                     Native::ObjectDefineProperty,
                     &Value::Undefined,
-                    &[target.clone(), Value::String(key.clone()), read],
+                    &[target.clone(), trap_arg, read],
                     instruction,
                 )?;
                 continue;
