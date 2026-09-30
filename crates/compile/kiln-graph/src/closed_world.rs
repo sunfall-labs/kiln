@@ -237,7 +237,7 @@ pub fn closed_world_function_liveness(
                                         );
                                     };
                                     let Some((binding_owner, slot)) =
-                                        captured_slot_owner(program, &parents, index, upvalue)
+                                        captured_slot_owner(program, &parents, index, upvalue as usize)
                                     else {
                                         return (
                                             (0..program.functions.len()).collect(),
@@ -287,7 +287,7 @@ pub fn closed_world_function_liveness(
                 continue;
             };
             for upvalue in 0..function.upvalues.len() {
-                let Some((owner, slot)) = captured_slot_owner(program, &parents, index, upvalue)
+                let Some((owner, slot)) = captured_slot_owner(program, &parents, index, upvalue as usize)
                 else {
                     return (
                         (0..program.functions.len()).collect(),
