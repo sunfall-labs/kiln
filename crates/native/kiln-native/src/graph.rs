@@ -1682,7 +1682,7 @@ pub(super) fn cycle_module_paths(graph: &ModuleGraph) -> std::collections::HashS
         .iter()
         .enumerate()
         .map(|(index, node)| (node.path.clone(), index))
-        .collect::<HashMap<_, _>>();
+        .collect::<std::collections::HashMap<_, _>>();
     let mut edges = vec![Vec::new(); nodes.len()];
     let mut reverse = vec![Vec::new(); nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
