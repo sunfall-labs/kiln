@@ -747,7 +747,9 @@ impl super::Compiler {
         }
         self.emit_object_segment(&mut pending, accumulating);
         if key_slot.is_some() {
-            self.scopes.pop().expect("the literal's key scope was pushed");
+            self.scopes
+                .pop()
+                .expect("the literal's key scope was pushed");
         }
         // The literal is the home object its methods were defined on, so it is what the binding
         // they captured has to hold -- duplicated rather than reloaded, because the literal is
@@ -768,12 +770,7 @@ impl super::Compiler {
     /// previous pair's value, which may be nullish. The key itself stands in for it (a nullish
     /// key is a primitive and needs no conversion), and a hidden local carries the converted key
     /// past the original. A key that is syntactically a primitive is left alone.
-    fn pending_literal_key(
-        &mut self,
-        key: &Expression,
-        slot: &mut Option<String>,
-        span: Span,
-    ) {
+    fn pending_literal_key(&mut self, key: &Expression, slot: &mut Option<String>, span: Span) {
         if matches!(
             key.kind,
             kiln_hir::ExpressionKind::Literal(_) | kiln_hir::ExpressionKind::Template { .. }

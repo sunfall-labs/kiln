@@ -2086,8 +2086,10 @@ mod tests {
             let host = flatten_header_wire(&parts.headers, &mut wire);
             let host = host.map_or(&b""[..], |range| &wire[range]);
             let mut scratch = Vec::new();
-            String::from_utf8(request_url(&parts.uri, host, target.as_bytes(), &mut scratch).to_vec())
-                .expect("utf-8")
+            String::from_utf8(
+                request_url(&parts.uri, host, target.as_bytes(), &mut scratch).to_vec(),
+            )
+            .expect("utf-8")
         };
         assert_eq!(url("GET /a?b=1\nhost:h:81"), "http://h:81/a?b=1");
         assert_eq!(url("OPTIONS *\nhost:h"), "http://h*");

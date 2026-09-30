@@ -112,7 +112,12 @@ fn every_mutable_emitted_static_has_an_owner_that_is_not_a_realm() {
         let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
             .expect("launcher emits");
         assert_owned(&launcher, &[], "the graph launcher");
-        for forbidden in ["kiln_namespaces[", "kiln_exports_", "kiln_imports_", "kiln_commonjs_"] {
+        for forbidden in [
+            "kiln_namespaces[",
+            "kiln_exports_",
+            "kiln_imports_",
+            "kiln_commonjs_",
+        ] {
             assert!(
                 !kiln_backend_c::state_owners::mutable_statics(&launcher)
                     .iter()
@@ -120,9 +125,13 @@ fn every_mutable_emitted_static_has_an_owner_that_is_not_a_realm() {
                 "the launcher's module linkage is its realm's graph context, not a static"
             );
         }
-        let shared = crate::shared_graph::graph_shared_wrapper_source(&graph, &modules, "kiln_probe")
-            .expect("shared wrapper emits");
+        let shared =
+            crate::shared_graph::graph_shared_wrapper_source(&graph, &modules, "kiln_probe")
+                .expect("shared wrapper emits");
         assert_owned(&shared, &["kiln_probe"], "the shared-library wrapper");
     }
-    assert!(checked > 10, "the probe program exercises the emitters' statics ({checked})");
+    assert!(
+        checked > 10,
+        "the probe program exercises the emitters' statics ({checked})"
+    );
 }

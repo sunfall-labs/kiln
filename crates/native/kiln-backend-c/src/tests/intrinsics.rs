@@ -243,7 +243,11 @@ int main(void) {
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
 }
 "#;
-    let run = run_with_main(&generated, wrapper, "shared-snapshot-symbol-string-collision");
+    let run = run_with_main(
+        &generated,
+        wrapper,
+        "shared-snapshot-symbol-string-collision",
+    );
     assert!(
         run.status.success(),
         "symbol/string collision failed ({:?}):\n{}",

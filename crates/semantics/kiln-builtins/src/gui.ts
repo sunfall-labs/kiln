@@ -4,6 +4,7 @@
 
 const G = globalThis as any;
 let nextNodeId = 1;
+export const nodeRegistry = new Map<number, Node>();
 
 export class Node {
   readonly id: number;
@@ -16,6 +17,17 @@ export class Node {
   constructor(tag: string) {
     this.id = nextNodeId++;
     this.tag = tag;
+    nodeRegistry.set(this.id, this);
+  }
+
+  dispose(): void {
+    nodeRegistry.delete(this.id);
+    for (let i = 0; i < this.children.length; i++) {
+      this.children[i].dispose();
+    }
+    if (this.parent) {
+      this.parent.removeChild(this);
+    }
   }
 
   get firstChild(): Node | null {
@@ -433,6 +445,255 @@ export function createRenderer<T extends Node = Node>(config?: any): {
   return renderer;
 }
 
+// OS Utility Bridges (ADR 0074 §3)
+export interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
+export interface OpenFileOptions {
+  title?: string;
+  filters?: FileFilter[];
+}
+
+export interface SaveFileOptions {
+  title?: string;
+  defaultPath?: string;
+  filters?: FileFilter[];
+}
+
+export interface MessageOptions {
+  title?: string;
+  message: string;
+  type?: "info" | "warning" | "error";
+}
+
+export const dialog = {
+  async openFile(options?: OpenFileOptions): Promise<string | null> {
+    if (typeof G.__kilnGuiOpenFile === "function") {
+      return G.__kilnGuiOpenFile(options);
+    }
+    return null;
+  },
+  async saveFile(options?: SaveFileOptions): Promise<string | null> {
+    if (typeof G.__kilnGuiSaveFile === "function") {
+      return G.__kilnGuiSaveFile(options);
+    }
+    return null;
+  },
+  async message(options: MessageOptions): Promise<void> {
+    if (typeof G.__kilnGuiShowMessage === "function") {
+      return G.__kilnGuiShowMessage(options);
+    }
+  },
+};
+
+let virtualClipboard = "";
+export const clipboard = {
+  async readText(): Promise<string> {
+    if (typeof G.__kilnGuiClipboardRead === "function") {
+      return G.__kilnGuiClipboardRead();
+    }
+    return virtualClipboard;
+  },
+  async writeText(text: string): Promise<void> {
+    if (typeof G.__kilnGuiClipboardWrite === "function") {
+      return G.__kilnGuiClipboardWrite(text);
+    }
+    virtualClipboard = String(text);
+  },
+};
+
+let currentTheme: "dark" | "light" = "light";
+const themeListeners: ((theme: "dark" | "light") => void)[] = [];
+export const systemTheme = {
+  getTheme(): "dark" | "light" {
+    if (typeof G.__kilnGuiGetTheme === "function") {
+      return G.__kilnGuiGetTheme();
+    }
+    return currentTheme;
+  },
+  setTheme(theme: "dark" | "light"): void {
+    currentTheme = theme;
+    for (let i = 0; i < themeListeners.length; i++) {
+      themeListeners[i](theme);
+    }
+  },
+  onThemeChange(callback: (theme: "dark" | "light") => void): () => void {
+    themeListeners.push(callback);
+    return () => {
+      const idx = themeListeners.indexOf(callback);
+      if (idx >= 0) themeListeners.splice(idx, 1);
+    };
+  },
+};
+
+// Turn Mailbox & Reentrancy-Safe Runloop Integration (ADR 0074 §4)
+interface MailboxTurn {
+  targetId: number;
+  event: string;
+  args: any[];
+}
+
+const mailboxQueue: MailboxTurn[] = [];
+let isExecutingTurn = false;
+
+export const turnMailbox = {
+  post(targetId: number, event: string, ...args: any[]): void {
+    mailboxQueue.push({ targetId, event, args });
+    if (!isExecutingTurn) {
+      this.drain();
+    }
+  },
+  drain(): void {
+    if (isExecutingTurn) return; // Reentrancy Guard (ADR 0074 §4.3)
+    isExecutingTurn = true;
+    try {
+      while (mailboxQueue.length > 0) {
+        const item = mailboxQueue.shift()!;
+        const target = nodeRegistry.get(item.targetId);
+        if (target) {
+          target.dispatchEvent(item.event, ...item.args);
+        }
+      }
+    } finally {
+      isExecutingTurn = false;
+    }
+  },
+  get pendingCount(): number {
+    return mailboxQueue.length;
+  },
+};
+
+// Fine-grained Reactive System (SolidJS 2.0 primitives)
+interface Computation {
+  fn: () => void | (() => void);
+  cleanups: (() => void)[];
+  sources: Set<Signal<any>>;
+  stale: boolean;
+}
+
+let currentListener: Computation | null = null;
+let batchDepth = 0;
+const pendingComputations: Set<Computation> = new Set();
+
+class Signal<T> {
+  value: T;
+  subscribers: Set<Computation> = new Set();
+
+  constructor(value: T) {
+    this.value = value;
+  }
+
+  read(): T {
+    if (currentListener) {
+      this.subscribers.add(currentListener);
+      currentListener.sources.add(this);
+    }
+    return this.value;
+  }
+
+  write(next: T | ((prev: T) => T)): void {
+    const val = typeof next === "function" ? (next as any)(this.value) : next;
+    if (val !== this.value) {
+      this.value = val;
+      const subs = Array.from(this.subscribers);
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        sub.stale = true;
+        if (batchDepth > 0) {
+          pendingComputations.add(sub);
+        } else {
+          runComputation(sub);
+        }
+      }
+    }
+  }
+}
+
+function runComputation(c: Computation): void {
+  for (let i = 0; i < c.cleanups.length; i++) {
+    c.cleanups[i]();
+  }
+  c.cleanups = [];
+
+  const srcs = Array.from(c.sources);
+  for (let i = 0; i < srcs.length; i++) {
+    srcs[i].subscribers.delete(c);
+  }
+  c.sources.clear();
+  c.stale = false;
+
+  const prevListener = currentListener;
+  currentListener = c;
+  try {
+    const cleanup = c.fn();
+    if (typeof cleanup === "function") {
+      c.cleanups.push(cleanup);
+    }
+  } finally {
+    currentListener = prevListener;
+  }
+}
+
+export function createSignal<T>(initialValue: T): [() => T, (value: T | ((prev: T) => T)) => void] {
+  const s = new Signal(initialValue);
+  return [() => s.read(), (v) => s.write(v)];
+}
+
+export function createEffect(fn: () => void | (() => void)): void {
+  const c: Computation = {
+    fn,
+    cleanups: [],
+    sources: new Set(),
+    stale: false,
+  };
+  runComputation(c);
+}
+
+export function createMemo<T>(fn: () => T): () => T {
+  const [get, set] = createSignal<T>(undefined as any);
+  createEffect(() => {
+    set(fn());
+  });
+  return get;
+}
+
+export function batch<T>(fn: () => T): T {
+  batchDepth++;
+  try {
+    return fn();
+  } finally {
+    batchDepth--;
+    if (batchDepth === 0) {
+      const pending = Array.from(pendingComputations);
+      pendingComputations.clear();
+      for (let i = 0; i < pending.length; i++) {
+        const c = pending[i];
+        if (c.stale) {
+          runComputation(c);
+        }
+      }
+    }
+  }
+}
+
+export function untrack<T>(fn: () => T): T {
+  const prev = currentListener;
+  currentListener = null;
+  try {
+    return fn();
+  } finally {
+    currentListener = prev;
+  }
+}
+
+export function onCleanup(fn: () => void): void {
+  if (currentListener) {
+    currentListener.cleanups.push(fn);
+  }
+}
+
 export default {
   Node,
   Window,
@@ -444,4 +705,16 @@ export default {
   Slider,
   Toggle,
   createRenderer,
+  dialog,
+  clipboard,
+  systemTheme,
+  turnMailbox,
+  nodeRegistry,
+  createSignal,
+  createEffect,
+  createMemo,
+  batch,
+  untrack,
+  onCleanup,
 };
+

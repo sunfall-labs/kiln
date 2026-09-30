@@ -1153,7 +1153,11 @@ fn emitted_async_module_emits_publish_exports() {
         "void {}_publish_exports(kiln_value *exports)",
         generated.symbol
     )));
-    assert!(generated.source.contains("if (roots_status != KILN_C99_OK) return roots_status;"));
+    assert!(
+        generated
+            .source
+            .contains("if (roots_status != KILN_C99_OK) return roots_status;")
+    );
 }
 
 #[test]

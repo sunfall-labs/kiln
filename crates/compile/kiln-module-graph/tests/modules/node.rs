@@ -29,7 +29,16 @@ fn module_addressed_actor_runs_in_a_worker_realm() {
             ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
         )
         .expect("execute actor graph");
-    assert_eq!(host.output, ["3 6", "0 23", "ActorRemoteError RangeError", "AbortError 2", "ActorClosedError"]);
+    assert_eq!(
+        host.output,
+        [
+            "3 6",
+            "0 23",
+            "ActorRemoteError RangeError",
+            "AbortError 2",
+            "ActorClosedError"
+        ]
+    );
 }
 
 #[test]
