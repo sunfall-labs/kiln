@@ -1967,7 +1967,7 @@ pub(super) fn json_value_and_sources_from_tape(
             }
             _ => return Err(ExecutionError::InvalidJson),
         };
-        let source = matches!(
+        let mut source = matches!(
             node.tag,
             kiln_json::TAG_NULL
                 | kiln_json::TAG_FALSE
@@ -2059,6 +2059,12 @@ pub(super) fn json_value_and_sources_from_tape(
                 }
                 None => return Err(ExecutionError::InvalidJson),
             };
+            // A completed array or object has no lexical primitive source of its own. `source`
+            // still describes the last tape node consumed while assembling this container;
+            // allowing it to flow to the parent would incorrectly expose that child's token as the
+            // container property's `context.source` (for example `[]` receiving its last
+            // element's `null`).
+            source = None;
         }
     }
     Ok((
