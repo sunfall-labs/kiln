@@ -847,7 +847,8 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
     if (found == NULL || out == NULL || key == NULL) return KILN_C99_INVALID_ARGUMENT;
     *found = 0;
     if (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
-        target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND ||
+        target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         /* Definitions on callable values live in their callable store. They are not exotic
          * instance stores: skipping this projection hid bootstrap facades such as JSON.parse
          * and Error.captureStackTrace behind their original native method-table answers. */
