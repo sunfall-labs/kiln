@@ -1943,6 +1943,58 @@ static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char *
     return 1;
 }
 
+/* Skip one complete statement, including a loop or nested if used as an unbraced branch.
+ * Stopping at the first semicolon can leave the closing loop body in the outer parser. */
+static void kiln_dyn_skip_statement(kiln_dyn_lexer *lex) {
+    if (lex->curr.kind == KILN_DYN_SEMI) { kiln_dyn_lexer_next(lex); return; }
+    if (lex->curr.kind == KILN_DYN_LBRACE) {
+        int braces = 1;
+        kiln_dyn_lexer_next(lex);
+        while (braces != 0 && lex->curr.kind != KILN_DYN_EOF) {
+            if (lex->curr.kind == KILN_DYN_LBRACE) braces++;
+            else if (lex->curr.kind == KILN_DYN_RBRACE) braces--;
+            kiln_dyn_lexer_next(lex);
+        }
+        return;
+    }
+    int conditional = lex->curr.kind == KILN_DYN_KW_IF;
+    int loop = lex->curr.kind == KILN_DYN_KW_FOR || lex->curr.kind == KILN_DYN_KW_WITH ||
+        (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 5 &&
+         memcmp(lex->curr.start, "while", 5) == 0);
+    if (conditional || loop) {
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_LPAREN) {
+            int parens = 1;
+            kiln_dyn_lexer_next(lex);
+            while (parens != 0 && lex->curr.kind != KILN_DYN_EOF) {
+                if (lex->curr.kind == KILN_DYN_LPAREN) parens++;
+                else if (lex->curr.kind == KILN_DYN_RPAREN) parens--;
+                kiln_dyn_lexer_next(lex);
+            }
+        }
+        kiln_dyn_skip_statement(lex);
+        if (conditional && lex->curr.kind == KILN_DYN_KW_ELSE) {
+            kiln_dyn_lexer_next(lex);
+            kiln_dyn_skip_statement(lex);
+        }
+        return;
+    }
+    int parens = 0, brackets = 0, braces = 0;
+    while (lex->curr.kind != KILN_DYN_EOF) {
+        if (parens == 0 && brackets == 0 && braces == 0) {
+            if (lex->curr.kind == KILN_DYN_RBRACE || lex->curr.kind == KILN_DYN_KW_ELSE) return;
+            if (lex->curr.kind == KILN_DYN_SEMI) { kiln_dyn_lexer_next(lex); return; }
+        }
+        if (lex->curr.kind == KILN_DYN_LPAREN) parens++;
+        else if (lex->curr.kind == KILN_DYN_RPAREN && parens > 0) parens--;
+        else if (lex->curr.kind == KILN_DYN_LBRACKET) brackets++;
+        else if (lex->curr.kind == KILN_DYN_RBRACKET && brackets > 0) brackets--;
+        else if (lex->curr.kind == KILN_DYN_LBRACE) braces++;
+        else if (lex->curr.kind == KILN_DYN_RBRACE && braces > 0) braces--;
+        kiln_dyn_lexer_next(lex);
+    }
+}
+
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *result, int *returned, kiln_value *thrown) {
@@ -2138,36 +2190,10 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (status != KILN_C99_OK || *returned) return status;
             if (lex->curr.kind == KILN_DYN_KW_ELSE) {
                 kiln_dyn_lexer_next(lex);
-                if (lex->curr.kind == KILN_DYN_LBRACE) {
-                    int bdepth = 1;
-                    kiln_dyn_lexer_next(lex);
-                    while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
-                        if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
-                        else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
-                        kiln_dyn_lexer_next(lex);
-                    }
-                } else {
-                    while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
-                        kiln_dyn_lexer_next(lex);
-                    }
-                    if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
-                }
+                kiln_dyn_skip_statement(lex);
             }
         } else {
-            if (lex->curr.kind == KILN_DYN_LBRACE) {
-                int bdepth = 1;
-                kiln_dyn_lexer_next(lex);
-                while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
-                    if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
-                    else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
-                    kiln_dyn_lexer_next(lex);
-                }
-            } else {
-                while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
-                    kiln_dyn_lexer_next(lex);
-                }
-                if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
-            }
+            kiln_dyn_skip_statement(lex);
             if (lex->curr.kind == KILN_DYN_KW_ELSE) {
                 kiln_dyn_lexer_next(lex);
                 status = kiln_dyn_eval_stmt(host, lex, scope, receiver, args, argc, depth, result, returned, thrown);
