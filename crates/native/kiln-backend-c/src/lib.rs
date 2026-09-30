@@ -2783,51 +2783,55 @@ fn entry_proto(program: &Program) -> FunctionProto {
     }
 }
 
-/// Replace direct-eval instructions in CFG-unreachable blocks with Nop and report whether any
-/// reachable direct eval remains. Failed CFG construction is conservative: leave that body's
-/// eval instructions intact so the emitter still refuses them.
+/// Replace direct-eval instructions in bytecode-unreachable regions with Nop and report whether
+/// any reachable direct eval remains. Both conditional paths and registered exception handlers
+/// are treated as reachable; only unconditional control flow proves a site dead.
 fn prune_unreachable_direct_eval(program: &mut Program) -> bool {
-    fn prune_body(proto: &FunctionProto, program: &Program, code: &mut [Instruction]) {
-        let Ok(graph) = build_function_graph(proto, program) else {
-            return;
-        };
-        let mut reachable_blocks = HashSet::from([graph.entry_block]);
-        let mut pending = vec![graph.entry_block];
-        while let Some(block_id) = pending.pop() {
-            if let Some(block) = graph.blocks.get(block_id.0 as usize) {
-                for successor in &block.successors {
-                    if reachable_blocks.insert(*successor) {
-                        pending.push(*successor);
-                    }
+    fn prune_body(code: &mut [Instruction]) {
+        let mut reachable = HashSet::new();
+        let mut pending = vec![0usize];
+        while let Some(pc) = pending.pop() {
+            if pc >= code.len() || !reachable.insert(pc) {
+                continue;
+            }
+            let next = pc + 1;
+            match &code[pc] {
+                Instruction::Jump(target) => pending.push(*target as usize),
+                Instruction::JumpIfFalse(target)
+                | Instruction::JumpIfTruthy(target)
+                | Instruction::JumpIfNotNullish(target)
+                | Instruction::JumpIfReturnSignal(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
                 }
+                // A handler can be entered by any throwing operation in the protected region.
+                // Conservatively count it as reachable as soon as its registration executes.
+                Instruction::PushHandler(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
+                }
+                Instruction::Return | Instruction::Throw => {}
+                // YieldStar carries the resumption target in addition to its ordinary
+                // continuation. Mark both to avoid pruning eval code entered by resumption.
+                Instruction::YieldStar(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
+                }
+                _ => pending.push(next),
             }
         }
-        let reachable_pcs: HashSet<u32> = graph
-            .blocks
-            .iter()
-            .filter(|block| reachable_blocks.contains(&block.id))
-            .flat_map(|block| block.operations.iter().map(|(value, _)| value))
-            .filter_map(|value| graph.origins.get(value).map(|origin| origin.pc))
-            .collect();
         for (pc, instruction) in code.iter_mut().enumerate() {
             if matches!(instruction, Instruction::DirectEval(_))
-                && !reachable_pcs.contains(&(pc as u32))
+                && !reachable.contains(&pc)
             {
                 *instruction = Instruction::Nop;
             }
         }
     }
 
-    // Graph construction consults the full function table, so analyze each body against one
-    // immutable snapshot while rewriting the corresponding output program.
-    let snapshot = program.clone();
-    prune_body(&entry_proto(&snapshot), &snapshot, &mut program.code);
-    for index in 0..program.functions.len() {
-        prune_body(
-            &snapshot.functions[index],
-            &snapshot,
-            &mut program.functions[index].code,
-        );
+    prune_body(&mut program.code);
+    for function in &mut program.functions {
+        prune_body(&mut function.code);
     }
     program.has_direct_eval()
 }

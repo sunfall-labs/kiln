@@ -752,23 +752,23 @@ impl NodePackageResolver {
                 (
                     ".js".to_owned(),
                     vec![
+                        ".js".to_owned(),
                         ".ts".to_owned(),
                         ".tsx".to_owned(),
-                        ".js".to_owned(),
                         ".jsx".to_owned(),
                     ],
                 ),
                 (
                     ".mjs".to_owned(),
-                    vec![".mts".to_owned(), ".mjs".to_owned()],
+                    vec![".mjs".to_owned(), ".mts".to_owned()],
                 ),
                 (
                     ".cjs".to_owned(),
-                    vec![".cts".to_owned(), ".cjs".to_owned()],
+                    vec![".cjs".to_owned(), ".cts".to_owned()],
                 ),
                 (
                     ".jsx".to_owned(),
-                    vec![".tsx".to_owned(), ".jsx".to_owned()],
+                    vec![".jsx".to_owned(), ".tsx".to_owned()],
                 ),
             ],
             // Node's package and directory fallback when no `exports` or `main` target wins.
@@ -2041,6 +2041,22 @@ mod tests {
                 .path,
             cjs
         );
+    }
+
+    #[test]
+    fn package_main_prefers_existing_javascript_over_typescript_alias() {
+        let project = TempProject::new();
+        let importer = project.write("main.cjs", "");
+        let javascript = project.write("node_modules/pkg/index.js", "module.exports = 'js';");
+        project.write("node_modules/pkg/index.ts", "export default 'ts';");
+        write_package(&project, "pkg", r#"{"main":"index.js"}"#);
+
+        let resolved = NodePackageResolver::new(&project.root)
+            .expect("valid project root")
+            .resolve_for_request("pkg", &importer, NodeRequestKind::Require)
+            .expect("Node require resolves package main");
+
+        assert_eq!(resolved.path, fs::canonicalize(javascript).unwrap());
     }
 
     #[test]
