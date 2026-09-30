@@ -48,6 +48,53 @@
     }
   }
 
+  // The engine-owned primitive returns only activation metadata. Keep public CallSite methods
+  // here so both execution engines expose the same ordinary JavaScript facade.
+  const ErrorCtor = G.Error || Error;
+  const captureFrameSnapshots = ErrorCtor.captureStackTrace;
+  if (typeof captureFrameSnapshots === "function") {
+    function captureStackTrace(target: any, constructorOpt?: Function): void {
+      const frames = captureFrameSnapshots(target, constructorOpt) || [];
+      const sites: any[] = [];
+      for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i];
+        const site: any = {};
+        const functionName = frame.functionName;
+        defineHidden(site, "getThis", () => undefined);
+        defineHidden(site, "getTypeName", () => null);
+        defineHidden(site, "getFunction", () => undefined);
+        defineHidden(site, "getFunctionName", () => functionName);
+        defineHidden(site, "getMethodName", () => functionName);
+        defineHidden(site, "getFileName", () => frame.fileName);
+        defineHidden(site, "getLineNumber", () => undefined);
+        defineHidden(site, "getColumnNumber", () => undefined);
+        defineHidden(site, "getEvalOrigin", () => undefined);
+        defineHidden(site, "isToplevel", () => false);
+        defineHidden(site, "isEval", () => false);
+        defineHidden(site, "isNative", () => false);
+        defineHidden(site, "isConstructor", () => false);
+        defineHidden(site, "toString", () => functionName
+          ? `at ${functionName} (${frame.fileName})`
+          : `at ${frame.fileName}`);
+        sites.push(site);
+      }
+      const prepare = ErrorCtor.prepareStackTrace;
+      const stack = typeof prepare === "function"
+        ? prepare.call(ErrorCtor, target, sites)
+        : `${target.name || "Error"}${target.message ? `: ${target.message}` : ""}${sites.map((site) => `\n    ${site.toString()}`).join("")}`;
+      Object.defineProperty(target, "stack", {
+        value: stack,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+    for (let i = 0; i < errorSubclasses.length; i++) {
+      const Ctor = G[errorSubclasses[i]];
+      if (typeof Ctor === "function") defineHidden(Ctor, "captureStackTrace", captureStackTrace);
+    }
+  }
+
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).
   function SuppressedError(this: any, error: any, suppressed: any, message?: any) {
     if (!(this instanceof SuppressedError)) {
@@ -58,7 +105,6 @@
     this.message = message !== undefined ? String(message) : "";
   }
 
-  const ErrorCtor = G.Error || Error;
   if (typeof Object.setPrototypeOf === "function") {
     Object.setPrototypeOf(SuppressedError.prototype, ErrorCtor.prototype);
     Object.setPrototypeOf(SuppressedError, ErrorCtor);

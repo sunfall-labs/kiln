@@ -1845,23 +1845,7 @@ pub(crate) fn call_native(
             };
             parse_json_text(&text)?
         }
-        // Present so `typeof` reports "function", which is what the corpus checks. Calling it
-        // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
-        Native::CallSiteGetFileName => Value::String("<kiln>".to_owned().into()),
-        Native::CallSiteGetLineNumber | Native::CallSiteGetColumnNumber => Value::Number(0.0),
-        Native::CallSiteGetFunctionName | Native::CallSiteGetMethodName => {
-            own_data_property(receiver, CALL_SITE_NAME).unwrap_or(Value::Null)
-        }
-        Native::CallSiteGetTypeName => Value::String("Function".to_owned().into()),
-        Native::CallSiteGetThis => Value::Undefined,
-        Native::CallSiteGetEvalOrigin => Value::Undefined,
-        Native::CallSiteIsEval => Value::Boolean(false),
-        Native::CallSiteToString => {
-            let name = own_data_property(receiver, CALL_SITE_NAME)
-                .map_or_else(|| "<anonymous>".to_owned(), |value| value.to_display_string());
-            Value::String(format!("{name} (<kiln>:0:0)").into())
-        }
         // Array and typed-array iterators retain their receiver rather than snapshotting it.
         // State lives in reserved properties on the iterator itself, so `next` can observe a
         // write that happened after iterator creation, as the language requires.

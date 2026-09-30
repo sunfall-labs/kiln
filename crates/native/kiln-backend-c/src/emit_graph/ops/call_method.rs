@@ -1721,12 +1721,17 @@ pub(super) fn emit_call_method(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    let diagnostic_source = diagnostic_source(diagnostic_site);
+    writeln!(
+        output,
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc});"
+    )
+    .unwrap();
     let argc = args.len();
     let key_str = match program.constants.get(*name as usize) {
         Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
         _ => String::new(),
     };
-    let diagnostic_source = diagnostic_source(diagnostic_site);
     // Every parallel site (`parallelMap` and the family) says, in the C, what was decided for it
     // and why; see `parallel::SiteRecord`.
     let parallel_site = crate::parallel::ParallelMethod::from_name(&key_str).map(|method| {

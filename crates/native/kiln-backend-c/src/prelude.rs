@@ -3800,10 +3800,7 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_OBJECT_IS),
     r#"
-/* `Error.captureStackTrace`. Present so `typeof` reports "function", which is what libraries
- * feature-detect on; calling it evaluates to undefined rather than inventing a stack this engine
- * does not record. The interpreter makes exactly that trade, and the two have to make it
- * together. */
+/* Private frame-snapshot primitive captured by the TypeScript Error.captureStackTrace facade. */
 "#,
     emit_method_define!(KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE),
     r#"

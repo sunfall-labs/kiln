@@ -132,51 +132,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .collect()
     }
 
-    /// V8-compatible stack capture over Kiln's logical frames.
-    ///
-    /// Kiln does not retain source-map locations in the VM, so CallSites deliberately use one
-    /// deterministic virtual filename and zero locations. Their function names are real: they
-    /// come from the same closures used by uncaught-error traces.
+    /// Private frame snapshot primitive used by the public TypeScript CallSite facade.
     pub(super) fn capture_stack_trace(
         &mut self,
         arguments: &[Value],
-        instruction: usize,
+        _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-        let Value::Object(target_object) = &target else {
+        if !matches!(target, Value::Object(_) | Value::Function(_)) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "invalid argument to Error.captureStackTrace".to_owned(),
             });
-        };
-        let mut names = self.trace();
-        // The capture helper itself is a native call rather than a JavaScript frame. V8's
-        // constructorOpt removes frames through the named constructor; approximating that rule
-        // by dropping the first matching name keeps library helper frames out deterministically.
-        if let Some(Value::Function(constructor)) = arguments.get(1)
-            && let Some(name) = constructor.name.as_deref()
-            && let Some(index) = names.iter().position(|candidate| candidate == name)
-        {
-            names.drain(..=index);
         }
-        let sites = Value::Array(ArrayData::new(
-            names.into_iter().map(call_site_object).collect(),
-        ));
-        let error_constructor = Value::Native(Native::Error(ErrorKind::Error), RealmId::PRIMARY);
-        let prepare = self.read_property(&error_constructor, "prepareStackTrace", instruction)?;
-        let stack = if is_callable(&prepare) {
-            self.call_value(
-                &prepare,
-                error_constructor,
-                vec![target.clone(), sites],
-                instruction,
-            )?
-        } else {
-            Value::String("Error".to_owned().into())
-        };
-        target_object
-            .borrow_mut()
-            .set_non_enumerable("stack", stack);
-        Ok(Value::Undefined)
+        if let Some(constructor) = arguments.get(1)
+            && !matches!(constructor, Value::Undefined | Value::Function(_))
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
+            });
+        }
+        let mut frames = std::iter::once(self.function.clone())
+            .chain(self.frames.iter().rev().map(|frame| frame.function.clone()))
+            .collect::<Vec<_>>();
+        // The primitive receives no public JavaScript CallSite objects. The facade is built in
+        // errors.ts from these copied metadata records and cannot keep VM frames alive.
+        if !frames.is_empty() {
+            frames.remove(0);
+        }
+        if let Some(Value::Function(constructor)) = arguments.get(1)
+            && let Some(index) = frames.iter().position(|frame| {
+                frame
+                    .as_ref()
+                    .is_some_and(|candidate| Rc::ptr_eq(candidate, constructor))
+            })
+        {
+            frames.drain(..=index);
+        }
+        Ok(Value::Array(ArrayData::new(
+            frames
+                .into_iter()
+                .map(|frame| {
+                    ordinary_object([
+                        ("fileName".to_owned(), Value::String("<kiln>".into())),
+                        (
+                            "functionName".to_owned(),
+                            frame
+                                .and_then(|closure| closure.name.clone())
+                                .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        ("instruction".to_owned(), Value::Number(0.0)),
+                    ])
+                })
+                .collect(),
+        )))
     }
 
     pub(super) fn throw_error(

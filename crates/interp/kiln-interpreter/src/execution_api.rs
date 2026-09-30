@@ -420,52 +420,6 @@ pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Va
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
-pub(super) fn call_site_object(name: String) -> Value {
-    ordinary_object([
-        (CALL_SITE_NAME.to_owned(), Value::String(name.into())),
-        (
-            "getFileName".to_owned(),
-            Value::Native(Native::CallSiteGetFileName, RealmId::PRIMARY),
-        ),
-        (
-            "getLineNumber".to_owned(),
-            Value::Native(Native::CallSiteGetLineNumber, RealmId::PRIMARY),
-        ),
-        (
-            "getColumnNumber".to_owned(),
-            Value::Native(Native::CallSiteGetColumnNumber, RealmId::PRIMARY),
-        ),
-        (
-            "getFunctionName".to_owned(),
-            Value::Native(Native::CallSiteGetFunctionName, RealmId::PRIMARY),
-        ),
-        (
-            "getMethodName".to_owned(),
-            Value::Native(Native::CallSiteGetMethodName, RealmId::PRIMARY),
-        ),
-        (
-            "getTypeName".to_owned(),
-            Value::Native(Native::CallSiteGetTypeName, RealmId::PRIMARY),
-        ),
-        (
-            "getThis".to_owned(),
-            Value::Native(Native::CallSiteGetThis, RealmId::PRIMARY),
-        ),
-        (
-            "getEvalOrigin".to_owned(),
-            Value::Native(Native::CallSiteGetEvalOrigin, RealmId::PRIMARY),
-        ),
-        (
-            "isEval".to_owned(),
-            Value::Native(Native::CallSiteIsEval, RealmId::PRIMARY),
-        ),
-        (
-            "toString".to_owned(),
-            Value::Native(Native::CallSiteToString, RealmId::PRIMARY),
-        ),
-    ])
-}
-
 /// Read one own data property from an interpreter object without invoking program code.
 pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
     let Value::Object(object) = value else {

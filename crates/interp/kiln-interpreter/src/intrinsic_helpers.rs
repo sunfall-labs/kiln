@@ -275,7 +275,6 @@ pub(super) fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError
 /// Reserved, so it never enumerates -- and it is also the only mark that separates a real error
 /// from an object shaped like one, which is what `Error.isError` answers from.
 pub(super) const ERROR_TRACE: &str = "@@trace";
-pub(super) const CALL_SITE_NAME: &str = "@@call-site-name";
 
 /// The reserved slots a `DisposableStack` carries.
 pub(super) const DISPOSE_ENTRIES: &str = "@@disposeEntries";

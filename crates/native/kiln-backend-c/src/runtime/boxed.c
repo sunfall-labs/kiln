@@ -623,7 +623,10 @@ static int kiln_c99_val_sort_compare(kiln_c99_val_sort_context *ctx, kiln_val a,
         if (!plain->publishes_frame) {
             kiln_call_context ctx_call = { ctx->host, ctx->thrown, NULL, ctx->depth + 1 };
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+            kiln_js_frame js_frame;
+            kiln_c99_js_frame_enter(&js_frame, plain);
             status = plain->body(&ctx_call, &prod, plain->upvalues, &recv, args, (size_t)2);
+            kiln_c99_js_frame_leave(&js_frame);
         } else {
             status = kiln_c99_invoke_closure(ctx->host, &prod, plain, KILN_VAL_UNDEFINED, args, (size_t)2, ctx->depth, ctx->thrown, NULL, 0);
         }

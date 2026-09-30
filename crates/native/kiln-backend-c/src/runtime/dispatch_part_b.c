@@ -1775,11 +1775,7 @@
             return status;
         }
         case KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE:
-            /* A release build strips unwind tables, so there are no frames to read: the
-             * property this would write is one this engine cannot fill in. Answering undefined
-             * and leaving the error's own `stack` header alone is what the interpreter does. */
-            *result = kiln_c99_undefined();
-            return KILN_C99_OK;
+            return kiln_c99_error_capture_stack_trace(host, result, args, argc, depth, thrown);
         case KILN_C99_METHOD_OBJECT_IS: {
             /* SameValue: `===` except that it separates the two zeroes and finds NaN. The
              * collections already compare with SameValueZero, which differs from this in

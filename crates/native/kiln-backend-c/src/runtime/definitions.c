@@ -1489,8 +1489,8 @@ static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
 }
 
 /* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns the write. */
-static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
-                                  kiln_value method) {
+int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+                           kiln_value method) {
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;

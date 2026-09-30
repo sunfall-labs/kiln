@@ -894,6 +894,16 @@ typedef struct kiln_closure {
     kiln_val *upvalues;
 } kiln_closure;
 
+/* A JavaScript activation retained for Error.captureStackTrace. This is an explicit language
+ * frame, not a C unwind frame: generated C records the module and IR instruction at each call
+ * operation, and the common closure entry links the function's canonical name to it. */
+typedef struct kiln_js_frame {
+    struct kiln_js_frame *previous;
+    const kiln_closure *closure;
+    const char *instruction_source;
+    size_t instruction;
+} kiln_js_frame;
+
 /* Properties attached to runtime-provided callables. Method identity is its append-only numeric
  * code, so one realm-owned store per code gives `Stream.Readable`, `Buffer.constants`, and future
  * native constructor statics ordinary property behavior without changing the scalar value ABI or

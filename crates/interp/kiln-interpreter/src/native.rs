@@ -963,19 +963,8 @@ pub enum Native {
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
     /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
     ArrayValues,
-    /// V8's stack-capture extension, implemented by the VM because it needs logical frames and
-    /// may call a program-provided `Error.prepareStackTrace` hook.
+    /// Private activation-snapshot primitive used by the TypeScript CallSite facade.
     ErrorCaptureStackTrace,
-    CallSiteGetFileName,
-    CallSiteGetLineNumber,
-    CallSiteGetColumnNumber,
-    CallSiteGetFunctionName,
-    CallSiteGetMethodName,
-    CallSiteGetTypeName,
-    CallSiteGetThis,
-    CallSiteGetEvalOrigin,
-    CallSiteIsEval,
-    CallSiteToString,
     /// `Error.prototype.toString`, which renders `name: message`.
     ErrorToString,
     /// Standard Web/Node globals provided as stubs or baseline classes.
