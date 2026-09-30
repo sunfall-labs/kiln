@@ -389,7 +389,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
     }
     if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND ||
-        target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_SETTLER) {
+        target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_SETTLER ||
+        target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         kiln_value store, extra;
         kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
         int owns_prototype = closure != NULL && !closure->arrow &&

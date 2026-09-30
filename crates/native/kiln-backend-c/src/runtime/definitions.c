@@ -319,9 +319,10 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             key_value = stable_value;
         return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
     }
-    if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
-        target.tag != KILN_VALUE_BUILTIN && target.tag != KILN_VALUE_METHOD &&
-        target.tag != KILN_VALUE_BOUND && kiln_c99_exotic_store(target) == NULL) {
+    if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT &&
+        target.tag != KILN_VALUE_FUNCTION && target.tag != KILN_VALUE_BUILTIN &&
+        target.tag != KILN_VALUE_METHOD && target.tag != KILN_VALUE_BOUND &&
+        target.tag != KILN_VALUE_COMMONJS_REQUIRE && kiln_c99_exotic_store(target) == NULL) {
         /* References with an own-property store are valid targets. Their intrinsic names still
          * need specialised descriptor handling, but an unrelated key must land in the same store
          * ordinary reads already consult. This is what permits libraries to install a symbol
@@ -727,6 +728,18 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         kiln_value key_value = kiln_c99_key_value(view, &stable);
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_describe(host, target, key_value, out, found, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        /* The resolver facade decorates its callable require with an ordinary own-property
+         * store. Describe a written key through that same store instead of sending this custom
+         * callable tag to the exotic-object refusal below. */
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT ||
+            !kiln_c99_store_has(store, view, canonical)) {
+            return status;
+        }
+        return kiln_c99_describe_property_key(host, store, view, canonical, out, found, depth,
+                                              thrown);
     }
     if (target.tag == KILN_VALUE_SHARED) {
         kiln_value value;
