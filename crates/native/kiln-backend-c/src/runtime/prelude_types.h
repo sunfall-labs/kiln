@@ -1685,7 +1685,7 @@ typedef struct kiln_c99_site {
     /* Exact ASCII property key for cached builtin-method answers. Native method ids can have
      * aliases, so bootstrap facade checks must be tied to the spelling this site read. */
     uint8_t cached_member_len;
-    char cached_member[64];
+    char cached_member[32];
     /* A builtin receiver's method is cached by which builtin it was, and nothing else: it holds
      * while the current realm has not modified that built-in (`kiln_c99_realm_builtin_modified`),
      * a record every realm keeps for itself. */

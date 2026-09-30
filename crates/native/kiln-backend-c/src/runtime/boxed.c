@@ -1082,7 +1082,7 @@ static inline int kiln_c99_site_member_matches_key(const kiln_c99_site *site,
 static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t tag,
                                                   uint64_t method, uint32_t builtin,
                                                   const kiln_string *key) {
-    char member[64];
+    char member[32];
     size_t len = key == NULL ? sizeof member : key->unit_len;
     if (tag != KILN_VALUE_BUILTIN) {
         kiln_c99_site_cache_method(site, tag, method, builtin, NULL, 0);
