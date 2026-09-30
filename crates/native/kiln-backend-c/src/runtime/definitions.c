@@ -1338,10 +1338,26 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_BUILTIN: {
         int enumerable;
         kiln_value names;
+        char intrinsic_buffer[256];
+        const char *intrinsic_key;
+        size_t intrinsic_len;
         if (target.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE &&
             (kiln_c99_same_name_key(view, "name") || kiln_c99_same_name_key(view, "length"))) {
             *found = 1;
             return KILN_C99_OK;
+        }
+        /* A builtin's own method rows are authoritative even when its full own-key set has
+         * extra exotic properties. Check the requested property directly before asking the
+         * broader enumerator, whose completeness is intentionally still refused for unknown
+         * constructor surfaces. This also covers Function.prototype's callable table rows. */
+        if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
+                                          &intrinsic_len)) {
+            int owned = 0;
+            if (kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned) != NULL ||
+                kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
+                *found = 1;
+                return KILN_C99_OK;
+            }
         }
         if (kiln_c99_typed_prototype_own_key(target, view, NULL, found, &enumerable)) {
             return KILN_C99_OK;

@@ -15,4 +15,6 @@ for (const [fn, length] of samples) {
     descriptor.enumerable, descriptor.configurable);
 }
 console.log(Object.keys.hasOwnProperty("length"));
+console.log(Object.prototype.hasOwnProperty.call(Function.prototype, "call"),
+  Object.prototype.hasOwnProperty.call(Function.prototype, "constructor"));
 console.log(/x/.hasOwnProperty("lastIndex"), /x/.hasOwnProperty("source"));
