@@ -93,7 +93,7 @@ delete (globalThis as any).__kilnTypedArraySort;
       let sourceLength = 0;
       for (let i = 0; i < input.length; i++) {
         const code = input.charCodeAt(i);
-        if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) continue;
+        if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) continue;
         sourceLength++;
         if (code === 61) {
           padded = true;

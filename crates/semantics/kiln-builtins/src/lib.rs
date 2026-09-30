@@ -1371,7 +1371,9 @@ pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     "\n",
     include_str!("web_events_streams.ts"),
     "\n",
-    include_str!("buffer.ts")
+    include_str!("buffer.ts"),
+    "\n",
+    include_str!("web_encoding_crypto.ts")
 );
 
 /// `URL` and `URLSearchParams` over the host's `__kilnUrl*` intrinsics (ADR 0063 rule 4). Part
@@ -1484,6 +1486,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         selected(family::STRING_LOCALE, STRING_LOCALE_BOOTSTRAP_SOURCE),
         selected(family::INTL_DATETIME, INTL_DATETIME_BOOTSTRAP_SOURCE),
         ANNEXB_BOOTSTRAP_SOURCE,
+        include_str!("string_wellformed.ts"),
         selected(family::DISPOSABLE, DISPOSABLE_BOOTSTRAP_SOURCE),
         REGEXP_BOOTSTRAP_SOURCE,
         selected(family::WEAK_REFS, WEAK_REFS_BOOTSTRAP_SOURCE),
