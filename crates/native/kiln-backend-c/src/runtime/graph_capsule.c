@@ -69,7 +69,7 @@ static const void *kiln_c99_graph_capsule_root_payload(const kiln_gc_heap *from,
             payload != (const void *)(uintptr_t)root.bits ||
             !kiln_c99_graph_inert_finalizer_block(block)) return NULL;
     } else if (root.tag == KILN_VALUE_DATE) {
-        if (kind != KILN_GC_DATE || block->size != sizeof(double) ||
+        if (kind != KILN_GC_DATE || block->size != sizeof(kiln_date) ||
             payload != (const void *)(uintptr_t)root.bits) return NULL;
     } else {
         return NULL;

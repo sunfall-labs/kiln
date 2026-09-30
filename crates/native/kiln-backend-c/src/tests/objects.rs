@@ -4484,12 +4484,16 @@ int main(void) {
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, date);
     date->time = 123456.0;
-    date->properties = kiln_c99_undefined();
+    date->properties = kiln_c99_value(KILN_VALUE_OBJECT,
+                                       (uint64_t)(uintptr_t)object, NULL, 0);
     kiln_c99_par_arena_seal(&candidate);
     kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    if (kiln_c99_graph_capsule_root_payload(&sender,
+        kiln_c99_value(KILN_VALUE_DATE, (uint64_t)(uintptr_t)date, NULL, 0)) != date)
+        return 9;
     if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
                                                     reservation)) return 5;
