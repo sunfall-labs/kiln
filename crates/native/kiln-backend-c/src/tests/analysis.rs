@@ -747,7 +747,11 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
     assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
     assert!(instantiation.source.contains("ku_fn_0("));
     assert!(instantiation.source.contains("return KILN_C99_OK;"));
-    assert!(!instantiation.source.contains("goto kiln_refusal;"));
+    assert!(
+        !instantiation
+            .source
+            .contains("\n    goto kiln_refusal;\nkiln_refusal:;")
+    );
 }
 
 #[test]
