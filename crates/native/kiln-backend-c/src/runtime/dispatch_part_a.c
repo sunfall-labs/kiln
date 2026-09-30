@@ -2103,7 +2103,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value gathered;
             if (list.tag == KILN_VALUE_ARRAY) {
                 given = kiln_c99_array_of(list);
-            } else if (list.tag != KILN_VALUE_UNDEFINED && list.tag != KILN_VALUE_NULL) {
+                /* A hole is heap storage, never a JavaScript argument. It may also read an
+                 * inherited indexed property, so sparse arrays take the ordinary Get path. */
+                if (given->properties.tag == KILN_VALUE_OBJECT) {
+                    given = NULL;
+                } else {
+                    for (size_t at = 0; at < given->count; ++at) {
+                        if (given->elements[at] == KILN_VAL_HOLE) {
+                            given = NULL;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (given == NULL && list.tag != KILN_VALUE_UNDEFINED && list.tag != KILN_VALUE_NULL) {
                 kiln_value length_value;
                 double length;
                 size_t at;
