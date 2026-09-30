@@ -293,6 +293,19 @@ pub fn select_executable_modules<'a>(
                 if node.source == ModuleSource::CommonJs
                     && graph
                         .module(&dependency.target)
+                        .is_some_and(|target| target.source == ModuleSource::CommonJs)
+                {
+                    // A synchronous CommonJS require observes the target's complete
+                    // `module.exports` value. Keep its export slot live even when no ESM import
+                    // names the CommonJS exports explicitly (for example, a wildcard namespace
+                    // interop helper that reads a property later during module initialization).
+                    if namespace_demands.insert(dependency.target.clone()) {
+                        queue.push_back(dependency.target.clone());
+                    }
+                }
+                if node.source == ModuleSource::CommonJs
+                    && graph
+                        .module(&dependency.target)
                         .is_some_and(|target| target.source != ModuleSource::CommonJs)
                 {
                     // CommonJS receives the complete namespace from synchronous require(esm),
