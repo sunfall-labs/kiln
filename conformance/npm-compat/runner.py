@@ -66,8 +66,8 @@ def main():
                     parser.error(f'invalid package row: {row!r}')
                 rows.append(row)
     names = [row[0] for row in rows]
-    if len(names) != len(set(names)) or len(names) != 360:
-        parser.error('inventory must contain exactly 360 unique packages')
+    if len(names) != len(set(names)) or len(names) != 361:
+        parser.error('inventory must contain exactly 361 unique packages')
     unknown = sorted(set(args.packages) - set(names))
     if unknown:
         parser.error('unknown packages: ' + ', '.join(unknown))

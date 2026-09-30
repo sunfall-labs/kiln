@@ -1,6 +1,6 @@
 # npm package compatibility corpus
 
-360 popular npm packages, each with a small smoke test that uses its real API.
+361 npm packages (the original 360-package set plus upm), each with a small smoke test that uses its real API.
 The methodology mirrors [porffor's npm-packages
 dashboard](https://porffor-packages.porch.page/): the test runs under Node for
 the expected stdout, then gets compiled with kiln to a native binary, and the
@@ -16,9 +16,9 @@ threshold to enforce.
 
     conformance/npm-compat/
       README.md            this file
-      package.json         all 360 packages, exact-pinned versions
+      package.json         all 361 packages, exact-pinned versions
       packages.tsv         name / version / porffor status / test-file stem
-      tests/               360 smoke tests (3-8 real API calls each, deterministic output)
+      tests/               361 smoke tests (3-8 real API calls each, deterministic output)
       run.sh               the harness: node baseline vs kiln native, byte comparison
       results/
         baseline-2026-09-30.md    head-to-head report vs porffor's 2026-09-30 dashboard run
@@ -29,7 +29,7 @@ threshold to enforce.
 
 ```sh
 cd conformance/npm-compat
-npm ci                       # once: installs the 360 pinned packages
+npm ci                       # once: installs the 361 pinned packages
 ./run.sh                     # full corpus; retains results/raw/<run-id>/ evidence
 ./run.sh ms lodash           # subset by package name
 TIMEOUT_S=300 ./run.sh       # per-package timeout (default 600s)
