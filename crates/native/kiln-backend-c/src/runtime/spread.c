@@ -1592,6 +1592,8 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->candidate_properties = 0;
     object->candidate_slots = 0;
     object->candidate_elements = 0;
+    object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
