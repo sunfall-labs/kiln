@@ -3081,8 +3081,12 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
  * pointer type under strict aliasing. Callers supply the audited GC owner of the field. */
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
     const void *owner_payload, void *slot, const void *pointer) {
-    if (pointer != NULL && owner_payload != NULL && kiln_c99_no_write_depth == 0)
-        kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload, pointer);
+    if (pointer != NULL && owner_payload != NULL && kiln_c99_no_write_depth == 0) {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        /* Ordinary constructors should not call the cold ledger walk when no candidate lives. */
+        if (heap != NULL && KILN_UNLIKELY(heap->candidate_ledger_groups != 0))
+            kiln_c99_candidate_record_pointer_store(heap, owner_payload, pointer);
+    }
     memcpy(slot, &pointer, sizeof pointer);
 }
 
