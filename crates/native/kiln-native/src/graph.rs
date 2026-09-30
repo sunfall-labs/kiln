@@ -210,6 +210,7 @@ function __kilnDecorateCommonJsRequire(require) {
     };
     Object.defineProperty(require, "resolve", {
         value: resolve,
+        enumerable: true,
         writable: true,
         configurable: true
     });
