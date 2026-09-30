@@ -69,6 +69,7 @@ def main():
         tests[name] = matches[0]
     args.raw.mkdir(parents=True, exist_ok=True)
     evidence = {'schema': 1, 'generated': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'state': 'running', 'completed': 0,
                 'inventory_sha256': hashlib.sha256((HERE / 'packages.tsv').read_bytes()).hexdigest(),
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
@@ -116,6 +117,7 @@ def main():
                     status = 'wrong-output'
         result['status'] = status
         evidence['results'].append(result)
+        evidence['completed'] = len(evidence['results'])
         # Persist after every package so interruption does not lose completed evidence.
         (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
         timing = ', '.join(f'{phase}={data["seconds"]:.3f}s' for phase, data in phases.items())
@@ -131,6 +133,7 @@ def main():
             writer.writerow([result['name'], result['version'], result['status'], result['porffor_status'],
                              *(phases.get(phase, {}).get('seconds', '') for phase in ('build', 'native', 'node'))])
     evidence['counts'] = counts
+    evidence['state'] = 'complete'
     (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(f'coverage: selected={len(selected)}, deferred={len(rows)-len(selected)}, discovered={len(rows)}')
     print(f'{counts.get("pass", 0)}/{len(selected)} pass; evidence: {args.raw}')

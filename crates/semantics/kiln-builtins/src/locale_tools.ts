@@ -25,7 +25,8 @@
     for (let index = 0; index < length; index++) {
       if (!(index in object)) continue;
       const item = object[index];
-      if (typeof item !== "string" && (item === null || typeof item !== "object")) {
+      if (typeof item !== "string" && (item === null ||
+          (typeof item !== "object" && typeof item !== "function"))) {
         throw new TypeError("Locales must be strings or objects");
       }
       const tag = typeof item === "string" ? item : `${item}`;

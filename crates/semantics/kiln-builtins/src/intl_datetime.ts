@@ -30,10 +30,10 @@
         normalized[key] = !!value;
       } else if (key === "fractionalSecondDigits") {
         const number = +value;
-        if (number !== Math.floor(number) || number < 1 || number > 3) {
+        if (!(number >= 1 && number <= 3)) {
           throw new RangeError("fractionalSecondDigits must be an integer between 1 and 3");
         }
-        normalized[key] = number;
+        normalized[key] = Math.floor(number);
       } else {
         const string = `${value}`;
         if (key === "localeMatcher" && string !== "lookup" && string !== "best fit") {
