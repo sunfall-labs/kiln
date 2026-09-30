@@ -14,3 +14,5 @@ Object.defineProperty(Words.prototype, 'toString', { get() { reads++; return fun
 delete words.toString;
 console.log(words.toString(), reads);
 console.log(words.toString(), reads);
+Object.defineProperty(Words.prototype, 'length', { value: 99 });
+console.log(words.length);
