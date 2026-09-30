@@ -1065,9 +1065,20 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_NUMBER:
         case KILN_C99_BUILTIN_BOOLEAN:
         case KILN_C99_BUILTIN_SYMBOL:
-        case KILN_C99_BUILTIN_BIGINT:
-            *answer = 0;
+        case KILN_C99_BUILTIN_BIGINT: {
+            uint8_t expected = constructor.bits == KILN_C99_BUILTIN_STRING
+                                   ? KILN_C99_WRAPPER_STRING
+                               : constructor.bits == KILN_C99_BUILTIN_NUMBER
+                                   ? KILN_C99_WRAPPER_NUMBER
+                               : constructor.bits == KILN_C99_BUILTIN_BOOLEAN
+                                   ? KILN_C99_WRAPPER_BOOLEAN
+                               : constructor.bits == KILN_C99_BUILTIN_SYMBOL
+                                   ? KILN_C99_WRAPPER_SYMBOL
+                                   : KILN_C99_WRAPPER_BIGINT;
+            *answer = value.tag == KILN_VALUE_OBJECT &&
+                      kiln_c99_object_of(value)->primitive_wrapper_kind == expected;
             return KILN_C99_OK;
+        }
         default:
             KILN_C99_REFUSE("instanceof against a built-in whose instances this backend does not "
                             "model");
