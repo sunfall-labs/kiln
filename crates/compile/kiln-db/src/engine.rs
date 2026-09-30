@@ -735,8 +735,9 @@ impl QueryEngine for MemoEngine {
             self.file(file).module_ir_by_identity.get(identity)
             && *cached_revision == revision
         {
+            let program = program.clone();
             self.stats.validated += 1;
-            return program.clone();
+            return program;
         }
         let mut module = self
             .file(file)
