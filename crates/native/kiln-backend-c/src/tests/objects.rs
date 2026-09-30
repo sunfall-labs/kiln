@@ -2423,8 +2423,6 @@ static void graph_control_enter(kiln_gc_heap *heap, uint64_t realm) {
 }
 
 __attribute__((noinline)) static uint64_t graph_control_request(kiln_gc_heap *heap) {
-    kiln_c99_par_arena arena;
-    kiln_nursery_chunk *chunk;
     kiln_object *handle;
     kiln_collection *registry;
     kiln_string *string;
@@ -2441,21 +2439,22 @@ __attribute__((noinline)) static uint64_t graph_control_request(kiln_gc_heap *he
     registry->entries = (kiln_entry *)calloc(1, sizeof(kiln_entry));
     if (registry->entries == NULL) return 0;
     registry->capacity = registry->count = registry->live = 1;
-    if (!kiln_c99_graph_candidate_open(&arena, heap, heap->nursery.capacity)) return 0;
-    string = (kiln_string *)kiln_c99_par_alloc(&arena, KILN_GC_STRING, sizeof *string + 4);
+    /* Use the production factory authority: a standalone private arena has no sender
+     * store ledger and therefore cannot authorize optimized incoming certification. */
+    if (!kiln_c99_actor_candidate_begin(heap)) return 0;
+    string = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof *string + 4);
     if (string == NULL) return 0;
     string->unit_len = 4;
     string->flags = KILN_STRING_LATIN1;
     string->data = string + 1;
     memcpy((void *)string->data, "root", 4);
-    kiln_c99_par_arena_seal(&arena);
-    kiln_c99_graph_candidate_close(&arena);
-    chunk = arena.filled;
-    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 0;
     handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
-    registry->entries[0].key = handle_value;
-    registry->entries[0].value = kiln_c99_value(KILN_VALUE_STRING,
-        (uint64_t)(uintptr_t)string->data, string->data, string->unit_len);
+    kiln_c99_heap_store_value(registry, &registry->entries[0].key, handle_value);
+    kiln_c99_heap_store_value(registry, &registry->entries[0].value,
+        kiln_c99_value(KILN_VALUE_STRING, (uint64_t)(uintptr_t)string->data,
+                       string->data, string->unit_len));
+    kiln_c99_actor_candidate_seal(heap, registry->entries[0].value);
     heap->realm.isolated_graphs = kiln_c99_value(KILN_VALUE_COLLECTION,
         (uint64_t)(uintptr_t)registry, NULL, 0);
     if (!kiln_c99_actor_isolated_request_begin(heap, handle_value, &request)) return 0;
@@ -2542,6 +2541,7 @@ static int graph_control_commit(void *context) {
     return 0;
 }
 int main(void) {
+    setenv("KILN_GRAPH_LEDGER_AUDIT", "1", 1);
     graph_control_probe probe = {0};
     kiln_gc_heap sender, receiver;
     pthread_t sender_lane;
@@ -5634,8 +5634,6 @@ fn executable_actor_graph_capsule_certificate_retains_only_escrow() {
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap) {
-    kiln_c99_par_arena arena;
-    kiln_nursery_chunk *chunk;
     kiln_object *handle;
     kiln_collection *registry;
     kiln_string *string;
@@ -5652,21 +5650,22 @@ __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap
     registry->entries = (kiln_entry *)calloc(1, sizeof(kiln_entry));
     if (registry->entries == NULL) return 0;
     registry->capacity = registry->count = registry->live = 1;
-    if (!kiln_c99_graph_candidate_open(&arena, heap, heap->nursery.capacity)) return 0;
-    string = (kiln_string *)kiln_c99_par_alloc(&arena, KILN_GC_STRING, sizeof *string + 4);
+    /* Use the production factory authority: a standalone private arena has no sender
+     * store ledger and therefore cannot authorize optimized incoming certification. */
+    if (!kiln_c99_actor_candidate_begin(heap)) return 0;
+    string = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof *string + 4);
     if (string == NULL) return 0;
     string->unit_len = 4;
     string->flags = KILN_STRING_LATIN1;
     string->data = string + 1;
     memcpy((void *)string->data, "root", 4);
-    kiln_c99_par_arena_seal(&arena);
-    kiln_c99_graph_candidate_close(&arena);
-    chunk = arena.filled;
-    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 0;
     handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
-    registry->entries[0].key = handle_value;
-    registry->entries[0].value = kiln_c99_value(KILN_VALUE_STRING,
-        (uint64_t)(uintptr_t)string->data, string->data, string->unit_len);
+    kiln_c99_heap_store_value(registry, &registry->entries[0].key, handle_value);
+    kiln_c99_heap_store_value(registry, &registry->entries[0].value,
+        kiln_c99_value(KILN_VALUE_STRING, (uint64_t)(uintptr_t)string->data,
+                       string->data, string->unit_len));
+    kiln_c99_actor_candidate_seal(heap, registry->entries[0].value);
     heap->realm.isolated_graphs = kiln_c99_value(KILN_VALUE_COLLECTION,
         (uint64_t)(uintptr_t)registry, NULL, 0);
     if (!kiln_c99_actor_isolated_request_begin(heap, handle_value, &request)) return 0;
@@ -5723,6 +5722,7 @@ static int actor_certificate_entry(void *context) {
 }
 
 int main(void) {
+    setenv("KILN_GRAPH_LEDGER_AUDIT", "1", 1);
     uint64_t realm;
     int result;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 8;
