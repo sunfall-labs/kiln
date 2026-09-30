@@ -2297,8 +2297,12 @@ pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> 
                 index += 1;
             }
         }
-        let compiled =
-            Arc::new(regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?);
+        let normalized = if flags.contains('v') {
+            kiln_regexp::normalize_unicode_sets_pattern(&codepoints)
+        } else {
+            codepoints.clone()
+        };
+        let compiled = Arc::new(regress::Regex::from_unicode(normalized, flags).ok()?);
         if cacheable {
             compiled_regexp_cache()
                 .lock()

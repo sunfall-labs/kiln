@@ -56,6 +56,17 @@ pub unsafe extern "C" fn kiln_regexp_compile(
     let Some(pattern) = pattern else {
         return INVALID_ARGUMENT;
     };
+    // regress 0.12's UnicodeSets parser rejects any adjacent pair of characters drawn from its
+    // reserved-double-punctuation alphabet, even when the pair itself is not reserved by
+    // ECMAScript. `[:;]` is a valid v-mode class (ansi-styles uses it to split SGR parameters),
+    // but the parser treats `:;` as an invalid double punctuator. Escaping the first literal in
+    // such a pair preserves its class meaning while leaving real syntax tokens (`&&`, `::`,
+    // `;;`, etc.) untouched so their original validation remains in force.
+    let pattern = if flags.contains('v') {
+        kiln_regexp::normalize_unicode_sets_pattern(&pattern)
+    } else {
+        pattern
+    };
     let Ok(compiled) = regress::Regex::from_unicode(pattern.into_iter(), flags.as_str()) else {
         return INVALID_ARGUMENT;
     };
@@ -358,6 +369,47 @@ fn view_to_flags(view: super::StringView<'_>) -> Option<String> {
 /// An offset that fits the boundary type, saturating rather than wrapping.
 fn as_offset(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_sets_literal_punctuation_class_compiles_through_provider() {
+        let pattern_bytes = b"[:;]";
+        let flag_bytes = b"v";
+        let pattern = super::super::KilnString {
+            unit_len: pattern_bytes.len() as u32,
+            flags: 0,
+            data: pattern_bytes.as_ptr().cast(),
+        };
+        let flags = super::super::KilnString {
+            unit_len: flag_bytes.len() as u32,
+            flags: 0,
+            data: flag_bytes.as_ptr().cast(),
+        };
+        let subject_bytes = b";";
+        let subject = super::super::KilnString {
+            unit_len: subject_bytes.len() as u32,
+            flags: 0,
+            data: subject_bytes.as_ptr().cast(),
+        };
+        let mut handle = core::ptr::null_mut();
+
+        // SAFETY: both views point at live byte arrays for the duration of this call, and the
+        // output slot is writable. On success the handle is released below.
+        let status = unsafe { kiln_regexp_compile(&pattern, &flags, &mut handle) };
+        assert_eq!(status, 0);
+        let mut ranges = [0_i64; 2];
+        // SAFETY: `handle` came from the successful compile above; `subject` and `ranges` are
+        // live, correctly sized buffers for this search call.
+        let matched = unsafe { kiln_regexp_search(handle, &subject, 0, ranges.as_mut_ptr(), 1) };
+        assert_eq!(matched, 1);
+        assert_eq!(ranges, [0, 1]);
+        // SAFETY: a successful compile returned the live handle owned by this test.
+        unsafe { kiln_regexp_free(handle) };
+    }
 }
 
 macro_rules! assert_provider_export {

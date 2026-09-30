@@ -47,6 +47,7 @@ kiln-date-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 hashbrown = { version = "0.16.1", default-features = false, features = ["equivalent"] }
 kiln-string = { workspace = true }
+kiln-regexp = { workspace = true }
 kiln-shared-graph = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-url = { workspace = true }
