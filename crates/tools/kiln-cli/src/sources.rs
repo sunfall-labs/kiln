@@ -589,9 +589,9 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         };
         // Literal createRequire/getBuiltinModule calls are lazy at runtime, but a relative
         // createRequire target still needs its source text in the synchronized snapshot.
-        for runtime in
-            kiln_frontend_oxc::discover_node_runtime_requests(importer_path, importer_text)
-        {
+        // Reuse facts from the classified parse above. Reparsing by extension loses CommonJS
+        // context for .js files and misses dependencies revealed by bounded literal eval.
+        for runtime in &module.node_runtime_requests {
             let runtime_importer = captured_importer_path(&runtime.importer)?;
             if !requests
                 .iter()
@@ -602,7 +602,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
                 })
             {
                 requests.push((
-                    runtime.specifier,
+                    runtime.specifier.clone(),
                     NodeRequestKind::Require,
                     false,
                     runtime_importer,

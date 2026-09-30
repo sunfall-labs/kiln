@@ -4786,6 +4786,7 @@ mod tests {
         assert!(shadowed.node_runtime_requests.is_empty());
     }
 
+    #[test]
     fn node_runtime_discovery_tracks_esbuild_require_helper_literals() {
         let source = r#"
             import { createRequire as __prettierCreateRequire } from "module";
