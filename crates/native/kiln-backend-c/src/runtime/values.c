@@ -219,7 +219,10 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     if (arrow == 1) {
         /* Only an arrow, and only at creation: the list belongs to a frame that will be gone
          * before the arrow is called, so it has to be copied out now rather than pointed at. */
-        int captured = kiln_c99_visible_arguments(&closure->captured_arguments);
+        kiln_value captured_arguments;
+        int captured = kiln_c99_visible_arguments(&captured_arguments);
+        if (captured == KILN_C99_OK)
+            kiln_c99_heap_store_value(closure, &closure->captured_arguments, captured_arguments);
         if (captured != KILN_C99_OK) {
             if (upvalues != closure->inline_upvalues) free(upvalues);
             kiln_c99_gc_release(closure);

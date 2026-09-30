@@ -679,8 +679,8 @@ static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
     property->accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
     property->refused = 0;
     if (property->accessor) {
-        property->getter = kiln_c99_accessor_pair_half(held, 0);
-        property->setter = kiln_c99_accessor_pair_half(held, 1);
+        kiln_c99_heap_store_value(object, &property->getter, kiln_c99_accessor_pair_half(held, 0));
+        kiln_c99_heap_store_value(object, &property->setter, kiln_c99_accessor_pair_half(held, 1));
     } else {
         kiln_c99_heap_store_value(object, &property->value, kiln_val_to_boundary(held));
     }
@@ -1258,7 +1258,8 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
     values->dense_order = 1;
     orders = (uint32_t *)(values->values + count);
     for (index = 0; index < count; ++index) {
-        values->values[index] = kiln_val_from_boundary(object->properties[index].value);
+        kiln_c99_heap_store_val(object, &values->values[index],
+                                  kiln_val_from_boundary(object->properties[index].value));
         orders[index] = (uint32_t)index + 1;
     }
     kiln_c99_object_properties_free(object);

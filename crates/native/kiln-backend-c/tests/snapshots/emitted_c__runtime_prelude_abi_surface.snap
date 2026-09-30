@@ -2353,6 +2353,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
 static void kiln_c99_candidate_prune_owners(kiln_gc_heap *heap) {
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
+static int kiln_c99_graph_ledger_audit_enabled(void) {
 typedef struct kiln_c99_graph_provider_visit {
 static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(

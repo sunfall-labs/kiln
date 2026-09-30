@@ -217,7 +217,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
         if (table.tag != KILN_VALUE_ARRAY) {
             status = kiln_c99_new_array(&table);
             if (status != KILN_C99_OK) return status;
-            state->value = table;
+            kiln_c99_heap_store_value(kiln_c99_object_of(receiver), &state->value, table);
         }
     }
     entries = kiln_c99_array_of(table);

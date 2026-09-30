@@ -691,7 +691,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
         }
         if (array->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object(&array->properties);
+            status = kiln_c99_new_object_for_owner(&array->properties, array);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -702,7 +702,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
     if (target.tag == KILN_VALUE_COLLECTION) {
         kiln_collection *collection = kiln_c99_collection_of(target);
         if (collection->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object(&collection->properties);
+            status = kiln_c99_new_object_for_owner(&collection->properties, collection);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -713,7 +713,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
     if (target.tag == KILN_VALUE_PROMISE) {
         kiln_promise *promise = kiln_c99_promise_of(target);
         if (promise->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object(&promise->properties);
+            status = kiln_c99_new_object_for_owner(&promise->properties, promise);
             if (status != KILN_C99_OK) {
                 return status;
             }

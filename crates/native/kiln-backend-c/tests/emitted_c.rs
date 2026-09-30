@@ -1094,7 +1094,7 @@ fn runtime_prelude_size() {
     // prelude to 66,012 lines. The ordinary block header remains unchanged.
     // Candidate lifetime owner recording, store helpers and shared-layout publication
     // observation add 266 lines (66,278 total). Runtime sections remain emitted once.
-    const CEILING_LINES: usize = 66_400;
+    const CEILING_LINES: usize = 66_450;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

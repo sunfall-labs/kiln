@@ -867,7 +867,7 @@ static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_
         kiln_property *property;
         int status = kiln_c99_own_slot_key(built, ikey, ikey, &property);
         if (status != KILN_C99_OK) return status;
-        property->value = kiln_val_to_boundary(member);
+        kiln_c99_heap_store_value(object, &property->value, kiln_val_to_boundary(member));
         return KILN_C99_OK;
     }
 }

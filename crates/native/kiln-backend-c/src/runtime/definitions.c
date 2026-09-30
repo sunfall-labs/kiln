@@ -187,8 +187,8 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
     }
     property->accessor = 1;
     object->accessor_count += 1;
-    property->getter = getter;
-    property->setter = setter;
+    kiln_c99_heap_store_value(object, &property->getter, getter);
+    kiln_c99_heap_store_value(object, &property->setter, setter);
     property->writable = 0;
     /* A symbol key stays stored non-enumerable (see `kiln_property.symbol_hidden`); the program's
      * answer for it is the hidden bit. */

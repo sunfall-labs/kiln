@@ -481,7 +481,7 @@ static int kiln_c99_collection_put_val_unleased(kiln_collection *collection, kil
             uint32_t idx = collection->hash_table[at] - 1;
             if (!collection->entries[idx].dead &&
                 kiln_c99_val_collection_eq(collection->entries[idx].key, key)) {
-                collection->entries[idx].value = kiln_val_to_boundary(value);
+                kiln_c99_heap_store_value(collection, &collection->entries[idx].value, kiln_val_to_boundary(value));
                 return KILN_C99_OK;
             }
             at = (at + 1) & mask;
@@ -491,7 +491,7 @@ static int kiln_c99_collection_put_val_unleased(kiln_collection *collection, kil
         for (size_t index = 0; index < collection->count; ++index) {
             if (collection->entries[index].dead) continue;
             if (kiln_c99_val_collection_eq(collection->entries[index].key, key)) {
-                collection->entries[index].value = kiln_val_to_boundary(value);
+                kiln_c99_heap_store_value(collection, &collection->entries[index].value, kiln_val_to_boundary(value));
                 return KILN_C99_OK;
             }
         }
@@ -500,8 +500,8 @@ static int kiln_c99_collection_put_val_unleased(kiln_collection *collection, kil
                                   collection->count + 1, sizeof *collection->entries);
     if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
     size_t new_idx = collection->count;
-    collection->entries[new_idx].key = kiln_val_to_boundary(key);
-    collection->entries[new_idx].value = kiln_val_to_boundary(value);
+    kiln_c99_heap_store_value(collection, &collection->entries[new_idx].key, kiln_val_to_boundary(key));
+    kiln_c99_heap_store_value(collection, &collection->entries[new_idx].value, kiln_val_to_boundary(value));
     collection->entries[new_idx].dead = 0;
     collection->count += 1;
     collection->live += 1;
@@ -563,6 +563,8 @@ static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection,
     collection->entries[(size_t)at].dead = 1;
     collection->live -= 1;
     kiln_c99_collection_hash_remove(collection, (size_t)at, kiln_val_to_boundary(key));
+    kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].key, kiln_c99_undefined());
+    kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].value, kiln_c99_undefined());
     return KILN_VAL_TRUE;
 }
 

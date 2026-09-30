@@ -700,7 +700,7 @@ static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t 
             kiln_atomics_wait_async_cancel(ticket);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        work->promise = promise;
+        kiln_c99_heap_store_value(work, &work->promise, promise);
         operation.operation = KILN_REALM_OP_ATOMICS_WAIT;
         operation.resource = ticket;
         memcpy(&bits, &timeout, sizeof bits);

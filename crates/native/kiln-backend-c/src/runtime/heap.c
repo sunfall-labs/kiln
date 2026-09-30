@@ -5738,6 +5738,40 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
+/* Audit real certification boundaries while the full walk remains authoritative. An unknown
+ * ledger fails closed and may conservatively defer to the full walk. A definitive disagreement
+ * means a store or inventory was missed; audit mode refuses rather than hiding that defect. */
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
+    const kiln_gc_heap *heap, const kiln_c99_candidate_group *group,
+    kiln_nursery_chunk *const *chunks, size_t count, int audit) {
+    kiln_c99_graph_incoming_result full = kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+    if (audit && group != NULL) {
+        kiln_c99_graph_incoming_result ledger = kiln_c99_graph_scan_local_shapes(heap, chunks, count);
+        if (ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED)
+            ledger = kiln_c99_graph_scan_candidate_owners(heap, group, chunks, count);
+        if ((ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+             ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) && ledger != full) {
+            fputs("kiln: candidate ledger disagrees with heap scan: ", stderr);
+            fputs(ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "ledger alias, " : "ledger clear, ", stderr);
+            fputs(full == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "heap alias\n" :
+                  full == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "heap clear\n" : "heap unproven\n", stderr);
+            return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+        }
+    }
+    return full;
+}
+
+static int kiln_c99_graph_ledger_audit_enabled(void) {
+    static _Thread_local int initialized;
+    static _Thread_local int enabled;
+    if (!initialized) {
+        const char *option = getenv("KILN_GRAPH_LEDGER_AUDIT");
+        enabled = option != NULL && strcmp(option, "1") == 0;
+        initialized = 1;
+    }
+    return enabled;
+}
+
 typedef struct kiln_c99_graph_provider_visit {
     const kiln_gc_heap *heap;
     kiln_nursery_chunk *const *chunks;
@@ -5867,7 +5901,8 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
             goto done;
         }
     }
-    result = kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+    result = kiln_c99_graph_scan_incoming_heap_checked(heap, group, chunks, count,
+                                                       kiln_c99_graph_ledger_audit_enabled());
     if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) goto done;
     {
         kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };

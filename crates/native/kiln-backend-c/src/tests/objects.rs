@@ -2871,7 +2871,7 @@ fn executable_candidate_ledger_covers_collection_proxy_and_async_holders() {
     let wrapper = r#"
 static int ledger_holders_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
-    kiln_val *root;
+    void *root;
     kiln_c99_candidate_group *group;
     kiln_nursery_chunk *batch[1];
     kiln_value root_value, map_value, proxy_value, promise_value, bound_value, settler_value;
@@ -2885,11 +2885,9 @@ static int ledger_holders_entry(void *context) {
     heap->fallback = 0;
     heap->enabled = 1;
     if (!kiln_c99_actor_candidate_begin(heap)) return 1;
-    root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
-    if (root == NULL) return 2;
-    kiln_c99_val_store_cell(root, KILN_VAL_UNDEFINED);
+    if (kiln_c99_new_object(&root_value) != KILN_C99_OK) return 2;
+    root = root_value.ptr;
     group = heap->actor_candidate_group;
-    root_value = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root, NULL, 0);
     if (!kiln_c99_actor_candidate_end(heap, 1)) return 3;
     kiln_c99_actor_candidate_seal(heap, root_value);
     batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root - 1);
@@ -2941,6 +2939,48 @@ static int ledger_holders_entry(void *context) {
             KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
         kiln_c99_graph_scan_outside_heap(heap, batch, 1) !=
             KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 9;
+    {
+        kiln_value fast_value, accessor_value;
+        kiln_collection *fast;
+        kiln_val compact_root = kiln_val_from_boundary(root_value);
+        if (kiln_c99_new_collection(&fast_value, 1, 0) != KILN_C99_OK ||
+            kiln_c99_new_object(&accessor_value) != KILN_C99_OK ||
+            kiln_c99_ensure_dictionary(kiln_c99_object_of(accessor_value)) != KILN_C99_OK) return 12;
+        fast = kiln_c99_collection_of(fast_value);
+        /* The compact method path has separate insertion and hashed/unhashed updates. */
+        if (kiln_c99_collection_put_val_fast(fast, kiln_c99_val_from_double(0), compact_root) != KILN_C99_OK ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 13;
+        if (kiln_c99_collection_put_val_fast(fast, kiln_c99_val_from_double(0), KILN_VAL_UNDEFINED) != KILN_C99_OK ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 14;
+        for (size_t index = 1; index < 20; ++index)
+            if (kiln_c99_collection_put_val_fast(fast, kiln_c99_val_from_double(index),
+                    kiln_c99_val_from_double(index)) != KILN_C99_OK) return 15;
+        if (fast->hash_table == NULL ||
+            kiln_c99_collection_put_val_fast(fast, kiln_c99_val_from_double(0), compact_root) != KILN_C99_OK ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 16;
+        if (kiln_c99_collection_put_val_fast(fast, kiln_c99_val_from_double(0), KILN_VAL_UNDEFINED) != KILN_C99_OK ||
+            kiln_c99_collection_put_val_fast(fast, compact_root, KILN_VAL_UNDEFINED) != KILN_C99_OK ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 17;
+        if (kiln_c99_collection_delete_val_fast(fast, compact_root) != KILN_VAL_TRUE ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 18;
+        /* The new-property accessor branch publishes through a descriptor pointer alias. */
+        if (kiln_c99_define_accessor(accessor_value, "held", 4, root_value,
+                kiln_c99_undefined(), 1) != KILN_C99_OK ||
+            kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 19;
+        int deleted = 0;
+        int delete_status = kiln_c99_delete(NULL, accessor_value, "held", 4, &deleted, 0, NULL);
+        kiln_c99_graph_incoming_result after_delete = kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, 1, 1);
+        if (delete_status != KILN_C99_OK || !deleted || after_delete != KILN_C99_GRAPH_ROOTS_UNENUMERATED) {
+            fprintf(stderr, "accessor delete: status=%d deleted=%d scan=%d\n", delete_status, deleted, after_delete);
+            return 20;
+        }
+    }
     return 0;
 }
 int main(void) {
@@ -3266,6 +3306,69 @@ int main(void) {
         "host ledger failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_candidate_ledger_audit_detects_an_unrecorded_store_and_allows_retry() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int ledger_audit_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_val *owner;
+    kiln_value root;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 0;
+    owner = kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *owner);
+    if (owner == NULL) return 1;
+    *owner = KILN_VAL_UNDEFINED;
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&root) != KILN_C99_OK) return 2;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 3;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 4;
+    /* Deliberately bypass the authority: this is the defect audit mode must detect. */
+    *owner = kiln_val_from_boundary(root);
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 5;
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 6;
+    kiln_c99_val_store_cell(owner, kiln_val_from_boundary(root));
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 7;
+    kiln_c99_val_store_cell(owner, KILN_VAL_UNDEFINED);
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 8;
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    status = kiln_realm_enter(realm, ledger_audit_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 10;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-ledger-audit");
+    assert!(
+        run.status.success(),
+        "audit failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr)
+            .matches("candidate ledger disagrees")
+            .count(),
+        1
     );
 }
 

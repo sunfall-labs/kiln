@@ -400,7 +400,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
                                 "to answer",
                                 out);
             }
-            if (kiln_c99_new_object(&bound->properties) != KILN_C99_OK)
+            if (kiln_c99_new_object_for_owner(&bound->properties, bound) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
         }
         *out = bound->properties;
