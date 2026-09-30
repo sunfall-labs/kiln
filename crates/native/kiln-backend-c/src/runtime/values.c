@@ -1,6 +1,9 @@
 
 void kiln_c99_publish_diagnostic(void);
 
+/* Defined later in strings.c; all runtime parts share one translation unit. */
+static int kiln_c99_is_trimmed(uint16_t unit);
+
 static kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
@@ -734,43 +737,61 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
             if (subject.tag == KILN_VALUE_STRING) {
                 /* A string that is not an integer is a SyntaxError, unlike `Number("x")` which
                  * is NaN -- a BigInt has no NaN to be. */
-                size_t subject_len = 0;
-                const char *subject_bytes = kiln_c99_string_ascii_bytes(subject, &subject_len);
-                size_t first = 0, last = subject_len;
+                const kiln_string *subject_string =
+                    subject.ptr == NULL ? NULL : (const kiln_string *)subject.ptr;
+                size_t first = 0;
+                size_t last = subject_string == NULL ? 0 : subject_string->unit_len;
                 uint32_t radix = 10;
-                if (subject_bytes == NULL) {
+                const unsigned char *digits = NULL;
+                unsigned char *owned_digits = NULL;
+                size_t digit_len;
+                int parsed = -1;
+                int empty_input;
+                if (subject_string == NULL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                                 "Cannot convert this string to a BigInt");
                 }
                 /* BigInt string grammar accepts unsigned 0x/0o/0b prefixes in addition to
                  * signed decimal. The provider parses digits in a caller-selected radix, so
                  * strip only a recognized prefix here; signed non-decimal forms stay invalid. */
-                while (first < last && (subject_bytes[first] == ' ' ||
-                       (subject_bytes[first] >= '\t' && subject_bytes[first] <= '\r')))
+                while (first < last && kiln_c99_is_trimmed(
+                           (uint16_t)kiln_string_unit_at(subject_string, first)))
                     ++first;
-                while (last > first && (subject_bytes[last - 1] == ' ' ||
-                       (subject_bytes[last - 1] >= '\t' && subject_bytes[last - 1] <= '\r')))
+                while (last > first && kiln_c99_is_trimmed(
+                           (uint16_t)kiln_string_unit_at(subject_string, last - 1)))
                     --last;
-                if (last - first >= 2 && subject_bytes[first] == '0') {
-                    char prefix = subject_bytes[first + 1];
+                empty_input = first == last;
+                if (last - first >= 2 && kiln_string_unit_at(subject_string, first) == '0') {
+                    uint32_t prefix = kiln_string_unit_at(subject_string, first + 1);
                     if (prefix == 'x' || prefix == 'X') radix = 16;
                     else if (prefix == 'o' || prefix == 'O') radix = 8;
                     else if (prefix == 'b' || prefix == 'B') radix = 2;
                     if (radix != 10) first += 2;
                 }
-                if (first == last) {
+                digit_len = last - first;
+                if (empty_input) {
                     static const unsigned char zero[] = "0";
-                    if (kiln_bigint_parse(zero, 1, 10, &handle) == 0) {
-                        *result = kiln_c99_bigint_value(handle);
-                        return KILN_C99_OK;
+                    parsed = kiln_bigint_parse(zero, 1, 10, &handle);
+                } else if (digit_len != 0 && !kiln_string_is_utf16(subject_string)) {
+                    digits = (const unsigned char *)kiln_string_latin1(subject_string) + first;
+                } else if (digit_len != 0) {
+                    size_t index;
+                    owned_digits = (unsigned char *)malloc(digit_len);
+                    if (owned_digits == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    for (index = 0; index < digit_len; ++index) {
+                        uint32_t unit = kiln_string_unit_at(subject_string, first + index);
+                        if (unit > 0x7f) break;
+                        owned_digits[index] = (unsigned char)unit;
                     }
-                } else if (kiln_bigint_parse(
-                               (const unsigned char *)subject_bytes + first, last - first,
-                               radix, &handle) == 0) {
+                    if (index == digit_len) digits = owned_digits;
+                }
+                if (digit_len != 0 && digits != NULL)
+                    parsed = kiln_bigint_parse(digits, digit_len, radix, &handle);
+                free(owned_digits);
+                if (parsed == 0) {
                     *result = kiln_c99_bigint_value(handle);
                     return KILN_C99_OK;
-                }
-                {
+                } else {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                                 "Cannot convert this string to a BigInt");
                 }
