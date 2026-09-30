@@ -2824,9 +2824,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(Value::RegExp(regexp)) = arguments.first() else {
                     unreachable!("checked by the guard");
                 };
+                let cap = match arguments.get(1) {
+                    None | Some(Value::Undefined) => u32::MAX as usize,
+                    Some(limit) => {
+                        to_uint32(self.as_number_argument(Some(limit), instruction)?) as usize
+                    }
+                };
                 let subject: Vec<u16> = text.encode_utf16().collect();
                 let mut parts = Vec::new();
                 let mut copied = 0;
+                if cap == 0 {
+                    return Ok(Value::Array(ArrayData::new(parts)));
+                }
                 if subject.is_empty() {
                     // An empty subject is the one case with no trailing piece: a separator that
                     // matches it splits it into nothing, and one that does not leaves it whole.
@@ -2838,10 +2847,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
                 let matches = regexp_search_all(regexp, &subject);
-                if let Some((_, groups, _)) = matches.last() {
-                    self.publish_regexp_legacy_captures(&subject, groups);
-                }
                 for (range, groups, _) in matches {
+                    if parts.len() >= cap {
+                        break;
+                    }
+                    // Split's limit can end the operation before later separators are visited;
+                    // only captures from matches the algorithm reaches become observable.
+                    self.publish_regexp_legacy_captures(&subject, &groups);
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
@@ -2857,6 +2869,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     parts.push(Value::String(
                         utf16_slice(&subject, copied..range.start).into(),
                     ));
+                    if parts.len() == cap {
+                        return Ok(Value::Array(ArrayData::new(parts)));
+                    }
                     // A capturing separator contributes its groups to the result, which is what
                     // makes `"a1b".split(/(\d)/)` three elements rather than two.
                     for group in groups.iter().skip(1) {
@@ -2866,12 +2881,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             }
                             None => Value::Undefined,
                         });
+                        if parts.len() == cap {
+                            return Ok(Value::Array(ArrayData::new(parts)));
+                        }
                     }
                     copied = range.end;
                 }
-                parts.push(Value::String(
-                    utf16_slice(&subject, copied..subject.len()).into(),
-                ));
+                if parts.len() < cap {
+                    parts.push(Value::String(
+                        utf16_slice(&subject, copied..subject.len()).into(),
+                    ));
+                }
                 Ok(Value::Array(ArrayData::new(parts)))
             }
             // `ArrayBuffer.prototype.slice` builds its result with `SpeciesConstructor`, which
@@ -2979,7 +2999,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Value::RegExp(regexp) = &pattern else {
                     return Ok(Value::Null);
                 };
-                let all = matches!(native, Native::StringMatchAll) || regexp.global;
+                if matches!(native, Native::StringMatchAll) {
+                    return self.regexp_match_all_symbol(&pattern, &subject, instruction);
+                }
+                let all = regexp.global;
                 if !all {
                     // Without `g`, `match` is `exec`: one result with its groups.
                     let found = regexp_search(regexp, &subject, 0);
@@ -2994,17 +3017,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 let matches = regexp_search_all(regexp, &subject);
-                if let Some((_, groups, _)) = matches.last() {
-                    self.publish_regexp_legacy_captures(&subject, groups);
-                }
                 let mut results = Vec::new();
-                for (range, groups, names) in matches {
-                    results.push(if matches!(native, Native::StringMatchAll) {
-                        // `matchAll` yields full results; `match` with `g` yields only the text.
-                        match_result(&subject, &range, &groups, &names, regexp.has_indices)
-                    } else {
-                        Value::String(utf16_slice(&subject, range).into())
-                    });
+                for (range, groups, _) in matches {
+                    self.publish_regexp_legacy_captures(&subject, &groups);
+                    results.push(Value::String(utf16_slice(&subject, range).into()));
                 }
                 if results.is_empty() && matches!(native, Native::StringMatch) {
                     return Ok(Value::Null);
