@@ -704,7 +704,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
                 Instruction::StoreCell(1),
                 Instruction::Return,
             ],
-            local_count: 2,
+            local_count: 3,
             functions: vec![function],
             template_sites: Vec::new(),
         },
@@ -715,6 +715,15 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
         }],
     );
     module.link_facts.module_instantiation_end = 4;
+    // Evaluation-only dead declaration metadata must not erase instantiation's new return.
+    module
+        .link_facts
+        .removable_declarations
+        .push(kiln_ir::RemovableDeclaration {
+            local_slots: vec![2],
+            pc_start: 4,
+            pc_end: 7,
+        });
     let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
         &module,
         "fixture.js",
@@ -737,6 +746,8 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
     );
     assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
     assert!(instantiation.source.contains("ku_fn_0("));
+    assert!(instantiation.source.contains("return KILN_C99_OK;"));
+    assert!(!instantiation.source.contains("goto kiln_refusal;"));
 }
 
 #[test]

@@ -959,7 +959,8 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                                   depth, thrown);
         return KILN_C99_OK;
     }
-    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY &&
+        kiln_c99_exotic_store(target) == NULL) {
         KILN_C99_REFUSE("an own-property descriptor of a value whose own properties are not all "
                         "modelled");
     }

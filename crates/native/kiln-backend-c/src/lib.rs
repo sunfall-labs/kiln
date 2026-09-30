@@ -678,6 +678,21 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 }),
         );
     }
+    // Splitting removes hoisted MakeFunction instructions from evaluation. Compute their
+    // captured binding roots while the complete module still establishes closure ownership.
+    let mut evaluation_policy = policy.clone();
+    if instantiate {
+        if let Some(demanded) = &policy.live_module_slots {
+            let retained = closed_world_function_liveness(
+                &module.program,
+                demanded,
+                module.link_facts.direct_eval,
+                &module.link_facts.removable_declarations,
+            )
+            .2;
+            evaluation_policy.live_module_slots = Some(Arc::new(retained));
+        }
+    }
     let (module, instantiation) = if instantiate {
         let mut module = module.clone();
         let mut binding_slots = module
@@ -726,6 +741,9 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
             .code
             .truncate(module.link_facts.module_instantiation_end as usize);
         instantiation.program.code.push(Instruction::Return);
+        // Declaration ranges describe evaluation's original bytecode, not this truncated
+        // prefix. In particular the appended Return occupies the first initializer's PC.
+        instantiation.link_facts.removable_declarations.clear();
         // An instantiation entrypoint is linked as one auxiliary object. Do not let the normal
         // large-module splitter return chunks that CModuleUnit cannot currently retain.
         let mut instantiation_policy = policy.clone();
@@ -834,7 +852,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 instantiate.then_some(symbol.as_str()),
                 instantiate,
                 false,
-                &policy,
+                &evaluation_policy,
                 false,
                 logical_path,
                 instantiate,
