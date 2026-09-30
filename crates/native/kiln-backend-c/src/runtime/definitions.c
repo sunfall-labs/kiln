@@ -1338,6 +1338,14 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_BUILTIN: {
         int enumerable;
         kiln_value names;
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_property_read_own_value(store, view, canonical, &projected)) {
+            *found = 1;
+            return KILN_C99_OK;
+        }
         char intrinsic_buffer[256];
         const char *intrinsic_key;
         size_t intrinsic_len;

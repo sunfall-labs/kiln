@@ -28,3 +28,11 @@ console.log(JSON.stringify({ a: 2 }, (_key, value) => typeof value === "number" 
 const captureTarget = {};
 Error.captureStackTrace(captureTarget);
 console.log(typeof captureTarget.stack);
+
+// Reflection must inspect the same callable store that definitions and reads use.
+const ownSymbol = Symbol("own builtin key");
+Object.defineProperty(Math, "customOwn", { value: 7, configurable: true });
+Object.defineProperty(Math, ownSymbol, { value: 8, configurable: true });
+console.log(Object.hasOwn(Math, "customOwn"), Object.prototype.hasOwnProperty.call(Math, ownSymbol));
+delete Math.customOwn;
+delete Math[ownSymbol];
