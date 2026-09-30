@@ -1,0 +1,7 @@
+// Annex B RegExp capture statics follow the most recent native match, including the bool-only
+// RegExp.test fast path used by libraries such as Showdown.
+const re = /(\w+)-(\d+)/;
+console.log(re.test("part-42"), RegExp.$1, RegExp.$2);
+console.log("xray-7".match(re)?.[0], RegExp.$1, RegExp.$2);
+console.log(/never/.test("here"), JSON.stringify(RegExp.$1), JSON.stringify(RegExp.$2));
+console.log(/(a)(b)?/.test("a"), JSON.stringify(RegExp.$1), JSON.stringify(RegExp.$2));

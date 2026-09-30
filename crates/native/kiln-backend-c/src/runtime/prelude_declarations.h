@@ -489,6 +489,10 @@ extern kiln_val kiln_c99_val_from_double(double d);
 extern size_t kiln_c99_val_string_length(kiln_val v);
 extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
+extern int kiln_c99_regexp_publish_legacy(const uint16_t *units, size_t count,
+                                          const int64_t *ranges, size_t groups, int matched);
+extern int kiln_c99_regexp_publish_legacy_subject(kiln_value subject, const int64_t *ranges,
+                                                  size_t groups, int matched);
 extern int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak);
 extern int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value);

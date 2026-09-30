@@ -1640,6 +1640,18 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = value;
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW) {
+        kiln_c99_realm_state *realm = kiln_c99_realm();
+        double capture = argc > 0 && args[0].tag == KILN_VALUE_NUMBER
+                             ? kiln_c99_as_number(args[0]) : -1.0;
+        if (realm == NULL || !isfinite(capture) || floor(capture) != capture ||
+            capture < 1.0 || capture > 9.0) {
+            *result = kiln_c99_undefined();
+        } else {
+            *result = realm->regexp_legacy_captures[(size_t)capture - 1];
+        }
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
         if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
             kiln_c99_collection_of(args[0])->is_weak || argc < 2 ||
@@ -3252,6 +3264,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 if (units != NULL && !stack_used) {
                     free(units);
                 }
+                return status;
+            }
+            status = kiln_c99_regexp_publish_legacy_subject(subject, ranges, groups, matched);
+            if (status != KILN_C99_OK) {
+                if (ranges != stack_ranges) free(ranges);
+                if (units != NULL && !stack_used) free(units);
                 return status;
             }
             if (regexp->global || regexp->sticky) {

@@ -210,6 +210,8 @@ static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_v
                             : 0;
                         if ((regexp->global || regexp->sticky) && start > sval.len) {
                             regexp->last_index = 0.0;
+                            int clear_status = kiln_c99_regexp_publish_legacy_subject(sval, NULL, 0, 0);
+                            if (clear_status != KILN_C99_OK) return clear_status;
                             *out = KILN_VAL_FALSE;
                             return KILN_C99_OK;
                         }
@@ -222,6 +224,8 @@ static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_v
                         if (regexp->global || regexp->sticky) {
                             regexp->last_index = matched ? (double)ranges[1] : 0.0;
                         }
+                        status = kiln_c99_regexp_publish_legacy_subject(sval, ranges, groups, matched);
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                         *out = matched ? KILN_VAL_TRUE : KILN_VAL_FALSE;
                         return KILN_C99_OK;
                     }
@@ -257,6 +261,8 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                             : 0;
                         if ((regexp->global || regexp->sticky) && start > sval.len) {
                             regexp->last_index = 0.0;
+                            int clear_status = kiln_c99_regexp_publish_legacy_subject(sval, NULL, 0, 0);
+                            if (clear_status != KILN_C99_OK) return clear_status;
                             *out = KILN_VAL_NULL;
                             return KILN_C99_OK;
                         }
@@ -281,6 +287,11 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         }
                         if (regexp->global || regexp->sticky) {
                             regexp->last_index = matched ? (double)ranges[1] : 0.0;
+                        }
+                        status = kiln_c99_regexp_publish_legacy_subject(sval, ranges, groups, matched);
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+                            if (ranges != stack_ranges) free(ranges);
+                            return status;
                         }
                         if (!matched) {
                             if (ranges != stack_ranges) free(ranges);

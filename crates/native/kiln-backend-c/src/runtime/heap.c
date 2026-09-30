@@ -5153,6 +5153,10 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
     KILN_VISIT_REALM_VALUE(&realm->array_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->string_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->regexp_string_iterator_prototype);
+    for (index = 0; index < sizeof realm->regexp_legacy_captures / sizeof *realm->regexp_legacy_captures;
+         ++index)
+        KILN_VISIT_REALM_VALUE(&realm->regexp_legacy_captures[index]);
+    KILN_VISIT_REALM_VALUE(&realm->regexp_legacy_empty);
     KILN_VISIT_REALM_VALUE(&realm->typed_array_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->map_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->set_iterator_prototype);
