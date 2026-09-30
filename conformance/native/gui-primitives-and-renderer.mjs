@@ -7,6 +7,9 @@ import {
   TextInput,
   Slider,
   Toggle,
+  TrayIcon,
+  Menu,
+  MenuItem,
   createRenderer,
   dialog,
   clipboard,
@@ -157,5 +160,19 @@ systemTheme.setTheme('light');
 await clipboard.writeText('kiln-gui-clipboard');
 const readBack = await clipboard.readText();
 console.log('clipboard readback:', readBack);
+
+// 9. Native Menu & Tray Icon (ADR 0074)
+const menu = new Menu();
+const item1 = new MenuItem({ label: 'Open', onClick: () => console.log('menu open') });
+const item2 = new MenuItem({ label: 'Quit', onClick: () => console.log('menu quit') });
+menu.append(item1);
+menu.append(item2);
+console.log('menu items count:', menu.getItems().length);
+console.log('item1 label:', item1.label, 'enabled:', item1.enabled);
+
+const tray = new TrayIcon({ tooltip: 'Kiln App Tray', menu });
+console.log('tray tooltip:', tray.tooltip);
+console.log('tray menu items:', tray.menu?.getItems().length);
+tray.dispose();
 
 console.log('gui conformance passed');

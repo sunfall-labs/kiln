@@ -1022,23 +1022,209 @@ export interface MessageOptions {
   type?: "info" | "warning" | "error";
 }
 
+export class HostGuiBridge {
+  private initialized = false;
+  private lib: any = null;
+  private ffi: any = null;
+
+  init(): boolean {
+    if (this.initialized) return this.lib !== null;
+    this.initialized = true;
+    try {
+      this.ffi = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.ffi) || null;
+      if (!this.ffi) return false;
+
+      const fs = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.fs) || null;
+      const suffix = this.ffi.suffix || ".so";
+
+      const candidates: string[] = [];
+      if (typeof process !== "undefined" && process.env && process.env.KILN_HOST_GUI_LIB) {
+        candidates.push(process.env.KILN_HOST_GUI_LIB);
+      }
+      const cwd = typeof process !== "undefined" && typeof process.cwd === "function" ? process.cwd() : ".";
+      candidates.push(
+        cwd + "/target/release/libkiln_host_gui" + suffix,
+        cwd + "/target/debug/libkiln_host_gui" + suffix,
+        "./target/release/libkiln_host_gui" + suffix,
+        "./target/debug/libkiln_host_gui" + suffix
+      );
+
+      let targetLib: string | null = null;
+      if (fs && typeof fs.existsSync === "function") {
+        for (const candidate of candidates) {
+          try {
+            if (fs.existsSync(candidate)) {
+              targetLib = candidate;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (!targetLib) return false;
+
+      this.lib = this.ffi.dlopen(targetLib, {
+        kiln_gui_dialog_open_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
+        kiln_gui_dialog_save_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
+        kiln_gui_dialog_message: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
+        kiln_gui_clipboard_read: { arguments: ["pointer", "u64"], return: "i32" },
+        kiln_gui_clipboard_write: { arguments: ["pointer"], return: "i32" },
+        kiln_gui_get_theme: { arguments: [], return: "i32" },
+        kiln_gui_tray_create: { arguments: ["pointer"], return: "u32" },
+        kiln_gui_tray_clear: { arguments: [], return: "i32" },
+      });
+      return this.lib !== null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  openFile(options?: OpenFileOptions): string | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
+      let filterNamePtr = 0n;
+      let filterExtsPtr = 0n;
+      if (options?.filters && options.filters.length > 0) {
+        filterNamePtr = toCStr(this.ffi, options.filters[0].name);
+        filterExtsPtr = toCStr(this.ffi, options.filters[0].extensions.join(","));
+      }
+      const buf = new Uint8Array(4096);
+      const bufPtr = this.ffi.getRawPointer(buf.buffer);
+      const len = this.lib.kiln_gui_dialog_open_file(titlePtr, filterNamePtr, filterExtsPtr, bufPtr, BigInt(buf.length));
+      if (len > 0) {
+        return new TextDecoder().decode(buf.subarray(0, len));
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  saveFile(options?: SaveFileOptions): string | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
+      const defaultPathPtr = options?.default_path ? toCStr(this.ffi, options.default_path) : 0n;
+      let filterNamePtr = 0n;
+      let filterExtsPtr = 0n;
+      if (options?.filters && options.filters.length > 0) {
+        filterNamePtr = toCStr(this.ffi, options.filters[0].name);
+        filterExtsPtr = toCStr(this.ffi, options.filters[0].extensions.join(","));
+      }
+      const buf = new Uint8Array(4096);
+      const bufPtr = this.ffi.getRawPointer(buf.buffer);
+      const len = this.lib.kiln_gui_dialog_save_file(titlePtr, defaultPathPtr, filterNamePtr, filterExtsPtr, bufPtr, BigInt(buf.length));
+      if (len > 0) {
+        return new TextDecoder().decode(buf.subarray(0, len));
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  showMessage(options: MessageOptions): void {
+    if (!this.init() || !this.lib) return;
+    try {
+      const titlePtr = options.title ? toCStr(this.ffi, options.title) : 0n;
+      const msgPtr = toCStr(this.ffi, options.message);
+      const kindPtr = options.kind ? toCStr(this.ffi, options.kind) : 0n;
+      this.lib.kiln_gui_dialog_message(titlePtr, msgPtr, kindPtr);
+    } catch (_) {}
+  }
+
+  clipboardRead(): string | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const buf = new Uint8Array(8192);
+      const bufPtr = this.ffi.getRawPointer(buf.buffer);
+      const len = this.lib.kiln_gui_clipboard_read(bufPtr, BigInt(buf.length));
+      if (len >= 0) {
+        return new TextDecoder().decode(buf.subarray(0, len));
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  clipboardWrite(text: string): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      const textPtr = toCStr(this.ffi, text);
+      const res = this.lib.kiln_gui_clipboard_write(textPtr);
+      return res === 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  getTheme(): "dark" | "light" | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const code = this.lib.kiln_gui_get_theme();
+      return code === 0 ? "dark" : "light";
+    } catch (_) {
+      return null;
+    }
+  }
+
+  createTray(tooltip: string): number | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const tipPtr = toCStr(this.ffi, tooltip);
+      const id = this.lib.kiln_gui_tray_create(tipPtr);
+      return id > 0 ? id : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  clearTrays(): void {
+    if (!this.init() || !this.lib) return;
+    try {
+      this.lib.kiln_gui_tray_clear();
+    } catch (_) {}
+  }
+}
+
+export const hostGuiBridge = new HostGuiBridge();
+
 export const dialog = {
   async openFile(options?: OpenFileOptions): Promise<string | null> {
     if (typeof G.__kilnGuiOpenFile === "function") {
       return G.__kilnGuiOpenFile(options);
     }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.openFile === "function") {
+      return nativeMod.openFile(options);
+    }
+    const hostPath = hostGuiBridge.openFile(options);
+    if (hostPath !== null) return hostPath;
     return null;
   },
   async saveFile(options?: SaveFileOptions): Promise<string | null> {
     if (typeof G.__kilnGuiSaveFile === "function") {
       return G.__kilnGuiSaveFile(options);
     }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.saveFile === "function") {
+      return nativeMod.saveFile(options);
+    }
+    const hostPath = hostGuiBridge.saveFile(options);
+    if (hostPath !== null) return hostPath;
     return null;
   },
   async message(options: MessageOptions): Promise<void> {
     if (typeof G.__kilnGuiShowMessage === "function") {
       return G.__kilnGuiShowMessage(options);
     }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.showMessage === "function") {
+      return nativeMod.showMessage(options);
+    }
+    hostGuiBridge.showMessage(options);
   },
 };
 
@@ -1048,13 +1234,25 @@ export const clipboard = {
     if (typeof G.__kilnGuiClipboardRead === "function") {
       return G.__kilnGuiClipboardRead();
     }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.readText === "function") {
+      return nativeMod.readText();
+    }
+    const hostText = hostGuiBridge.clipboardRead();
+    if (hostText !== null) return hostText;
     return virtualClipboard;
   },
   async writeText(text: string): Promise<void> {
     if (typeof G.__kilnGuiClipboardWrite === "function") {
       return G.__kilnGuiClipboardWrite(text);
     }
-    virtualClipboard = String(text);
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.writeText === "function") {
+      return nativeMod.writeText(text);
+    }
+    if (!hostGuiBridge.clipboardWrite(text)) {
+      virtualClipboard = String(text);
+    }
   },
 };
 
@@ -1065,6 +1263,12 @@ export const systemTheme = {
     if (typeof G.__kilnGuiGetTheme === "function") {
       return G.__kilnGuiGetTheme();
     }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.getTheme === "function") {
+      return nativeMod.getTheme();
+    }
+    const hostTheme = hostGuiBridge.getTheme();
+    if (hostTheme !== null) return hostTheme;
     return currentTheme;
   },
   setTheme(theme: "dark" | "light"): void {
@@ -1081,6 +1285,82 @@ export const systemTheme = {
     };
   },
 };
+
+export interface MenuItemOptions {
+  id?: string;
+  label: string;
+  enabled?: boolean;
+  checked?: boolean;
+  onClick?: () => void;
+}
+
+export class MenuItem {
+  readonly id: string;
+  label: string;
+  enabled: boolean;
+  checked?: boolean;
+  onClick?: () => void;
+
+  constructor(options: MenuItemOptions) {
+    this.id = options.id || String(nextNodeId++);
+    this.label = options.label;
+    this.enabled = options.enabled !== false;
+    this.checked = options.checked;
+    this.onClick = options.onClick;
+  }
+}
+
+export class Menu {
+  readonly id: number = nextNodeId++;
+  private items: MenuItem[] = [];
+
+  append(item: MenuItem): void {
+    this.items.push(item);
+  }
+
+  getItems(): MenuItem[] {
+    return [...this.items];
+  }
+}
+
+export interface TrayIconOptions {
+  tooltip?: string;
+  menu?: Menu;
+  onPress?: () => void;
+}
+
+export class TrayIcon {
+  readonly id: number;
+  private _tooltip: string;
+  private _menu: Menu | null;
+
+  constructor(options: TrayIconOptions = {}) {
+    this._tooltip = options.tooltip || "";
+    this._menu = options.menu || null;
+    const hostId = hostGuiBridge.createTray(this._tooltip);
+    this.id = hostId !== null ? hostId : nextNodeId++;
+  }
+
+  get tooltip(): string {
+    return this._tooltip;
+  }
+
+  set tooltip(value: string) {
+    this._tooltip = value;
+  }
+
+  get menu(): Menu | null {
+    return this._menu;
+  }
+
+  set menu(value: Menu | null) {
+    this._menu = value;
+  }
+
+  dispose(): void {
+    // Clean up tray icon
+  }
+}
 
 // Turn Mailbox & Reentrancy-Safe Runloop Integration (ADR 0074 §4)
 interface MailboxTurn {
@@ -1291,6 +1571,9 @@ export default {
   TextInput,
   Slider,
   Toggle,
+  TrayIcon,
+  Menu,
+  MenuItem,
   createRenderer,
   createElement,
   h,

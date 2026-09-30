@@ -25,6 +25,7 @@ kiln-db = { path = "crates/compile/kiln-db" }
 kiln-digest = { path = "crates/foundation/kiln-digest" }
 kiln-hir = { path = "crates/syntax/kiln-hir" }
 kiln-host-abi = { path = "crates/foundation/kiln-host-abi" }
+kiln-host-gui = { path = "crates/host/kiln-host-gui" }
 kiln-ir = { path = "crates/compile/kiln-ir" }
 kiln-string = { path = "crates/foundation/kiln-string" }
 kiln-interpreter = { path = "crates/interp/kiln-interpreter" }

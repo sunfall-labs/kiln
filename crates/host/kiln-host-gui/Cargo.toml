@@ -1,0 +1,19 @@
+[package]
+name = "kiln-host-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+arboard = { version = "3.4", default-features = false, features = ["wayland-data-control"] }
+dark-light = "1.1"
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+muda = { version = "0.21", default-features = false }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
