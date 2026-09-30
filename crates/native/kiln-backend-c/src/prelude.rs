@@ -11,11 +11,12 @@ pub(crate) struct MethodId {
 
 const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 
-/// Native dispatch IDs that implement a shared prototype member through primitive-special
-/// dispatch rather than the builtin receiver table. The member's semantics and arity still come
-/// from `kiln_builtin_surface`; this table only connects the C dispatch ID to its public owner.
-const NATIVE_METHOD_PROTOTYPE_BINDINGS: &[(&str, &str, &str)] = &[
+/// Native dispatch IDs whose public owner/key cannot be recovered from the table-driven builtin
+/// receiver rows. The member's arity still comes from `kiln_builtin_surface`; this table only
+/// connects the C dispatch ID to that public identity.
+const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
     ("KILN_C99_METHOD_STRING_INDEX_OF", "String.prototype", "indexOf"),
+    ("KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC", "node:fs", "readFileSync"),
 ];
 
 const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
@@ -45,7 +46,7 @@ const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn method_declared_length(method: &MethodId) -> u32 {
-    for (native_id, owner, member) in NATIVE_METHOD_PROTOTYPE_BINDINGS {
+    for (native_id, owner, member) in NATIVE_METHOD_SURFACE_BINDINGS {
         if *native_id == method.name {
             if let Some(length) = kiln_builtin_surface::native_function_length(owner, member) {
                 return length as u32;
@@ -2301,7 +2302,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 34,
+        sites: 35,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \

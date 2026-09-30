@@ -162,6 +162,65 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+        /* The shared iterator prototype is an intrinsic rather than a table-driven namespace.
+         * Its methods are dispatched by `kiln_c99_iterator_prototype_method`, and the symbol
+         * members are installed by the bootstrap; listing both lets feature detection ask about
+         * `Symbol.iterator` without a false refusal. */
+        static const char *const names[] = {
+            "constructor", "reduce", "toArray", "forEach", "some", "every", "find", "map",
+            "filter", "take", "drop", "flatMap"};
+        static const char *const symbols[] = {
+            "@@iterator", "@@toStringTag", "@@dispose"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        for (index = 0; index < sizeof symbols / sizeof symbols[0]; ++index) {
+            kiln_value symbol;
+            size_t len = strlen(symbols[index]);
+            if (kiln_c99_symbol_of_key(symbols[index], len, &symbol)) {
+                status = kiln_c99_array_push(built, symbol);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE) {
+        /* RegExp.prototype has several accessors that are not ordinary methods, so deriving its
+         * keys from the dispatch table omitted `unicode` and made hasOwnProperty refuse. Keep
+         * Node's complete built-in own-key list here; method reads still route through the
+         * existing RegExp dispatch, while accessors use their receiver checks. */
+        static const char *const names[] = {
+            "constructor", "exec", "dotAll", "flags", "global", "hasIndices", "ignoreCase",
+            "multiline", "source", "sticky", "unicode", "unicodeSets", "compile", "toString",
+            "test"};
+        static const char *const symbols[] = {
+            "@@match", "@@matchAll", "@@replace", "@@search", "@@split"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        for (index = 0; index < sizeof symbols / sizeof symbols[0]; ++index) {
+            kiln_value symbol;
+            size_t len = strlen(symbols[index]);
+            if (kiln_c99_symbol_of_key(symbols[index], len, &symbol)) {
+                status = kiln_c99_array_push(built, symbol);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (!kiln_c99_is_namespace(builtin)) {
         /* A constructor whose statics are not table-driven -- the typed-array constructors and
          * `Temporal`'s eight types -- still cannot list itself, because its members are computed

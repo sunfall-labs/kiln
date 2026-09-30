@@ -2014,6 +2014,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
+        if (target.bits == KILN_C99_BUILTIN_DATE_PROTOTYPE &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            if (kiln_c99_is_date_member(intrinsic_key, intrinsic_len)) {
+                KILN_C99_REFUSE("a Date.prototype locale member this backend has not implemented");
+            }
+            /* date.ts installs every other Date.prototype member into this prototype's own
+             * store, checked above. A remaining spelling such as the nonstandard
+             * `getUTCTime` read by @date-fns/utc is genuinely absent. */
+            KILN_C99_ABSENT("not a Date.prototype member; date.ts installs the complete supported \
+                            Date.prototype surface", out);
+        }
         if (kiln_c99_same_name_key(key, "prototype")) {
             if (target.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);

@@ -1842,9 +1842,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     }
     if (code == KILN_C99_METHOD_TYPED_TO_STRING_TAG) {
         if (receiver.tag != KILN_VALUE_TYPED_ARRAY) {
-            return kiln_c99_throw_error(
-                thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                "get %TypedArray%.prototype[@@toStringTag] needs a typed array receiver");
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
         }
         {
             kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
@@ -3441,6 +3440,29 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (args[0].tag == KILN_VALUE_BOOLEAN || args[0].tag == KILN_VALUE_NUMBER ||
                 args[0].tag == KILN_VALUE_SYMBOL || args[0].tag == KILN_VALUE_BIGINT) {
                 status = kiln_c99_new_array(&built);
+                *result = built;
+                return status;
+            }
+            if (args[0].tag == KILN_VALUE_STRING) {
+                const kiln_string *string = (const kiln_string *)args[0].ptr;
+                status = kiln_c99_new_array(&built);
+                if (status != KILN_C99_OK) return status;
+                for (index = 0; string != NULL && index < string->unit_len && status == KILN_C99_OK; ++index) {
+                    kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                    uint16_t unit = (uint16_t)kiln_string_unit_at(string, index);
+                    kiln_value value = kiln_c99_from_units(&unit, 1);
+                    if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                        status = kiln_c99_array_push(built, key);
+                    } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, value);
+                    } else {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, value);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                    }
+                }
                 *result = built;
                 return status;
             }
