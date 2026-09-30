@@ -26,6 +26,16 @@ use kiln_module_resolver::{
 
 pub const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
 
+/// A cache-stable identity for private names in one project graph. Files retain their absolute
+/// paths everywhere else (resolution, diagnostics, and `import.meta`); only the compiler identity
+/// uses the path relative to the canonical project root.
+fn graph_module_identity(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
 /// missing module from an unresolvable specifier should not need a second dependency to read it.
 pub use kiln_module_resolver::ResolveError;
@@ -431,6 +441,8 @@ impl ModuleGraph {
         L: SourceLoader,
         F: Frontend,
     {
+        let logical_root = fs::canonicalize(project_root.as_ref())
+            .unwrap_or_else(|_| project_root.as_ref().to_path_buf());
         let provider = move |path: &Path| -> Result<ModuleProgram, ModuleGraphError> {
             let source = loader
                 .load(path)
@@ -443,7 +455,8 @@ impl ModuleGraph {
                 .ok_or_else(|| ModuleGraphError::FrontendPath {
                     path: path.to_path_buf(),
                 })?;
-            let hir = frontend.parse(path_string, &source);
+            let mut hir = frontend.parse(path_string, &source);
+            hir.module_id = Arc::from(graph_module_identity(&logical_root, path));
             compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
                 path: path.to_path_buf(),
                 diagnostics,
@@ -466,11 +479,14 @@ impl ModuleGraph {
         P: FnMut(&Path) -> Result<Module, E>,
         E: fmt::Display,
     {
+        let logical_root = fs::canonicalize(project_root.as_ref())
+            .unwrap_or_else(|_| project_root.as_ref().to_path_buf());
         let mut provider = move |path: &Path| -> Result<ModuleProgram, ModuleGraphError> {
-            let hir = provider(path).map_err(|error| ModuleGraphError::Source {
+            let mut hir = provider(path).map_err(|error| ModuleGraphError::Source {
                 path: path.to_path_buf(),
                 message: error.to_string(),
             })?;
+            hir.module_id = Arc::from(graph_module_identity(&logical_root, path));
             compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
                 path: path.to_path_buf(),
                 diagnostics,
@@ -600,7 +616,12 @@ impl ModuleGraph {
         F: Frontend,
         R: ResolutionPolicy,
     {
-        Self::build_with_typed_policy(entry, resolver, Self::node_provider(loader, frontend))
+        let logical_root = resolver.project_root().to_path_buf();
+        Self::build_with_typed_policy(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend, logical_root),
+        )
     }
 
     /// Node-format graph with already-resolved declared modules that may be loaded at runtime.
@@ -616,10 +637,11 @@ impl ModuleGraph {
         F: Frontend,
         R: ResolutionPolicy,
     {
+        let logical_root = resolver.project_root().to_path_buf();
         Self::build_with_typed_policy_includes(
             entry,
             resolver,
-            Self::node_provider(loader, frontend),
+            Self::node_provider(loader, frontend, logical_root),
             includes,
         )
     }
@@ -649,10 +671,11 @@ impl ModuleGraph {
                 loader.load(path).map_err(|error| error.to_string())
             }
         };
+        let logical_root = resolver.project_root().to_path_buf();
         Self::build_with_policy_provider_entry(
             entry,
             resolver,
-            Self::node_provider(loader, frontend),
+            Self::node_provider(loader, frontend, logical_root),
             true,
             true,
             Vec::new(),
@@ -662,6 +685,7 @@ impl ModuleGraph {
     fn node_provider<L, F>(
         mut loader: L,
         mut frontend: F,
+        logical_root: PathBuf,
     ) -> impl FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>
     where
         L: SourceLoader,
@@ -697,12 +721,17 @@ impl ModuleGraph {
                     })?;
                 return Ok(ModulePayload::JsonText(json_text));
             }
-            let commonjs = (source_kind == ModuleSource::CommonJs)
+            let mut commonjs = (source_kind == ModuleSource::CommonJs)
                 .then(|| frontend.parse_commonjs(path_string, &source));
-            let hir = commonjs.as_ref().map_or_else(
+            let mut hir = commonjs.as_ref().map_or_else(
                 || frontend.parse(path_string, &source),
                 |parsed| parsed.module.clone(),
             );
+            let module_id = Arc::<str>::from(graph_module_identity(&logical_root, path));
+            hir.module_id = module_id.clone();
+            if let Some(parsed) = &mut commonjs {
+                parsed.module.module_id = module_id;
+            }
             if source_kind == ModuleSource::CommonJs && hir.has_static_module_syntax() {
                 return Err(ModuleGraphError::CjsStaticModuleSyntax {
                     path: path.to_path_buf(),
