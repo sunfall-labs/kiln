@@ -2,7 +2,7 @@
 
 import { AsyncResource } from "node:async_hooks";
 
-export class EventEmitter {
+class EventEmitterImplementation {
   static defaultMaxListeners: number = 10;
   static captureRejectionSymbol: symbol = Symbol.for("nodejs.rejection");
   static captureRejections: boolean = false;
@@ -271,6 +271,23 @@ export class EventEmitter {
       : [];
     const all: (string | symbol)[] = (keys as (string | symbol)[]).concat(symbols);
     return all.filter((key) => this._events[key] !== undefined);
+  }
+}
+
+// Node's legacy constructor is callable on a subclass receiver (`EventEmitter.call(this)`).
+// Keep the method implementation on one prototype while exposing that constructor contract.
+export function EventEmitter(this: any, options?: any): void {
+  EventEmitterImplementation.init.call(this, options);
+}
+export type EventEmitter = EventEmitterImplementation;
+EventEmitter.prototype = EventEmitterImplementation.prototype;
+Object.defineProperty(EventEmitter.prototype, "constructor", {
+  value: EventEmitter, writable: true, configurable: true,
+});
+for (const key of Reflect.ownKeys(EventEmitterImplementation)) {
+  if (key !== "prototype" && key !== "name" && key !== "length") {
+    Object.defineProperty(EventEmitter, key,
+      Object.getOwnPropertyDescriptor(EventEmitterImplementation, key)!);
   }
 }
 

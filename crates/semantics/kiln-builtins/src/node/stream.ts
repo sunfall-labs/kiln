@@ -112,7 +112,7 @@ class EventEmitter {
   }
 }
 
-export class Stream extends EventEmitter {
+class StreamImplementation extends EventEmitter {
   static Readable: typeof Readable;
   static Writable: typeof Writable;
   static Duplex: typeof Duplex;
@@ -162,6 +162,20 @@ export class Stream extends EventEmitter {
     return destination;
   }
 }
+
+// readable-stream and other legacy subclasses initialize their receiver with Stream.call(this).
+export function Stream(this: any, options?: any): void {
+  if (this._events === undefined) {
+    this._events = Object.create(null);
+    this._eventsCount = 0;
+  }
+  this._maxListeners = this._maxListeners || undefined;
+}
+export type Stream = StreamImplementation;
+Stream.prototype = StreamImplementation.prototype;
+Object.defineProperty(Stream.prototype, "constructor", {
+  value: Stream, writable: true, configurable: true,
+});
 
 export class Readable extends Stream {
   _readableState: {
