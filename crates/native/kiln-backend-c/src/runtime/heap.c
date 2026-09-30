@@ -3072,6 +3072,11 @@ static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *
     kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload, pointer);
 }
 
+static KILN_ALWAYS_INLINE inline const void *kiln_c99_gc_value_pointer(kiln_value value) {
+    return value.tag == KILN_VALUE_SYMBOL && value.ptr != NULL ? value.ptr
+         : (const void *)(uintptr_t)value.bits;
+}
+
 /* The slot can live inside its block or an owned side allocation. The owner payload supplies
  * stable identity across side-buffer growth; the slot address is never retained in metadata. */
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
@@ -3082,9 +3087,10 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
 
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
     const void *owner_payload, kiln_value *slot, kiln_value value) {
-    if (value.tag >= KILN_VALUE_STRING && kiln_c99_no_write_depth == 0)
+    if ((value.tag >= KILN_VALUE_STRING || value.tag == KILN_VALUE_SYMBOL) &&
+        kiln_c99_no_write_depth == 0)
         kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
-                                                (const void *)(uintptr_t)value.bits);
+                                                kiln_c99_gc_value_pointer(value));
     *slot = value;
 }
 
@@ -3146,9 +3152,10 @@ static void kiln_c99_heap_copy_values(const void *owner_payload, kiln_value *des
     if (KILN_UNLIKELY(heap == NULL)) heap = kiln_c99_gc_heap();
     if (heap == NULL || heap->candidate_ledger_groups == 0) return;
     for (size_t index = 0; index < count; ++index)
-        if (destination[index].tag >= KILN_VALUE_STRING)
+        if (destination[index].tag >= KILN_VALUE_STRING ||
+            destination[index].tag == KILN_VALUE_SYMBOL)
             kiln_c99_candidate_record_pointer_store(heap, owner_payload,
-                (const void *)(uintptr_t)destination[index].bits);
+                kiln_c99_gc_value_pointer(destination[index]));
 }
 
 /* Relocation is restricted to the same owner's existing storage. Witnesses name that
@@ -3178,15 +3185,18 @@ static void kiln_c99_candidate_record_property(const void *owner_payload,
     kiln_c99_candidate_record_pointer_store(heap, owner_payload, property->key);
     if (property->refused) return;
     if (property->accessor) {
-        if (property->getter.tag >= KILN_VALUE_STRING)
+        if (property->getter.tag >= KILN_VALUE_STRING ||
+            property->getter.tag == KILN_VALUE_SYMBOL)
             kiln_c99_candidate_record_pointer_store(heap, owner_payload,
-                (const void *)(uintptr_t)property->getter.bits);
-        if (property->setter.tag >= KILN_VALUE_STRING)
+                kiln_c99_gc_value_pointer(property->getter));
+        if (property->setter.tag >= KILN_VALUE_STRING ||
+            property->setter.tag == KILN_VALUE_SYMBOL)
             kiln_c99_candidate_record_pointer_store(heap, owner_payload,
-                (const void *)(uintptr_t)property->setter.bits);
-    } else if (property->value.tag >= KILN_VALUE_STRING) {
+                kiln_c99_gc_value_pointer(property->setter));
+    } else if (property->value.tag >= KILN_VALUE_STRING ||
+               property->value.tag == KILN_VALUE_SYMBOL) {
         kiln_c99_candidate_record_pointer_store(heap, owner_payload,
-            (const void *)(uintptr_t)property->value.bits);
+            kiln_c99_gc_value_pointer(property->value));
     }
 }
 
@@ -4421,6 +4431,9 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
            bytes == chunk->alloc_bytes;
 }
 
+static const kiln_symbol *kiln_c99_gc_symbol_for_key(const kiln_gc_heap *heap,
+                                                      const kiln_string *key);
+
 typedef struct kiln_c99_graph_walk {
     const kiln_gc_heap *heap;
     kiln_gc_ptrset regions;
@@ -4679,8 +4692,11 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
                 !kiln_c99_graph_add_object_side(walk, block, object)) return 0;
             for (index = 0; index < object->count; ++index) {
                 const kiln_property *property = &object->properties[index];
+                const kiln_symbol *key_symbol =
+                    kiln_c99_gc_symbol_for_key(walk->heap, property->key);
                 if ((!kiln_c99_key_is_shared(property->key) &&
                      !kiln_c99_graph_follow(walk, property->key)) ||
+                    (key_symbol != NULL && !kiln_c99_graph_follow(walk, key_symbol)) ||
                     !kiln_c99_graph_follow_val(walk,
                                                kiln_val_from_boundary(property->value))) return 0;
             }
@@ -4690,7 +4706,10 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
         if (object->candidate_slots != 0 &&
             !kiln_c99_graph_add_object_slots_side(walk, block, object)) return 0;
         for (index = 0; index < object->shape->property_count; ++index) {
+            const kiln_symbol *key_symbol =
+                kiln_c99_gc_symbol_for_key(walk->heap, object->shape->keys[index]);
             if (kiln_c99_graph_pointer_names_member(walk, object->shape->keys[index])) return 0;
+            if (key_symbol != NULL && !kiln_c99_graph_follow(walk, key_symbol)) return 0;
             if (!kiln_c99_graph_follow_val(walk, object->slots[index])) return 0;
         }
         return 1;
@@ -4947,8 +4966,18 @@ static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
                                          kiln_nursery_chunk *const *chunks, size_t count,
                                          const kiln_value *value) {
+    if (value->tag == KILN_VALUE_SYMBOL)
+        return kiln_c99_graph_in_batch(heap, chunks, count,
+                                       kiln_c99_gc_value_pointer(*value));
     return value->tag >= KILN_VALUE_STRING &&
            kiln_c99_graph_in_batch(heap, chunks, count, (const void *)(uintptr_t)value->bits);
+}
+
+static int kiln_c99_graph_symbol_key_in_batch(const kiln_gc_heap *heap,
+                                               kiln_nursery_chunk *const *chunks,
+                                               size_t count, const kiln_string *key) {
+    const kiln_symbol *symbol = kiln_c99_gc_symbol_for_key(heap, key);
+    return symbol != NULL && kiln_c99_graph_in_batch(heap, chunks, count, symbol);
 }
 
 /* These are storage primitives for a future actor transaction, not transfer admission.
@@ -5103,8 +5132,13 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
         if ((address) != excluded_escrow_slot &&                                              \
             visitor->value(visitor->context, (address))) return 1;                             \
     } while (0)
-    for (index = 0; index < realm->symbol_count; ++index)
-        KILN_VISIT_REALM_VALUE(&realm->symbols[index]);
+    for (index = 0; index < realm->symbol_count; ++index) {
+        const kiln_symbol *symbol = (const kiln_symbol *)realm->symbols[index].ptr;
+        /* Symbol.for registrations are rooted for the realm. Unique symbols remain a weak
+         * identity index; values and symbol property keys provide their actual roots. */
+        if (symbol != NULL && symbol->registry_id != 0)
+            KILN_VISIT_REALM_VALUE(&realm->symbols[index]);
+    }
     KILN_VISIT_REALM_VALUE(&realm->isolated_graphs);
     KILN_VISIT_REALM_VALUE(&realm->isolated_request_handle);
     KILN_VISIT_REALM_VALUE(&realm->isolated_escrow_key);
@@ -5166,6 +5200,11 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
     };
     size_t index;
     if (kiln_c99_gc_visit_realm_roots(heap, &visitor, excluded_escrow_slot)) return 1;
+    /* The realm symbol array is a weak identity index, not a root, but it still contains raw
+     * pointers used by reflection. Never transfer one of those symbols away from its index. */
+    for (index = 0; index < heap->realm.symbol_count; ++index)
+        if (kiln_c99_graph_in_batch(heap, chunks, count, heap->realm.symbols[index].ptr))
+            return 1;
     for (index = heap->job_head; index < heap->job_tail; ++index) {
         const kiln_microtask *job = &heap->jobs[index & heap->job_mask];
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &job->handler) ||
@@ -5613,19 +5652,24 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
                 if (shape->keys[index] == NULL)
                     return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
                 if (kiln_c99_graph_in_batch(heap, chunks, count, shape->keys[index]) ||
+                    kiln_c99_graph_symbol_key_in_batch(heap, chunks, count,
+                                                       shape->keys[index]) ||
                     kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))
                     return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
             }
         }
         if (object->sealed != NULL) {
             for (index = 0; index < object->sealed->count; ++index) {
-                if (kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))
+                if (kiln_c99_graph_symbol_key_in_batch(
+                        heap, chunks, count, object->sealed->entries[index].key) ||
+                    kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))
                     return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
             }
         }
         for (index = 0; index < object->count; ++index) {
             const kiln_property *property = &object->properties[index];
             if (kiln_c99_graph_in_batch(heap, chunks, count, property->key) ||
+                kiln_c99_graph_symbol_key_in_batch(heap, chunks, count, property->key) ||
                 (property->accessor
                      ? kiln_c99_graph_value_in_batch(heap, chunks, count, &property->getter) ||
                        kiln_c99_graph_value_in_batch(heap, chunks, count, &property->setter)
@@ -6819,6 +6863,8 @@ static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep) {
 /* The empty key: one for the process, in the shared block (see `kiln_c99_process`). */
 #define kiln_c99_key_empty ((const kiln_string *)&kiln_c99_process()->empty_key)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+static const kiln_symbol *kiln_c99_gc_symbol_for_key(const kiln_gc_heap *heap,
+                                                      const kiln_string *key);
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
@@ -7801,10 +7847,38 @@ static void kiln_c99_gc_mark_now(kiln_gc_heap *heap, const void *payload) {
 }
 
 static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
-    /* Every payload-carrying tag keeps its pointer in the shared word, and a pointer the heap
-     * does not know (a constant, a well-known symbol, a provider handle) is simply not marked. */
-    if (value == NULL || value->tag < KILN_VALUE_STRING) return;
+    /* Symbols are the exception to the shared-word layout: their identity pointer is in ptr;
+     * every other payload-carrying tag uses bits. Non-heap constants are ignored by lookup. */
+    if (value == NULL) return;
+    if (value->tag == KILN_VALUE_SYMBOL) {
+        kiln_c99_gc_mark_block(heap, kiln_c99_gc_value_pointer(*value));
+        return;
+    }
+    if (value->tag < KILN_VALUE_STRING) return;
     kiln_c99_gc_mark_block(heap, (const void *)(uintptr_t)value->bits);
+}
+
+/* Symbol properties store the canonical key string, not the symbol pointer. The realm's
+ * symbol array is an identity index; a reachable property key is the strong edge that keeps
+ * its dynamic symbol alive. */
+static const kiln_symbol *kiln_c99_gc_symbol_for_key(const kiln_gc_heap *heap,
+                                                      const kiln_string *key) {
+    size_t index;
+    if (heap == NULL || key == NULL || !kiln_c99_key_is_symbol(key) ||
+        !kiln_c99_key_has_prefix(key, "@@symbol:"))
+        return NULL;
+    for (index = 0; index < heap->realm.symbol_count; ++index) {
+        const kiln_value *value = &heap->realm.symbols[index];
+        const kiln_symbol *symbol = (const kiln_symbol *)value->ptr;
+        if (symbol != NULL && symbol->key == key) return symbol;
+    }
+    return NULL;
+}
+
+void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *opaque, const kiln_string *key) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    const kiln_symbol *symbol = kiln_c99_gc_symbol_for_key(heap, key);
+    if (symbol != NULL) kiln_c99_gc_mark_block(heap, symbol);
 }
 
 static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
@@ -8236,9 +8310,44 @@ static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
  * before sweep, while every weak entry still points to allocated storage. */
 static int kiln_c99_gc_weak_key_live(kiln_gc_heap *heap, const kiln_value *key) {
     kiln_gc_block *block;
+    if (key->tag == KILN_VALUE_SYMBOL) {
+        block = kiln_c99_gc_lookup(heap, kiln_c99_gc_value_pointer(*key));
+        return block == NULL || kiln_c99_gc_is_marked(heap, block);
+    }
     if (key->tag < KILN_VALUE_STRING) return 1;
     block = kiln_c99_gc_lookup(heap, (const void *)(uintptr_t)key->bits);
     return block == NULL || kiln_c99_gc_is_marked(heap, block);
+}
+
+static void kiln_c99_gc_prune_unique_symbols(kiln_gc_heap *heap) {
+    kiln_c99_realm_state *realm = &heap->realm;
+    size_t read_at, write_at = 0;
+    for (read_at = 0; read_at < realm->symbol_count; ++read_at) {
+        kiln_value value = realm->symbols[read_at];
+        kiln_symbol *symbol = (kiln_symbol *)value.ptr;
+        kiln_gc_block *block;
+        if (symbol == NULL || symbol->registry_id != 0) {
+            realm->symbols[write_at++] = value;
+            continue;
+        }
+        block = kiln_c99_gc_lookup(heap, symbol);
+        if (block != NULL && kiln_c99_gc_is_marked(heap, block))
+            realm->symbols[write_at++] = value;
+    }
+    realm->symbol_count = write_at;
+    if (write_at == 0) {
+        free(realm->symbols);
+        realm->symbols = NULL;
+        realm->symbol_capacity = 0;
+    } else if (realm->symbol_capacity > 64 && write_at < realm->symbol_capacity / 4) {
+        size_t capacity = write_at * 2;
+        kiln_value *smaller =
+            (kiln_value *)realloc(realm->symbols, capacity * sizeof *smaller);
+        if (smaller != NULL) {
+            realm->symbols = smaller;
+            realm->symbol_capacity = capacity;
+        }
+    }
 }
 
 static kiln_gc_weak_resource *kiln_c99_gc_weak_resource_find(kiln_gc_heap *heap,
@@ -8363,6 +8472,13 @@ typedef struct kiln_gc_finalization_registry {
     kiln_gc_finalization_cell *cells;
 } kiln_gc_finalization_registry;
 
+static int kiln_c99_gc_same_value_identity(kiln_value left, kiln_value right) {
+    if (left.tag != right.tag) return 0;
+    if (left.tag == KILN_VALUE_SYMBOL)
+        return kiln_c99_gc_value_pointer(left) == kiln_c99_gc_value_pointer(right);
+    return left.bits == right.bits;
+}
+
 static int kiln_c99_gc_weak_reference_aliases(const kiln_gc_heap *heap,
                                                kiln_nursery_chunk *const *chunks,
                                                size_t count, void *payload) {
@@ -8464,8 +8580,8 @@ int kiln_c99_gc_keep_during_job(kiln_value value) {
     kiln_value *grown;
     if (heap == NULL) return KILN_C99_INVALID_ARGUMENT;
     for (index = 0; index < heap->weak_keep_count; ++index) {
-        if (heap->weak_keep_during_job[index].tag == value.tag &&
-            heap->weak_keep_during_job[index].bits == value.bits) return KILN_C99_OK;
+        if (kiln_c99_gc_same_value_identity(heap->weak_keep_during_job[index], value))
+            return KILN_C99_OK;
     }
     if (heap->weak_keep_count == heap->weak_keep_capacity) {
         size_t capacity = heap->weak_keep_capacity == 0 ? 8 : heap->weak_keep_capacity * 2;
@@ -8546,7 +8662,7 @@ int kiln_c99_finalization_registry_unregister(kiln_value owner, kiln_value token
     link = &registry->cells;
     while (*link != NULL) {
         kiln_gc_finalization_cell *cell = *link;
-        if (cell->token.tag == token.tag && cell->token.bits == token.bits) {
+        if (kiln_c99_gc_same_value_identity(cell->token, token)) {
             *link = cell->next;
             free(cell);
             removed = 1;
@@ -8966,6 +9082,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             kiln_c99_gc_drain(heap);
         } while (!heap->mark_failed && heap->marked_blocks != marked_before);
         if (!heap->mark_failed) {
+            kiln_c99_gc_prune_unique_symbols(heap);
             kiln_c99_gc_weak_resources_sweep(heap);
             kiln_c99_gc_drain(heap);
             if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons(heap);

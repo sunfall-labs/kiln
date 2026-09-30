@@ -1,6 +1,8 @@
 
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
-    return (kiln_symbol *)(uintptr_t)value.ptr;
+    /* Symbol values cross the compact kiln_val boundary with their pointer in bits, while
+     * freshly constructed C values store it in ptr. Both representations name one identity. */
+    return (kiln_symbol *)(uintptr_t)(value.ptr != NULL ? (uintptr_t)value.ptr : value.bits);
 }
 
 /* The specification's own symbols. One instance each, so equality is the pointer's exactly as it
@@ -56,10 +58,9 @@ static const kiln_symbol kiln_c99_well_known[] = {
  * `kiln_symbol *` inside it, because `Symbol.for` and `Symbol()` fill `bits` differently and
  * equality reads what was stored.
  *
- * Held for the life of the realm, because the last reference to a symbol can legitimately be
- * the property key it is stored under: `o[Symbol("k")] = 1` keeps nothing else, and the key must
- * still name a symbol afterwards. The registry is the realm's (`kiln_c99_realm_state.symbols`):
- * marked by its heap and freed with it. */
+ * The realm's array is an identity index rather than a strong root. Values mark their symbols;
+ * property-key tracing marks a symbol from its canonical key, and GC removes dead entries before
+ * the next reflection lookup. */
 static int kiln_c99_remember_symbol(kiln_value symbol) {
     kiln_c99_realm_state *realm = kiln_c99_realm();
     if (realm->symbol_count == realm->symbol_capacity) {
@@ -208,14 +209,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    /* The reserved key stays malloc-backed and is never released: a symbol lives as long as the
-     * realm does (the realm's symbol registry roots every one of them), and the key bytes are borrowed by
-     * every property stored under this symbol. The tracer still marks both `key` and
-     * `description` as candidate blocks, so a description that came from a collected string --
-     * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
-    /* Registered as immortal: the interned copy is pinned for the realm's life, and a property
-     * stored under the symbol carries that canonical pointer. The builder's malloc has done its
-     * job once the copy exists. */
+    /* Shapes and their transitions cache this canonical key after the object that introduced it
+     * dies, so keep the key spelling pinned for the realm. The symbol object itself is weakly
+     * indexed and is reclaimed independently. */
     {
         kiln_string view;
         if (key.len > UINT32_MAX) {

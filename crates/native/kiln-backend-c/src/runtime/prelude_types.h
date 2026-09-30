@@ -1,4 +1,7 @@
 
+struct kiln_gc_heap;
+void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *heap, const kiln_string *key);
+
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
     return key != NULL &&
            (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0;

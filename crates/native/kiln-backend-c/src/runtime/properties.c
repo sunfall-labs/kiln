@@ -245,10 +245,13 @@ static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
                                                  const kiln_object *object) {
     size_t index;
     if (object->sealed != NULL) {
+        for (index = 0; index < object->sealed->count; ++index)
+            kiln_c99_gc_mark_symbol_key(heap, object->sealed->entries[index].key);
         kiln_c99_gc_mark_vals(heap, object->slots, object->sealed->count);
     } else if (object->shape != NULL) {
         for (index = 0; index < object->shape->property_count; ++index) {
             kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
+            kiln_c99_gc_mark_symbol_key(heap, object->shape->keys[index]);
             if (object->slots != NULL) kiln_c99_gc_mark_val(heap, object->slots[index]);
         }
     }
@@ -257,6 +260,7 @@ static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
     for (index = 0; index < object->count; ++index) {
         const kiln_property *property = &object->properties[index];
         kiln_c99_gc_mark_block(heap, property->key);
+        kiln_c99_gc_mark_symbol_key(heap, property->key);
         if (property->accessor) {
             kiln_c99_gc_mark_value(heap, &property->getter);
             kiln_c99_gc_mark_value(heap, &property->setter);

@@ -117,7 +117,8 @@ static uint64_t kiln_c99_value_hash(kiln_value v) {
         if (sym != NULL && sym->registry_id != 0) {
             return (uint64_t)sym->registry_id * UINT64_C(0x9e3779b97f4a7c15);
         }
-        return (uint64_t)(uintptr_t)v.bits * UINT64_C(0x9e3779b97f4a7c15);
+        return (uint64_t)(uintptr_t)kiln_c99_symbol_of(v) *
+               UINT64_C(0x9e3779b97f4a7c15);
     }
     if (v.tag == KILN_VALUE_BIGINT) {
         int64_t high = 0;

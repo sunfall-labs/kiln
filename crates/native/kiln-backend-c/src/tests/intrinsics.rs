@@ -503,6 +503,68 @@ int main(void) {
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }
+
+#[test]
+fn unique_symbols_are_collected_but_property_keys_keep_their_identity() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_gc_heap heap_storage;
+    kiln_gc_heap *heap = &heap_storage;
+    kiln_value property_symbol, object, recovered, weak_symbol, weak_ref;
+    kiln_gc_block *property_block, *weak_block;
+    const kiln_string *property_key;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    kiln_c99_gc_heap_init(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation++;
+    heap->enabled = 1;
+    if (kiln_c99_new_symbol(&property_symbol, kiln_c99_undefined()) != KILN_C99_OK ||
+        kiln_c99_new_object(&object) != KILN_C99_OK) return 3;
+    property_key = kiln_c99_symbol_of(property_symbol)->key;
+    property_block = kiln_c99_gc_lookup(heap, property_symbol.ptr);
+    if (property_block == NULL ||
+        kiln_c99_define_computed(object, property_symbol, kiln_c99_number(73)) != KILN_C99_OK)
+        return 4;
+    property_symbol = kiln_c99_undefined();
+    kiln_test_gc_root = object;
+    kiln_c99_gc_collect(heap, 1);
+    if (kiln_c99_gc_lookup(heap, property_block + 1) != property_block ||
+        !kiln_c99_symbol_of_key_view(property_key, &recovered) ||
+        recovered.ptr != (const char *)(property_block + 1)) return 5;
+    if (kiln_c99_get_computed(NULL, object, recovered, &weak_ref, 0, NULL) != KILN_C99_OK ||
+        weak_ref.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(weak_ref) != 73) return 6;
+
+    if (kiln_c99_new_symbol(&weak_symbol, kiln_c99_undefined()) != KILN_C99_OK ||
+        kiln_c99_new_object(&weak_ref) != KILN_C99_OK) return 7;
+    weak_block = kiln_c99_gc_lookup(heap, weak_symbol.ptr);
+    if (weak_block == NULL) return 8;
+    kiln_c99_gc_enter_job();
+    if (kiln_c99_weak_reference_create(weak_ref, weak_symbol) != KILN_C99_OK) return 9;
+    kiln_c99_gc_leave_job();
+    kiln_test_gc_root = weak_ref;
+    weak_symbol = kiln_c99_undefined();
+    kiln_c99_gc_collect(heap, 1);
+    if (kiln_c99_weak_reference_deref(weak_ref, &recovered) != KILN_C99_OK ||
+        recovered.tag != KILN_VALUE_UNDEFINED || kiln_c99_gc_lookup(heap, weak_block + 1) != NULL)
+        return 10;
+    kiln_test_gc_root = kiln_c99_undefined();
+    heap->enabled = 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 11;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "unique-symbol-weak-lifetime");
+    assert!(
+        run.status.success(),
+        "unique symbol weak lifetime fixture failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
 "#
     .to_string();
     let run = run_with_main(&generated, &wrapper, "symbol-registry");
