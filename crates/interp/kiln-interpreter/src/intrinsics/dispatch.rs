@@ -571,25 +571,31 @@ pub(crate) fn call_native(
             unreachable!("`AsyncLocalStorage` is dispatched by the interpreter")
         }
         Native::ObjectGetOwnPropertyDescriptor => {
-            let target = arguments.first().unwrap_or(&Value::Undefined);
+            let target = to_object(arguments.first().unwrap_or(&Value::Undefined))
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                })?;
             let value = arguments.get(1).unwrap_or(&Value::Undefined);
             let key = value.property_key_units_checked()?;
-            own_descriptor_key(intrinsics, target, PropertyKeyRef::from_value(value, &key))
+            own_descriptor_key(intrinsics, &target, PropertyKeyRef::from_value(value, &key))
                 .unwrap_or(Value::Undefined)
         }
         Native::ObjectGetOwnPropertyDescriptors => {
-            let target = arguments.first().unwrap_or(&Value::Undefined);
+            let target = to_object(arguments.first().unwrap_or(&Value::Undefined))
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                })?;
             let mut data = ObjectData::default();
-            for key in own_property_keys_units(intrinsics, target) {
+            for key in own_property_keys_units(intrinsics, &target) {
                 if let Some(descriptor) =
-                    own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
+                    own_descriptor_key(intrinsics, &target, PropertyKeyRef::Units(&key))
                 {
                     data.set_units(&key, descriptor);
                 }
             }
-            for key in own_symbol_keys_units(intrinsics, target) {
+            for key in own_symbol_keys_units(intrinsics, &target) {
                 if let Some(descriptor) =
-                    own_descriptor_key(intrinsics, target, PropertyKeyRef::SymbolUnits(&key))
+                    own_descriptor_key(intrinsics, &target, PropertyKeyRef::SymbolUnits(&key))
                 {
                     data.set_key(PropertyKeyRef::SymbolUnits(&key), descriptor);
                 }
