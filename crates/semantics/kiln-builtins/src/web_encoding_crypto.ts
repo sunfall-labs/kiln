@@ -30,9 +30,10 @@
   {
     const crypto = {
       getRandomValues(view: any): any {
-        if (!ArrayBuffer.isView(view) || view instanceof DataView ||
-            view instanceof Float32Array || view instanceof Float64Array ||
-            (typeof Float16Array !== 'undefined' && view instanceof Float16Array)) {
+        const kind = Object.prototype.toString.call(view);
+        if (!ArrayBuffer.isView(view) || kind === '[object DataView]' ||
+            kind === '[object Float32Array]' || kind === '[object Float64Array]' ||
+            kind === '[object Float16Array]') {
           throw new DOMException('Expected an integer TypedArray', 'TypeMismatchError');
         }
         if (view.byteLength > 65536) {

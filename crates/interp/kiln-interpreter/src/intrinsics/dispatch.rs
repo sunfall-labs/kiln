@@ -1938,7 +1938,7 @@ pub(crate) fn call_native(
                 // reports, so a position inside an astral character lands where the language
                 // says it does rather than where Rust's byte offsets would.
                 Native::StringIncludes | Native::StringStartsWith | Native::StringEndsWith => {
-                    let haystack: Vec<u16> = text.encode_utf16().collect();
+                    let haystack: Vec<u16> = text.units().collect();
                     let needle: Vec<u16> = argument(0).encode_utf16().collect();
                     let clamp = |raw: f64| -> usize {
                         if raw.is_nan() || raw <= 0.0 {
@@ -1981,7 +1981,7 @@ pub(crate) fn call_native(
                     // strings by bytes made the optional start unusable and would split astral
                     // characters; searching encoded units keeps all three quantities in the
                     // unit JavaScript specifies.
-                    let haystack: Vec<u16> = text.encode_utf16().collect();
+                    let haystack: Vec<u16> = text.units().collect();
                     let needle: Vec<u16> = argument(0).encode_utf16().collect();
                     let raw_start = arguments.get(1).map_or(0.0, Value::as_number);
                     let start = if raw_start.is_nan() || raw_start <= 0.0 {
@@ -2077,7 +2077,7 @@ pub(crate) fn call_native(
                     // Code units, like `charAt` and `[i]` and `length`: three spellings of "the
                     // character there" that differ only at the edges, and a fourth unit would
                     // make them differ in the middle as well.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
@@ -2096,7 +2096,7 @@ pub(crate) fn call_native(
                 Native::StringCharAt => {
                     // Code units, not characters: `charAt` counts what `length` counts, so half
                     // of a surrogate pair is a position and reads as that half.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
@@ -2108,7 +2108,7 @@ pub(crate) fn call_native(
                     }
                 }
                 Native::StringCharCodeAt => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
@@ -2129,7 +2129,7 @@ pub(crate) fn call_native(
                             .units()
                             .collect(),
                     };
-                    let current = text.encode_utf16().count();
+                    let current = text.units().count();
                     let target = if target.is_finite() && target > 0.0 {
                         target as usize
                     } else {
@@ -2177,7 +2177,7 @@ pub(crate) fn call_native(
                     // before and after it, and `$$` is one dollar. The same expander the regexp
                     // path uses does it, so the two cannot disagree.
                     let all = matches!(native, Native::StringReplaceAll);
-                    let subject: Vec<u16> = text.encode_utf16().collect();
+                    let subject: Vec<u16> = text.units().collect();
                     let needle: Vec<u16> = pattern.encode_utf16().collect();
                     let mut out = String::with_capacity(text.len());
                     let mut at = 0;
@@ -2237,7 +2237,7 @@ pub(crate) fn call_native(
                     // them, and that argument was being dropped: `"abcabc".lastIndexOf("c", 1)`
                     // answered 5, which is not a later match than the caller allowed but the
                     // last one in the string, found by a search that never looked at the bound.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let needle_units: Vec<u16> = needle.encode_utf16().collect();
                     // The one position argument in the language where NaN means the *end* of
                     // the string rather than the start: the specification names it as
@@ -2263,7 +2263,7 @@ pub(crate) fn call_native(
                 // way round, where `slice` counts a negative from the end and yields nothing
                 // when they cross. The two look alike and agree on almost no edge case.
                 Native::StringSubstring => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let clamp = |value: f64| -> usize {
                         if value.is_nan() || value < 0.0 {
                             0
@@ -2280,7 +2280,7 @@ pub(crate) fn call_native(
                     Value::String(StringUnits::from_units(&units[start..end]))
                 }
                 Native::StringSubstr => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let start = arguments.first().map_or(0.0, Value::as_number);
                     // A negative start counts from the end, which is the one thing `substr`
                     // does that `substring` does not.
@@ -2304,7 +2304,7 @@ pub(crate) fn call_native(
                 }
                 Native::StringCodePointAt => {
                     let index = arguments.first().map_or(0.0, Value::as_number);
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     if index < 0.0 || index >= units.len() as f64 {
                         Value::Undefined
                     } else {
@@ -2335,7 +2335,7 @@ pub(crate) fn call_native(
                     let other = arguments
                         .first()
                         .map_or_else(String::new, Value::to_display_string);
-                    Value::Number(match text.encode_utf16().cmp(other.encode_utf16()) {
+                    Value::Number(match text.units().cmp(other.encode_utf16()) {
                         std::cmp::Ordering::Less => -1.0,
                         std::cmp::Ordering::Equal => 0.0,
                         std::cmp::Ordering::Greater => 1.0,
@@ -2387,7 +2387,7 @@ pub(crate) fn call_native(
                     // made `s.slice(0, s.length)` shorter than `s` for any string holding an
                     // astral character, and made `slice` disagree with `[i]` about where a
                     // position is -- silently, in both cases.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let resolve = |value: f64| -> usize {
                         if value < 0.0 {
                             (units.len() as f64 + value).max(0.0) as usize

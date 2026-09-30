@@ -4,7 +4,7 @@
     if (receiver === null || receiver === undefined || typeof receiver === 'symbol') {
       throw new TypeError('Cannot convert receiver to string');
     }
-    return `${receiver}`;
+    return typeof receiver === 'string' ? receiver : `${receiver}`;
   }
   const isWellFormed = { isWellFormed(this: any): boolean {
     const value = text(this);
