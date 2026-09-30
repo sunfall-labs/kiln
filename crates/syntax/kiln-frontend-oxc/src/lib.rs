@@ -869,7 +869,7 @@ fn discover_node_runtime_requests_from_semantic(
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
         if left.specifier == right.specifier && left.importer == right.importer {
-            left.resolve_only &= right.resolve_only;
+            right.resolve_only &= left.resolve_only;
             true
         } else {
             false
@@ -1509,7 +1509,7 @@ fn parse_source_with_commonjs_requires(
         });
         node_runtime_requests.dedup_by(|left, right| {
             if left.specifier == right.specifier && left.importer == right.importer {
-                left.resolve_only &= right.resolve_only;
+                right.resolve_only &= left.resolve_only;
                 true
             } else {
                 false
@@ -1687,7 +1687,7 @@ fn parse_source_in_context(
         });
         requests.dedup_by(|left, right| {
             if left.specifier == right.specifier && left.importer == right.importer {
-                left.resolve_only &= right.resolve_only;
+                right.resolve_only &= left.resolve_only;
                 true
             } else {
                 false
@@ -4765,6 +4765,28 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn node_runtime_load_wins_over_resolve_only_for_the_same_request() {
+        for calls in [
+            "req.resolve('./fixture.js'); req('./fixture.js');",
+            "req('./fixture.js'); req.resolve('./fixture.js');",
+        ] {
+            let source = format!(
+                "const {{ createRequire }} = require('module'); \
+                 const req = createRequire(__filename); {calls}"
+            );
+            let requests = discover_node_runtime_requests("fixture.cjs", &source);
+            let request = requests
+                .iter()
+                .find(|request| request.specifier == "./fixture.js")
+                .expect("the createRequire target is discovered");
+            assert!(
+                !request.resolve_only,
+                "a load must not become resolution-only"
+            );
+        }
     }
 
     #[test]
