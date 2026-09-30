@@ -1229,4 +1229,5 @@ mod analysis;
 mod emission;
 mod intrinsics;
 mod objects;
+mod reference_stores;
 mod runtime;

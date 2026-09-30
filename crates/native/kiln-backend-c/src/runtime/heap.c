@@ -3126,6 +3126,14 @@ static void kiln_c99_candidate_record_property(const void *owner_payload,
     }
 }
 
+/* Whole descriptors carry keys and either data or accessor values. Copying their storage
+ * through this authority keeps relocation and cross-owner publication in one inventory. */
+static void kiln_c99_heap_store_property(const void *owner_payload, kiln_property *slot,
+                                        kiln_property value) {
+    kiln_c99_candidate_record_property(owner_payload, &value);
+    *slot = value;
+}
+
 /* Keep `payload` a root until here. The collector finds a C frame's pointers by scanning the
  * stack, and a pointer whose last use is behind it has usually left the stack by the time the
  * frame allocates again; a caller that will hand the payload to something after that -- the

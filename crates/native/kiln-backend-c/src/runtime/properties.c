@@ -843,7 +843,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                                 new_slots[fill_i] = KILN_VAL_UNDEFINED;
                             }
                         }
-                        object->slots = new_slots;
+                        kiln_c99_heap_store_pointer(object, &object->slots, new_slots);
                         object->slot_capacity = new_cap;
                     }
                     kiln_c99_heap_store_val(object, &object->slots[new_slot], kiln_val_from_boundary(value));
@@ -861,7 +861,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                     for (size_t fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                         new_elements[fill_i] = KILN_VAL_HOLE;
                     }
-                    object->elements = new_elements;
+                    kiln_c99_heap_store_pointer(object, &object->elements, new_elements);
                     object->element_capacity = new_cap;
                 }
                 kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
@@ -1040,7 +1040,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
             position = index;
         }
         for (index = object->count; index > position; --index) {
-            object->properties[index] = object->properties[index - 1];
+            kiln_c99_heap_store_property(object, &object->properties[index], object->properties[index - 1]);
         }
         object->properties[position].key = ikey;
         /* The key's domain, rather than its text, says whether it is an internal slot. A
@@ -1155,7 +1155,7 @@ static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_stri
     }
     if (object->properties[index].accessor) object->accessor_count -= 1;
     for (; index + 1 < object->count; ++index)
-        object->properties[index] = object->properties[index + 1];
+        kiln_c99_heap_store_property(object, &object->properties[index], object->properties[index + 1]);
     object->count -= 1;
     return KILN_C99_OK;
 }

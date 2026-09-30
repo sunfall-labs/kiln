@@ -27,8 +27,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     if (frame == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    frame->locals = (kiln_val *)(frame + 1);
-    frame->stack = frame->locals + locals;
+    kiln_c99_heap_store_pointer(frame, &frame->locals, (kiln_val *)(frame + 1));
+    kiln_c99_heap_store_pointer(frame, &frame->stack, frame->locals + locals);
     frame->handlers = NULL;
     frame->handler_stack = NULL;
     frame->handler_top = 0;
@@ -52,8 +52,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->started = 0;
     frame->done = 0;
     frame->running = 0;
-    frame->queue_promises = NULL;
-    frame->queue_sent = NULL;
+    kiln_c99_heap_store_pointer(frame, &frame->queue_promises, NULL);
+    kiln_c99_heap_store_pointer(frame, &frame->queue_sent, NULL);
     frame->queue_count = 0;
     frame->queue_capacity = 0;
     frame->queue_executing = 0;

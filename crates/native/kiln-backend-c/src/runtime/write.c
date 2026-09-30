@@ -374,7 +374,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                     for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                         new_elements[fill_i] = KILN_VAL_HOLE;
                     }
-                    object->elements = new_elements;
+                    kiln_c99_heap_store_pointer(object, &object->elements, new_elements);
                     object->element_capacity = new_cap;
                 }
                 kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
@@ -619,7 +619,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                 for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
                     new_elements[fill_i] = KILN_VAL_HOLE;
                 }
-                object->elements = new_elements;
+                kiln_c99_heap_store_pointer(object, &object->elements, new_elements);
                 object->element_capacity = new_cap;
             }
             kiln_c99_heap_store_val(object, &object->elements[elem_idx], kiln_val_from_boundary(value));
@@ -660,7 +660,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                     for (fill_i = object->slot_capacity; fill_i < new_cap; ++fill_i) {
                         new_slots[fill_i] = KILN_VAL_UNDEFINED;
                     }
-                    object->slots = new_slots;
+                    kiln_c99_heap_store_pointer(object, &object->slots, new_slots);
                     object->slot_capacity = new_cap;
                 }
                 kiln_c99_heap_store_val(object, &object->slots[new_slot], kiln_val_from_boundary(value));

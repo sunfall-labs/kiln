@@ -241,7 +241,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->prologue_resume = prologue_resume;
     closure->proto = proto;
     closure->upvalue_count = count;
-    closure->upvalues = upvalues;
+    kiln_c99_heap_store_pointer(closure, &closure->upvalues, upvalues);
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
@@ -300,7 +300,7 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
             closure->prologue_resume = prologue_resume;
             closure->proto = proto;
             closure->upvalue_count = 0;
-            closure->upvalues = NULL;
+            kiln_c99_heap_store_pointer(closure, &closure->upvalues, NULL);
             __atomic_store_n(site, closure, __ATOMIC_RELEASE);
             *out = kiln_c99_function(closure);
             return KILN_C99_OK;

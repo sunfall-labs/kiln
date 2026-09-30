@@ -1145,8 +1145,8 @@
                 if (frame->queue_executing) {
                     if (frame->queue_count >= frame->queue_capacity) {
                         size_t new_cap = frame->queue_capacity == 0 ? 4 : frame->queue_capacity * 2;
-                        frame->queue_promises = (kiln_value *)realloc(frame->queue_promises, new_cap * sizeof(kiln_value));
-                        frame->queue_sent = (kiln_value *)realloc(frame->queue_sent, new_cap * sizeof(kiln_value));
+                        kiln_c99_heap_store_pointer(frame, &frame->queue_promises, (kiln_value *)realloc(frame->queue_promises, new_cap * sizeof(kiln_value)));
+                        kiln_c99_heap_store_pointer(frame, &frame->queue_sent, (kiln_value *)realloc(frame->queue_sent, new_cap * sizeof(kiln_value)));
                         frame->queue_capacity = new_cap;
                         /* The frame owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
                         kiln_c99_gc_note_finalizable(frame);

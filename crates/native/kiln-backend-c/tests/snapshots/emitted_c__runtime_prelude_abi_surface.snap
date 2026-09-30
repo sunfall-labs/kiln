@@ -2222,6 +2222,7 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
 static void kiln_c99_candidate_record_vals(const void *owner_payload,
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
 static void kiln_c99_candidate_record_property(const void *owner_payload,
+static void kiln_c99_heap_store_property(const void *owner_payload, kiln_property *slot,
 static inline void kiln_c99_gc_keep_alive(const void *payload) {
 typedef char kiln_c99_block_kind_offset_agrees[sizeof(kiln_gc_block) - offsetof(kiln_gc_block, kind) ==
 typedef char kiln_c99_block_kind_mask_agrees[KILN_GC_KIND_MASK == KILN_C99_BLOCK_KIND_MASK ? 1 : -1];

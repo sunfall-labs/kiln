@@ -295,7 +295,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         }
                         kiln_array *arr = kiln_c99_array_of(built);
                         if (groups <= sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0])) {
-                            arr->elements = arr->inline_elements;
+                            kiln_c99_heap_store_pointer(arr, &arr->elements, arr->inline_elements);
                             arr->capacity = sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0]);
                         } else {
                             status = kiln_c99_array_reserve(arr, groups);

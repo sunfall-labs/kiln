@@ -14,7 +14,7 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
     for (fill_i = dest->slot_capacity; fill_i < new_cap; ++fill_i) {
         new_slots[fill_i] = KILN_VAL_UNDEFINED;
     }
-    dest->slots = new_slots;
+    kiln_c99_heap_store_pointer(dest, &dest->slots, new_slots);
     dest->slot_capacity = new_cap;
     return KILN_C99_OK;
 }
@@ -415,7 +415,7 @@ static int kiln_c99_clone_arena_dictionary(kiln_c99_clone_arena *arena, size_t c
     if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_object_init(object, 0);
     object->shape = NULL;
-    object->properties = (kiln_property *)(object + 1);
+    kiln_c99_heap_store_pointer(object, &object->properties, (kiln_property *)(object + 1));
     object->count = count;
     object->capacity = count;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
@@ -433,10 +433,10 @@ static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capaci
     if (array == NULL) return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_array_init(array, is_numeric);
     if (in_block != 0) {
-        array->elements = (kiln_val *)(array + 1);
+        kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(array + 1));
         array->capacity = in_block;
     } else if (capacity != 0 && capacity <= inline_capacity) {
-        array->elements = array->inline_elements;
+        kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
         array->capacity = inline_capacity;
     } else if (capacity != 0) {
         kiln_c99_candidate_array_elements *header;
@@ -455,7 +455,7 @@ static int kiln_c99_clone_arena_array(kiln_c99_clone_arena *arena, size_t capaci
         header->owner = array;
         header->capacity = capacity;
         header->generation = 1;
-        array->elements = (kiln_val *)(header + 1);
+        kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(header + 1));
         array->capacity = capacity;
         array->candidate_elements = 1;
     }
@@ -810,7 +810,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                     properties[i].writable = 1;
                     properties[i].configurable = 1;
                 }
-                copy->properties = properties;
+                kiln_c99_heap_store_pointer(copy, &copy->properties, properties);
                 copy->count = count;
                 copy->capacity = count;
                 copy->shape = NULL;
@@ -1573,7 +1573,7 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     kiln_object *object = (kiln_object *)kiln_c99_par_alloc(arena, KILN_GC_OBJECT, sizeof *object);
     size_t slot;
     if (object == NULL) return 0;
-    object->properties = NULL;
+    kiln_c99_heap_store_pointer(object, &object->properties, NULL);
     object->count = 0;
     object->capacity = 0;
     kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_undefined());
@@ -1590,10 +1590,10 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
-    object->slots = object->inline_slots;
+    kiln_c99_heap_store_pointer(object, &object->slots, object->inline_slots);
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (slot = 0; slot < KILN_C99_INLINE_SLOTS; ++slot) kiln_c99_heap_store_val(object, &object->inline_slots[slot], KILN_VAL_UNDEFINED);
-    object->elements = NULL;
+    kiln_c99_heap_store_pointer(object, &object->elements, NULL);
     object->element_count = 0;
     object->element_capacity = 0;
     *out = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
@@ -1715,7 +1715,7 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
         numeric &= KILN_VAL_IS_NUMBER(elements[index]) ? 1 : 0;
     }
     if (elements == NULL) numeric = 0;
-    array->elements = NULL;
+    kiln_c99_heap_store_pointer(array, &array->elements, NULL);
     array->count = 0;
     array->capacity = 0;
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
@@ -1727,10 +1727,10 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
     array->is_numeric = numeric;
     array->candidate_elements = 0;
     if (in_block > 0) {
-        array->elements = (kiln_val *)(array + 1);
+        kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(array + 1));
         array->capacity = in_block;
     } else if (count > 0) {
-        array->elements = array->inline_elements;
+        kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
         array->capacity = inline_capacity;
     }
     if (count > 0 && elements != NULL) kiln_c99_heap_copy_vals(array, array->elements, elements, count);

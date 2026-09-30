@@ -14,7 +14,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    array->elements = NULL;
+    kiln_c99_heap_store_pointer(array, &array->elements, NULL);
     array->count = 0;
     array->capacity = 0;
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
@@ -72,7 +72,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     if (array->elements == NULL && needed <= sizeof array->inline_elements / sizeof array->inline_elements[0]) {
         /* An array's first elements live in the array: a parsed `[1, 2, 3]` or a `push` onto
          * `[]` used to malloc four slots it had room for already. */
-        array->elements = array->inline_elements;
+        kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
         array->capacity = sizeof array->inline_elements / sizeof array->inline_elements[0];
         return KILN_C99_OK;
     }
@@ -121,7 +121,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
             return KILN_C99_OUT_OF_MEMORY;
         }
     }
-    array->elements = moved;
+    kiln_c99_heap_store_pointer(array, &array->elements, moved);
     array->capacity = grown;
     return KILN_C99_OK;
 }
@@ -134,7 +134,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 
 /* Shared by the realm allocator and the private graph arena's allocation policy. */
 static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
-    array->elements = NULL;
+    kiln_c99_heap_store_pointer(array, &array->elements, NULL);
     array->count = 0;
     array->capacity = 0;
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
@@ -162,11 +162,11 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     }
     kiln_c99_array_init(array, is_numeric);
     if (in_block > 0) {
-        array->elements = (kiln_val *)(array + 1);
+        kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(array + 1));
         array->capacity = in_block;
     } else if (capacity > 0) {
         if (capacity <= inline_capacity) {
-            array->elements = array->inline_elements;
+            kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
             array->capacity = inline_capacity;
         } else {
             int status = kiln_c99_array_reserve(array, capacity);
@@ -1058,7 +1058,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
         if (view == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        view->buffer = buffer;
+        kiln_c99_heap_store_pointer(view, &view->buffer, buffer);
         view->byte_offset = byte_offset;
         view->length = count;
         view->kind = kind;
@@ -1087,7 +1087,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     if (view == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    view->buffer = kiln_c99_typed_buffer_of(buffer_value);
+    kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer_value));
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
@@ -1145,7 +1145,7 @@ static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t
     if (view == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    view->buffer = kiln_c99_typed_buffer_of(buffer);
+    kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer));
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
@@ -1196,7 +1196,7 @@ static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byt
     if (view == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    view->buffer = buffer;
+    kiln_c99_heap_store_pointer(view, &view->buffer, buffer);
     view->byte_offset = byte_offset;
     /* With no explicit length the view runs to the end of the buffer, and keeps running there:
      * nothing here can resize a buffer, so the length is settled once rather than tracked. */
