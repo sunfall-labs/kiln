@@ -444,19 +444,18 @@ impl super::Compiler {
                 (ObjectKey::Static(key), _) => {
                     let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_property_instruction(name));
+                    self.code.push(Instruction::DefineOwnProperty(name));
                 }
                 // The name was evaluated, converted and checked with the other element keys.
                 (ObjectKey::Computed(_), Some(binding)) => {
                     self.load_captured_binding(binding);
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
                 (ObjectKey::Computed(key), None) => {
                     self.expression(key);
-                    self.guard_static_prototype_key();
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
             }
             self.code.push(Instruction::Pop);
@@ -861,7 +860,7 @@ impl super::Compiler {
                 // The name was computed and converted once, where the class is defined.
                 self.load_captured_binding(binding);
                 self.emit_field_value(field, None);
-                self.code.push(self.set_computed_instruction());
+                self.code.push(Instruction::DefineOwnComputed);
                 self.code.push(Instruction::Pop);
                 continue;
             }
@@ -874,12 +873,12 @@ impl super::Compiler {
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, None);
-                    self.code.push(self.set_property_instruction(name));
+                    self.code.push(Instruction::DefineOwnProperty(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.emit_field_value(field, None);
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
             }
             self.code.push(Instruction::Pop);

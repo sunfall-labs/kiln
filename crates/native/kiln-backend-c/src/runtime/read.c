@@ -1051,6 +1051,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_TYPED_ARRAY: {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (view->properties.tag == KILN_VALUE_OBJECT) {
+            int found;
+            int own_status = kiln_c99_store_get_key(host, target, key, ikey, out, depth,
+                                                    thrown, &found);
+            if (own_status != KILN_C99_OK || found) return own_status;
+        }
         if (kiln_c99_same_name_key(key, "@@toStringTag")) {
             const char *name = view->is_buffer ? "Uint8Array" : kiln_c99_typed_name(view->kind);
             *out = kiln_c99_copy_text(name, strlen(name));

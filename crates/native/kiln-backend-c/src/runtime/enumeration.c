@@ -921,6 +921,11 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
                 return status;
             }
         }
+        if (view->properties.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(
+                kiln_c99_object_of(view->properties), built, 0);
+            if (status != KILN_C99_OK) return status;
+        }
     } else if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         kiln_value store;
         status = kiln_c99_callable_store(target, &store, 0);

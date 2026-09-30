@@ -190,6 +190,11 @@ pub enum Instruction {
     SetComputedStrict {
         strict: bool,
     },
+    /// Create an own data property with all three attributes true. Used by public class fields,
+    /// whose DefineField semantics bypass inherited setters and readonly data properties.
+    DefineOwnProperty(u32),
+    /// Computed-key counterpart of `DefineOwnProperty`.
+    DefineOwnComputed,
     /// Push the current `this`.
     LoadThis,
     /// `new.target`. Follows the same rule as `this`: an ordinary call has none, a `new` call

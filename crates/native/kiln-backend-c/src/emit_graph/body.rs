@@ -2117,10 +2117,18 @@ fn compute_live_twins(
                     }
                 }
                 GraphOp::SetComputed { key, value, .. }
-                | GraphOp::SetComputedStrict { key, value, .. } => {
+                | GraphOp::SetComputedStrict { key, value, .. }
+                | GraphOp::DefineOwnComputed { key, value, .. } => {
                     if ints.contains(key) {
                         live_ints.insert(*key);
                     }
+                    if ints.contains(value) {
+                        live_ints.insert(*value);
+                    } else if numbers.contains(value) {
+                        live_numbers.insert(*value);
+                    }
+                }
+                GraphOp::DefineOwnProperty { value, .. } => {
                     if ints.contains(value) {
                         live_ints.insert(*value);
                     } else if numbers.contains(value) {
@@ -2482,12 +2490,19 @@ fn boxed_uses(
                 }
                 | GraphOp::SetComputedStrict {
                     object, key, value, ..
+                }
+                | GraphOp::DefineOwnComputed {
+                    object, key, value, ..
                 } => {
                     used.insert(*object);
                     used.insert(*value);
                     if !ints.contains(key) {
                         used.insert(*key);
                     }
+                }
+                GraphOp::DefineOwnProperty { object, value, .. } => {
+                    used.insert(*object);
+                    used.insert(*value);
                 }
                 GraphOp::CallMethod {
                     object, name, args, ..

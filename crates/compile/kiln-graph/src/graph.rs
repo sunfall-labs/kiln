@@ -160,6 +160,18 @@ pub enum GraphOp {
         strict: bool,
         site: SiteId,
     },
+    DefineOwnProperty {
+        object: ValueId,
+        name: u32,
+        value: ValueId,
+        site: SiteId,
+    },
+    DefineOwnComputed {
+        object: ValueId,
+        key: ValueId,
+        value: ValueId,
+        site: SiteId,
+    },
 
     // Invocation and Construction
     MakeFunction {
@@ -231,12 +243,16 @@ impl GraphOp {
             Self::Binary { left, right, .. } => vec![*left, *right],
             Self::GetProperty { object, .. } => vec![*object],
             Self::SetProperty { object, value, .. }
-            | Self::SetPropertyStrict { object, value, .. } => vec![*object, *value],
+            | Self::SetPropertyStrict { object, value, .. }
+            | Self::DefineOwnProperty { object, value, .. } => vec![*object, *value],
             Self::GetComputed { object, key, .. } => vec![*object, *key],
             Self::SetComputed {
                 object, key, value, ..
             }
             | Self::SetComputedStrict {
+                object, key, value, ..
+            }
+            | Self::DefineOwnComputed {
                 object, key, value, ..
             } => vec![*object, *key, *value],
             Self::Call { callee, args, .. } | Self::New { callee, args, .. } => {
@@ -284,7 +300,8 @@ impl GraphOp {
             }
             Self::GetProperty { object, .. } => apply(object),
             Self::SetProperty { object, value, .. }
-            | Self::SetPropertyStrict { object, value, .. } => {
+            | Self::SetPropertyStrict { object, value, .. }
+            | Self::DefineOwnProperty { object, value, .. } => {
                 apply(object);
                 apply(value);
             }
@@ -296,6 +313,9 @@ impl GraphOp {
                 object, key, value, ..
             }
             | Self::SetComputedStrict {
+                object, key, value, ..
+            }
+            | Self::DefineOwnComputed {
                 object, key, value, ..
             } => {
                 apply(object);
@@ -1623,6 +1643,23 @@ pub fn build_function_graph(
                             site,
                         },
                     ));
+                    frame.stack.push(result);
+                }
+                Instruction::DefineOwnProperty(name) => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    operations.push((result, GraphOp::DefineOwnProperty { object, name: *name, value, site }));
+                    frame.stack.push(result);
+                }
+                Instruction::DefineOwnComputed => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    operations.push((result, GraphOp::DefineOwnComputed { object, key, value, site }));
                     frame.stack.push(result);
                 }
                 Instruction::MakeFunction(index) => {

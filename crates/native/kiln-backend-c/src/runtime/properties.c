@@ -743,6 +743,15 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         return kiln_c99_put_mode_key(host, promise->properties, key, ikey, value, strict, depth,
                                      thrown);
     }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (view->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object_for_owner(&view->properties, view);
+            if (status != KILN_C99_OK) return status;
+        }
+        return kiln_c99_put_mode_key(host, view->properties, key, ikey, value, strict, depth,
+                                     thrown);
+    }
     if (target.tag == KILN_VALUE_REGEXP) {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         if (kiln_c99_same_name_key(key, "lastIndex")) {

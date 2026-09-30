@@ -763,7 +763,8 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                             }
                         }
                         GraphOp::SetProperty { object, name, .. }
-                        | GraphOp::SetPropertyStrict { object, name, .. } => {
+                        | GraphOp::SetPropertyStrict { object, name, .. }
+                        | GraphOp::DefineOwnProperty { object, name, .. } => {
                             let prop_name = program.constants.get(*name as usize).and_then(|c| {
                                 if let Constant::String(s) = c {
                                     s.to_scalar_string().ok()
@@ -836,7 +837,9 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     }
                     eval_stack.push(None);
                 }
-                Instruction::SetProperty(name) | Instruction::SetPropertyStrict { name, .. } => {
+                Instruction::SetProperty(name)
+                | Instruction::SetPropertyStrict { name, .. }
+                | Instruction::DefineOwnProperty(name) => {
                     eval_stack.pop();
                     let obj = eval_stack.pop().flatten();
                     if obj == Some(1)
@@ -986,6 +989,13 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                         detail: Some(format_constant_name(program, *name)),
                     });
                 }
+                GraphOp::DefineOwnProperty { name, site, .. } => {
+                    sites.push(SiteFact {
+                        id: site.0,
+                        kind: "DefineOwnProperty".to_string(),
+                        detail: Some(format_constant_name(program, *name)),
+                    });
+                }
                 GraphOp::GetComputed { site, .. } => {
                     sites.push(SiteFact {
                         id: site.0,
@@ -1006,6 +1016,9 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                         kind: "SetComputedStrict".to_string(),
                         detail: None,
                     });
+                }
+                GraphOp::DefineOwnComputed { site, .. } => {
+                    sites.push(SiteFact { id: site.0, kind: "DefineOwnComputed".to_string(), detail: None });
                 }
                 GraphOp::MakeFunction { index, site } => {
                     sites.push(SiteFact {

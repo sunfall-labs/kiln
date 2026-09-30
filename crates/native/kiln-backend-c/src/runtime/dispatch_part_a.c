@@ -3622,6 +3622,35 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
                     }
                 }
+                if (view->properties.tag == KILN_VALUE_OBJECT && status == KILN_C99_OK) {
+                    object = kiln_c99_object_of(view->properties);
+                    size_t property_count;
+                    status = kiln_c99_property_walk(object, &property_count);
+                    for (index = 0; index < property_count && status == KILN_C99_OK; ++index) {
+                        kiln_property projected;
+                        const kiln_property *property =
+                            kiln_c99_property_view(object, index, &projected);
+                        kiln_value key;
+                        kiln_value read;
+                        if (!property->enumerable) continue;
+                        key = kiln_c99_stable_key_value(property->key);
+                        if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                            status = kiln_c99_array_push(built, key);
+                            continue;
+                        }
+                        status = kiln_c99_get_computed(host, args[0], key, &read, depth, thrown);
+                        if (status != KILN_C99_OK) break;
+                        if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                            status = kiln_c99_array_push(built, read);
+                        } else {
+                            kiln_value pair;
+                            status = kiln_c99_new_array(&pair);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, read);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                }
                 *result = built;
                 return status;
             }

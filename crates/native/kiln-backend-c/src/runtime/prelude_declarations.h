@@ -338,6 +338,7 @@ extern KILN_COLD void kiln_c99_note_get_property_refusal(kiln_value target);
 extern KILN_COLD void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key);
 extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key, int depth, kiln_value *thrown, kiln_value *out);
 extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int depth, kiln_value *thrown);
 extern uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr);
 extern kiln_value kiln_val_to_boundary(kiln_val v);
 extern kiln_value kiln_val_binding_to_boundary(kiln_val v);

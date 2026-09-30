@@ -209,7 +209,9 @@ fn collect_sites(
             | GraphOp::SetProperty { site, .. }
             | GraphOp::SetPropertyStrict { site, .. }
             | GraphOp::SetComputed { site, .. }
-            | GraphOp::SetComputedStrict { site, .. } => {
+            | GraphOp::SetComputedStrict { site, .. }
+            | GraphOp::DefineOwnProperty { site, .. }
+            | GraphOp::DefineOwnComputed { site, .. } => {
                 sites.push(site.0);
             }
             GraphOp::Phi { inputs } => {

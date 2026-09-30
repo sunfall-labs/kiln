@@ -79,6 +79,11 @@ pub fn analyze_demanded_members(
                             demanded.names.insert(name);
                         }
                     }
+                    Instruction::DefineOwnProperty(index) => {
+                        if let Some(name) = name_at(*index) {
+                            demanded.names.insert(name);
+                        }
+                    }
                     Instruction::SetPropertyStrict { name, .. } => {
                         if let Some(name) = name_at(*name) {
                             demanded.names.insert(name);
@@ -87,7 +92,8 @@ pub fn analyze_demanded_members(
                     Instruction::GetComputed
                     | Instruction::CallComputed { .. }
                     | Instruction::SetComputed
-                    | Instruction::SetComputedStrict { .. } => {
+                    | Instruction::SetComputedStrict { .. }
+                    | Instruction::DefineOwnComputed => {
                         demanded.has_computed_access = true;
                     }
                     _ => {}

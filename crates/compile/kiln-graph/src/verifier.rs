@@ -325,7 +325,8 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     check_operand(*object)?;
                 }
                 GraphOp::SetProperty { object, value, .. }
-                | GraphOp::SetPropertyStrict { object, value, .. } => {
+                | GraphOp::SetPropertyStrict { object, value, .. }
+                | GraphOp::DefineOwnProperty { object, value, .. } => {
                     check_operand(*object)?;
                     check_operand(*value)?;
                 }
@@ -333,6 +334,9 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     object, key, value, ..
                 }
                 | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                }
+                | GraphOp::DefineOwnComputed {
                     object, key, value, ..
                 } => {
                     check_operand(*object)?;

@@ -537,6 +537,9 @@ typedef int32_t (*kiln_ffi_dispatch_fn)(void *context, const kiln_ffi_value *arg
 
 typedef struct kiln_typed_array {
     kiln_typed_buffer *buffer;
+    /* Named own properties live beside the indexed element storage. Most views never allocate
+     * this store; it is created only when a program writes a non-index key. */
+    kiln_value properties;
     size_t byte_offset;
     size_t length;
     kiln_typed_kind kind;

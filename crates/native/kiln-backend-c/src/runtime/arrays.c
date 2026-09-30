@@ -1059,6 +1059,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
             return KILN_C99_OUT_OF_MEMORY;
         }
         kiln_c99_heap_store_pointer(view, &view->buffer, buffer);
+        kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
         view->byte_offset = byte_offset;
         view->length = count;
         view->kind = kind;
@@ -1088,6 +1089,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
         return KILN_C99_OUT_OF_MEMORY;
     }
     kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer_value));
+    kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
@@ -1146,6 +1148,7 @@ static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t
         return KILN_C99_OUT_OF_MEMORY;
     }
     kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer));
+    kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;

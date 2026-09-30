@@ -88,14 +88,18 @@ pub fn stack_effect(
             }
         }
         // A write leaves the value it wrote, which is what makes `a = b.c = d` work.
-        Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. } => {
+        Instruction::SetProperty(_)
+        | Instruction::SetPropertyStrict { .. }
+        | Instruction::DefineOwnProperty(_) => {
             if height < 2 {
                 Err(underflow(2))
             } else {
                 Ok((height - 1, false))
             }
         }
-        Instruction::SetComputed | Instruction::SetComputedStrict { .. } => {
+        Instruction::SetComputed
+        | Instruction::SetComputedStrict { .. }
+        | Instruction::DefineOwnComputed => {
             if height < 3 {
                 Err(underflow(3))
             } else {

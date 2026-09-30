@@ -421,6 +421,16 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
         }
+        if (status == KILN_C99_OK && view->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_value extra;
+            status = kiln_c99_all_own_keys(host, view->properties, &extra, depth, thrown);
+            if (status == KILN_C99_OK) {
+                kiln_array *listed = kiln_c99_array_of(extra);
+                for (index = 0; index < listed->count && status == KILN_C99_OK; ++index)
+                    status = kiln_c99_array_push(built,
+                        kiln_val_to_boundary(listed->elements[index]));
+            }
+        }
         *out = built;
         return status;
     }
@@ -502,6 +512,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
  * the same question, so the two kinds answer it in one place rather than each spelling out where
  * it keeps its store. */
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {
+    if (target.tag == KILN_VALUE_TYPED_ARRAY)
+        return &kiln_c99_typed_array_of(target)->properties;
     if (target.tag == KILN_VALUE_DATE)
         return &((kiln_date *)(uintptr_t)target.bits)->properties;
     if (target.tag == KILN_VALUE_GENERATOR) return &kiln_c99_generator_of(target)->properties;

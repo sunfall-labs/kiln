@@ -328,6 +328,11 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 68);
                 byte(&mut hash, u8::from(*strict));
             }
+            Instruction::DefineOwnProperty(name) => {
+                byte(&mut hash, 194);
+                word(&mut hash, u64::from(*name));
+            }
+            Instruction::DefineOwnComputed => byte(&mut hash, 195),
             Instruction::LoadBuiltin(builtin) => {
                 byte(&mut hash, 25);
                 word(&mut hash, *builtin as u64);

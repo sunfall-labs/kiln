@@ -1841,7 +1841,8 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             | GraphOp::NewObject { .. } => true,
             GraphOp::GetProperty { object, .. }
             | GraphOp::SetProperty { object, .. }
-            | GraphOp::SetPropertyStrict { object, .. } => fresh(prefix, *object, 0),
+            | GraphOp::SetPropertyStrict { object, .. }
+            | GraphOp::DefineOwnProperty { object, .. } => fresh(prefix, *object, 0),
             GraphOp::Bridge { instruction, .. } => matches!(
                 instruction,
                 Instruction::DefineMethod

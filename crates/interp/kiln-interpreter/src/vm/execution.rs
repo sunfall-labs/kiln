@@ -590,6 +590,61 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.stack.push(value);
                 }
+                Instruction::DefineOwnProperty(name) => {
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let name = self.string_constant_units(*name, current)?;
+                    let descriptor = Descriptor {
+                        value: Some(value.clone()),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..Descriptor::default()
+                    };
+                    let defined = self.define_own_operation_key(
+                        &target,
+                        PropertyKeyRef::Units(&name),
+                        &descriptor,
+                        current,
+                    );
+                    let Some(accepted) = self.catchable(defined, current)? else {
+                        continue;
+                    };
+                    if !accepted {
+                        self.throw_error(ErrorKind::Type, "Cannot define class field".into(), current)?;
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::DefineOwnComputed => {
+                    let value = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let Some(key) = self.catchable(key.property_key_units_checked(), current)? else {
+                        continue;
+                    };
+                    let descriptor = Descriptor {
+                        value: Some(value.clone()),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..Descriptor::default()
+                    };
+                    let defined = self.define_own_operation_key(
+                        &target,
+                        PropertyKeyRef::Units(&key),
+                        &descriptor,
+                        current,
+                    );
+                    let Some(accepted) = self.catchable(defined, current)? else {
+                        continue;
+                    };
+                    if !accepted {
+                        self.throw_error(ErrorKind::Type, "Cannot define class field".into(), current)?;
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
                 // The read half of `SetPrototype`, and `super.x`'s first step: the object a
                 // method was defined on answers with the link it carries at this moment rather
                 // than the one it carried when the class was written.

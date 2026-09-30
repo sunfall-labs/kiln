@@ -586,6 +586,33 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     return kiln_c99_define_property_key(host, target, &view, NULL, descriptor, depth, thrown);
 }
 
+/* Class fields use DefineField/CreateDataPropertyOrThrow, not [[Set]]. In particular a public
+ * field must create an own property even when its prototype carries a non-writable data property
+ * of the same name. Keep this as a private runtime operation so field initialization preserves
+ * proxy defineProperty traps without exposing a new builtin. */
+int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key,
+                                  kiln_value value, int depth, kiln_value *thrown) {
+    kiln_value descriptor;
+    kiln_value name;
+    const kiln_string *view;
+    int status = kiln_c99_new_object(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "value", 5, value, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "enumerable", 10, kiln_c99_boolean(1), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    name = kiln_c99_property_key(key);
+    if (name.tag != KILN_VALUE_STRING) {
+        KILN_C99_REFUSE("a class field key that is neither a string nor a named symbol slot");
+    }
+    view = (const kiln_string *)name.ptr;
+    return kiln_c99_define_property_key(host, target, view, NULL, descriptor, depth, thrown);
+}
+
 /* Every own property of `descriptors`, defined onto `target`. The shared half of
  * `Object.defineProperties` and the two-argument `Object.create`. */
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
@@ -1247,6 +1274,10 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_TYPED_ARRAY: {
         int enumerable;
         kiln_c99_typed_own_key(target, view, found, &enumerable);
+        if (*found) return KILN_C99_OK;
+        if (kiln_c99_typed_array_of(target)->properties.tag == KILN_VALUE_OBJECT)
+            return kiln_c99_own_property_present(host,
+                kiln_c99_typed_array_of(target)->properties, key, found, depth, thrown);
         return KILN_C99_OK;
     }
     case KILN_VALUE_GENERATOR: {

@@ -36,6 +36,7 @@ pub fn instruction_diagnostic(
         kiln_ir::Instruction::CallMethod { name, .. }
         | kiln_ir::Instruction::GetProperty(name)
         | kiln_ir::Instruction::SetProperty(name)
+        | kiln_ir::Instruction::DefineOwnProperty(name)
         | kiln_ir::Instruction::SetPropertyStrict { name, .. } => constants.get(*name as usize),
         _ => None,
     };

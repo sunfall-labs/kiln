@@ -3609,6 +3609,7 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
         match instruction {
             Instruction::GetProperty(name)
             | Instruction::SetProperty(name)
+            | Instruction::DefineOwnProperty(name)
             | Instruction::DeleteProperty(name)
             | Instruction::LoadSuperProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
@@ -4526,7 +4527,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_read_property = true;
                 *has_status = true;
             }
-            Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. } => {
+            Instruction::SetProperty(_)
+            | Instruction::SetPropertyStrict { .. }
+            | Instruction::DefineOwnProperty(_) => {
                 *has_write_property = true;
                 *has_status = true;
             }
@@ -4537,6 +4540,8 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             }
             Instruction::SetComputed
             | Instruction::SetComputedStrict { .. }
+            | Instruction::DefineOwnComputed
+            | Instruction::DefineOwnProperty(_)
             | Instruction::SetPrototype
             | Instruction::SetSuperPropertyStrict { .. }
             | Instruction::SetSuperElementStrict { .. }

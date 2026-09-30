@@ -5579,7 +5579,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
     case KILN_GC_TYPED_ARRAY: {
         const kiln_typed_array *array = (const kiln_typed_array *)(block + 1);
         if (block->size < sizeof *array) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
-        return kiln_c99_graph_in_batch(heap, chunks, count, array->buffer)
+        return kiln_c99_graph_in_batch(heap, chunks, count, array->buffer) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &array->properties)
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
     case KILN_GC_DATA_VIEW: {
@@ -8034,6 +8035,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         break;
     case KILN_GC_TYPED_ARRAY:
         kiln_c99_gc_mark_block(heap, ((kiln_typed_array *)payload)->buffer);
+        kiln_c99_gc_mark_value(heap, &((kiln_typed_array *)payload)->properties);
         break;
     case KILN_GC_DATA_VIEW:
         kiln_c99_gc_mark_block(heap, ((kiln_data_view *)payload)->buffer);

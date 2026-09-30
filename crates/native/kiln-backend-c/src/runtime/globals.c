@@ -688,9 +688,9 @@ static int kiln_c99_global_object_val(kiln_val *out) {
 
 /* One binding of the realm's global object, for a name the compiler could not place.
  *
- * `found` stays 0 for a name that is genuinely absent, which is the caller's cue to throw. Only
- * *own* properties count: the global object is the last place identifier resolution looks, and
- * inheriting `toString` from `Object.prototype` would make a bare `toString` resolve. */
+ * `found` stays 0 for a name that is genuinely absent, which is the caller's cue to throw. Own
+ * global bindings take priority, followed by inherited Object.prototype methods from the global
+ * object's object record. */
 /* A global the runtime bootstrap defines in TypeScript -- `structuredClone` -- read the way a
  * program's own global read goes. The bootstrap runs before any module body, so the only way to
  * miss is a program compiled without it, which is refused by name rather than read as undefined. */
@@ -720,6 +720,19 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
         *out = property.value;
         *found = 1;
+        return KILN_C99_OK;
+    }
+    /* GlobalEnvironment's object record uses HasProperty, so inherited Object.prototype
+     * methods are resolvable as bare identifiers in Node (`toString ===
+     * Object.prototype.toString`). Keep the unmodified intrinsic fallback here; own global
+     * bindings above continue to take priority. */
+    {
+        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                    name, name_len);
+        if (method != 0) {
+            *out = kiln_c99_method(method);
+            *found = 1;
+        }
     }
     return KILN_C99_OK;
 }
@@ -738,6 +751,28 @@ static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name,
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
         *out = property.value;
         *found = 1;
+        return KILN_C99_OK;
+    }
+    {
+        char *ascii = malloc((size_t)name->unit_len + 1);
+        size_t index;
+        if (ascii == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < name->unit_len; ++index) {
+            uint32_t unit = kiln_string_unit_at(name, index);
+            if (unit > 0x7f) {
+                free(ascii);
+                return KILN_C99_OK;
+            }
+            ascii[index] = (char)unit;
+        }
+        ascii[name->unit_len] = '\0';
+        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                    ascii, name->unit_len);
+        free(ascii);
+        if (method != 0) {
+            *out = kiln_c99_method(method);
+            *found = 1;
+        }
     }
     return KILN_C99_OK;
 }
