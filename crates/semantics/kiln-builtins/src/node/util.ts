@@ -6,13 +6,40 @@ const customPromisifySymbol = Symbol.for("nodejs.util.promisify.custom");
 export const TextDecoder = globalThis.TextDecoder;
 export const TextEncoder = globalThis.TextEncoder;
 
+function inspectString(value: string): string {
+  // Node prefers single quotes, switching only when that avoids escaping the only quote kind
+  // present in the string. Keep the escaping here independent of JSON's always-double quoting.
+  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
+  let out = quote;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    const ch = value[i];
+    if (ch === "\\") out += "\\\\";
+    else if (ch === quote) out += "\\" + ch;
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (ch === "\b") out += "\\b";
+    else if (ch === "\f") out += "\\f";
+    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, "0")}`;
+    else if (code >= 0xd800 && code <= 0xdfff &&
+             !(code <= 0xdbff && i + 1 < value.length &&
+               value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) &&
+             !(code >= 0xdc00 && i > 0 &&
+               value.charCodeAt(i - 1) >= 0xd800 && value.charCodeAt(i - 1) <= 0xdbff))
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    else out += ch;
+  }
+  return out + quote;
+}
+
 export function inspect(value: any, options?: any): string {
   if (value === undefined) return "undefined";
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return Object.is(value, -0) ? "-0" : String(value);
   if (typeof value === "bigint") return `${value}n`;
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return inspectString(value);
   if (typeof value === "symbol") return value.toString();
   if (typeof value === "function") {
     return value.name ? `[Function: ${value.name}]` : "[Function (anonymous)]";

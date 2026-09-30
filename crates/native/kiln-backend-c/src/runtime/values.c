@@ -736,14 +736,44 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
                  * is NaN -- a BigInt has no NaN to be. */
                 size_t subject_len = 0;
                 const char *subject_bytes = kiln_c99_string_ascii_bytes(subject, &subject_len);
-                if (subject_bytes == NULL || kiln_bigint_parse((const unsigned char *)subject_bytes,
-                                      subject_len, 10,
-                                      &handle) != 0) {
+                size_t first = 0, last = subject_len;
+                uint32_t radix = 10;
+                if (subject_bytes == NULL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                                 "Cannot convert this string to a BigInt");
                 }
-                *result = kiln_c99_bigint_value(handle);
-                return KILN_C99_OK;
+                /* BigInt string grammar accepts unsigned 0x/0o/0b prefixes in addition to
+                 * signed decimal. The provider parses digits in a caller-selected radix, so
+                 * strip only a recognized prefix here; signed non-decimal forms stay invalid. */
+                while (first < last && (subject_bytes[first] == ' ' ||
+                       (subject_bytes[first] >= '\t' && subject_bytes[first] <= '\r')))
+                    ++first;
+                while (last > first && (subject_bytes[last - 1] == ' ' ||
+                       (subject_bytes[last - 1] >= '\t' && subject_bytes[last - 1] <= '\r')))
+                    --last;
+                if (last - first >= 2 && subject_bytes[first] == '0') {
+                    char prefix = subject_bytes[first + 1];
+                    if (prefix == 'x' || prefix == 'X') radix = 16;
+                    else if (prefix == 'o' || prefix == 'O') radix = 8;
+                    else if (prefix == 'b' || prefix == 'B') radix = 2;
+                    if (radix != 10) first += 2;
+                }
+                if (first == last) {
+                    static const unsigned char zero[] = "0";
+                    if (kiln_bigint_parse(zero, 1, 10, &handle) == 0) {
+                        *result = kiln_c99_bigint_value(handle);
+                        return KILN_C99_OK;
+                    }
+                } else if (kiln_bigint_parse(
+                               (const unsigned char *)subject_bytes + first, last - first,
+                               radix, &handle) == 0) {
+                    *result = kiln_c99_bigint_value(handle);
+                    return KILN_C99_OK;
+                }
+                {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                "Cannot convert this string to a BigInt");
+                }
             }
             /* Only an exact integer converts: `BigInt(1.5)` is a RangeError rather than a
              * rounding, because rounding is the thing this type exists to avoid. */
