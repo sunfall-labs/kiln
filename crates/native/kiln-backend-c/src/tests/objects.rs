@@ -1997,6 +1997,9 @@ int main(void) {
     kiln_nursery_chunk *first, *second;
     kiln_nursery_chunk *batch[2];
     void *first_value, *second_value;
+    char *base, *limit;
+    uint64_t *bitmap;
+    size_t words;
     kiln_c99_gc_heap_init(&sender);
     kiln_c99_gc_heap_init(&receiver);
     kiln_c99_gc_heap_init(&ordinary);
@@ -2046,7 +2049,19 @@ int main(void) {
     if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 19;
     first->alloc_count -= 1;
     if (sender.count != 2 || receiver.count != 0) return 20;
+    /* Prime the sender with its owned region and seed the receiver with a stale matching key.
+     * Commit must invalidate both entries before changing region ownership. */
+    if (!kiln_c99_nursery_locate(&sender, (const char *)first_value, &base, &limit, &bitmap,
+                                  &words) ||
+        sender.nursery.lookup_region != (char *)first) return 44;
+    receiver.nursery.lookup_region = (char *)first;
     if (!kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 8;
+    if (sender.nursery.lookup_region != NULL || receiver.nursery.lookup_region != NULL) return 45;
+    if (!kiln_c99_nursery_locate(&receiver, (const char *)first_value, &base, &limit, &bitmap,
+                                  &words) ||
+        receiver.nursery.lookup_region != (char *)first ||
+        kiln_c99_nursery_locate(&sender, (const char *)first_value, &base, &limit, &bitmap,
+                                &words)) return 46;
     if (sender.count != 0 || receiver.count != 2 || sender.nursery.full != NULL) return 9;
     if (receiver.nursery.full_bytes != 2 * (size_t)(second->limit - second->base)) return 10;
     if (kiln_c99_gc_lookup(&sender, first_value) != NULL ||
@@ -3891,6 +3906,9 @@ int main(void) {
     kiln_c99_graph_capsule capsule;
     kiln_val *root_cell, *child_cell;
     kiln_value root;
+    char *base, *limit;
+    uint64_t *bitmap;
+    size_t words;
     uint64_t reservation = 94;
     size_t filler = 0;
     kiln_c99_gc_heap_init(&sender);
@@ -3919,6 +3937,9 @@ int main(void) {
     kiln_c99_par_arena_seal(&candidate);
     if (!kiln_c99_heap_adopt_chunks(&sender, candidate.filled)) return 6;
     root = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root_cell, NULL, 0);
+    if (!kiln_c99_nursery_locate(&sender, (const char *)root_cell, &base, &limit, &bitmap,
+                                  &words) ||
+        sender.nursery.lookup_region != (char *)first) return 12;
     if (!kiln_c99_graph_capsule_prepare(&sender, first, root, &capsule) ||
         capsule.needs.regions != 2 || capsule.chunks == NULL) return 7;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
@@ -3927,7 +3948,15 @@ int main(void) {
         sender.count != 0 || sender.nursery.full != NULL ||
         kiln_c99_gc_lookup(&sender, root_cell) != NULL ||
         kiln_c99_gc_lookup(&receiver, root_cell) != NULL) return 9;
+    if (sender.nursery.lookup_region != NULL) return 13;
+    receiver.nursery.lookup_region = (char *)first;
     kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    if (receiver.nursery.lookup_region != NULL) return 14;
+    if (!kiln_c99_nursery_locate(&receiver, (const char *)root_cell, &base, &limit, &bitmap,
+                                  &words) ||
+        receiver.nursery.lookup_region != (char *)first ||
+        kiln_c99_nursery_locate(&sender, (const char *)root_cell, &base, &limit, &bitmap,
+                                &words)) return 15;
     if (receiver.count != capsule.needs.objects || capsule.chunk != NULL ||
         kiln_c99_gc_lookup(&receiver, root_cell) == NULL ||
         kiln_c99_gc_lookup(&receiver, child_cell) == NULL ||
