@@ -1068,11 +1068,15 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
             Some(length) => length,
             None => return None,
         },
-        N::ObjectKeys => kiln_builtin_surface::native_function_length("Object", "keys")
-            .unwrap_or(1) as f64,
+        N::ObjectKeys => match kiln_builtin_surface::native_function_length("Object", "keys") {
+            Some(length) => length as f64,
+            None => 1.0,
+        },
         N::ObjectGetOwnPropertyDescriptor => {
-            kiln_builtin_surface::native_function_length("Object", "getOwnPropertyDescriptor")
-                .unwrap_or(2) as f64
+            match kiln_builtin_surface::native_function_length("Object", "getOwnPropertyDescriptor") {
+                Some(length) => length as f64,
+                None => 2.0,
+            }
         }
         N::FunctionCall | N::FunctionApply | N::FunctionBind => {
             let member = match native {
@@ -1080,8 +1084,10 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
                 N::FunctionApply => "apply",
                 _ => "bind",
             };
-            kiln_builtin_surface::native_function_length("Function.prototype", member)
-                .unwrap_or(1) as f64
+            match kiln_builtin_surface::native_function_length("Function.prototype", member) {
+                Some(length) => length as f64,
+                None => 1.0,
+            }
         }
 
         // The zero-argument built-ins: every accessor, every `toString`, and the collection
