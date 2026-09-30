@@ -36,5 +36,9 @@
   ],
   "median_on_seconds": 0.051716003043111414,
   "median_off_seconds": 0.8671818900038488,
-  "off_over_on": 16.768153743067693
+  "off_over_on": 16.768153743067693,
+  "binary_sha256": {
+    "on": "2d91f8f8fa97b30152934e0de855fa0e31e2ab4af371ad3b1a08897ea697ee5e",
+    "off": "f59a27b403b023cfafc1b84ee1d0c58e9193efd39de64c37ba74a677a216b8d9"
+  }
 }
