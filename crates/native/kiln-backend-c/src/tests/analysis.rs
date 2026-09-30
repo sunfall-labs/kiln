@@ -745,7 +745,11 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
             .contains("kiln_c99_val_make_cell(&locals[1])")
     );
     assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
-    assert!(instantiation.source.contains("ku_fn_0("));
+    assert!(
+        instantiation
+            .source
+            .contains(&format!("{}_fn_0(", emitted.symbol))
+    );
     assert!(instantiation.source.contains("return KILN_C99_OK;"));
     assert!(
         !instantiation
