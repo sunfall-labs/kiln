@@ -1998,9 +1998,15 @@ impl super::Compiler {
                 })
                 .collect();
             let argc = if spreading {
+                let eval_name = self.constant_index(Constant::String("eval".into()));
+                self.code
+                    .push(Instruction::LoadGlobalBindingOrUndefined(eval_name));
                 self.array_literal(arguments, span);
                 None
             } else {
+                let eval_name = self.constant_index(Constant::String("eval".into()));
+                self.code
+                    .push(Instruction::LoadGlobalBindingOrUndefined(eval_name));
                 Some(self.emit_arguments(arguments))
             };
             self.code.push(Instruction::DirectEval(Box::new(EvalSite {

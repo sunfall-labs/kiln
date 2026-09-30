@@ -934,8 +934,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(prototype);
                 }
                 Instruction::DirectEval(site) => {
-                    // No callee sits under the arguments: a direct eval names no value, which is
-                    // exactly why it is an instruction rather than a call.
+                    // The compiler read the global `eval` binding before evaluating arguments.
+                    // It stays under them so an accessor or replacement follows ordinary call
+                    // ordering while the intrinsic case still enters the caller's environment.
                     let arguments = match site.argc {
                         Some(argc) => {
                             let argc = usize::from(argc);
@@ -951,6 +952,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             argument => vec![argument],
                         },
                     };
+                    let callee = self.pop(current)?;
+                    if !matches!(&callee, Value::Native(Native::Eval, _)) {
+                        let called = self.call_value(&callee, Value::Undefined, arguments, current);
+                        if let Some(result) = self.catchable(called, current)? {
+                            self.stack.push(result);
+                        }
+                        continue;
+                    }
                     // An eval of anything but a string *is* that value, per the specification,
                     // which is what makes `eval(someObject)` harmless rather than a coercion.
                     let source = match arguments.into_iter().next() {

@@ -281,7 +281,10 @@ pub fn stack_effect(
         // program the interpreter runs happily. `argc` is `None` when a spread put the arguments
         // in one array, which leaves exactly one value to consume.
         Instruction::DirectEval(site) => {
-            let needed = usize::from(site.argc.unwrap_or(1));
+            // The source reference to `eval` is read before its arguments, so accessors and
+            // mutations run in ordinary call-expression order. The callee remains below the
+            // fixed arguments, or below the materialized spread list.
+            let needed = usize::from(site.argc.unwrap_or(1)) + 1;
             if height < needed {
                 Err(underflow(needed))
             } else {

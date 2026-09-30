@@ -69,6 +69,7 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
             Instruction::NewCell(0),
             Instruction::Const(0),
             Instruction::StoreCell(0),
+            Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
             Instruction::Const(1),
             Instruction::DirectEval(Box::new(EvalSite {
                 module_id: "<language-test>".to_owned(),
