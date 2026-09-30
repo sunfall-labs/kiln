@@ -799,6 +799,12 @@ typedef struct kiln_call_context {
 
 typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues,
                             const kiln_val * restrict receiver, const kiln_val * restrict args, size_t argc);
+enum kiln_c99_function_kind {
+    KILN_C99_FUNCTION_ORDINARY = 0,
+    KILN_C99_FUNCTION_METHOD = 1,
+    KILN_C99_FUNCTION_CLASS = 2
+};
+
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
@@ -831,6 +837,7 @@ typedef struct kiln_closure {
     /* Whether this function was written with method syntax. Methods have no `prototype`
      * unless they are generators, and cannot be constructed with `new`. */
     int is_method;
+    int is_class;
     /* What a generator's frame has to be big enough for, known when the body is emitted. */
     uint32_t local_count;
     uint32_t stack_size;

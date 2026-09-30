@@ -27,6 +27,7 @@ fn entry_proto(program: &Program) -> FunctionProto {
         generator: false,
         async_generator: false,
         is_method: false,
+        is_class: false,
         parameter_count: 0,
         mapped_arguments: false,
         declared_length: 0,

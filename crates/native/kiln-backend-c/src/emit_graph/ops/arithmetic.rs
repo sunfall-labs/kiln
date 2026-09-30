@@ -732,13 +732,14 @@ pub(super) fn emit_binary_instance_of(
     vid: ValueId,
     left: &ValueId,
     right: &ValueId,
-    _ctx: &OpContext,
+    ctx: &OpContext,
 ) {
     let v = vid.0;
+    let unwind = ctx.unwind;
 
     writeln!(
                 output,
-                "    {{ kiln_value constructor = kiln_val_to_boundary(v{r}); int answer; int status = kiln_c99_instance_of(kiln_val_to_boundary(v{l}), constructor, &answer); if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
+                "    {{ kiln_value constructor = kiln_val_to_boundary(v{r}); int answer; int status = kiln_c99_instance_of(host, kiln_val_to_boundary(v{l}), constructor, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; v{v} = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 l = left.0,
                 r = right.0
             )

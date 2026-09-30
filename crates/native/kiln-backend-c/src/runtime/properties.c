@@ -621,7 +621,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         if (kiln_c99_same_name_key(key, "prototype")) {
             kiln_value store = kiln_c99_closure_store(closure);
             kiln_value *slot;
-            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(store)->frozen) {
+            if (closure->is_class || (store.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(store)->frozen)) {
                 return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
             slot = kiln_c99_closure_prototype_slot(closure);

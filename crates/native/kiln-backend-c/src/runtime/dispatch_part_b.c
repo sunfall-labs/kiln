@@ -1370,11 +1370,11 @@
                  * `Object.setPrototypeOf(f, o)` puts it and where the read walk looks for
                  * inherited statics -- so this has to report the same link or the two disagree
                  * about a chain they are both walking. */
-                kiln_value linked =
-                    subject.tag == KILN_VALUE_FUNCTION &&
-                            kiln_c99_closure_store(kiln_c99_closure_of(subject)).tag == KILN_VALUE_OBJECT
-                        ? kiln_c99_object_of(kiln_c99_closure_store(kiln_c99_closure_of(subject)))->prototype
-                        : kiln_c99_undefined();
+                kiln_value store;
+                status = kiln_c99_callable_store(subject, &store, 0);
+                if (status != KILN_C99_OK) return status;
+                kiln_value linked = store.tag == KILN_VALUE_OBJECT
+                    ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
                 *result = linked.tag == KILN_VALUE_UNDEFINED
                               ? kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)
                               : linked;
@@ -1448,7 +1448,7 @@
                 *result = subject;
                 return KILN_C99_OK;
             }
-            if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION &&
+            if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION && subject.tag != KILN_VALUE_BOUND &&
                 kiln_c99_exotic_store(subject) == NULL &&
                 !(subject.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(subject.bits))) {
                 KILN_C99_REFUSE("Object.setPrototypeOf on a value with no prototype slot");
@@ -1919,117 +1919,78 @@
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_ARRAY_FROM: {
-            /* Anything iterable, then the optional mapper -- which is one walk rather than a
-             * `map` afterwards, because `Array.from({length: 3}, f)` has nothing to map. */
-            kiln_value built;
-            kiln_value mapper = argc > 1 ? args[1] : kiln_c99_undefined();
-            kiln_array *collected;
             kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value iterator_method;
-            if (mapper.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(mapper)) {
+            kiln_value mapper = argc > 1 ? args[1] : kiln_c99_undefined();
+            kiln_value iterator_method, iterator = kiln_c99_undefined(), next, built;
+            int custom = kiln_c99_heritage_constructs(receiver) &&
+                !(receiver.tag == KILN_VALUE_BUILTIN && receiver.bits == KILN_C99_BUILTIN_ARRAY);
+            size_t length = 0;
+            int iterable;
+            if (mapper.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(mapper))
                 return kiln_c99_throw_not_a(thrown, mapper, "function");
-            }
-            if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+            if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL)
                 return kiln_c99_throw_not_a(thrown, source, "iterable or array-like object");
-            }
-            status = kiln_c99_new_array(&built);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            iterator_method = kiln_c99_undefined();
-            /* A generator is iterable and is not array-like: it has no `length`, so falling to
-             * the array-like path below read `undefined`, coerced it to zero, and answered `[]`
-             * for a generator that yields. That is the silent kind of wrong -- `Array.from(g())`
-             * is how a program drains one, and an empty array is a plausible answer a caller
-             * carries forward. It used to refuse here, so the answer got worse, not better. */
-            if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_STRING ||
-                source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_COLLECTION ||
-                source.tag == KILN_VALUE_GENERATOR) {
-                status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &iterator_method, depth,
-                                      thrown);
-                if (status != KILN_C99_OK) return status;
-            } else if (source.tag == KILN_VALUE_OBJECT) {
-                /* A plain object is array-like unless it explicitly supplies the iterator
-                 * protocol. Unknown ordinary names on objects read as undefined here. */
-                status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &iterator_method, depth,
-                                      thrown);
-                if (status == KILN_C99_CONTROL_ERROR) {
-                    /* Answered rather than refused, so the refusal's detail must go with it --
-                     * see the `@@` conversion in `kiln_c99_get` for what a left-behind one does. */
-                    kiln_c99_diagnostic_detail = NULL;
-                    iterator_method = kiln_c99_undefined();
-                    status = KILN_C99_OK;
-                }
-                if (status != KILN_C99_OK) return status;
-            }
-            if (iterator_method.tag == KILN_VALUE_UNDEFINED ||
-                iterator_method.tag == KILN_VALUE_NULL) {
-                /* `LengthOfArrayLike` is `ToLength(Get(items, "length"))`, so a length that is
-                 * not already a number is coerced rather than read as zero, and one no array can
-                 * have is the `ArrayCreate` step's `RangeError`. Clamping `Infinity` to
-                 * `(size_t)-1` and then *running* was the other answer, and it reached 6 GB
-                 * before anything stopped it. The interpreter refuses at the same bound. */
+            status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &iterator_method, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            iterable = iterator_method.tag != KILN_VALUE_UNDEFINED && iterator_method.tag != KILN_VALUE_NULL;
+            if (iterable && !kiln_c99_is_callable(iterator_method))
+                return kiln_c99_throw_not_a(thrown, iterator_method, "function");
+            if (!iterable) {
                 kiln_value length_value;
                 double wanted;
-                size_t length = 0;
                 status = kiln_c99_get(host, source, "length", 6, &length_value, depth, thrown);
                 if (status != KILN_C99_OK) return status;
                 status = kiln_c99_to_number_checked(host, length_value, &wanted, depth, thrown);
                 if (status != KILN_C99_OK) return status;
-                if (wanted > 0.0) {
-                    wanted = floor(wanted);
-                    if (wanted > 4294967295.0) {
-                        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                                    "Invalid array length");
-                    }
-                    length = (size_t)wanted;
-                }
-                for (index = 0; index < length; ++index) {
-                    char key[32];
-                    size_t key_len = kiln_c99_double_to_js((double)index, key);
-                    kiln_value value;
-                    kiln_value produced;
+                if (wanted > 4294967295.0)
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Invalid array length");
+                length = wanted > 0.0 ? (size_t)floor(wanted) : 0;
+            }
+            if (custom) {
+                kiln_value size = kiln_c99_number((double)length);
+                status = kiln_c99_construct(host, &built, receiver, iterable ? NULL : &size, iterable ? 0 : 1, depth, thrown);
+            } else status = kiln_c99_new_array(&built);
+            if (status != KILN_C99_OK) return status;
+            if (iterable) {
+                status = kiln_c99_call(host, &iterator, iterator_method, source, NULL, 0, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_iterator_direct(host, iterator, &next, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            for (index = 0; iterable || index < length; ++index) {
+                kiln_value value;
+                char key[32];
+                size_t key_len = kiln_c99_double_to_js((double)index, key);
+                if (iterable) {
+                    int finished;
+                    status = kiln_c99_iterator_advance(host, iterator, next, &value, &finished, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (finished) break;
+                } else {
                     status = kiln_c99_get(host, source, key, key_len, &value, depth, thrown);
                     if (status != KILN_C99_OK) return status;
-                    if (mapper.tag != KILN_VALUE_UNDEFINED) {
-                        kiln_value visit[2] = {value, kiln_c99_number((double)index)};
-                        kiln_value this_arg = argc > 2 ? args[2] : kiln_c99_undefined();
-                        status = kiln_c99_call(host, &produced, mapper, this_arg, visit, 2, depth,
-                                               thrown);
-                        if (status != KILN_C99_OK) return status;
-                        value = produced;
-                    }
-                    status = kiln_c99_array_push(built, value);
-                    if (status != KILN_C99_OK) return status;
                 }
-                *result = built;
-                return KILN_C99_OK;
-            }
-            if (!kiln_c99_is_callable(iterator_method)) {
-                return kiln_c99_throw_not_a(thrown, iterator_method, "function");
-            }
-            status = kiln_c99_iterate(host, built, source, depth, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (!kiln_c99_is_callable(mapper)) {
-                *result = built;
-                return KILN_C99_OK;
-            }
-            collected = kiln_c99_array_of(built);
-            for (index = 0; index < collected->count; ++index) {
-                kiln_value visit[2];
-                kiln_value produced;
-                visit[0] = kiln_val_to_boundary(collected->elements[index]);
-                visit[1] = kiln_c99_number((double)index);
-                status = kiln_c99_call(host, &produced, mapper,
-                                       argc > 2 ? args[2] : kiln_c99_undefined(), visit, 2, depth,
-                                       thrown);
+                if (mapper.tag != KILN_VALUE_UNDEFINED) {
+                    kiln_value visit[2] = {value, kiln_c99_number((double)index)};
+                    status = kiln_c99_call(host, &value, mapper, argc > 2 ? args[2] : kiln_c99_undefined(), visit, 2, depth, thrown);
+                }
+                if (status == KILN_C99_OK && custom) {
+                    kiln_value descriptor;
+                    status = kiln_c99_new_object(&descriptor);
+                    if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "value", 5, value);
+                    if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "writable", 8, kiln_c99_boolean(1));
+                    if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "enumerable", 10, kiln_c99_boolean(1));
+                    if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "configurable", 12, kiln_c99_boolean(1));
+                    if (status == KILN_C99_OK) status = kiln_c99_define_property(host, built, key, key_len, descriptor, depth, thrown);
+                } else if (status == KILN_C99_OK) status = kiln_c99_array_push(built, value);
                 if (status != KILN_C99_OK) {
+                    if (iterable) kiln_c99_iterator_close_discarding(host, iterator, depth, thrown);
                     return status;
                 }
-                kiln_c99_heap_store_val(collected, &collected->elements[index], kiln_val_from_boundary(produced));
             }
-            *result = built;
-            return KILN_C99_OK;
+            status = kiln_c99_put(host, built, "length", 6, kiln_c99_number((double)index), depth, thrown);
+            if (status == KILN_C99_OK) *result = built;
+            return status;
         }
         case KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE: {
             /* Own *and* enumerable, which is the pair `Object.keys` reports and `hasOwnProperty`
@@ -2779,6 +2740,56 @@
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         kiln_val vcallee = kiln_val_from_boundary(callback);
+        if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+             code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) &&
+            (array->properties.tag != KILN_VALUE_UNDEFINED ||
+             !kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_ARRAY, KILN_C99_BUILTIN_ARRAY_PROTOTYPE))) {
+            /* ArraySpeciesCreate is observable before the first callback. Keep the plain-array
+             * fast loop below; custom prototypes/constructors use ordinary property authority. */
+            size_t length = array->count;
+            kiln_value constructor, species, requested = kiln_c99_number((double)length);
+            if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
+            status = kiln_c99_get(host, receiver, "constructor", 11, &constructor, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            species = constructor;
+            if (kiln_c99_can_be_prototype(constructor) && constructor.tag != KILN_VALUE_NULL) {
+                status = kiln_c99_probe_symbol(host, constructor, "@@species", 9, &species, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (species.tag == KILN_VALUE_NULL) species = kiln_c99_undefined();
+            }
+            if (species.tag == KILN_VALUE_UNDEFINED)
+                status = kiln_c99_array_constructor(&built, &requested, 1, thrown);
+            else if (!kiln_c99_heritage_constructs(species))
+                return kiln_c99_throw_not_a(thrown, species, "constructor");
+            else status = kiln_c99_construct(host, &built, species, &requested, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            kiln_value descriptor;
+            status = kiln_c99_new_object(&descriptor);
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "writable", 8, kiln_c99_boolean(1));
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "enumerable", 10, kiln_c99_boolean(1));
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "configurable", 12, kiln_c99_boolean(1));
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < length; ++index) {
+                kiln_value key = kiln_c99_number((double)index), value, produced;
+                int present;
+                status = kiln_c99_has_computed(host, receiver, key, &present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) continue;
+                status = kiln_c99_get_computed(host, receiver, key, &value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                kiln_value visit[3] = {value, key, receiver};
+                status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_own_data(descriptor, "value", 5, produced);
+                if (status != KILN_C99_OK) return status;
+                char spelling[32];
+                size_t spelling_len = kiln_c99_double_to_js((double)index, spelling);
+                status = kiln_c99_define_property(host, built, spelling, spelling_len, descriptor, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            *result = built;
+            return KILN_C99_OK;
+        }
         if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) &&
             KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
             kiln_value built_val;

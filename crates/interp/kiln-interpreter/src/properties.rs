@@ -3157,7 +3157,7 @@ pub(super) fn own_attributes_key(
             .or_else(|| {
                 (key.matches_ascii("prototype") && has_prototype_property(closure)).then_some(
                     Attributes {
-                        writable: true,
+                        writable: !closure.program.functions[closure.function as usize].is_class,
                         enumerable: false,
                         configurable: false,
                     },

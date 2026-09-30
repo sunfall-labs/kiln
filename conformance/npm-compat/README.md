@@ -1,0 +1,65 @@
+# npm package compatibility corpus
+
+360 popular npm packages, each with a small smoke test that uses its real API.
+The methodology mirrors [porffor's npm-packages
+dashboard](https://porffor-packages.porch.page/): the test runs under Node for
+the expected stdout, then gets compiled with kiln to a native binary, and the
+binary's stdout is compared byte for byte. Same output, it passes. The smoke
+tests here are kiln-authored — porffor's are not published.
+
+This is an **informational benchmark, not a gate**. `run.sh` exits 0 even when
+packages fail, and nothing here is wired into `mise run gate` or CI. The
+committed baselines in `results/` are the record to compare against, not a
+threshold to enforce.
+
+## Layout
+
+    conformance/npm-compat/
+      README.md            this file
+      package.json         all 360 packages, exact-pinned versions
+      packages.tsv         name / version / porffor status / test-file stem
+      tests/               360 smoke tests (3-8 real API calls each, deterministic output)
+      run.sh               the harness: node baseline vs kiln native, byte comparison
+      results/
+        baseline-2026-09-30.md    head-to-head report vs porffor's 2026-09-30 dashboard run
+        baseline-2026-09-30.tsv   per-package machine-readable results
+        raw/                      per-run stdout/stderr (gitignored)
+
+## Running it
+
+```sh
+cd conformance/npm-compat
+npm ci                       # once: installs the 360 pinned packages
+./run.sh                     # full corpus; writes results/results-<date>.tsv
+./run.sh ms lodash           # subset by package name
+TIMEOUT_S=300 ./run.sh       # per-package timeout (default 600s)
+```
+
+`run.sh` builds `target/release/kiln` first if it is missing. Two environment
+quirks it handles: the native backend shells out to `cargo`/`rustc` (via the
+`CARGO`/`RUSTC` env vars, not just `PATH`), and it stages a ~2GB
+number-provider build under `$TMPDIR`, so `TMPDIR` points at `./tmp` here
+instead of a small tmpfs `/tmp`.
+
+`mise run npm-compat` does the same from the repo root.
+
+## Baseline (2026-09-30)
+
+kiln release build, Node v24 baseline:
+
+| Status | kiln | porffor (same 360) |
+|---|---|---:|
+| Pass | **240 (66.7%)** | 123 (34.2%) |
+| Wrong output | 11 (3.1%) | 44 (12.2%) |
+| Runtime error | 94 (26.1%) | 100 (27.8%) |
+| Compile error | 14 (3.9%) | 5 (1.4%) |
+| Timeout | 1 (0.3%) | 0 (0.0%) |
+
+Corpus caveat: the package list was extracted from porffor's dashboard, which
+headlines 363 packages (125 pass) but rendered 360 rows (123 pass) — the
+extraction is short 2 pass rows and 1 missing-API row. All numbers above are
+over the shared 360.
+
+The full head-to-head — including the 136 packages kiln passes that porffor
+fails, the 19 where it is the other way round, and per-package failure
+reasons — is in `results/baseline-2026-09-30.md`.

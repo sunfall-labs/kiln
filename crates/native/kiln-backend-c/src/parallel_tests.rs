@@ -32,6 +32,7 @@ fn proto(code: Vec<Instruction>, parameter_count: u32, upvalues: Vec<Upvalue>) -
         asynchronous: false,
         async_generator: false,
         is_method: false,
+        is_class: false,
         mapped_arguments: false,
         upvalues,
         type_annotations: None,

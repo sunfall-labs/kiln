@@ -51,6 +51,10 @@ pub(crate) const OBSERVABLE: &str = "kiln:observable";
 
 /// Wrap every expression in `program` that Oxc could wrongly judge free of effects.
 pub(crate) fn guard_observable_effects<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+    FunctionSemanticsGuard {
+        builder: AstBuilder::new(allocator),
+    }
+    .visit_program(program);
     let scoping = SemanticBuilder::new()
         .build(program)
         .semantic
@@ -92,6 +96,56 @@ pub(crate) fn guard_observable_effects<'a>(allocator: &'a Allocator, program: &m
 /// Remove every wrapper [`guard_observable_effects`] added (and the DCE kept).
 pub(crate) fn release_observable_guards<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
     Unwrap { allocator }.visit_program(program);
+}
+
+// A sequence expression is not a named-evaluation position. DCE may remove its leading
+// pure operands and expose an anonymous function to object/binding name inference. Keep an
+// opaque marker around that function, then restore a harmless sequence after compression.
+const ANONYMOUS_SEQUENCE: &str = "kiln:anonymous-sequence";
+
+struct FunctionSemanticsGuard<'a> {
+    builder: AstBuilder<'a>,
+}
+impl<'a> VisitMut<'a> for FunctionSemanticsGuard<'a> {
+    fn visit_expression(&mut self, it: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, it);
+        if let Expression::BinaryExpression(binary) = it
+            && binary.operator == BinaryOperator::Instanceof
+        {
+            let inner = binary.right.take_in(&self.builder);
+            binary.right = Expression::new_call_expression(
+                SPAN,
+                Expression::new_identifier(SPAN, OBSERVABLE, &self.builder),
+                None::<oxc_allocator::Box<'a, _>>,
+                oxc_allocator::Vec::from_array_in([Argument::from(inner)], &self.builder),
+                false,
+                &self.builder,
+            );
+        }
+        let Expression::SequenceExpression(sequence) = it else {
+            return;
+        };
+        let Some(last) = sequence.expressions.last_mut() else {
+            return;
+        };
+        let anonymous = match last.without_parentheses() {
+            Expression::FunctionExpression(function) => function.id.is_none(),
+            Expression::ArrowFunctionExpression(_) => true,
+            Expression::ClassExpression(class) => class.id.is_none(),
+            _ => false,
+        };
+        if anonymous {
+            let inner = last.take_in(&self.builder);
+            *last = Expression::new_call_expression(
+                SPAN,
+                Expression::new_identifier(SPAN, ANONYMOUS_SEQUENCE, &self.builder),
+                None::<oxc_allocator::Box<'a, _>>,
+                oxc_allocator::Vec::from_array_in([Argument::from(inner)], &self.builder),
+                false,
+                &self.builder,
+            );
+        }
+    }
 }
 
 struct Facts<'s> {
@@ -503,6 +557,29 @@ impl<'a> VisitMut<'a> for Unwrap<'a> {
                 .expect("a guard wraps an expression")
                 .take_in(&self.allocator);
             *it = inner;
+        }
+        if matches!(it, Expression::CallExpression(call)
+            if call.arguments.len() == 1 && matches!(&call.callee, Expression::Identifier(callee) if callee.name == ANONYMOUS_SEQUENCE))
+        {
+            let Expression::CallExpression(call) = it else {
+                unreachable!()
+            };
+            let inner = call.arguments[0]
+                .as_expression_mut()
+                .expect("anonymous marker argument")
+                .take_in(&self.allocator);
+            let zero = Expression::new_numeric_literal(
+                SPAN,
+                0.0,
+                None,
+                oxc_syntax::number::NumberBase::Decimal,
+                &AstBuilder::new(self.allocator),
+            );
+            *it = Expression::new_sequence_expression(
+                SPAN,
+                oxc_allocator::Vec::from_array_in([zero, inner], &self.allocator),
+                &AstBuilder::new(self.allocator),
+            );
         }
         walk_mut::walk_expression(self, it);
     }

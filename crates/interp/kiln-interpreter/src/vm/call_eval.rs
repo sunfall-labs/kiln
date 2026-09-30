@@ -158,6 +158,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
             constructing,
+            super_call: false,
             locals: std::mem::replace(&mut self.locals, locals),
             // Inherited: a called function reads the same module bindings its caller does.
             global_base: self.global_base,
@@ -301,6 +302,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
             constructing: None,
+            super_call: false,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
             instruction: self.instruction,

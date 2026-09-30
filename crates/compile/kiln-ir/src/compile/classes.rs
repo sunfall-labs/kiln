@@ -1071,6 +1071,7 @@ impl super::Compiler {
         // It is taken either way, so it cannot leak into the next function compiled.
         let method = std::mem::take(&mut self.next_is_method);
         let is_method = method && !function.arrow && class.is_none();
+        let is_class = class.is_some();
         let outer_in_function = self.in_function;
         let outer_super_property = self.super_property;
         let outer_field_initialiser = self.field_initialiser;
@@ -1299,6 +1300,7 @@ impl super::Compiler {
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
             is_method,
+            is_class,
             parameter_count,
             mapped_arguments,
             declared_length,

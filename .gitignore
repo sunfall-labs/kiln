@@ -73,3 +73,9 @@ node_modules/
 .scratch/native-real-libraries/*.partial.*
 gmon.out
 __pycache__/
+
+# npm-compat corpus run artifacts (the committed baselines live in results/)
+conformance/npm-compat/node_modules/
+conformance/npm-compat/results/raw/
+conformance/npm-compat/tmp/
+conformance/npm-compat/expected/

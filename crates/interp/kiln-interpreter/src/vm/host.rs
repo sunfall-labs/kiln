@@ -3717,7 +3717,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         loop {
             self.drain_microtasks(runtime)?;
             self.checkpoint_runtime_http(runtime)?;
-            if until_module && self.module_outcome().is_some() {
+            // An entry-module rejection must reach its caller even if an actor, server or
+            // timer remains referenced. Successful entries still drain their live resources;
+            // dependencies stop as soon as either evaluation outcome is available.
+            if self
+                .module_outcome()
+                .is_some_and(|outcome| until_module || matches!(outcome, Settled::Rejected(_)))
+            {
                 return Ok(());
             }
             // Pending adapter entries are routing metadata, not liveness. Runtime-owned HTTP

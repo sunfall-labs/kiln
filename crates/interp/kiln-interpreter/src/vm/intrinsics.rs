@@ -1308,7 +1308,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::UrlSearchParamsHas
             | Native::UrlSearchParamsGetAll
             | Native::UrlSearchParamsToString => url::dispatch(native, receiver, arguments),
-            Native::ArrayFrom => self.array_from(arguments, instruction),
+            Native::ArrayFrom => self.array_from(receiver, arguments, instruction),
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, instruction)
             }
@@ -1360,7 +1360,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 };
                 let source = [arguments.first().cloned().unwrap_or(Value::Undefined)];
-                let collected = self.array_from(&source, instruction)?;
+                let collected = self.array_from(&Value::Undefined, &source, instruction)?;
                 let Value::Array(items) = &collected else {
                     return construct_typed_array(kind, &[collected]);
                 };
@@ -2319,12 +2319,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ),
                 })
             }
-            Native::FunctionBind => Ok(Value::Bound(Rc::new(BoundFunction {
-                target: receiver.clone(),
-                this_value: arguments.first().cloned().unwrap_or(Value::Undefined),
-                arguments: arguments.get(1..).unwrap_or_default().to_vec(),
-                properties: RefCell::new(ObjectData::default()),
-            }))),
+            Native::FunctionBind => {
+                let prototype = self.prototype_for(receiver, instruction)?;
+                let bound = Value::Bound(Rc::new(BoundFunction {
+                    target: receiver.clone(),
+                    this_value: arguments.first().cloned().unwrap_or(Value::Undefined),
+                    arguments: arguments.get(1..).unwrap_or_default().to_vec(),
+                    properties: RefCell::new(ObjectData::default()),
+                }));
+                record_prototype(&bound, prototype);
+                Ok(bound)
+            }
             // `Object.create(proto, descriptors)` is `Object.create(proto)` followed by
             // `Object.defineProperties`. The descriptors may carry accessors, and an accessor
             // is a function -- so the second argument cannot be handled beside the first one,

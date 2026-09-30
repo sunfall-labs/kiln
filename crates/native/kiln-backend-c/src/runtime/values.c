@@ -169,7 +169,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
-                                 int async_generator, int is_method, int arrow, int strict, kiln_val receiver,
+                                 int async_generator, int function_kind, int arrow, int strict, kiln_val receiver,
                                  kiln_val new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, uint32_t prologue_resume,
@@ -205,7 +205,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->publishes_frame = 1;
     kiln_c99_heap_store_val(closure, &closure->captured_this, arrow ? receiver : KILN_VAL_UNDEFINED);
     closure->async_generator = async_generator;
-    closure->is_method = is_method;
+    closure->is_method = function_kind == KILN_C99_FUNCTION_METHOD;
+    closure->is_class = function_kind == KILN_C99_FUNCTION_CLASS;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
     kiln_c99_heap_store_val(closure, &closure->captured_new_target, new_target);
@@ -257,7 +258,7 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
                                    const kiln_string *name, const char *source, size_t source_len,
                                    const char *diagnostic_source, uint32_t proto, uint32_t arity,
                                    int generator, int asynchronous, int async_generator,
-                                   int is_method, int arrow, int strict, kiln_val receiver,
+                                   int function_kind, int arrow, int strict, kiln_val receiver,
                                    uint32_t local_count, uint32_t stack_size,
                                    uint32_t handler_depth, uint32_t prologue_resume,
                                    int publishes_frame) {
@@ -286,7 +287,8 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
             closure->region = 1;
             kiln_c99_heap_store_val(closure, &closure->captured_this, KILN_VAL_UNDEFINED);
             closure->async_generator = async_generator;
-            closure->is_method = is_method;
+            closure->is_method = function_kind == KILN_C99_FUNCTION_METHOD;
+            closure->is_class = function_kind == KILN_C99_FUNCTION_CLASS;
             kiln_c99_heap_store_val(closure, &closure->captured_new_target, KILN_VAL_UNDEFINED);
             kiln_c99_heap_store_value(closure, &closure->captured_arguments, kiln_c99_undefined());
             kiln_c99_heap_store_value(closure, &closure->own_prototype, kiln_c99_undefined());
@@ -307,7 +309,7 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
         }
     }
     status = kiln_c99_make_closure(out, body, name, source, source_len, diagnostic_source, proto,
-                                   arity, generator, asynchronous, async_generator, is_method,
+                                   arity, generator, asynchronous, async_generator, function_kind,
                                    arrow, strict, receiver,
                                    kiln_val_from_boundary(kiln_c99_new_target), local_count,
                                    stack_size, handler_depth, prologue_resume, NULL, 0);
@@ -579,6 +581,13 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
     kiln_closure *closure;
+    if (kiln_c99_intrinsic_has_instance(callee)) {
+        int answer;
+        int status = kiln_c99_ordinary_has_instance(host, argc > 0 ? args[0] : kiln_c99_undefined(), receiver, &answer, depth, thrown);
+        if (status == KILN_C99_OK) *result = kiln_c99_boolean(answer);
+        return status;
+    }
+
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }

@@ -2341,6 +2341,7 @@ mod tests {
             asynchronous: false,
             async_generator: false,
             is_method: false,
+            is_class: false,
             mapped_arguments: false,
             upvalues: Vec::new(),
             type_annotations: None,

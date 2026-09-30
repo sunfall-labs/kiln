@@ -3007,6 +3007,7 @@ mod dead_phi_tests {
             generator: true,
             async_generator: false,
             is_method: false,
+            is_class: false,
             parameter_count: 0,
             declared_length: 0,
             mapped_arguments: false,

@@ -152,6 +152,8 @@ static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
     kiln_c99_heap_store_pointer(require, &require->root_context, root_context);
+    if (kiln_c99_candidate_context_publish(kiln_c99_gc_heap(), require) != KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
     return KILN_C99_OK;

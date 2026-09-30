@@ -1,0 +1,360 @@
+semver	7.8.5	runtime-error	Uncaught ReferenceError: module is not defined	semver
+ansi-styles	7.0.0	pass		ansi-styles
+ms	2.1.3	pass		ms
+string-width	8.3.0	missing-api	Uncaught ReferenceError: Intl is not defined	string-width
+chalk	6.0.1	pass		chalk
+picomatch	4.0.7	pass		picomatch
+ansi-regex	6.4.0	pass		ansi-regex
+wrap-ansi	10.0.2	missing-api	Uncaught ReferenceError: Intl is not defined	wrap-ansi
+tslib	2.8.1	runtime-error	Uncaught TypeError: Tried for..of on non-iterable type	tslib
+glob	13.0.6	missing-api	porffor: node builtin modules are not supported (node:url)	glob
+ajv	8.20.0	runtime-error	Uncaught TypeError: Cannot get property of null	ajv
+source-map	0.8.0	missing-api	porffor: cannot resolve 'url' from node_modules/source-map/lib/url.js	source-map
+escape-string-regexp	5.0.0	wrong-output	expected "How much \\$ for a 🦄\\? \\(a\\+b\\)\\*\\[c\\]", got "How much \\$ for a >�\\? \\(a\\+b\\)\\*\\[c\\]"	escape-string-regexp
+color-convert	3.1.3	wrong-output	expected "[96,47.619,58.8235]", got "[95.2,47.619,58.8235]"	color-convert
+json-schema-traverse	1.0.0	pass		json-schema-traverse
+safe-buffer	5.2.1	missing-api	porffor: cannot resolve 'buffer' from node_modules/safe-buffer/index.js	safe-buffer
+zod	4.6.5	runtime-error	Uncaught ReferenceError: globalConfig is not defined	zod
+iconv-lite	0.7.3	missing-api	porffor: cannot resolve 'buffer' from node_modules/safer-buffer/safer.js	iconv-lite
+typescript	6.0.3	compile-error	SyntaxError: The requested module 'typescript' does not provide an export named 'default'	typescript
+uuid	14.0.2	missing-api	Uncaught ReferenceError: crypto is not defined	uuid
+mime-db	1.54.0	runtime-error	Uncaught TypeError: Cannot get property of null	mime-db
+mime-types	3.0.2	missing-api	porffor: cannot resolve 'path' from node_modules/mime-types/index.js	mime-types
+string_decoder	1.3.0	missing-api	porffor: cannot resolve 'buffer' from node_modules/safe-buffer/index.js	string_decoder
+acorn	8.18.0	runtime-error	Uncaught TypeError: Cannot get property of null	acorn
+@babel/parser	7.29.9	runtime-error	Uncaught TypeError: Cannot get property of null	babel__parser
+estraverse	5.3.0	pass		estraverse
+@jridgewell/sourcemap-codec	1.6.0	pass		jridgewell__sourcemap-codec
+punycode	2.3.1	runtime-error	crashed (SIGSEGV)	punycode
+yaml	2.9.1	wrong-output	expected/actual mismatch on line 1 (diff truncated on page)	yaml
+negotiator	1.1.0	pass		negotiator
+@babel/generator	8.0.6	runtime-error	crashed (SIGSEGV)	babel__generator
+@babel/traverse	8.0.6	missing-api	porffor: node builtin modules are not supported (node:util)	babel__traverse
+@babel/runtime	8.0.5	runtime-error	Uncaught TypeError	babel__runtime
+@babel/core	8.0.6	missing-api	porffor: node builtin modules are not supported (node:util)	babel__core
+camelcase	9.0.0	pass		camelcase
+form-data	4.0.6	missing-api	porffor: cannot resolve 'stream' from node_modules/delayed-stream/lib/delayed_stream.js	form-data
+http-errors	2.0.1	missing-api	porffor: cannot resolve 'path' from node_modules/depd/index.js	http-errors
+buffer	6.0.3	wrong-output	expected "48656c6c6f2c20506f7266666f722120e29c93", got ""	buffer
+react-dom	19.3.0	missing-api	Uncaught ReferenceError: MessageChannel is not defined	react-dom
+lodash	4.18.1	runtime-error	Uncaught TypeError: Cannot get property of null	lodash
+braces	3.0.3	missing-api	porffor: cannot resolve 'util' from node_modules/fill-range/index.js	braces
+mime	4.1.0	pass		mime
+accepts	1.3.8	missing-api	porffor: cannot resolve 'path' from node_modules/mime-types/index.js	accepts
+util-deprecate	1.0.2	missing-api	porffor: cannot resolve 'util' from node_modules/util-deprecate/node.js	util-deprecate
+base64-js	1.5.1	missing-api	Uncaught ReferenceError: TextEncoder is not defined	base64-js
+esquery	1.7.0	compile-error	SyntaxError: 'import' and 'export' may appear only with 'sourceType: module'	esquery
+diff	9.0.0	pass		diff
+fresh	0.5.2	pass		fresh
+@eslint-community/regexpp	4.12.2	wrong-output	expected "Invalid regular expression: /(?<a>x)(?<a>y)/u: Duplicate capture group name", got "undefined"	eslint-community__regexpp
+normalize-path	3.0.0	pass		normalize-path
+jose	6.2.12	missing-api	Uncaught ReferenceError: TextEncoder is not defined	jose
+express	5.2.1	missing-api	porffor: node builtin modules are not supported (node:http)	express
+prettier	3.9.9	runtime-error	crashed (SIGSEGV)	prettier
+bytes	3.1.2	pass		bytes
+ajv-formats	3.0.1	runtime-error	Uncaught TypeError: Cannot get property of null	ajv-formats
+lodash.merge	4.6.2	runtime-error	Uncaught TypeError: Cannot get property of null	lodash_merge
+clsx	2.1.1	pass		clsx
+axios	1.20.0	missing-api	porffor: cannot resolve 'crypto' from node_modules/axios/lib/platform/node/index.js	axios
+slice-ansi	9.0.1	missing-api	Uncaught ReferenceError: Intl is not defined	slice-ansi
+vary	1.1.2	pass		vary
+esprima	4.0.1	runtime-error	Uncaught TypeError: Cannot get property of null	esprima
+prop-types	15.8.1	wrong-output	expected "Warning: Failed prop type: The prop `name` is marked as required in `UserCard`, but its value is `undefined`.", got "0"	prop-types
+async	3.2.6	runtime-error	Uncaught TypeError: Deadlock: awaited pending promise with no pending jobs	async
+arg	5.0.2	wrong-output	expected "ARG_UNKNOWN_OPTION: unknown or unexpected option: --bogus", got "ARG_UNKNOWN_OPTION: undefined"	arg
+htmlparser2	12.0.0	pass		htmlparser2
+path-is-absolute	1.0.1	missing-api	Uncaught ReferenceError: process is not defined	path-is-absolute
+events	3.3.0	pass		events
+@noble/hashes	2.4.0	runtime-error	Uncaught TypeError: Cannot mix BigInts and non-BigInts in numeric expressions	noble__hashes
+tiny-invariant	1.3.3	wrong-output	expected "Error: Invariant failed: User 9 not found", got "Error: Invariant failed"	tiny-invariant
+fflate	0.8.3	runtime-error	crashed (SIGSEGV)	fflate
+figures	6.1.0	missing-api	porffor: node builtin modules are not supported (node:process)	figures
+fast-xml-parser	5.11.2	pass		fast-xml-parser
+terser	5.51.2	runtime-error	crashed (SIGSEGV)	terser
+p-map	7.0.8	runtime-error	Uncaught TypeError: Expected `input` to be either an `Iterable` or `AsyncIterable`, got (object)	p-map
+d3-time-format	4.1.0	pass		d3-time-format
+marked	18.0.14	runtime-error	Uncaught Error: Infinite loop on byte: 84	marked
+acorn-walk	8.3.5	pass		acorn-walk
+is-plain-object	5.1.0	wrong-output	expected "true", got "false"	is-plain-object
+@tanstack/query-core	5.104.0	missing-api	Uncaught ReferenceError: AbortController is not defined	tanstack__query-core
+jsonc-parser	3.3.1	pass		jsonc-parser
+regenerator-runtime	0.14.1	runtime-error	Uncaught TypeError	regenerator-runtime
+lz-string	1.5.0	pass		lz-string
+bn.js	5.2.5	pass		bn_js
+bignumber.js	11.1.5	pass		bignumber_js
+safe-stable-stringify	2.5.0	runtime-error	Uncaught TypeError: Cannot get property of null	safe-stable-stringify
+ansi-colors	4.1.3	wrong-output	expected "\"✔\"", got "\"\u0014\""	ansi-colors
+array-union	3.0.1	wrong-output	expected "[\"🐱\",\"🦄\",\"🐻\",\"🌈\"]", got "[\"=1\",\">�\",\"=;\",\"<\b\"]"	array-union
+bluebird	3.7.2	runtime-error	Uncaught Error: No async scheduler available	bluebird
+micromark	4.0.3	pass		micromark
+zustand	5.0.15	pass		zustand
+escodegen	2.1.0	pass		escodegen
+reselect	5.3.0	pass		reselect
+cac	7.0.0	missing-api	Uncaught ReferenceError: EventTarget is not defined	cac
+arrify	3.0.0	runtime-error	crashed (SIGSEGV)	arrify
+fast-safe-stringify	2.1.1	pass		fast-safe-stringify
+h3	2.0.1-rc.32	missing-api	Uncaught ReferenceError: URL is not defined	h3
+uglify-js	3.19.3	missing-api	porffor: cannot resolve 'fs' from node_modules/uglify-js/tools/node.js	uglify-js
+emittery	2.1.0	pass		emittery
+quick-lru	7.3.0	runtime-error	Uncaught TypeError: Tried for..of on non-iterable type	quick-lru
+redux	5.0.1	pass		redux
+he	1.2.0	runtime-error	crashed (SIGSEGV)	he
+immutable	5.1.9	runtime-error	Uncaught ReferenceError: Map.prototype is not defined	immutable
+util	0.12.5	runtime-error	Uncaught TypeError	util
+text-table	0.2.0	pass		text-table
+luxon	3.7.2	missing-api	Uncaught ReferenceError: Intl is not defined	luxon
+querystringify	2.2.0	pass		querystringify
+moment	2.31.0	pass		moment
+preact	10.29.8	runtime-error	Uncaught TypeError: Cannot set property of undefined	preact
+big.js	7.0.1	pass		big_js
+map-obj	6.0.0	pass		map-obj
+@noble/curves	2.4.0	runtime-error	Uncaught TypeError: invalid exponent: expected bigint, got number	noble__curves
+hookable	6.1.2	pass		hookable
+@reduxjs/toolkit	2.13.0	runtime-error	Uncaught TypeError	reduxjs__toolkit
+mitt	3.0.1	pass		mitt
+underscore	1.13.8	runtime-error	Uncaught SyntaxError: Dynamic code evaluation is not supported	underscore
+lodash.clonedeep	4.5.0	runtime-error	Uncaught TypeError: Cannot get property of null	lodash_clonedeep
+boxen	9.0.0	missing-api	porffor: node builtin modules are not supported (node:process)	boxen
+winston	3.19.0	missing-api	porffor: cannot resolve 'os' from node_modules/@colors/colors/lib/system/supports-colors.js	winston
+validator	13.15.35	runtime-error	Uncaught ReferenceError: toString is not defined	validator
+mri	1.2.0	pass		mri
+astring	1.9.0	pass		astring
+filter-obj	6.1.0	pass		filter-obj
+xmlbuilder2	4.0.3	runtime-error	Uncaught ReferenceError: module is not defined	xmlbuilder2
+@paralleldrive/cuid2	3.3.0	runtime-error	Uncaught TypeError: Cannot mix BigInts and non-BigInts in numeric expressions	paralleldrive__cuid2
+assert	2.1.0	missing-api	porffor: cannot resolve 'util/' from node_modules/assert/build/internal/assert/assertion_error.js	assert
+md5	2.3.0	wrong-output	expected "d41d8cd98f00b204e9800998ecf8427e", got "c150fefe74fe01eafd30e41213865b2a"	md5
+mustache	4.2.0	pass		mustache
+sort-keys	6.0.1	runtime-error	Uncaught TypeError	sort-keys
+papaparse	5.7.0	pass		papaparse
+@vue/reactivity	3.5.43	wrong-output	expected "effect: count=5 items=2", got "10"	vue__reactivity
+filesize	11.0.25	pass		filesize
+escape-goat	4.0.0	runtime-error	Uncaught TypeError	escape-goat
+tinycolor2	1.6.0	pass		tinycolor2
+bcryptjs	3.0.3	missing-api	porffor: cannot resolve 'crypto' from node_modules/bcryptjs/index.js	bcryptjs
+title-case	4.3.2	pass		title-case
+yup	1.7.1	runtime-error	Uncaught TypeError: Cannot get property of null	yup
+ulid	3.0.2	runtime-error	Uncaught Error	ulid
+remeda	2.50.0	runtime-error	Uncaught TypeError	remeda
+meriyah	7.3.3	wrong-output	expected "[1:9-1:10]: Function declaration must have a name in this context", got "undefined"	meriyah
+gl-matrix	3.4.4	wrong-output	expected "[0,0.7071,0,0.7071] [0,0,-1]", got "[0,0.7071,0,0.7071] [0,0,-0.2]"	gl-matrix
+spark-md5	3.0.2	runtime-error	Uncaught TypeError	spark-md5
+turndown	7.2.4	runtime-error	Uncaught ReferenceError: module is not defined	turndown
+seedrandom	3.0.5	wrong-output	expected "0.9282578795792454", got "0.928257879579245"	seedrandom
+@preact/signals-core	1.14.4	pass		preact__signals-core
+fast-json-patch	3.1.1	wrong-output	expected "\"OPERATION_OP_INVALID\"", got "\"Error\""	fast-json-patch
+@iarna/toml	2.2.5	missing-api	Uncaught ReferenceError: global is not defined	iarna__toml
+kolorist	1.8.0	pass		kolorist
+tiny-emitter	2.1.0	pass		tiny-emitter
+eta	4.6.0	missing-api	porffor: node builtin modules are not supported (node:fs)	eta
+koa	3.2.1	missing-api	porffor: node builtin modules are not supported (node:http)	koa
+ts-pattern	5.9.0	runtime-error	Uncaught TypeError	ts-pattern
+just-diff	6.0.2	pass		just-diff
+@sindresorhus/slugify	3.0.1	pass		sindresorhus__slugify
+jsbi	4.3.2	runtime-error	Uncaught Error: implementation bug	jsbi
+node-cache	5.1.2	missing-api	porffor: cannot resolve 'events' from node_modules/node-cache/lib/node_cache.js	node-cache
+hash-sum	2.0.0	pass		hash-sum
+mobx	7.0.5	runtime-error	Uncaught ReferenceError: ObservableObjectAdministration is not defined	mobx
+js-sha3	0.13.0	pass		js-sha3
+rrule	2.8.1	compile-error	SyntaxError: The requested module 'rrule' does not provide an export named 'default'	rrule
+object-path	0.11.8	pass		object-path
+rambda	11.3.0	runtime-error	Uncaught TypeError	rambda
+numeral	2.0.6	pass		numeral
+blueimp-md5	2.19.0	pass		blueimp-md5
+radash	12.1.1	wrong-output	expected "[1,2,3] [0,1,2,3,4] 126", got "[1,2,3] [] 126"	radash
+@date-fns/utc	2.1.1	missing-api	Uncaught ReferenceError: Intl is not defined	date-fns__utc
+valtio	2.3.2	runtime-error	Uncaught TypeError: Cannot get property of null	valtio
+htm	3.1.1	runtime-error	Uncaught TypeError: Map.prototype.set expects 'this' to be a Map	htm
+arktype	2.2.5	missing-api	Uncaught ReferenceError: Blob is not defined	arktype
+merge-anything	6.0.8	pass		merge-anything
+showdown	2.1.0	runtime-error	Uncaught TypeError: Cannot get property of null	showdown
+hashids	2.3.0	runtime-error	Uncaught TypeError	hashids
+inferno	9.1.0	missing-api	porffor: cannot resolve 'stream' from node_modules/inferno-server/dist/index.mjs	inferno
+random-seed	0.3.0	wrong-output	expected "28", got "47"	random-seed
+change-case	5.4.4	pass		change-case
+chroma-js	3.2.0	pass		chroma-js
+class-variance-authority	0.7.1	pass		class-variance-authority
+classnames	2.5.1	pass		classnames
+cli-table3	0.6.5	missing-api	porffor: cannot resolve 'os' from node_modules/@colors/colors/lib/system/supports-colors.js	cli-table3
+cli-truncate	6.1.1	missing-api	Uncaught ReferenceError: Intl is not defined	cli-truncate
+clone	2.1.2	pass		clone
+color	5.0.3	runtime-error	Uncaught TypeError	color
+color-name	2.1.1	pass		color-name
+colord	2.10.0	wrong-output	expected "#898989", got "#888888"	colord
+colorette	2.0.20	missing-api	porffor: cannot resolve 'tty' from node_modules/colorette/index.js	colorette
+commander	15.0.0	missing-api	porffor: node builtin modules are not supported (node:events)	commander
+common-tags	1.8.2	pass		common-tags
+compare-versions	6.1.1	pass		compare-versions
+complex.js	2.4.3	pass		complex_js
+consola	3.4.2	missing-api	Uncaught ReferenceError: clearTimeout is not defined	consola
+content-type	3.1.1	pass		content-type
+convert-units	2.3.4	missing-api	Uncaught ReferenceError: global is not defined	convert-units
+cookie	2.0.1	pass		cookie
+cookie-signature	1.2.2	missing-api	porffor: cannot resolve 'crypto' from node_modules/cookie-signature/index.js	cookie-signature
+core-js	3.50.0	runtime-error	Uncaught TypeError: Cannot get property of null	core-js
+cron-parser	5.10.1	runtime-error	Uncaught TypeError: Cannot get property of null	cron-parser
+crypto-js	4.2.0	wrong-output	expected "5eb63bbbe01eeed093cb22bb8f5acdc3", got "5035f52159558a9efb9866706d1adf71"	crypto-js
+css-tree	3.2.1	missing-api	porffor: cannot resolve 'module' from node_modules/css-tree/lib/data.js	css-tree
+css-what	8.0.0	pass		css-what
+cssesc	3.0.0	runtime-error	crashed (SIGSEGV)	cssesc
+cssom	0.5.0	runtime-error	Uncaught ReferenceError: module is not defined	cssom
+csv-parse	7.0.3	missing-api	Uncaught ReferenceError: Buffer is not defined	csv-parse
+csv-stringify	6.9.0	missing-api	Uncaught ReferenceError: Buffer is not defined	csv-stringify
+culori	4.0.2	runtime-error	Uncaught ReferenceError: default is not defined	culori
+currency.js	2.0.4	wrong-output	expected "€1.234,50", got "�1.234,50"	currency_js
+d3-array	3.2.4	runtime-error	Uncaught TypeError: Map.prototype.get expects 'this' to be a Map	d3-array
+d3-color	3.1.0	pass		d3-color
+d3-format	3.1.2	wrong-output	expected "−$3.50", got "\u0012$3.50"	d3-format
+d3-interpolate	3.0.1	runtime-error	Uncaught TypeError	d3-interpolate
+d3-scale	4.0.2	runtime-error	Uncaught TypeError: Map.prototype.has expects 'this' to be a Map	d3-scale
+d3-shape	3.2.0	pass		d3-shape
+date-fns	4.4.0	pass		date-fns
+date-fns-tz	3.2.0	missing-api	Uncaught ReferenceError: Intl is not defined	date-fns-tz
+dayjs	1.11.23	runtime-error	Uncaught TypeError	dayjs
+debug	4.4.3	missing-api	porffor: cannot resolve 'tty' from node_modules/debug/src/node.js	debug
+decamelize	6.0.1	pass		decamelize
+decimal.js	10.6.0	wrong-output	expected "2.30258509299405", got "2"	decimal_js
+dedent	1.7.2	pass		dedent
+deep-equal	2.2.3	runtime-error	Uncaught TypeError	deep-equal
+deepmerge	4.3.1	pass		deepmerge
+defu	6.1.7	pass		defu
+dequal	2.0.3	pass		dequal
+dinero.js	2.0.2	runtime-error	Uncaught ReferenceError: multiplicand is not defined	dinero_js
+dot-prop	10.2.0	runtime-error	Uncaught TypeError	dot-prop
+dotenv	18.0.4	missing-api	porffor: cannot resolve 'fs' from node_modules/dotenv/dist/index.cjs	dotenv
+effect	3.22.2	missing-api	Uncaught ReferenceError: setTimeout is not defined	effect
+ejs	6.0.1	missing-api	porffor: node builtin modules are not supported (node:fs)	ejs
+emoji-regex	11.0.0	runtime-error	crashed (SIGSEGV)	emoji-regex
+entities	8.1.0	wrong-output	expected "&lt;é &amp; &quot;ü&quot;&gt;", got "&lt;� &amp; &quot;�&quot;&gt;"	entities
+es-toolkit	1.52.0	pass		es-toolkit
+escape-html	1.0.3	pass		escape-html
+espree	11.2.0	runtime-error	Uncaught TypeError: Cannot get property of null	espree
+etag	1.8.1	missing-api	porffor: cannot resolve 'crypto' from node_modules/etag/index.js	etag
+eventemitter3	5.0.4	pass		eventemitter3
+eventsource-parser	4.1.1	pass		eventsource-parser
+fast-deep-equal	3.1.3	pass		fast-deep-equal
+fast-diff	1.3.0	pass		fast-diff
+fast-json-stable-stringify	2.1.0	pass		fast-json-stable-stringify
+fast-querystring	1.1.2	pass		fast-querystring
+fastest-levenshtein	1.0.16	wrong-output	expected "1", got "33"	fastest-levenshtein
+fastify	5.12.5	missing-api	porffor: node builtin modules are not supported (node:util)	fastify
+flat	6.0.1	runtime-error	Uncaught TypeError: Cannot get property of null	flat
+fp-ts	2.16.11	pass		fp-ts
+fraction.js	5.3.4	runtime-error	Uncaught TypeError: Cannot mix BigInts and non-BigInts in numeric expressions	fraction_js
+glob-parent	6.0.2	missing-api	porffor: cannot resolve 'path' from node_modules/glob-parent/index.js	glob-parent
+handlebars	4.7.9	runtime-error	Uncaught SyntaxError: Dynamic code evaluation is not supported	handlebars
+hono	4.13.11	missing-api	Uncaught ReferenceError: Request is not defined	hono
+html-entities	2.6.0	wrong-output	expected "&lt; &gt; &quot; &apos; &amp; © ∆", got "&lt; &gt; &quot; &apos; &amp; � \u0006"	html-entities
+humanize-duration	3.35.0	pass		humanize-duration
+ieee754	1.2.1	wrong-output	expected "3.141592653589793", got "3.14159265358979"	ieee754
+immer	11.1.18	runtime-error	Uncaught TypeError	immer
+indent-string	5.0.0	wrong-output	expected "♥Unicorns", got "eUnicorns"	indent-string
+inherits	2.0.4	pass		inherits
+ini	7.0.0	pass		ini
+invariant	2.2.4	wrong-output	expected "Invariant Violation: Amount must be positive, got -5 (framesToPop=1)", got "Error: Amount must be positive, got -5 (framesToPop=1)"	invariant
+is-glob	4.0.3	pass		is-glob
+is-number	7.0.0	pass		is-number
+is-what	5.5.6	wrong-output	expected "true false", got "false false"	is-what
+itty-router	5.0.24	compile-error	TypeError: Cannot read properties of undefined (reading 'brk')	itty-router
+joi	18.2.9	missing-api	porffor: cannot resolve 'url' from node_modules/@hapi/address/esm/domain.js	joi
+jotai	3.0.1	pass		jotai
+js-base64	3.9.4	runtime-error	crashed (SIGSEGV)	js-base64
+js-sha256	1.0.0	pass		js-sha256
+js-tokens	10.0.0	wrong-output	token-list mismatch on line 1 (diff truncated on page)	js-tokens
+js-yaml	5.4.2	wrong-output	expected "a: 1", got "!!int 'a': 1"	js-yaml
+json-stable-stringify	1.3.0	runtime-error	Uncaught TypeError	json-stable-stringify
+json5	2.2.3	runtime-error	Uncaught RangeError: Invalid code point	json5
+jsonpointer	5.0.1	pass		jsonpointer
+jsonwebtoken	9.0.3	missing-api	porffor: cannot resolve 'buffer' from node_modules/safe-buffer/index.js	jsonwebtoken
+keyv	5.6.0	missing-api	porffor: cannot resolve 'buffer' from node_modules/@keyv/serialize/dist/index.js	keyv
+kind-of	6.0.3	wrong-output	type-list mismatch on line 1 (diff truncated on page)	kind-of
+kleur	4.1.5	pass		kleur
+klona	2.0.6	wrong-output	expected "[1,2] true", got "[] true"	klona
+ky	2.1.0	missing-api	Uncaught ReferenceError: TextEncoder is not defined	ky
+leven	4.1.0	pass		leven
+linkifyjs	4.3.3	runtime-error	crashed (SIGSEGV)	linkifyjs
+liquidjs	10.29.0	missing-api	porffor: cannot resolve 'stream' from node_modules/liquidjs/dist/liquid.node.mjs	liquidjs
+lodash-es	4.18.1	runtime-error	Uncaught TypeError: Cannot get property of null	lodash-es
+lodash.get	4.4.2	runtime-error	Uncaught TypeError: Cannot get property of null	lodash_get
+lodash.isequal	4.5.0	runtime-error	Uncaught TypeError: Cannot get property of null	lodash_isequal
+loglevel	1.9.2	runtime-error	Uncaught TypeError: Cannot get property of null	loglevel
+long	5.3.2	pass		long
+lru-cache	11.5.3	missing-api	Uncaught ReferenceError: AbortController is not defined	lru-cache
+magic-string	1.4.2	missing-api	Uncaught ReferenceError: TextDecoder is not defined	magic-string
+markdown-it	15.0.2	runtime-error	Uncaught SyntaxError: Regex parse: unmatched (	markdown-it
+mathjs	15.2.0	runtime-error	Uncaught TypeError	mathjs
+micromatch	4.0.8	missing-api	porffor: cannot resolve 'util' from node_modules/fill-range/index.js	micromatch
+minimatch	10.2.6	compile-error	SyntaxError: Identifier '#toString' has already been declared (143:4)	minimatch
+minimist	1.2.8	pass		minimist
+ml-matrix	6.15.0	pass		ml-matrix
+nanoevents	10.0.0	pass		nanoevents
+nanoid	6.0.1	missing-api	Uncaught ReferenceError: Buffer is not defined	nanoid
+nanostores	1.5.4	missing-api	Uncaught ReferenceError: setTimeout is not defined	nanostores
+neverthrow	8.2.0	wrong-output	expected "err(x15)", got "Promise (state: <pending>, result: undefined)"	neverthrow
+nunjucks	3.2.4	missing-api	porffor: cannot resolve 'events' from node_modules/nunjucks/src/object.js	nunjucks
+object-hash	3.0.0	missing-api	porffor: cannot resolve 'crypto' from node_modules/object-hash/index.js	object-hash
+ofetch	1.5.1	runtime-error	Uncaught TypeError: Cannot get property of null	ofetch
+p-limit	7.3.3	wrong-output	expected "max concurrent 2, limit 2", got "max concurrent 1, limit 2"	p-limit
+p-queue	9.3.3	runtime-error	Uncaught TypeError: Cannot convert Symbol or BigInt to a number	p-queue
+p-retry	8.0.1	pass		p-retry
+pako	3.0.2	missing-api	Uncaught ReferenceError: TextEncoder is not defined	pako
+parse5	8.0.1	pass		parse5
+path-browserify	1.0.1	pass		path-browserify
+path-to-regexp	8.4.2	runtime-error	Uncaught ReferenceError: TokenData is not defined	path-to-regexp
+picocolors	1.1.1	missing-api	Uncaught ReferenceError: process is not defined	picocolors
+pino	10.3.1	missing-api	Uncaught ReferenceError: process is not defined	pino
+pluralize	8.0.0	runtime-error	Uncaught TypeError: Cannot set property of undefined	pluralize
+postcss	8.5.28	missing-api	Uncaught ReferenceError: process is not defined	postcss
+preact-render-to-string	6.7.0	pass		preact-render-to-string
+pretty-bytes	7.2.0	runtime-error	Uncaught TypeError	pretty-bytes
+pretty-ms	9.3.1	wrong-output	expected "15d 11h 23m 20s", got "0.0410958904109589y 15d 11h 23m 20s"	pretty-ms
+process	0.11.10	missing-api	Uncaught ReferenceError: setTimeout is not defined	process
+pubsub-js	1.9.5	missing-api	Uncaught ReferenceError: global is not defined	pubsub-js
+qs	6.16.0	missing-api	porffor: cannot resolve 'util' from node_modules/object-inspect/util.inspect.js	qs
+query-string	9.5.1	pass		query-string
+querystring-es3	0.2.1	pass		querystring-es3
+ramda	0.32.0	runtime-error	Uncaught TypeError: "Ann" does not have a method named "toUpperCase"	ramda
+range-parser	1.3.0	pass		range-parser
+react	19.3.0	missing-api	Uncaught ReferenceError: MessageChannel is not defined	react
+readable-stream	4.7.0	missing-api	Uncaught ReferenceError: global is not defined	readable-stream
+recast	0.24.0	runtime-error	Uncaught ReferenceError: module is not defined	recast
+rfdc	1.4.1	runtime-error	Uncaught TypeError: Cannot convert an object to primitive	rfdc
+rxjs	7.8.2	pass		rxjs
+sanitize-html	2.17.7	missing-api	Uncaught ReferenceError: process is not defined	sanitize-html
+sax	1.6.1	runtime-error	Uncaught TypeError	sax
+set-cookie-parser	3.1.2	pass		set-cookie-parser
+simplex-noise	4.0.3	pass		simplex-noise
+slugify	1.6.9	runtime-error	Uncaught SyntaxError: Expected string key	slugify
+smol-toml	1.9.0	wrong-output	expected "Error", got "undefined"	smol-toml
+solid-js	1.9.15	pass		solid-js
+source-map-js	1.2.1	runtime-error	Uncaught SyntaxError: Dynamic code evaluation is not supported	source-map-js
+spdx-expression-parse	5.0.0	runtime-error	Uncaught TypeError	spdx-expression-parse
+spdx-license-ids	3.0.24	pass		spdx-license-ids
+sprintf-js	1.1.3	wrong-output	expected " 3.142|left |1.2345678e+4", got " 3.142|left |1.2345678000000002e+4"	sprintf-js
+statuses	2.0.2	runtime-error	Uncaught TypeError	statuses
+stream-browserify	3.0.0	missing-api	porffor: cannot resolve 'stream' from node_modules/readable-stream/lib/internal/streams/stream.js	stream-browserify
+string-similarity	4.0.4	wrong-output	expected "0.6060606060606061", got "0.606060606060606"	string-similarity
+strip-ansi	7.2.0	pass		strip-ansi
+strip-indent	4.1.1	pass		strip-indent
+striptags	3.2.0	runtime-error	Uncaught TypeError	striptags
+sucrase	3.35.1	pass		sucrase
+superstruct	2.0.2	runtime-error	Uncaught TypeError	superstruct
+svelte	5.57.1	pass		svelte
+tailwind-merge	3.7.0	pass		tailwind-merge
+tapable	2.3.3	missing-api	porffor: cannot resolve 'util' from node_modules/tapable/lib/Hook.js	tapable
+through2	5.0.11	missing-api	Uncaught ReferenceError: global is not defined	through2
+timeago.js	4.0.2	pass		timeago_js
+toml	5.0.0	pass		toml
+trim-newlines	5.0.0	wrong-output	expected "\"🦄\"", got "\">�\""	trim-newlines
+tweetnacl	1.0.3	missing-api	Uncaught ReferenceError: TextEncoder is not defined	tweetnacl
+type-detect	4.1.0	wrong-output	type-list mismatch on line 1 (diff truncated on page)	type-detect
+url	0.11.4	missing-api	porffor: cannot resolve 'util' from node_modules/object-inspect/util.inspect.js	url
+url-parse	1.5.10	runtime-error	crashed (SIGSEGV)	url-parse
+valibot	1.5.0	pass		valibot
+validate-npm-package-name	8.0.0	runtime-error	Uncaught TypeError	validate-npm-package-name
+vue	3.5.43	runtime-error	Uncaught ReferenceError: VUE.PROD.DEVTOOLS.. is not defined	vue
+warning	4.0.3	wrong-output	expected "2", got "0"	warning
+word-wrap	1.2.5	pass		word-wrap
+ws	8.22.0	missing-api	Uncaught ReferenceError: Buffer is not defined	ws
+xstate	5.33.2	runtime-error	Uncaught ReferenceError: options is not defined	xstate
+yargs	18.2.0	missing-api	porffor: cannot resolve 'assert' from node_modules/yargs/lib/platform-shims/esm.mjs	yargs

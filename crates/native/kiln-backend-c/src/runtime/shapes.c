@@ -346,6 +346,9 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
 static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
                                         uint32_t expected_bit, uint32_t attrs, kiln_body_fn code) {
     uint32_t bit = 1u << current->property_count;
+    /* Inductive native-metadata authority: parents contain only canonical keys; every new
+     * edge comes from the same key table, whose allocations are outside candidate ownership. */
+    if (ikey == NULL || kiln_c99_interned_key_in(kiln_c99_gc_heap(), ikey) != ikey) return NULL;
     kiln_shape *next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
     if (next_shape == NULL) return NULL;
     next_shape->parent = current;
@@ -1479,10 +1482,10 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     facade->graph = graph;
     facade->generation = generation;
     facade->node = node;
-    facade->owner = heap;
-    facade->previous = NULL;
-    facade->next = heap->shared_facades;
-    if (facade->next != NULL) facade->next->previous = facade;
+    kiln_c99_heap_store_pointer(facade, &facade->owner, heap);
+    kiln_c99_heap_store_pointer(facade, &facade->previous, NULL);
+    kiln_c99_heap_store_pointer(facade, &facade->next, heap->shared_facades);
+    if (facade->next != NULL) kiln_c99_heap_store_pointer(facade->next, &facade->next->previous, facade);
     heap->shared_facades = facade;
     kiln_c99_shared_facade_insert(heap, facade);
     *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)facade, NULL, 0);
