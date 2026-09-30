@@ -882,7 +882,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
-        KILN_C99_REFUSE("a RegExp.prototype member this backend has not implemented");
+        /* RegExp instances are ordinary objects after their own slots and RegExp.prototype.
+         * In particular an unknown name such as `length` is a real absent property, which code
+         * like kind-of tests directly; refusing it breaks the ordinary `=== undefined` branch. */
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        {
+            int found;
+            int status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                                  intrinsic_len, out, depth,
+                                                                  thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_ABSENT("not an own RegExp slot, RegExp.prototype member, or Object.prototype "
+                        "member; the checked stores and method tables are complete",
+                        out);
     }
     case KILN_VALUE_ARRAY_BUFFER:
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -1618,7 +1631,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number(target.bits == KILN_C99_METHOD_REGEXP_TO_STRING ? 0.0 : 1.0);
             return KILN_C99_OK;
         }
-        KILN_C99_REFUSE("a member of a native method other than name");
+        KILN_C99_ABSENT("not the native method's name, supported length or constructor prototype, "
+                        "nor a property in its own or callable-prototype stores",
+                        out);
     }
     case KILN_VALUE_BUILTIN: {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);

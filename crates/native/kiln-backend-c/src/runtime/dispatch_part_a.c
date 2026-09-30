@@ -3531,7 +3531,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = built;
                 return status;
             }
-            if (args[0].tag == KILN_VALUE_FUNCTION || args[0].tag == KILN_VALUE_BOUND) {
+            if (args[0].tag == KILN_VALUE_FUNCTION || args[0].tag == KILN_VALUE_BOUND ||
+                args[0].tag == KILN_VALUE_METHOD || args[0].tag == KILN_VALUE_SETTLER) {
                 /* A function is an object: `f.version = 2` is an own enumerable property of it,
                  * and it is kept on the closure's store rather than in a slot list of its own.
                  * `name`, `length` and `prototype` are read from the closure and are not in that
