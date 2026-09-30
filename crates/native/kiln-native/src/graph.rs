@@ -3101,6 +3101,7 @@ extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_requir
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
 extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);
 extern int kiln_c99_new_object(kiln_value *result);
+extern int kiln_c99_make_cell(kiln_value *slot);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);

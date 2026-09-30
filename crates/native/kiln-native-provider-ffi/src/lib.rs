@@ -350,6 +350,24 @@ pub unsafe extern "C" fn kiln_string_normalize(
 ///
 /// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_string_case(
+    _units: *const u16,
+    _count: u64,
+    _locale: *const u8,
+    _locale_len: u64,
+    _uppercase: u32,
+    _out: *mut u16,
+    _capacity: u64,
+    _out_len: *mut u64,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_intl_collate(
     _left: *const u16,
     _left_len: u64,
