@@ -1,74 +1,66 @@
-// Native GC tracks shared graph facades through opaque weak tokens. Ordinary WeakRef targets
-// retain the worker-compatibility behavior until ordinary weak cells are implemented.
+// Shared TypeScript surface over native GC weak cells. Target values and finalization holdings
+// live in collector metadata rather than in JavaScript fields, so a WeakRef never keeps its
+// target alive and a live registry keeps holdings alive until delivery or unregister.
 (function installNativeWeakReferences() {
   const G = globalThis as any;
-  const sharedWeak: ((operation: number, value: any) => any) | undefined = G.__kilnSharedWeak;
+  const weakOperation: ((operation: number, ...values: any[]) => any) | undefined = G.__kilnSharedWeak;
   delete G.__kilnSharedWeak;
-  // The native backend publishes this primitive until arraybuffer.ts captures it. The
-  // interpreter already has its own WeakRef and FinalizationRegistry implementation.
-  if (typeof G.__kilnSharedBuffer !== "function") return;
+  // The interpreter already has its own WeakRef and FinalizationRegistry implementation.
+  if (typeof weakOperation !== "function") return;
+  const symbolKeyFor = Symbol.keyFor;
+
+  function canBeHeldWeakly(value: any): boolean {
+    if (typeof value === "symbol") return symbolKeyFor.call(Symbol, value) === undefined;
+    return (typeof value === "object" && value !== null) || typeof value === "function";
+  }
 
   class WeakRef {
-    #target: any;
     #sharedToken: number[] | undefined;
 
     constructor(target: any) {
-      if ((typeof target !== "object" || target === null) && typeof target !== "function") {
+      if (!canBeHeldWeakly(target)) {
         throw new TypeError("WeakRef: target must be an object or an unregistered symbol");
       }
-      const token = sharedWeak === undefined ? undefined : sharedWeak(0, target);
-      if (token === undefined) this.#target = target;
-      else this.#sharedToken = token;
+      const token = weakOperation(0, target);
+      if (Array.isArray(token)) this.#sharedToken = token;
+      else weakOperation(2, this, target);
     }
 
     deref(): any {
-      return this.#sharedToken === undefined ? this.#target : sharedWeak!(1, this.#sharedToken);
+      return this.#sharedToken === undefined
+        ? weakOperation!(3, this)
+        : weakOperation!(1, this.#sharedToken);
     }
   }
 
   class FinalizationRegistry {
-    #callback: Function;
-    #targets = new WeakMap<object, any[]>();
-    #tokens = new WeakMap<object, any[]>();
-
     constructor(cleanupCallback: any) {
       if (typeof cleanupCallback !== "function") {
         throw new TypeError("FinalizationRegistry: cleanup callback must be a function");
       }
-      this.#callback = cleanupCallback;
+      weakOperation!(4, this, cleanupCallback);
     }
 
-    register(target: any, heldValue: any, unregisterToken?: any): void {
-      if ((typeof target !== "object" || target === null) && typeof target !== "function") {
+    register(target: any, heldValue: any): void {
+      const unregisterToken = arguments.length > 2 ? arguments[2] : undefined;
+      if (!canBeHeldWeakly(target)) {
         throw new TypeError("FinalizationRegistry.prototype.register: target must be an object or an unregistered symbol");
       }
       if (target === heldValue) {
         throw new TypeError("FinalizationRegistry.prototype.register: target and holdings must not be the same");
       }
-      if (unregisterToken !== undefined &&
-          ((typeof unregisterToken !== "object" || unregisterToken === null) && typeof unregisterToken !== "function")) {
+      if (unregisterToken !== undefined && !canBeHeldWeakly(unregisterToken)) {
         throw new TypeError("FinalizationRegistry.prototype.register: unregisterToken must be an object or an unregistered symbol");
       }
-      const cell = { heldValue, active: true };
-      const entries = this.#targets.get(target) || [];
-      entries.push(cell);
-      this.#targets.set(target, entries);
-      if (unregisterToken !== undefined) {
-        const tagged = this.#tokens.get(unregisterToken) || [];
-        tagged.push(cell);
-        this.#tokens.set(unregisterToken, tagged);
-      }
+      weakOperation!(5, this, target, heldValue,
+        unregisterToken === undefined ? undefined : unregisterToken);
     }
 
     unregister(unregisterToken: any): boolean {
-      if ((typeof unregisterToken !== "object" || unregisterToken === null) && typeof unregisterToken !== "function") {
+      if (!canBeHeldWeakly(unregisterToken)) {
         throw new TypeError("FinalizationRegistry.prototype.unregister: unregisterToken must be an object or an unregistered symbol");
       }
-      const cells = this.#tokens.get(unregisterToken);
-      if (cells === undefined) return false;
-      this.#tokens.delete(unregisterToken);
-      for (const cell of cells) cell.active = false;
-      return cells.length > 0;
+      return weakOperation!(6, this, unregisterToken);
     }
   }
 

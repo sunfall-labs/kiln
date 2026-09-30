@@ -445,6 +445,9 @@ typedef struct kiln_gc_weak_resource {
     kiln_value handle;
     void *payload;
     void (*dispose)(void *);
+    void (*mark)(struct kiln_gc_heap *, void *);
+    int (*process)(struct kiln_gc_heap *, void *);
+    int (*aliases)(const struct kiln_gc_heap *, kiln_nursery_chunk *const *, size_t, void *);
 } kiln_gc_weak_resource;
 
 typedef struct kiln_gc_heap {
@@ -526,6 +529,10 @@ typedef struct kiln_gc_heap {
     size_t shared_facade_count;
     kiln_collection *weak_collections;
     kiln_gc_weak_resource *weak_resources;
+    kiln_value *weak_keep_during_job;
+    size_t weak_keep_count;
+    size_t weak_keep_capacity;
+    uint32_t weak_job_depth;
     kiln_key_table keys;
     /* Canonical pointers for the keys the HTTP path writes on every request and response. See
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
@@ -5181,8 +5188,13 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
     for (const kiln_gc_weak_resource *entry = heap->weak_resources;
          entry != NULL; entry = entry->next) {
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->handle) ||
-            kiln_c99_graph_in_batch(heap, chunks, count, entry->payload)) return 1;
+            kiln_c99_graph_in_batch(heap, chunks, count, entry->payload) ||
+            (entry->aliases != NULL && entry->aliases(heap, chunks, count, entry->payload)))
+            return 1;
     }
+    for (size_t keep = 0; keep < heap->weak_keep_count; ++keep)
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count,
+                                          &heap->weak_keep_during_job[keep])) return 1;
     return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store) ||
            kiln_c99_graph_in_batch(heap, chunks, count, heap->shared_facades) ||
            kiln_c99_graph_in_batch(heap, chunks, count, heap->weak_collections);
@@ -8254,8 +8266,25 @@ static int kiln_c99_gc_weak_resource_register(kiln_gc_heap *heap, kiln_value han
     entry->handle = handle;
     entry->payload = payload;
     entry->dispose = dispose;
+    entry->mark = NULL;
+    entry->process = NULL;
+    entry->aliases = NULL;
     entry->next = heap->weak_resources;
     heap->weak_resources = entry;
+    return 1;
+}
+
+static int kiln_c99_gc_weak_resource_register_managed(
+    kiln_gc_heap *heap, kiln_value handle, void *payload, void (*dispose)(void *),
+    void (*mark)(kiln_gc_heap *, void *), int (*process)(kiln_gc_heap *, void *),
+    int (*aliases)(const kiln_gc_heap *, kiln_nursery_chunk *const *, size_t, void *)) {
+    kiln_gc_weak_resource *entry;
+    if (!kiln_c99_gc_weak_resource_register(heap, handle, payload, dispose)) return 0;
+    entry = kiln_c99_gc_weak_resource_find(heap, handle);
+    if (entry == NULL) return 0;
+    entry->mark = mark;
+    entry->process = process;
+    entry->aliases = aliases;
     return 1;
 }
 
@@ -8289,6 +8318,238 @@ static void kiln_c99_gc_weak_resources_sweep(kiln_gc_heap *heap) {
         entry->dispose(entry->payload);
         free(entry);
     }
+}
+
+static void kiln_c99_gc_weak_resources_mark(kiln_gc_heap *heap) {
+    kiln_gc_weak_resource *entry;
+    for (entry = heap->weak_resources; entry != NULL && !heap->mark_failed;
+         entry = entry->next) {
+        kiln_gc_block *block = kiln_c99_gc_lookup(heap,
+                                    (const void *)(uintptr_t)entry->handle.bits);
+        if (block != NULL && kiln_c99_gc_is_marked(heap, block) && entry->mark != NULL)
+            entry->mark(heap, entry->payload);
+    }
+}
+
+static void kiln_c99_gc_weak_resources_process(kiln_gc_heap *heap) {
+    kiln_gc_weak_resource *entry;
+    for (entry = heap->weak_resources; entry != NULL && !heap->mark_failed;
+         entry = entry->next) {
+        kiln_gc_block *block = kiln_c99_gc_lookup(heap,
+                                    (const void *)(uintptr_t)entry->handle.bits);
+        if (block != NULL && kiln_c99_gc_is_marked(heap, block) && entry->process != NULL &&
+            entry->process(heap, entry->payload) != KILN_C99_OK)
+            heap->mark_failed = 1;
+    }
+}
+
+typedef struct kiln_gc_finalization_cell {
+    struct kiln_gc_finalization_cell *next;
+    kiln_value target;
+    kiln_value held;
+    kiln_value token;
+} kiln_gc_finalization_cell;
+
+typedef struct kiln_gc_weak_reference {
+    kiln_value target;
+} kiln_gc_weak_reference;
+
+typedef struct kiln_gc_finalization_registry {
+    kiln_value callback;
+    kiln_gc_finalization_cell *cells;
+} kiln_gc_finalization_registry;
+
+static int kiln_c99_gc_weak_reference_aliases(const kiln_gc_heap *heap,
+                                               kiln_nursery_chunk *const *chunks,
+                                               size_t count, void *payload) {
+    kiln_gc_weak_reference *cell = (kiln_gc_weak_reference *)payload;
+    return kiln_c99_graph_value_in_batch(heap, chunks, count, &cell->target);
+}
+
+static int kiln_c99_gc_finalization_registry_aliases(const kiln_gc_heap *heap,
+                                                       kiln_nursery_chunk *const *chunks,
+                                                       size_t count, void *payload) {
+    kiln_gc_finalization_registry *registry = (kiln_gc_finalization_registry *)payload;
+    kiln_gc_finalization_cell *cell;
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &registry->callback)) return 1;
+    for (cell = registry->cells; cell != NULL; cell = cell->next) {
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &cell->target) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &cell->held) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &cell->token)) return 1;
+    }
+    return 0;
+}
+
+static void kiln_c99_gc_weak_reference_dispose(void *payload) { free(payload); }
+
+static int kiln_c99_gc_weak_reference_process(kiln_gc_heap *heap, void *payload) {
+    kiln_gc_weak_reference *cell = (kiln_gc_weak_reference *)payload;
+    if (!kiln_c99_gc_weak_key_live(heap, &cell->target)) cell->target = kiln_c99_undefined();
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_gc_finalization_registry_dispose(void *payload) {
+    kiln_gc_finalization_registry *registry = (kiln_gc_finalization_registry *)payload;
+    kiln_gc_finalization_cell *cell = registry->cells;
+    while (cell != NULL) {
+        kiln_gc_finalization_cell *next = cell->next;
+        free(cell);
+        cell = next;
+    }
+    free(registry);
+}
+
+static void kiln_c99_gc_finalization_registry_mark(kiln_gc_heap *heap, void *payload) {
+    kiln_gc_finalization_registry *registry = (kiln_gc_finalization_registry *)payload;
+    kiln_gc_finalization_cell *cell;
+    kiln_c99_gc_mark_value(heap, &registry->callback);
+    for (cell = registry->cells; cell != NULL; cell = cell->next)
+        kiln_c99_gc_mark_value(heap, &cell->held);
+}
+
+static int kiln_c99_gc_finalization_registry_process(kiln_gc_heap *heap, void *payload) {
+    kiln_gc_finalization_registry *registry = (kiln_gc_finalization_registry *)payload;
+    kiln_gc_finalization_cell **link = &registry->cells;
+    while (*link != NULL) {
+        kiln_gc_finalization_cell *cell = *link;
+        if (!kiln_c99_gc_weak_key_live(heap, &cell->target)) {
+            int status = kiln_c99_enqueue_finalizer(registry->callback, cell->held);
+            if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_mark_value(heap, &registry->callback);
+            kiln_c99_gc_mark_value(heap, &cell->held);
+            *link = cell->next;
+            free(cell);
+            continue;
+        }
+        if (cell->token.tag != KILN_VALUE_UNDEFINED &&
+            !kiln_c99_gc_weak_key_live(heap, &cell->token))
+            cell->token = kiln_c99_undefined();
+        link = &cell->next;
+    }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_weak_reference_create(kiln_value owner, kiln_value target) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_weak_reference *cell = (kiln_gc_weak_reference *)malloc(sizeof *cell);
+    if (cell == NULL) return KILN_C99_OUT_OF_MEMORY;
+    cell->target = target;
+    if (!kiln_c99_gc_weak_resource_register_managed(
+            heap, owner, cell, kiln_c99_gc_weak_reference_dispose, NULL,
+            kiln_c99_gc_weak_reference_process, kiln_c99_gc_weak_reference_aliases)) {
+        free(cell);
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (kiln_c99_gc_keep_during_job(target) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_weak_reference_deref(kiln_value owner, kiln_value *out) {
+    kiln_gc_weak_resource *entry = kiln_c99_gc_weak_resource_find(kiln_c99_gc_heap(), owner);
+    if (entry == NULL || entry->process != kiln_c99_gc_weak_reference_process)
+        return KILN_C99_INVALID_ARGUMENT;
+    *out = ((kiln_gc_weak_reference *)entry->payload)->target;
+    if (out->tag != KILN_VALUE_UNDEFINED && kiln_c99_gc_keep_during_job(*out) != KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_gc_keep_during_job(kiln_value value) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t index;
+    kiln_value *grown;
+    if (heap == NULL) return KILN_C99_INVALID_ARGUMENT;
+    for (index = 0; index < heap->weak_keep_count; ++index) {
+        if (heap->weak_keep_during_job[index].tag == value.tag &&
+            heap->weak_keep_during_job[index].bits == value.bits) return KILN_C99_OK;
+    }
+    if (heap->weak_keep_count == heap->weak_keep_capacity) {
+        size_t capacity = heap->weak_keep_capacity == 0 ? 8 : heap->weak_keep_capacity * 2;
+        if (capacity < heap->weak_keep_capacity || capacity > SIZE_MAX / sizeof *grown)
+            return KILN_C99_OUT_OF_MEMORY;
+        grown = (kiln_value *)realloc(heap->weak_keep_during_job, capacity * sizeof *grown);
+        if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+        heap->weak_keep_during_job = grown;
+        heap->weak_keep_capacity = capacity;
+    }
+    heap->weak_keep_during_job[heap->weak_keep_count++] = value;
+    return KILN_C99_OK;
+}
+
+void kiln_c99_gc_enter_job(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap != NULL && heap->weak_job_depth != UINT32_MAX) heap->weak_job_depth++;
+}
+
+int kiln_c99_gc_enter_job_if_idle(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->weak_job_depth != 0) return 0;
+    heap->weak_job_depth = 1;
+    return 1;
+}
+
+void kiln_c99_gc_leave_job(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->weak_job_depth == 0) return;
+    heap->weak_job_depth--;
+    if (heap->weak_job_depth == 0) heap->weak_keep_count = 0;
+}
+
+int kiln_c99_finalization_registry_create(kiln_value owner, kiln_value callback) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_finalization_registry *registry =
+        (kiln_gc_finalization_registry *)calloc(1, sizeof *registry);
+    if (registry == NULL) return KILN_C99_OUT_OF_MEMORY;
+    registry->callback = callback;
+    if (!kiln_c99_gc_weak_resource_register_managed(
+            heap, owner, registry, kiln_c99_gc_finalization_registry_dispose,
+            kiln_c99_gc_finalization_registry_mark,
+            kiln_c99_gc_finalization_registry_process,
+            kiln_c99_gc_finalization_registry_aliases)) {
+        free(registry);
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_finalization_registry_register(kiln_value owner, kiln_value target,
+                                             kiln_value held, kiln_value token) {
+    kiln_gc_weak_resource *entry = kiln_c99_gc_weak_resource_find(kiln_c99_gc_heap(), owner);
+    kiln_gc_finalization_registry *registry;
+    kiln_gc_finalization_cell *cell;
+    if (entry == NULL || entry->process != kiln_c99_gc_finalization_registry_process)
+        return KILN_C99_INVALID_ARGUMENT;
+    cell = (kiln_gc_finalization_cell *)malloc(sizeof *cell);
+    if (cell == NULL) return KILN_C99_OUT_OF_MEMORY;
+    registry = (kiln_gc_finalization_registry *)entry->payload;
+    cell->target = target;
+    cell->held = held;
+    cell->token = token;
+    cell->next = registry->cells;
+    registry->cells = cell;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_finalization_registry_unregister(kiln_value owner, kiln_value token,
+                                               kiln_value *out) {
+    kiln_gc_weak_resource *entry = kiln_c99_gc_weak_resource_find(kiln_c99_gc_heap(), owner);
+    kiln_gc_finalization_registry *registry;
+    kiln_gc_finalization_cell **link;
+    int removed = 0;
+    if (entry == NULL || entry->process != kiln_c99_gc_finalization_registry_process)
+        return KILN_C99_INVALID_ARGUMENT;
+    registry = (kiln_gc_finalization_registry *)entry->payload;
+    link = &registry->cells;
+    while (*link != NULL) {
+        kiln_gc_finalization_cell *cell = *link;
+        if (cell->token.tag == token.tag && cell->token.bits == token.bits) {
+            *link = cell->next;
+            free(cell);
+            removed = 1;
+        } else link = &cell->next;
+    }
+    *out = kiln_c99_boolean(removed);
+    return KILN_C99_OK;
 }
 
 static void kiln_c99_gc_weak_resources_dispose_all(kiln_gc_heap *heap) {
@@ -8607,6 +8868,7 @@ static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
         heap, kiln_c99_gc_mark_realm_value, kiln_c99_gc_mark_realm_val
     };
     (void)kiln_c99_gc_visit_realm_roots(heap, &visitor, NULL);
+    kiln_c99_gc_mark_values(heap, heap->weak_keep_during_job, heap->weak_keep_count);
 }
 
 /* Free what the realm context owns outside the collector, with the heap (teardown). */
@@ -8690,8 +8952,20 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
     kiln_c99_gc_drain(heap);
     if (!heap->mark_failed) {
-        kiln_c99_gc_weak_ephemerons(heap);
-        if (!heap->mark_failed) kiln_c99_gc_weak_resources_sweep(heap);
+        size_t marked_before;
+        do {
+            marked_before = heap->marked_blocks;
+            kiln_c99_gc_weak_ephemerons(heap);
+            if (!heap->mark_failed) kiln_c99_gc_weak_resources_mark(heap);
+            kiln_c99_gc_drain(heap);
+            if (!heap->mark_failed) kiln_c99_gc_weak_resources_process(heap);
+            kiln_c99_gc_drain(heap);
+        } while (!heap->mark_failed && heap->marked_blocks != marked_before);
+        if (!heap->mark_failed) {
+            kiln_c99_gc_weak_resources_sweep(heap);
+            kiln_c99_gc_drain(heap);
+            if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons(heap);
+        }
     }
 
     if (!heap->mark_failed) {
@@ -8866,6 +9140,9 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     /* First, while this realm's keys and shapes are all still allocated: no site may name one. */
     kiln_c99_gc_forget_realm_local(heap);
     kiln_c99_gc_weak_resources_dispose_all(heap);
+    free(heap->weak_keep_during_job);
+    heap->weak_keep_during_job = NULL;
+    heap->weak_keep_count = heap->weak_keep_capacity = 0;
     /* A realm that was building the shared region and never sealed it: nobody will use it. */
     kiln_c99_region_abandon(heap);
     /* The realm's modifications of built-ins end with it (`kiln_c99_builtin_store_epoch`). */

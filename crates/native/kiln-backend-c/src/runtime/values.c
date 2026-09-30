@@ -578,9 +578,9 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                          const kiln_value *args, size_t argc,
                                          int depth, kiln_value *thrown);
 
-static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                         kiln_value *thrown) {
+static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value callee,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *thrown) {
     kiln_closure *closure;
     if (kiln_c99_intrinsic_has_instance(callee)) {
         int answer;
@@ -946,4 +946,13 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         *result = kiln_val_to_boundary(vres);
         return status;
     }
+}
+
+int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                  kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                  kiln_value *thrown) {
+    int owns_job = kiln_c99_gc_enter_job_if_idle();
+    int status = kiln_c99_call_inner(host, result, callee, receiver, args, argc, depth, thrown);
+    if (owns_job) kiln_c99_gc_leave_job();
+    return status;
 }

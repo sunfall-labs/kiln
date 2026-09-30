@@ -70,6 +70,10 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     return KILN_C99_OK;
 }
 
+int kiln_c99_enqueue_finalizer(kiln_value callback, kiln_value held_value) {
+    return kiln_c99_enqueue(callback, held_value, kiln_c99_undefined(), 0, 0);
+}
+
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
     kiln_next_tick *task =
         (kiln_next_tick *)kiln_c99_gc_alloc(KILN_GC_NEXT_TICK, sizeof *task);
@@ -679,8 +683,12 @@ static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *th
             heap->job_head = 0;
             heap->job_tail = 0;
         }
+        kiln_c99_gc_enter_job();
         status = kiln_c99_run_job(&job, host, thrown);
-        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_leave_job();
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
     /* Node's `processTicksAndRejections`: ticks and promise jobs both run out, then the
      * rejections; the realm's drain comes back around for whatever reporting them queued. */
@@ -720,9 +728,11 @@ static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_p
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_gc_enter_job();
     kiln_c99_uncount_next_tick(task);
     status = kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
                            task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
+    kiln_c99_gc_leave_job();
     kiln_c99_publish_turn_refusal(status, produced, thrown);
     kiln_c99_gc_keep_alive(task);
     return status;
@@ -740,8 +750,10 @@ static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_point
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (timer == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_gc_enter_job();
     status = kiln_c99_call(host, &produced, timer->callback, kiln_c99_undefined(),
                            timer->argc == 0 ? NULL : timer->args, timer->argc, 0, thrown);
+    kiln_c99_gc_leave_job();
     kiln_c99_publish_turn_refusal(status, produced, thrown);
     /* The Realm removes one shot work from its queue before entering the callback. Keep the
      * payload live through the callback's final use; otherwise an optimized build can retire

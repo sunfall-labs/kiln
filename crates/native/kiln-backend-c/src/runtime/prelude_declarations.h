@@ -12,6 +12,18 @@ typedef struct kiln_data_view kiln_data_view;
 struct kiln_gc_heap;
 extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value *values,
                                     size_t count);
+extern int kiln_c99_weak_reference_create(kiln_value owner, kiln_value target);
+extern int kiln_c99_weak_reference_deref(kiln_value owner, kiln_value *out);
+extern int kiln_c99_gc_keep_during_job(kiln_value value);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
+extern int kiln_c99_gc_enter_job_if_idle(void);
+extern int kiln_c99_finalization_registry_create(kiln_value owner, kiln_value callback);
+extern int kiln_c99_finalization_registry_register(kiln_value owner, kiln_value target,
+                                                    kiln_value held, kiln_value token);
+extern int kiln_c99_finalization_registry_unregister(kiln_value owner, kiln_value token,
+                                                      kiln_value *out);
+extern int kiln_c99_enqueue_finalizer(kiln_value callback, kiln_value held_value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1
 typedef int (*kiln_native_entry)(void *heap, void *context, kiln_value *result, size_t depth, kiln_value *thrown);
 extern void kiln_c99_gc_release(void *ptr);

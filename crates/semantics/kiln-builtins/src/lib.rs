@@ -1414,9 +1414,8 @@ pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
 /// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
 pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
 
-/// FinalizationRegistry's language checks for the native backend. The interpreter already
-/// provides this builtin; native installs the TypeScript constructor before arraybuffer.ts
-/// captures its native-backend marker.
+/// Native WeakRef and FinalizationRegistry public classes over private collector cells. The
+/// interpreter provides the same public builtins through its VM object model.
 pub const WEAK_REFS_BOOTSTRAP_SOURCE: &str = include_str!("weak_refs.ts");
 
 /// `Atomics` over the native backend's element primitive and the runtime's waiter list (realms

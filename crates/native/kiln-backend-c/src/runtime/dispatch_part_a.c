@@ -1551,6 +1551,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             ? kiln_c99_as_number(args[0]) : -1.0;
         *result = kiln_c99_undefined();
         if (operation == 0.0 && argc > 1 && args[1].tag == KILN_VALUE_SHARED) {
+            status = kiln_c99_gc_keep_during_job(args[1]);
+            if (status != KILN_C99_OK) return status;
             kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)args[1].bits;
             uint32_t graph = facade->graph, generation = facade->generation, node = facade->node;
             uint64_t lease = kiln_shared_graph_retain(graph, generation, node);
@@ -1581,7 +1583,45 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 words[at] = (uint32_t)number;
             }
             status = kiln_c99_new_shared_facade(words[0], words[1], words[2], result);
+            if (status == KILN_C99_OK) status = kiln_c99_gc_keep_during_job(*result);
             return status == KILN_C99_INVALID_ARGUMENT ? KILN_C99_OK : status;
+        }
+        if (operation == 2.0 && argc > 2) {
+            status = kiln_c99_weak_reference_create(args[1], args[2]);
+            if (status == KILN_C99_INVALID_ARGUMENT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "WeakRef: invalid target or receiver");
+            if (status == KILN_C99_OK) *result = kiln_c99_boolean(1);
+            return status;
+        }
+        if (operation == 3.0 && argc > 1) {
+            status = kiln_c99_weak_reference_deref(args[1], result);
+            if (status == KILN_C99_INVALID_ARGUMENT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "WeakRef.prototype.deref called on an incompatible receiver");
+            return status;
+        }
+        if (operation == 4.0 && argc > 2) {
+            status = kiln_c99_finalization_registry_create(args[1], args[2]);
+            if (status == KILN_C99_INVALID_ARGUMENT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "FinalizationRegistry: invalid receiver");
+            if (status == KILN_C99_OK) *result = kiln_c99_boolean(1);
+            return status;
+        }
+        if (operation == 5.0 && argc > 4) {
+            status = kiln_c99_finalization_registry_register(args[1], args[2], args[3], args[4]);
+            if (status == KILN_C99_INVALID_ARGUMENT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "FinalizationRegistry.prototype.register called on an incompatible receiver");
+            return status;
+        }
+        if (operation == 6.0 && argc > 2) {
+            status = kiln_c99_finalization_registry_unregister(args[1], args[2], result);
+            if (status == KILN_C99_INVALID_ARGUMENT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "FinalizationRegistry.prototype.unregister called on an incompatible receiver");
+            return status;
         }
         return KILN_C99_OK;
     }

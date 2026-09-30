@@ -701,9 +701,9 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
 static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);
-static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                         kiln_value *thrown);
+int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                  kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                  kiln_value *thrown);
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);

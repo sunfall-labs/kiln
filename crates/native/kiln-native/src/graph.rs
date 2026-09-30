@@ -2244,6 +2244,8 @@ static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t i
 int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_METHOD_THEN 107
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
@@ -3121,6 +3123,8 @@ extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
@@ -3805,7 +3809,7 @@ static int kiln_cli_put_worker_env(kiln_host *host) {
     return kiln_c99_put(host, env, "KILN_WORKER_COUNT", 17, kiln_c99_copy_text(text, (size_t)length), 0, NULL);
 }
 
-static int kiln_graph_enter(void *opaque) {
+static int kiln_graph_enter_inner(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
     kiln_host *host;
@@ -4354,6 +4358,9 @@ static int kiln_graph_enter(void *opaque) {
     );
     output.push_str(&evaluation);
     output.push_str("    return 0;\n}\n");
+    output.push_str(
+        "static int kiln_graph_enter(void *opaque) {\n    kiln_c99_gc_enter_job();\n    int status = kiln_graph_enter_inner(opaque);\n    kiln_c99_gc_leave_job();\n    return status;\n}\n",
+    );
     output.push_str(&helper_defs);
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
