@@ -1089,22 +1089,6 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_value *coerced = NULL;
     size_t index;
     int status = KILN_C99_OK;
-    /* CallMethod is a fast path for an intrinsic property read plus call. A native namespace
-     * can still acquire an own property at runtime (the Error bootstrap installs its public
-     * stack formatter this way), so resolve that override before argument coercion or intrinsic
-     * dispatch. This keeps the fast path equivalent to GetProperty followed by Call. */
-    if (receiver.tag == KILN_VALUE_BUILTIN) {
-        const char *name = kiln_c99_method_name(code);
-        if (name != NULL) {
-            kiln_value current;
-            status = kiln_c99_read_property(host, receiver, name, strlen(name), depth, thrown,
-                                            NULL, &current);
-            if (status != KILN_C99_OK) return status;
-            if (current.tag != KILN_VALUE_METHOD || current.bits != code) {
-                return kiln_c99_call(host, result, current, receiver, args, argc, depth, thrown);
-            }
-        }
-    }
     if (KILN_UNLIKELY(kiln_c99_stack_exhausted())) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Maximum call stack size exceeded");
