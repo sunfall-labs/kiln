@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -71,6 +72,9 @@ def main():
                 'timezone': os.environ.get('TZ'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
+    evidence['git_head'] = subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=HERE, text=True).strip()
+    evidence['node_version'] = subprocess.check_output(['node', '--version'], text=True).strip()
     for name, version, porffor, _, stem in selected:
         test = str(tests[name])
         # with_suffix replaces the last suffix, so use an additional terminal suffix.
@@ -78,18 +82,24 @@ def main():
         build = args.raw / f'{stem}.build.log'
         native = args.raw / f'{stem}.kiln.log'
         binary = args.raw / f'{stem}.bin'
-        result = {'name': name, 'version': version, 'porffor_status': porffor, 'phases': {}}
+        result = {'name': name, 'version': version, 'porffor_status': porffor,
+                  'test_sha256': hashlib.sha256(tests[name].read_bytes()).hexdigest(), 'phases': {}}
         phases = result['phases']
         phases['node'] = command(['node', test], node, 60)
         if phases['node']['exit'] != 0 or phases['node']['timeout']:
             status = 'node-baseline-failed'
         else:
             phases['build'] = command([kiln, '--one-shot', 'build', test, '--output', str(binary)], build, args.timeout)
+            summary = build.with_suffix('.stdout').read_text(errors='replace')
+            timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
+            if timing:
+                phases['build']['native_timing_ms'] = dict(zip(('emit', 'compile', 'link'), map(int, timing.groups())))
             if phases['build']['timeout']:
                 status = 'compile-timeout'
             elif phases['build']['exit'] != 0 or not binary.is_file():
                 status = 'compile-error'
             else:
+                result['binary_bytes'] = binary.stat().st_size
                 phases['native'] = command([str(binary)], native, args.timeout)
                 if phases['native']['timeout']:
                     status = 'runtime-timeout'
