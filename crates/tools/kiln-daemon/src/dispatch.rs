@@ -818,8 +818,9 @@ fn snapshot_module_payload(
     #[cfg(test)]
     wait_for_graph_gate(path);
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
-        let (hir, static_requires) =
+        let (mut hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
+        hir.module_id = kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
         if hir.has_static_module_syntax() {
             return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
                 path: path.to_path_buf(),
@@ -835,7 +836,8 @@ fn snapshot_module_payload(
         program.dependencies = static_requires;
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
-    let hir = kiln_frontend_oxc::parse(path_string, &source.text);
+    let mut hir = kiln_frontend_oxc::parse(path_string, &source.text);
+    hir.module_id = kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
     let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
         kiln_module_graph::ModuleGraphError::Compile {
             path: path.to_path_buf(),
