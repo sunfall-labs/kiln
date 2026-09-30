@@ -1164,6 +1164,15 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                                            const kiln_string *canonical, int depth,
                                            kiln_value *thrown, kiln_c99_site *site,
                                            kiln_val *out) {
+    /* Namespace properties are live export cells, not values. Keep both shape/PIC reads and
+     * cached-method answers out of this wrapper so the semantic path can unwrap the binding. */
+    if (KILN_VAL_IS_OBJECT(target)) {
+        void *ptr = KILN_VAL_PTR(target);
+        if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT &&
+            ((const kiln_object *)ptr)->module_namespace) {
+            goto generic_read;
+        }
+    }
     if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(target))) {
         void *ptr = KILN_VAL_PTR(target);
         if (KILN_LIKELY(ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT)) {
@@ -1659,7 +1668,10 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(target);
         const kiln_string *keystr = (const kiln_string *)KILN_VAL_PTR(key);
         if (KILN_LIKELY(obj != NULL && keystr != NULL && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
-            if (obj->shape != NULL && obj->accessor_count == 0) {
+            /* Namespace slots hold live export cells internally. The generic computed-property
+             * path unwraps those cells (and checks their TDZ); returning the shape slot here
+             * would expose the cell as a JavaScript value. */
+            if (obj->shape != NULL && obj->accessor_count == 0 && !obj->module_namespace) {
                 if (obj->elements != NULL) {
                     double index_num = kiln_c99_key_index_key(keystr);
                     if (index_num >= 0.0 && index_num < 100000.0) {
