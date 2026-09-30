@@ -419,6 +419,7 @@ typedef int (*kiln_commonjs_resolve_fn)(void *context, kiln_host *host, kiln_val
 typedef struct kiln_commonjs_context kiln_commonjs_context;
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
+extern int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out, kiln_commonjs_require_fn call, kiln_commonjs_resolve_fn resolve, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
 extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
                                     kiln_value *result, kiln_value *thrown);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
