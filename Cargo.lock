@@ -2020,6 +2020,7 @@ dependencies = [
  "kiln-json",
  "kiln-node-path",
  "kiln-number-core",
+ "kiln-regexp",
  "kiln-runtime",
  "kiln-shared-graph",
  "kiln-string",
@@ -2181,6 +2182,7 @@ dependencies = [
  "kiln-native-provider-contract",
  "kiln-node-path",
  "kiln-number-core",
+ "kiln-regexp",
  "kiln-runtime",
  "kiln-shared-graph",
  "kiln-string",
@@ -2225,6 +2227,13 @@ dependencies = [
  "kiln-digest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kiln-regexp"
+version = "0.1.0"
+dependencies = [
+ "regress",
 ]
 
 [[package]]
