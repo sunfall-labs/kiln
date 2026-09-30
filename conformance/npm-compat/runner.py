@@ -70,6 +70,7 @@ def main():
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
                 'timezone': os.environ.get('TZ'),
+                'host': 'node',
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
@@ -90,7 +91,7 @@ def main():
         if phases['node']['exit'] != 0 or phases['node']['timeout']:
             status = 'node-baseline-failed'
         else:
-            phases['build'] = command([kiln, '--one-shot', 'build', test, '--output', str(binary)], build, args.timeout)
+            phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--output', str(binary)], build, args.timeout)
             summary = build.with_suffix('.stdout').read_text(errors='replace')
             timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
             if timing:

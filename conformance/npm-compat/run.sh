@@ -5,7 +5,7 @@
 # Methodology mirrors porffor's npm-packages dashboard
 # (https://porffor-packages.porch.page/): one small smoke test per package
 # using its real API, run under Node for the expected stdout, compiled with
-# `kiln --one-shot run --native`, and the binary's stdout compared byte for
+# `kiln --one-shot build --node`, and the binary's stdout compared byte for
 # byte. The smoke tests here are kiln-authored (porffor's are not published).
 #
 # This is an informational benchmark, not a gate: it exits 0 even when

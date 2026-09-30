@@ -43,6 +43,9 @@ failures remain informational. Compilation and binary execution have separate
 identify the failed phase. These wall times include process startup and are
 **not** warmed workload throughput measurements. The JSON records selected and
 deferred coverage, inventory and CLI digests, exact commands, exit codes and timing.
+Builds use `--node` to install the Node host and its shared Buffer/web bootstrap,
+matching the reference runtime. The JSON records this host mode. The original
+baseline predates this runner correction and is historical evidence.
 Runs default to four native workers (`KILN_JOBS` overrides this) and use
 `TZ=UTC`. Sampled simplex noise uses explicit seeds so its numeric
 output compares identical permutations across engines.
