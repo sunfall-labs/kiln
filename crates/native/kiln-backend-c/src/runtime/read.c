@@ -151,8 +151,7 @@ static int kiln_c99_prototype_store_read_with_receiver(
     *found = 1;
     if (!property.accessor) return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
     if (property.getter.tag == KILN_VALUE_UNDEFINED) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("an own accessor descriptor whose getter is undefined", out);
     }
     return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
 }

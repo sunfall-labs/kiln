@@ -2162,6 +2162,11 @@ pub struct AbsentAnswer {
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     AbsentAnswer {
+        function: "kiln_c99_prototype_store_read_with_receiver",
+        sites: 1,
+        proved_by: "an accessor with no getter returns undefined by the language rule",
+    },
+    AbsentAnswer {
         function: "kiln_c99_function_species",
         sites: 2,
         proved_by: "the checked prototype chain ended at null, or an own accessor has no getter",

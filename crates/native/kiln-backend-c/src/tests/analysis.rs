@@ -601,7 +601,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
 
 #[test]
 fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
-    let function = |upvalues| FunctionProto {
+    let function = |upvalues: Vec<Upvalue>| FunctionProto {
         inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
@@ -760,7 +760,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
 
 #[test]
 fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
-    let function = |upvalues| FunctionProto {
+    let function = |upvalues: Vec<Upvalue>| FunctionProto {
         inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
