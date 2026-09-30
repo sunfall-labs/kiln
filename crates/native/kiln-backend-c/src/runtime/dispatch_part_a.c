@@ -3687,7 +3687,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 (args[0].tag != KILN_VALUE_OBJECT && args[0].tag != KILN_VALUE_ARRAY &&
                  args[0].tag != KILN_VALUE_FUNCTION && args[0].tag != KILN_VALUE_BUILTIN &&
                  args[0].tag != KILN_VALUE_METHOD && args[0].tag != KILN_VALUE_BOUND &&
-                 args[0].tag != KILN_VALUE_GENERATOR)) {
+                 args[0].tag != KILN_VALUE_GENERATOR && args[0].tag != KILN_VALUE_REGEXP)) {
                 KILN_C99_REFUSE("Object.assign target must be an object, an array or a function");
             }
             target = args[0];
@@ -3700,7 +3700,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_value src_val = args[argument];
                 if (src_val.tag == KILN_VALUE_ARRAY || src_val.tag == KILN_VALUE_TYPED_ARRAY ||
                     src_val.tag == KILN_VALUE_PROXY || src_val.tag == KILN_VALUE_SHARED ||
-                    src_val.tag == KILN_VALUE_GENERATOR) {
+                    src_val.tag == KILN_VALUE_GENERATOR || src_val.tag == KILN_VALUE_REGEXP) {
                     kiln_value keys;
                     status = kiln_c99_all_own_keys(host, src_val, &keys, depth, thrown);
                     if (status != KILN_C99_OK) return status;

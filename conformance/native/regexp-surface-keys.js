@@ -8,3 +8,6 @@ console.log(Object.getOwnPropertyNames(regexp).join(","));
 const descriptor = Object.getOwnPropertyDescriptor(regexp, "lastIndex");
 console.log(descriptor.value, descriptor.writable, descriptor.enumerable,
   descriptor.configurable);
+
+const assigned = Object.assign(/x/, { flag: 'copied' });
+console.log(assigned.flag, assigned.test('x'), Object.keys(Object.assign({}, assigned)).join(','));
