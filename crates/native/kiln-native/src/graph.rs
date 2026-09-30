@@ -2121,6 +2121,62 @@ pub(super) fn graph_namespace_plans(
     Ok(plans)
 }
 
+/// Whether synchronously requiring this ESM module would encounter top-level await anywhere in
+/// its static ESM dependency graph. `require(esm)` must reject before evaluation, including when
+/// the awaited module is several imports away.
+fn module_has_transitive_top_level_await(
+    root: usize,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+) -> bool {
+    fn visit(
+        index: usize,
+        modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+        indices: &std::collections::HashMap<PathBuf, usize>,
+        visiting: &mut std::collections::HashSet<usize>,
+        memo: &mut std::collections::HashMap<usize, bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&index) {
+            return *result;
+        }
+        // A back-edge in an ESM SCC does not itself make the graph asynchronous. Continue
+        // checking the SCC's other outgoing edges from the first frame that entered it.
+        if !visiting.insert(index) {
+            return false;
+        }
+        let node = &modules[index].0;
+        let own_await = node.source == ModuleSource::Source
+            && node
+                .program
+                .program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+        let static_dependencies = node.program.dependencies.iter().filter_map(|specifier| {
+            node.dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == *specifier)
+                .and_then(|dependency| indices.get(&dependency.target).copied())
+        });
+        let result = own_await
+            || static_dependencies.into_iter().any(|dependency| {
+                modules[dependency].0.source == ModuleSource::Source
+                    && visit(dependency, modules, indices, visiting, memo)
+            });
+        visiting.remove(&index);
+        memo.insert(index, result);
+        result
+    }
+
+    visit(
+        root,
+        modules,
+        indices,
+        &mut std::collections::HashSet::new(),
+        &mut std::collections::HashMap::new(),
+    )
+}
+
 pub(super) fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
     if node.source == ModuleSource::CommonJs {
         1
@@ -2895,6 +2951,11 @@ pub(super) fn graph_launcher_source_with_imports(
         .iter()
         .position(|(node, _)| node.path == graph.entry())
         .expect("entry module is present in the graph");
+    let synchronous_require_async = modules
+        .iter()
+        .enumerate()
+        .map(|(index, _)| module_has_transitive_top_level_await(index, modules, &indices))
+        .collect::<Vec<_>>();
     // The entry is the sole startup root. Its static dependency walk recursively ensures every
     // reachable provider, while the realm turn loop drives any pending top-level-await
     // continuations. Starting every reachable module independently can evaluate a cycle from the
@@ -3147,6 +3208,11 @@ extern int kiln_c99_diagnostic_available(void);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
+static int kiln_graph_async_require_error(kiln_host *host, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_c99_new_type_error(out, "require() cannot load an ES module with top-level await");
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_put(host, *out, "code", 4, kiln_c99_copy_text("ERR_REQUIRE_ASYNC_MODULE", 24), 0, thrown);
+}
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
@@ -3427,15 +3493,9 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 )
                 .unwrap();
             } else if modules[provider_index].0.source == ModuleSource::Source {
-                let has_top_level_await = modules[provider_index]
-                    .0
-                    .program
-                    .program
-                    .code
-                    .iter()
-                    .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+                let has_top_level_await = synchronous_require_async[provider_index];
                 if has_top_level_await {
-                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
                 } else {
                     writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
                 }
@@ -3527,15 +3587,9 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 if modules[provider_index].0.source == ModuleSource::CommonJs {
                     writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);").unwrap();
                 } else if modules[provider_index].0.source == ModuleSource::Source {
-                    let has_top_level_await = modules[provider_index]
-                        .0
-                        .program
-                        .program
-                        .code
-                        .iter()
-                        .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+                    let has_top_level_await = synchronous_require_async[provider_index];
                     if has_top_level_await {
-                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
                     } else {
                         writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
                     }
@@ -3603,15 +3657,9 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
             )
             .unwrap();
         } else if modules[provider_index].0.source == ModuleSource::Source {
-            let has_top_level_await = modules[provider_index]
-                .0
-                .program
-                .program
-                .code
-                .iter()
-                .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+            let has_top_level_await = synchronous_require_async[provider_index];
             if has_top_level_await {
-                writeln!(output, "    if ({matches}) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                writeln!(output, "    if ({matches}) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
             } else {
                 writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
             }

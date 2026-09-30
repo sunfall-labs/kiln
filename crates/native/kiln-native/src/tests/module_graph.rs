@@ -999,6 +999,60 @@ fn native_graph_commonjs_require_of_esm_returns_the_module_namespace() {
 }
 
 #[test]
+fn native_graph_sync_require_rejects_transitive_top_level_await_with_node_code() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-cjs-requires-transitive-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("main.cjs"),
+        "try { require('./middle.js'); } catch (error) { console.log(error.code); }\n",
+    )
+    .expect("write CommonJS entry");
+    fs::write(
+        root.path.join("middle.js"),
+        "import './async-leaf.js'; export const ready = true;\n",
+    )
+    .expect("write intermediate ESM module");
+    fs::write(
+        root.path.join("async-leaf.js"),
+        "await Promise.resolve(); export const ready = true;\n",
+    )
+    .expect("write transitive top-level-await module");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS to transitive async ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native transitive TLA require check: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("transitive TLA graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"ERR_REQUIRE_ASYNC_MODULE\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"ERR_REQUIRE_ASYNC_MODULE\n");
+}
+
+#[test]
 fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

@@ -422,6 +422,93 @@ fn discover_node_runtime_requests_from_semantic(
         }
     }
 
+    struct RequireReferenceVisitor<'a> {
+        scoping: &'a oxc_semantic::Scoping,
+        loaders: &'a HashMap<SymbolId, String>,
+        importer: Option<String>,
+    }
+    impl<'a> oxc_ast_visit::Visit<'a> for RequireReferenceVisitor<'a> {
+        fn visit_identifier_reference(
+            &mut self,
+            identifier: &oxc_ast::ast::IdentifierReference<'a>,
+        ) {
+            let Some(reference) = identifier.reference_id.get() else {
+                return;
+            };
+            let Some(symbol) = self.scoping.get_reference(reference).symbol_id() else {
+                return;
+            };
+            if let Some(importer) = self.loaders.get(&symbol) {
+                self.importer = Some(importer.clone());
+            }
+        }
+    }
+
+    // Bundlers wrap lexical `require` in one or more local functions (esbuild names its helper
+    // `__require`). Discover those aliases from symbol-resolved references in each initializer,
+    // so only a value derived from a proven require function acquires a graph edge. A function
+    // with the same spelling and no require provenance remains an ordinary local function.
+    loop {
+        let mut aliases = Vec::new();
+        for node in semantic.nodes() {
+            let AstKind::VariableDeclarator(declarator) = node.kind() else {
+                continue;
+            };
+            let Some(symbol) = declarator
+                .id
+                .get_binding_identifier()
+                .and_then(|id| id.symbol_id.get())
+            else {
+                continue;
+            };
+            if require_symbols.contains_key(&symbol) || scoping.symbol_is_mutated(symbol) {
+                continue;
+            }
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            let is_function_wrapper = matches!(
+                init,
+                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+            );
+            let is_function_factory = matches!(
+                init,
+                Expression::CallExpression(call)
+                    if matches!(
+                        call.callee,
+                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                    )
+            );
+            let is_symbol_alias = if let Expression::Identifier(identifier) = init {
+                identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    .is_some_and(|source| require_symbols.contains_key(&source))
+            } else {
+                false
+            };
+            if !is_function_wrapper && !is_function_factory && !is_symbol_alias {
+                continue;
+            }
+            let mut visitor = RequireReferenceVisitor {
+                scoping,
+                loaders: &require_symbols,
+                importer: None,
+            };
+            oxc_ast_visit::Visit::visit_expression(&mut visitor, init);
+            if let Some(importer) = visitor.importer {
+                aliases.push((symbol, importer));
+            }
+        }
+        if aliases.is_empty() {
+            break;
+        }
+        for (symbol, importer) in aliases {
+            require_symbols.insert(symbol, importer);
+        }
+    }
+
     let mut requests = Vec::new();
     for node in semantic.nodes() {
         let AstKind::CallExpression(call) = node.kind() else {
@@ -3986,6 +4073,43 @@ mod tests {
                 .map(|request| request.specifier)
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn node_runtime_discovery_tracks_esbuild_require_helper_literals() {
+        let source = r#"
+            import { createRequire as __prettierCreateRequire } from "module";
+            const require = __prettierCreateRequire(import.meta.url);
+            const __require = ((id) => require(id));
+            __require("os");
+        "#;
+        let requests = discover_node_runtime_requests("prettier/index.mjs", source);
+
+        assert_eq!(
+            requests,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "prettier/index.mjs".to_owned(),
+            }]
+        );
+
+        let unrelated = discover_node_runtime_requests(
+            "fixture.mjs",
+            "function __require(id) { return id; } __require('os');",
+        );
+        assert!(
+            unrelated.is_empty(),
+            "an unrelated function named __require has no Node loader provenance"
+        );
+
+        let loaded_value = discover_node_runtime_requests(
+            "fixture.mjs",
+            "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const loaded = require('os'); loaded('path');",
+        );
+        assert!(
+            loaded_value.is_empty(),
+            "a module value returned by require is not itself a loader"
         );
     }
 
