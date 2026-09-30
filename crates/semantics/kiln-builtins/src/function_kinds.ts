@@ -41,6 +41,11 @@ if (typeof installFunctionKindPrototype === "function") {
       writable: false,
       configurable: false,
     });
+    Object.defineProperty(constructor, "length", {
+      value: 1,
+      writable: false,
+      configurable: true,
+    });
     installFunctionKindPrototype(kind, prototype);
   }
 }

@@ -19,6 +19,8 @@ console.log(
   typeof AsyncFunction.prototype,
   typeof GeneratorFunction.prototype,
   typeof AsyncGeneratorFunction.prototype,
+  Object.getPrototypeOf(AsyncFunction) === Function.prototype,
+  AsyncFunction.length,
   Object.prototype.toString.call(asynchronous),
   Object.prototype.toString.call(generator),
   Object.prototype.toString.call(asyncGenerator),
