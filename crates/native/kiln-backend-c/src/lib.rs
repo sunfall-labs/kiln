@@ -654,6 +654,37 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         region = Some(std::rc::Rc::new(plan));
     }
     let (module, instantiation) = if instantiate {
+        let mut module = module.clone();
+        let mut binding_slots = module
+            .exports
+            .iter()
+            .map(|binding| binding.local_slot)
+            .collect::<HashSet<_>>();
+        binding_slots.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
+        // The graph linker installs each binding slot as a cell before this code runs. The
+        // ordinary module-body instructions were compiled as locals, though, so convert those
+        // accesses to the cell operations the backend already uses for captured bindings.
+        // `NewCell` is redundant for these slots and would replace the shared cell.
+        for instruction in &mut module.program.code {
+            match instruction {
+                Instruction::LoadLocal(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::LoadCell(*slot);
+                }
+                Instruction::StoreLocal(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::StoreCell(*slot);
+                }
+                Instruction::NewCell(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::Nop;
+                }
+                _ => {}
+            }
+        }
         let instantiation_symbol = format!("{symbol}_instantiate");
         let mut evaluation = module.clone();
         for instruction in evaluation
