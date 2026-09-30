@@ -418,6 +418,8 @@ class Point {
 function total(points) { let s = 0; for (const p of points) s += p.norm(); return s; }
 function build(n) { const out = []; for (let i = 0; i < n; i++) out.push(new Point(i, i + 1).scaled(2)); return out; }
 export const answer = total(build(10));
+// This closure lands in a later C chunk; its loader call must be declared there too.
+export function loadLater() { return import('./later.js'); }
 "#;
     let hir = kiln_frontend_oxc::parse("split.js", source);
     let program = kiln_ir::compile_module(&hir).expect("compiles");

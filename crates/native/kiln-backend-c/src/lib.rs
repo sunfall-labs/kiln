@@ -4980,6 +4980,13 @@ fn render_module_positioned(
             c_string(diagnostic_site)
         )
         .unwrap();
+        // The weak fallback is defined in chunk 0, and the graph launcher can replace it.
+        // Nested functions in other chunks still need its declaration at their call sites.
+        if emitted_program.has_dynamic_import() {
+            chunk_header.push_str(
+                "int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown);\n",
+            );
+        }
         render_compact_macros(&mut chunk_header, emitted_program, &closure_fn);
         render_constant_declarations_extern(
             &mut chunk_header,
