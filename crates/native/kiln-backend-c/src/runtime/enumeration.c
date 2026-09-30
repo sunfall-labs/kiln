@@ -524,7 +524,10 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_same_name_key(key, "@@iterator") ||
                   kiln_c99_same_name_key(key, "@@unscopables") ||
-                  kiln_c99_array_method(intrinsic_key, intrinsic_len) != 0;
+                  kiln_c99_array_method(intrinsic_key, intrinsic_len) != 0 ||
+                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
+                                         KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
         if (!*answer) {
             /* A member defined on `Array.prototype` itself (the bootstrap's parallel family, a
              * program's polyfill): the store the array read consults after the table. */

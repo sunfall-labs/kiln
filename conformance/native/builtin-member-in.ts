@@ -19,7 +19,8 @@ for (const [name, proto, member] of protos) {
   console.log(name, member in proto, "hasOwnProperty" in proto, "nopeNopeNope" in proto);
 }
 
-console.log("inst", "map" in [], "nope" in [], "then" in Promise.resolve(1));
+console.log("inst", "map" in [], "nope" in [], "then" in Promise.resolve(1),
+  "valueOf" in [], "hasOwnProperty" in []);
 console.log("ns", "floor" in Math, "nope" in Math, "stringify" in JSON, "nope" in JSON);
 console.log("ctor", "keys" in Object, "nope" in Object, "isArray" in Array, "nope" in Array);
 
