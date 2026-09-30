@@ -6,6 +6,41 @@ const G = globalThis as any;
 let nextNodeId = 1;
 export const nodeRegistry = new Map<number, Node>();
 
+export type ButtonVariant = "primary" | "secondary" | "destructive" | "flat" | "ghost";
+export type ControlSize = "sm" | "md" | "lg";
+
+export interface GtkStyleOptions {
+  class?: string;
+  css?: string;
+}
+
+export interface MacStyleOptions {
+  bezelStyle?: "rounded" | "regularSquare" | "disclosure" | "inline" | "circular";
+  tint?: string;
+  keyEquivalent?: string;
+}
+
+export interface WinStyleOptions {
+  variant?: "accent" | "standard";
+  material?: "mica" | "acrylic";
+  cornerPreference?: "rounded" | "square";
+}
+
+export interface PlatformStyles {
+  gtk?: GtkStyleOptions;
+  mac?: MacStyleOptions;
+  win?: WinStyleOptions;
+}
+
+export interface ButtonOptions {
+  label?: string;
+  variant?: ButtonVariant;
+  size?: ControlSize;
+  disabled?: boolean;
+  platform?: PlatformStyles;
+  onPress?: () => void;
+}
+
 // Platform OS Windowing Drivers (ADR 0074)
 export interface PlatformDriver {
   readonly name: string;
@@ -54,6 +89,7 @@ export class Gtk4Driver implements PlatformDriver {
   private gtk: any = null;
   private ffi: any = null;
   private handles = new Map<number, bigint>();
+  private nodeByHandle = new Map<bigint, number>();
   private callbacks = new Map<number, bigint[]>();
 
   init(): boolean {
@@ -105,6 +141,13 @@ export class Gtk4Driver implements PlatformDriver {
         g_signal_connect_data: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "i32"], return: "u64" },
         g_main_context_iteration: { arguments: ["pointer", "i32"], return: "i32" },
         g_main_context_pending: { arguments: ["pointer"], return: "i32" },
+        gdk_display_get_default: { arguments: [], return: "pointer" },
+        gtk_css_provider_new: { arguments: [], return: "pointer" },
+        gtk_css_provider_load_from_string: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_style_context_add_provider_for_display: { arguments: ["pointer", "pointer", "u32"], return: "void" },
+        gtk_widget_add_css_class: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_widget_remove_css_class: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_widget_set_sensitive: { arguments: ["pointer", "i32"], return: "void" },
       });
 
       if (this.gtk && this.gtk.functions && this.gtk.functions.gtk_init_check && this.gtk.functions.gtk_init_check() === 1) {
@@ -127,6 +170,7 @@ export class Gtk4Driver implements PlatformDriver {
     try {
       handle = this.gtk.functions.gtk_window_new();
       this.handles.set(win.id, handle);
+      this.nodeByHandle.set(handle, win.id);
       this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, win.title || "Kiln Window"));
       this.gtk.functions.gtk_window_set_default_size(handle, win.width || 800, win.height || 600);
 
@@ -183,6 +227,7 @@ export class Gtk4Driver implements PlatformDriver {
       } catch (_) {}
       this.handles.delete(win.id);
       this.callbacks.delete(win.id);
+      this.nodeByHandle.delete(handle);
     }
   }
 
@@ -237,6 +282,64 @@ export class Gtk4Driver implements PlatformDriver {
         this.gtk.functions.gtk_window_set_resizable(handle, resizable ? 1 : 0);
       } catch (_) {}
     }
+  }
+
+  addGlobalCss(css: string): boolean {
+    if (!this.init() || !this.gtk) return false;
+    try {
+      const display = this.gtk.functions.gdk_display_get_default();
+      if (!display) return false;
+      const provider = this.gtk.functions.gtk_css_provider_new();
+      this.gtk.functions.gtk_css_provider_load_from_string(provider, toCStr(this.ffi, css));
+      this.gtk.functions.gtk_style_context_add_provider_for_display(display, provider, 600 /* GTK_STYLE_PROVIDER_PRIORITY_APPLICATION */);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  applyWidgetStyling(node: Node, handle: bigint): void {
+    if (!this.gtk) return;
+    try {
+      const ffi = this.ffi;
+      const gtk = this.gtk;
+
+      // Sensitivity / disabled
+      const disabled = node.getProperty("disabled");
+      if (disabled !== undefined && gtk.functions.gtk_widget_set_sensitive) {
+        gtk.functions.gtk_widget_set_sensitive(handle, disabled ? 0 : 1);
+      }
+
+      // Semantic variant
+      const variant = node.getProperty("variant");
+      if (variant && gtk.functions.gtk_widget_add_css_class) {
+        if (variant === "primary") {
+          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "suggested-action"));
+        } else if (variant === "destructive") {
+          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "destructive-action"));
+        } else if (variant === "flat" || variant === "ghost") {
+          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "flat"));
+        }
+      }
+
+      // Platform GTK styles
+      const platform = node.getProperty("platform") as PlatformStyles | undefined;
+      if (platform?.gtk) {
+        if (platform.gtk.class && gtk.functions.gtk_widget_add_css_class) {
+          const classes = platform.gtk.class.split(/\s+/).filter(Boolean);
+          for (let i = 0; i < classes.length; i++) {
+            gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, classes[i]));
+          }
+        }
+        if (platform.gtk.css) {
+          const className = `kiln-node-${node.id}`;
+          if (gtk.functions.gtk_widget_add_css_class) {
+            gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, className));
+          }
+          this.addGlobalCss(`.${className} { ${platform.gtk.css} }`);
+        }
+      }
+    } catch (_) {}
   }
 
   createWidget(node: Node): bigint | null {
@@ -318,9 +421,11 @@ export class Gtk4Driver implements PlatformDriver {
 
       if (handle) {
         this.handles.set(node.id, handle);
+        this.nodeByHandle.set(handle, node.id);
         if (nodeCallbacks.length > 0) {
           this.callbacks.set(node.id, nodeCallbacks);
         }
+        this.applyWidgetStyling(node, handle);
         if (node.tag === "vstack" || node.tag === "hstack") {
           for (let i = 0; i < node.children.length; i++) {
             const childHandle = this.createWidget(node.children[i]);
@@ -351,6 +456,16 @@ export class Gtk4Driver implements PlatformDriver {
         this.gtk.functions.gtk_switch_set_active(handle, value ? 1 : 0);
       } else if (tag === "window" && name === "title") {
         this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, String(value)));
+      }
+
+      if (name === "variant" || name === "disabled" || name === "platform") {
+        const nodeId = this.nodeByHandle.get(handle);
+        if (nodeId !== undefined) {
+          const node = nodeRegistry.get(nodeId);
+          if (node) {
+            this.applyWidgetStyling(node, handle);
+          }
+        }
       }
     } catch (_) {}
   }
@@ -385,7 +500,9 @@ export class Gtk4Driver implements PlatformDriver {
           this.gtk.functions.gtk_window_close(handle);
         } catch (_) {}
       }
+      this.nodeByHandle.delete(handle);
       this.handles.delete(node.id);
+      this.callbacks.delete(node.id);
     }
     this.callbacks.delete(node.id);
   }
@@ -888,12 +1005,16 @@ export class Text extends Node {
 }
 
 export class Button extends Node {
-  constructor(labelOrOptions?: string | { label?: string; onPress?: () => void }) {
+  constructor(labelOrOptions?: string | ButtonOptions) {
     super("button");
     if (typeof labelOrOptions === "string") {
       this.label = labelOrOptions;
     } else if (labelOrOptions) {
       if (labelOrOptions.label !== undefined) this.label = labelOrOptions.label;
+      if (labelOrOptions.variant !== undefined) this.variant = labelOrOptions.variant;
+      if (labelOrOptions.size !== undefined) this.size = labelOrOptions.size;
+      if (labelOrOptions.disabled !== undefined) this.disabled = labelOrOptions.disabled;
+      if (labelOrOptions.platform !== undefined) this.platform = labelOrOptions.platform;
       if (labelOrOptions.onPress) this.onPress = labelOrOptions.onPress;
     }
   }
@@ -905,6 +1026,34 @@ export class Button extends Node {
     this.setProperty("label", val);
   }
 
+  get variant(): ButtonVariant | undefined {
+    return this.properties.variant;
+  }
+  set variant(val: ButtonVariant | undefined) {
+    this.setProperty("variant", val);
+  }
+
+  get size(): ControlSize | undefined {
+    return this.properties.size;
+  }
+  set size(val: ControlSize | undefined) {
+    this.setProperty("size", val);
+  }
+
+  get disabled(): boolean {
+    return !!this.properties.disabled;
+  }
+  set disabled(val: boolean) {
+    this.setProperty("disabled", val);
+  }
+
+  get platform(): PlatformStyles | undefined {
+    return this.properties.platform;
+  }
+  set platform(val: PlatformStyles | undefined) {
+    this.setProperty("platform", val);
+  }
+
   get onPress(): (() => void) | null {
     return this.properties.onPress || null;
   }
@@ -913,7 +1062,9 @@ export class Button extends Node {
   }
 
   click(): void {
-    this.dispatchEvent("click");
+    if (!this.disabled) {
+      this.dispatchEvent("click");
+    }
   }
 }
 
@@ -1672,6 +1823,16 @@ export const globalShortcut = {
   },
 };
 
+export const gtk = {
+  addCss(css: string): boolean {
+    const driver = getActiveDriver();
+    if (driver && typeof (driver as any).addGlobalCss === "function") {
+      return (driver as any).addGlobalCss(css);
+    }
+    return false;
+  },
+};
+
 export interface MenuItemOptions {
   id?: string;
   label: string;
@@ -1997,6 +2158,7 @@ export default {
   Fragment,
   app,
   globalShortcut,
+  gtk,
   dialog,
   clipboard,
   systemTheme,

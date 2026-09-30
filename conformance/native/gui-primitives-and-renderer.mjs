@@ -19,6 +19,7 @@ import {
   notification,
   app,
   globalShortcut,
+  gtk,
   turnMailbox,
   nodeRegistry,
   createSignal,
@@ -211,5 +212,35 @@ console.log('item accelerator:', saveItem.accelerator);
 
 console.log('globalShortcut register defined:', typeof globalShortcut.register === 'function');
 console.log('globalShortcut poll defined:', typeof globalShortcut.poll === 'function');
+
+// 12. Typed Platform Styles & Semantic Variants
+const styledBtn = new Button({
+  label: 'Save Project',
+  variant: 'primary',
+  size: 'md',
+  platform: {
+    gtk: {
+      class: 'suggested-action pill',
+      css: 'padding: 8px 16px;',
+    },
+    mac: {
+      bezelStyle: 'rounded',
+      tint: '#007aff',
+    },
+    win: {
+      variant: 'accent',
+      cornerPreference: 'rounded',
+    },
+  },
+});
+
+console.log('styled button variant:', styledBtn.variant);
+console.log('styled button size:', styledBtn.size);
+console.log('styled button gtk class:', styledBtn.platform?.gtk?.class);
+console.log('styled button mac bezel:', styledBtn.platform?.mac?.bezelStyle);
+console.log('styled button win variant:', styledBtn.platform?.win?.variant);
+
+gtk.addCss('.custom-btn { border-radius: 9999px; }');
+console.log('gtk addCss defined:', typeof gtk.addCss === 'function');
 
 console.log('gui conformance passed');

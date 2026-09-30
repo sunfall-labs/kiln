@@ -184,6 +184,7 @@ declare_ts_builtins! {
             "dialog",
             "getActiveDriver",
             "globalShortcut",
+            "gtk",
             "h",
             "hostGuiBridge",
             "nodeRegistry",
