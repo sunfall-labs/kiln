@@ -1749,9 +1749,8 @@ static inline void kiln_c99_site_set_dictionary(kiln_c99_site *site, uint32_t ow
 
 /* A site's cached method -- a method-call or property-read site whose receiver is a built-in
  * kind -- is three words behind `has_cached_method`, a one-byte slot: 0 none, 2 being written, 1
- * published with release. A published answer stays true for its receiver kind, so it is replaced
- * (a site that sees strings, then arrays) only when no other thread can be reading it; otherwise
- * the site keeps the first answer and the other kind takes the slow path. */
+ * published with release. A published answer and its property-key bytes remain immutable;
+ * another receiver kind or key takes the slow path. */
 #define KILN_C99_SITE_METHOD_WRITING 2u
 
 static KILN_ALWAYS_INLINE inline int kiln_c99_site_has_method(const kiln_c99_site *site) {
@@ -1778,10 +1777,6 @@ static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c9
                                      (uint8_t)KILN_C99_SITE_METHOD_WRITING, 0, __ATOMIC_SEQ_CST,
                                      __ATOMIC_RELAXED))
         return;
-    if (seen == 1u && kiln_realm_retire_tag() != 0) {
-        __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
-        return;
-    }
     site->cached_tag = tag;
     site->cached_method = method;
     site->cached_builtin = builtin;

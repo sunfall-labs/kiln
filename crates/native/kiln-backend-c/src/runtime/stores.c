@@ -652,7 +652,8 @@ kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *mem
     }
     if (!modified) return 1;
     at = kiln_c99_member_answer_at(builtin, member);
-    if (heap->member_answers[at].cached_member_len == len &&
+    if (heap->member_answers[at].member == member &&
+        heap->member_answers[at].cached_member_len == len &&
         memcmp(heap->member_answers[at].cached_member, member, len) == 0 &&
         heap->member_answers[at].builtin == builtin &&
         heap->member_answers[at].serial == heap->builtin_store_serial) {
