@@ -139,6 +139,7 @@ static kiln_val *kiln_c99_cell_of(kiln_value value) {
 }
 
 static int kiln_c99_val_make_cell(kiln_val *slot);
+static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown);
 
 /* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
  * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
