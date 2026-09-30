@@ -2,7 +2,7 @@
 
 use crate::{
     FileFilter, MessageOptions, NotificationOptions, OpenFileOptions, PickFolderOptions,
-    SaveFileOptions, clipboard, dialog, notification, theme, tray,
+    SaveFileOptions, app, clipboard, dialog, hotkey, notification, single_instance, theme, tray,
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -231,4 +231,52 @@ pub extern "C" fn kiln_gui_tray_destroy(id: u32) -> i32 {
 pub extern "C" fn kiln_gui_tray_clear() -> i32 {
     tray::clear_tray_icons();
     0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_app_get_path(
+    name: *const c_char,
+    out_buf: *mut c_char,
+    out_len: usize,
+) -> i32 {
+    let name_str = match unsafe { c_str_to_opt_string(name) } {
+        Some(s) => s,
+        None => return -1,
+    };
+    match app::get_path(&name_str) {
+        Some(p) => unsafe { copy_to_c_buf(&p.to_string_lossy(), out_buf, out_len) },
+        None => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_app_single_instance_lock(app_id: *const c_char) -> i32 {
+    let app_id = unsafe { c_str_to_opt_string(app_id) }.unwrap_or_else(|| "default".to_string());
+    if single_instance::request_single_instance_lock(&app_id) {
+        0
+    } else {
+        -1
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_hotkey_register(accelerator: *const c_char) -> u32 {
+    let acc = match unsafe { c_str_to_opt_string(accelerator) } {
+        Some(s) => s,
+        None => return 0,
+    };
+    hotkey::register(&acc).unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_hotkey_unregister(id: u32) -> i32 {
+    match hotkey::unregister(id) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_hotkey_poll() -> u32 {
+    hotkey::poll_event().unwrap_or(0)
 }

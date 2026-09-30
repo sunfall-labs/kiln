@@ -14,6 +14,11 @@ export interface PlatformDriver {
   createWindow(win: Window): bigint | null;
   showWindow(win: Window): void;
   closeWindow(win: Window): void;
+  maximizeWindow?(win: Window): void;
+  unmaximizeWindow?(win: Window): void;
+  minimizeWindow?(win: Window): void;
+  setFullscreen?(win: Window, fullscreen: boolean): void;
+  setResizable?(win: Window, resizable: boolean): void;
   setWindowContent(winHandle: bigint, childHandle: bigint): void;
   createWidget(node: Node): bigint | null;
   updateProperty(handle: bigint, tag: string, name: string, value: any): void;
@@ -69,6 +74,12 @@ export class Gtk4Driver implements PlatformDriver {
         gtk_window_set_child: { arguments: ["pointer", "pointer"], return: "void" },
         gtk_window_present: { arguments: ["pointer"], return: "void" },
         gtk_window_close: { arguments: ["pointer"], return: "void" },
+        gtk_window_maximize: { arguments: ["pointer"], return: "void" },
+        gtk_window_unmaximize: { arguments: ["pointer"], return: "void" },
+        gtk_window_minimize: { arguments: ["pointer"], return: "void" },
+        gtk_window_fullscreen: { arguments: ["pointer"], return: "void" },
+        gtk_window_unfullscreen: { arguments: ["pointer"], return: "void" },
+        gtk_window_set_resizable: { arguments: ["pointer", "i32"], return: "void" },
         gtk_box_new: { arguments: ["i32", "i32"], return: "pointer" },
         gtk_box_append: { arguments: ["pointer", "pointer"], return: "void" },
         gtk_box_remove: { arguments: ["pointer", "pointer"], return: "void" },
@@ -169,6 +180,61 @@ export class Gtk4Driver implements PlatformDriver {
     if (handle && this.gtk) {
       try {
         this.gtk.functions.gtk_window_close(handle);
+      } catch (_) {}
+      this.handles.delete(win.id);
+      this.callbacks.delete(win.id);
+    }
+  }
+
+  maximizeWindow(win: Window): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk?.functions?.gtk_window_maximize) {
+      try {
+        this.gtk.functions.gtk_window_maximize(handle);
+      } catch (_) {}
+    }
+  }
+
+  unmaximizeWindow(win: Window): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk?.functions?.gtk_window_unmaximize) {
+      try {
+        this.gtk.functions.gtk_window_unmaximize(handle);
+      } catch (_) {}
+    }
+  }
+
+  minimizeWindow(win: Window): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk?.functions?.gtk_window_minimize) {
+      try {
+        this.gtk.functions.gtk_window_minimize(handle);
+      } catch (_) {}
+    }
+  }
+
+  setFullscreen(win: Window, fullscreen: boolean): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk?.functions) {
+      try {
+        if (fullscreen) {
+          if (this.gtk.functions.gtk_window_fullscreen) {
+            this.gtk.functions.gtk_window_fullscreen(handle);
+          }
+        } else {
+          if (this.gtk.functions.gtk_window_unfullscreen) {
+            this.gtk.functions.gtk_window_unfullscreen(handle);
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  setResizable(win: Window, resizable: boolean): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk?.functions?.gtk_window_set_resizable) {
+      try {
+        this.gtk.functions.gtk_window_set_resizable(handle, resizable ? 1 : 0);
       } catch (_) {}
     }
   }
@@ -689,6 +755,60 @@ export class Window extends Node {
       G.__kilnGuiCloseWindow(this.id);
     }
   }
+
+  maximize(): void {
+    const driver = getActiveDriver();
+    if (typeof driver.maximizeWindow === "function") {
+      driver.maximizeWindow(this);
+    }
+    this.dispatchEvent("maximize");
+  }
+
+  unmaximize(): void {
+    const driver = getActiveDriver();
+    if (typeof driver.unmaximizeWindow === "function") {
+      driver.unmaximizeWindow(this);
+    }
+    this.dispatchEvent("unmaximize");
+  }
+
+  minimize(): void {
+    const driver = getActiveDriver();
+    if (typeof driver.minimizeWindow === "function") {
+      driver.minimizeWindow(this);
+    }
+    this.dispatchEvent("minimize");
+  }
+
+  setFullscreen(fullscreen: boolean): void {
+    const driver = getActiveDriver();
+    if (typeof driver.setFullscreen === "function") {
+      driver.setFullscreen(this, fullscreen);
+    }
+    this.setProperty("fullscreen", fullscreen);
+  }
+
+  get fullscreen(): boolean {
+    return !!this.properties.fullscreen;
+  }
+  set fullscreen(val: boolean) {
+    this.setFullscreen(val);
+  }
+
+  setResizable(resizable: boolean): void {
+    const driver = getActiveDriver();
+    if (typeof driver.setResizable === "function") {
+      driver.setResizable(this, resizable);
+    }
+    this.setProperty("resizable", resizable);
+  }
+
+  get resizable(): boolean {
+    return this.properties.resizable !== false;
+  }
+  set resizable(val: boolean) {
+    this.setResizable(val);
+  }
 }
 
 export class VStack extends Node {
@@ -1088,6 +1208,11 @@ export class HostGuiBridge {
         kiln_gui_tray_set_tooltip: { arguments: ["u32", "pointer"], return: "i32" },
         kiln_gui_tray_destroy: { arguments: ["u32"], return: "i32" },
         kiln_gui_tray_clear: { arguments: [], return: "i32" },
+        kiln_gui_app_get_path: { arguments: ["pointer", "pointer", "u64"], return: "i32" },
+        kiln_gui_app_single_instance_lock: { arguments: ["pointer"], return: "i32" },
+        kiln_gui_hotkey_register: { arguments: ["pointer"], return: "u32" },
+        kiln_gui_hotkey_unregister: { arguments: ["u32"], return: "i32" },
+        kiln_gui_hotkey_poll: { arguments: [], return: "u32" },
       });
       return this.lib !== null;
     } catch (_) {
@@ -1260,6 +1385,60 @@ export class HostGuiBridge {
       this.lib.kiln_gui_tray_clear();
     } catch (_) {}
   }
+
+  appGetPath(name: string): string | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const namePtr = toCStr(this.ffi, name);
+      const buf = new Uint8Array(4096);
+      const bufPtr = this.ffi.getRawPointer(buf.buffer);
+      const len = this.lib.kiln_gui_app_get_path(namePtr, bufPtr, BigInt(buf.length));
+      if (len > 0) {
+        return new TextDecoder().decode(buf.subarray(0, len));
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  appSingleInstanceLock(appId: string): boolean {
+    if (!this.init() || !this.lib) return true;
+    try {
+      const appIdPtr = toCStr(this.ffi, appId);
+      return this.lib.kiln_gui_app_single_instance_lock(appIdPtr) === 0;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  hotkeyRegister(accelerator: string): number {
+    if (!this.init() || !this.lib) return 0;
+    try {
+      const accPtr = toCStr(this.ffi, accelerator);
+      return this.lib.kiln_gui_hotkey_register(accPtr);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  hotkeyUnregister(id: number): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      return this.lib.kiln_gui_hotkey_unregister(id) === 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  hotkeyPoll(): number {
+    if (!this.init() || !this.lib) return 0;
+    try {
+      return this.lib.kiln_gui_hotkey_poll();
+    } catch (_) {
+      return 0;
+    }
+  }
 }
 
 export const hostGuiBridge = new HostGuiBridge();
@@ -1402,11 +1581,103 @@ export const notification = {
   },
 };
 
+export type AppPathName =
+  | "home"
+  | "appData"
+  | "userData"
+  | "cache"
+  | "temp"
+  | "desktop"
+  | "documents"
+  | "downloads"
+  | "config";
+
+export const app = {
+  name: "kiln-app",
+  version: "0.1.0",
+  getPath(name: AppPathName): string {
+    if (typeof G.__kilnGuiAppGetPath === "function") {
+      return G.__kilnGuiAppGetPath(name);
+    }
+    const hostPath = hostGuiBridge.appGetPath(name);
+    if (hostPath !== null) return hostPath;
+    if (name === "temp") {
+      return (typeof process !== "undefined" && (process.env?.TMPDIR || process.env?.TEMP || "/tmp")) || "/tmp";
+    }
+    if (name === "home") {
+      return (typeof process !== "undefined" && process.env?.HOME) || "/";
+    }
+    return (typeof process !== "undefined" && process.env?.HOME ? `${process.env.HOME}/.${name}` : `/${name}`);
+  },
+  quit(exitCode = 0): void {
+    if (typeof process !== "undefined" && typeof process.exit === "function") {
+      process.exit(exitCode);
+    }
+  },
+  requestSingleInstanceLock(appId = "kiln-app"): boolean {
+    if (typeof G.__kilnGuiAppSingleInstanceLock === "function") {
+      return G.__kilnGuiAppSingleInstanceLock(appId);
+    }
+    return hostGuiBridge.appSingleInstanceLock(appId);
+  },
+};
+
+const registeredHotkeys = new Map<string, number>();
+const hotkeyHandlers = new Map<number, () => void>();
+
+export const globalShortcut = {
+  register(accelerator: string, callback: () => void): boolean {
+    if (typeof G.__kilnGuiHotkeyRegister === "function") {
+      const id = G.__kilnGuiHotkeyRegister(accelerator);
+      if (id > 0) {
+        registeredHotkeys.set(accelerator, id);
+        hotkeyHandlers.set(id, callback);
+        return true;
+      }
+      return false;
+    }
+    const id = hostGuiBridge.hotkeyRegister(accelerator);
+    if (id > 0) {
+      registeredHotkeys.set(accelerator, id);
+      hotkeyHandlers.set(id, callback);
+      return true;
+    }
+    return false;
+  },
+  unregister(accelerator: string): void {
+    const id = registeredHotkeys.get(accelerator);
+    if (id !== undefined) {
+      hostGuiBridge.hotkeyUnregister(id);
+      registeredHotkeys.delete(accelerator);
+      hotkeyHandlers.delete(id);
+    }
+  },
+  unregisterAll(): void {
+    for (const id of registeredHotkeys.values()) {
+      hostGuiBridge.hotkeyUnregister(id);
+    }
+    registeredHotkeys.clear();
+    hotkeyHandlers.clear();
+  },
+  poll(): boolean {
+    const firedId = hostGuiBridge.hotkeyPoll();
+    if (firedId > 0) {
+      const handler = hotkeyHandlers.get(firedId);
+      if (handler) {
+        handler();
+        return true;
+      }
+    }
+    return false;
+  },
+};
+
 export interface MenuItemOptions {
   id?: string;
   label: string;
   enabled?: boolean;
   checked?: boolean;
+  accelerator?: string;
   onClick?: () => void;
 }
 
@@ -1415,6 +1686,7 @@ export class MenuItem {
   label: string;
   enabled: boolean;
   checked?: boolean;
+  accelerator?: string;
   onClick?: () => void;
 
   constructor(options: MenuItemOptions) {
@@ -1422,6 +1694,7 @@ export class MenuItem {
     this.label = options.label;
     this.enabled = options.enabled !== false;
     this.checked = options.checked;
+    this.accelerator = options.accelerator;
     this.onClick = options.onClick;
   }
 }
@@ -1515,7 +1788,9 @@ let isExecutingTurn = false;
 export const turnMailbox = {
   pumpEvents(): boolean {
     const driver = getActiveDriver();
-    return driver ? driver.pumpEvents() : false;
+    const driverHad = driver ? driver.pumpEvents() : false;
+    const shortcutHad = globalShortcut.poll();
+    return driverHad || shortcutHad;
   },
   post(targetId: number, event: string, ...args: any[]): void {
     mailboxQueue.push({ targetId, event, args });
@@ -1720,6 +1995,8 @@ export default {
   createElement,
   h,
   Fragment,
+  app,
+  globalShortcut,
   dialog,
   clipboard,
   systemTheme,

@@ -272,3 +272,121 @@ pub mod menu {
         muda::Submenu::new(text, enabled)
     }
 }
+
+pub mod app {
+    use std::path::PathBuf;
+
+    pub fn get_path(name: &str) -> Option<PathBuf> {
+        match name {
+            "home" => dirs::home_dir(),
+            "config" | "appData" => dirs::config_dir(),
+            "cache" => dirs::cache_dir(),
+            "data" | "userData" => dirs::data_dir(),
+            "desktop" => dirs::desktop_dir(),
+            "documents" => dirs::document_dir(),
+            "downloads" => dirs::download_dir(),
+            "temp" => Some(std::env::temp_dir()),
+            _ => None,
+        }
+    }
+}
+
+pub mod single_instance {
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
+    use std::sync::Mutex;
+
+    static LOCK_HOLDER: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
+
+    pub fn request_single_instance_lock(app_id: &str) -> bool {
+        let mut guard = LOCK_HOLDER.lock().unwrap();
+        if guard.is_some() {
+            return true;
+        }
+
+        #[cfg(unix)]
+        {
+            let safe_id: String = app_id
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let sock_path = std::env::temp_dir().join(format!("kiln-app-{safe_id}.sock"));
+
+            if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+                return false;
+            }
+            let _ = std::fs::remove_file(&sock_path);
+
+            match UnixListener::bind(&sock_path) {
+                Ok(listener) => {
+                    *guard = Some(Box::new(listener));
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = app_id;
+            true
+        }
+    }
+}
+
+pub mod hotkey {
+    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::HotKey};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    thread_local! {
+        static MANAGER: RefCell<Option<GlobalHotKeyManager>> = const { RefCell::new(None) };
+        static HOTKEYS: RefCell<HashMap<u32, HotKey>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn register(accelerator: &str) -> Result<u32, String> {
+        let hotkey = HotKey::from_str(accelerator).map_err(|e| e.to_string())?;
+        let id = hotkey.id();
+        MANAGER.with(|mgr| {
+            let mut mgr_borrow = mgr.borrow_mut();
+            if mgr_borrow.is_none() {
+                *mgr_borrow = Some(GlobalHotKeyManager::new().map_err(|e| e.to_string())?);
+            }
+            if let Some(m) = mgr_borrow.as_ref() {
+                m.register(hotkey).map_err(|e| e.to_string())?;
+            }
+            HOTKEYS.with(|keys| {
+                keys.borrow_mut().insert(id, hotkey);
+            });
+            Ok(id)
+        })
+    }
+
+    pub fn unregister(id: u32) -> Result<(), String> {
+        MANAGER.with(|mgr| {
+            if let Some(m) = mgr.borrow().as_ref() {
+                HOTKEYS.with(|keys| {
+                    if let Some(hotkey) = keys.borrow_mut().remove(&id) {
+                        let _ = m.unregister(hotkey);
+                    }
+                });
+            }
+            Ok(())
+        })
+    }
+
+    pub fn poll_event() -> Option<u32> {
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            Some(event.id())
+        } else {
+            None
+        }
+    }
+}

@@ -18,3 +18,5 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zbus = { version = "5", default-features = false }
+dirs = "4.0"
+global-hotkey = { version = "0.8", default-features = false }

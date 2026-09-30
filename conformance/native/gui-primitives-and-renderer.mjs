@@ -17,6 +17,8 @@ import {
   clipboard,
   systemTheme,
   notification,
+  app,
+  globalShortcut,
   turnMailbox,
   nodeRegistry,
   createSignal,
@@ -54,6 +56,12 @@ console.log('click 2:', label.text);
 
 win.show();
 console.log('window visible:', win.visible);
+win.maximize();
+win.unmaximize();
+win.minimize();
+win.setFullscreen(false);
+win.setResizable(true);
+console.log('win fullscreen:', win.fullscreen, 'resizable:', win.resizable);
 win.close();
 console.log('window closed:', win.visible);
 
@@ -189,9 +197,19 @@ console.log('tray updated tooltip:', tray.tooltip);
 console.log('tray menu items:', tray.menu?.getItems().length);
 tray.dispose();
 
-// 10. Additional GUI OS APIs
+// 10. Additional GUI OS APIs & App Environment
 console.log('dialog pickFolder defined:', typeof dialog.pickFolder === 'function');
 console.log('dialog openFiles defined:', typeof dialog.openFiles === 'function');
 console.log('notification show defined:', typeof notification.show === 'function');
+console.log('app name:', app.name, 'version:', app.version);
+console.log('app getPath temp defined:', typeof app.getPath('temp') === 'string');
+console.log('app single instance lock:', typeof app.requestSingleInstanceLock('test-app') === 'boolean');
+
+// 11. Accelerators & Global Shortcuts
+const saveItem = new MenuItem({ label: 'Save', accelerator: 'Ctrl+S' });
+console.log('item accelerator:', saveItem.accelerator);
+
+console.log('globalShortcut register defined:', typeof globalShortcut.register === 'function');
+console.log('globalShortcut poll defined:', typeof globalShortcut.poll === 'function');
 
 console.log('gui conformance passed');
