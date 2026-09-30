@@ -4203,7 +4203,36 @@ int {symbol}(kiln_host *host, kiln_value *result) {{
     .unwrap();
 }
 
-fn render_module_realm_wrapper(output: &mut String, symbol: &str, unit_symbol: &str) {
+fn render_module_realm_wrapper(
+    output: &mut String,
+    symbol: &str,
+    unit_symbol: &str,
+    commonjs_site: Option<&str>,
+) {
+    let invocation = if let Some(site) = commonjs_site {
+        // CommonJS evaluation is a real wrapper activation. It enters the module body directly,
+        // rather than calling a closure, so publish its frame here and restore it on every return.
+        // Otherwise captureStackTrace loses the caller of module-level depd initialization.
+        let source = c_string(site);
+        writeln!(
+            output,
+            r#"
+static int {unit_symbol}_invoke_body(kiln_host *host, kiln_value *result,
+    const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{
+    kiln_js_frame module_frame;
+    kiln_c99_js_frame_enter(&module_frame, NULL);
+    kiln_c99_js_frame_note_instruction({source}, 0);
+    int status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
+    kiln_c99_js_frame_leave(&module_frame);
+    return status;
+}}
+"#
+        )
+        .unwrap();
+        format!("{unit_symbol}_invoke_body")
+    } else {
+        format!("{unit_symbol}_body")
+    };
     writeln!(
         output,
         r#"
@@ -4231,7 +4260,7 @@ static int {unit_symbol}_realm_entry(void *opaque) {{
     {unit_symbol}_realm_context *context = ({unit_symbol}_realm_context *)opaque;
     int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    status = {unit_symbol}_body(context->host, context->result, context->imports,
+    status = {invocation}(context->host, context->result, context->imports,
                            context->import_count, context->exports, context->export_count);
     /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
      * deliberately private to each unit, so the module that owns the refusing instruction must
@@ -4251,7 +4280,7 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (kiln_realm_is_active()) {{
         (void)kiln_realm_diagnostic_reset();
-        status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
+        status = {invocation}(host, result, imports, import_count, exports, export_count);
         if (status == KILN_C99_CONTROL_ERROR)
             *result = kiln_c99_control_diagnostic();
         return status;
@@ -5440,7 +5469,12 @@ fn render_module_positioned(
     }
     render_namespace_wrapper(&mut output, symbol);
     if callables {
-        render_module_realm_wrapper(&mut output, symbol, unit_symbol);
+        render_module_realm_wrapper(
+            &mut output,
+            symbol,
+            unit_symbol,
+            commonjs.then_some(diagnostic_site),
+        );
     }
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
@@ -5679,7 +5713,7 @@ fn render_runtime_module(
     )
     .unwrap();
     render_namespace_wrapper(&mut output, symbol);
-    render_module_realm_wrapper(&mut output, symbol, symbol);
+    render_module_realm_wrapper(&mut output, symbol, symbol, None);
     output
 }
 
