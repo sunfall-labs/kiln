@@ -3,20 +3,22 @@
 (function installJSONReplacers() {
   const G = globalThis as any;
   const serialize = G.__kilnJsonSerialize;
+  const parse = G.__kilnJsonParse;
+  const unboxPrimitive = G.__kilnJsonUnbox;
   delete G.__kilnJsonSerialize;
+  delete G.__kilnJsonParse;
+  delete G.__kilnJsonUnbox;
   if (typeof serialize !== "function") return;
 
   function unbox(value: any): any {
     if (value === null || typeof value !== "object") return value;
-    const tag = Object.prototype.toString.call(value);
-    // The tag only selects a brand check; a forged @@toStringTag must not unbox an object.
-    try {
-      if (tag === "[object Number]") return Number.prototype.valueOf.call(value);
-      if (tag === "[object String]") return String.prototype.valueOf.call(value);
-      if (tag === "[object Boolean]") return Boolean.prototype.valueOf.call(value);
-      if (tag === "[object BigInt]") return BigInt.prototype.valueOf.call(value);
-    } catch (_) {}
-    return value;
+    const primitive = unboxPrimitive(value);
+    if (primitive === value) return value;
+    // Number and String wrapper conversion can invoke user coercion hooks. Boolean and BigInt
+    // serialization reads their internal slots instead; classification never reads a public tag.
+    if (typeof primitive === "number") return Number(value);
+    if (typeof primitive === "string") return String(value);
+    return primitive;
   }
 
   const stringify = {
@@ -48,6 +50,8 @@
         }
         if (callback !== undefined) current = callback.call(holder, key, current);
         current = unbox(current);
+        if (typeof current === "bigint") throw new TypeError("Do not know how to serialize a BigInt");
+        if (typeof current === "function" || typeof current === "symbol") return undefined;
         if (current === null || typeof current !== "object") return current;
         if (ancestors.indexOf(current) !== -1)
           throw new TypeError("Converting circular structure to JSON");
@@ -58,7 +62,7 @@
           const length = current.length;
           for (let i = 0; i < length; i++) result.push(visit(current, String(i)));
         } else {
-          result = {};
+          result = Object.create(null);
           const keys = propertyList === undefined ? Object.keys(current) : propertyList;
           for (let i = 0; i < keys.length; i++) {
             const key = keys[i];
@@ -78,5 +82,37 @@
   }.stringify;
   Object.defineProperty(G.JSON, "stringify", {
     value: stringify, writable: true, configurable: true,
+  });
+  const parseWithReviver = {
+    parse(text: any, reviver?: any): any {
+      const value = parse(text);
+      if (typeof reviver !== "function") return value;
+      function visit(holder: any, key: string): any {
+        const value = holder[key];
+        if (value !== null && typeof value === "object") {
+          const keys: string[] = [];
+          if (Array.isArray(value)) {
+            const length = value.length;
+            for (let i = 0; i < length; i++) keys.push(String(i));
+          } else {
+            const own = Object.keys(value);
+            for (let i = 0; i < own.length; i++) keys.push(own[i]);
+          }
+          for (let i = 0; i < keys.length; i++) {
+            const childKey = keys[i];
+            const child = visit(value, childKey);
+            if (child === undefined) delete value[childKey];
+            else Object.defineProperty(value, childKey, {
+              value: child, writable: true, enumerable: true, configurable: true,
+            });
+          }
+        }
+        return reviver.call(holder, key, value);
+      }
+      return visit({ "": value }, "");
+    },
+  }.parse;
+  Object.defineProperty(G.JSON, "parse", {
+    value: parseWithReviver, writable: true, configurable: true,
   });
 })();

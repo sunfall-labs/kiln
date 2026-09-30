@@ -16,3 +16,8 @@ let conversions = 0;
 const tagged = { toJSON(key) { conversions++; return { key, value: 9 }; } };
 console.log(JSON.stringify({ tagged }, (_key, value) => value), conversions);
 console.log(JSON.stringify({ ['__proto__']: 2, other: 1 }, ['__proto__']));
+const revived = JSON.parse('{"a":1,"gone":2,"items":[3,4]}', function (key, value) {
+  return key === 'gone' ? undefined : typeof value === 'number' ? value + 10 : value;
+});
+console.log(JSON.stringify(revived));
+console.log(JSON.parse('4', (_key, value) => value * 3));

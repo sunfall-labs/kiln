@@ -1613,6 +1613,17 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_SHARED);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_JSON_UNBOX_RAW) {
+        kiln_value value = argc > 0 ? args[0] : kiln_c99_undefined();
+        /* Internal wrapper-slot access, without public getters or coercion callbacks. The
+         * TypeScript serializer chooses the language's Number/String conversions afterward. */
+        if (!kiln_c99_unwrap_primitive_wrapper(value, KILN_C99_WRAPPER_NUMBER, result) &&
+            !kiln_c99_unwrap_primitive_wrapper(value, KILN_C99_WRAPPER_STRING, result) &&
+            !kiln_c99_unwrap_primitive_wrapper(value, KILN_C99_WRAPPER_BOOLEAN, result) &&
+            !kiln_c99_unwrap_primitive_wrapper(value, KILN_C99_WRAPPER_BIGINT, result))
+            *result = value;
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
         if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
             kiln_c99_collection_of(args[0])->is_weak || argc < 2 ||

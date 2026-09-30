@@ -1518,6 +1518,8 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
     .join("\n");
     let cleanup: &[(u32, &str)] = &[
         (family::JSON, "__kilnJsonSerialize"),
+        (family::JSON, "__kilnJsonParse"),
+        (family::JSON, "__kilnJsonUnbox"),
         (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
         (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),

@@ -508,6 +508,8 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnSharedWeak", KILN_C99_METHOD_SHARED_WEAK_RAW},
                      {"__kilnCollectionSize", KILN_C99_METHOD_COLLECTION_SIZE_RAW},
                      {"__kilnJsonSerialize", KILN_C99_METHOD_JSON_STRINGIFY},
+                     {"__kilnJsonParse", KILN_C99_METHOD_JSON_PARSE},
+                     {"__kilnJsonUnbox", KILN_C99_METHOD_JSON_UNBOX_RAW},
                      /* `%TypedArray%.prototype`'s element-storage primitives, captured the same
                       * way by `kiln-builtins/src/typedarray.ts`. */
                      {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},
