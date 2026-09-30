@@ -147,7 +147,7 @@ impl super::Compiler {
                 optional,
             } => self.call(callee, arguments, *optional, expression.span),
             ExpressionKind::InlineLiteralEval {
-                callee,
+                callee: _,
                 argument,
                 expression: inline,
             } => {

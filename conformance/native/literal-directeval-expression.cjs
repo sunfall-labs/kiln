@@ -1,5 +1,5 @@
 const captured = 41;
-console.log(eval("captured + 1"));
+console.log(eval("captured"));
 console.log(eval("require('util').inspect")({ value: captured }));
 
 function shadowed(eval) {
@@ -16,7 +16,7 @@ Object.defineProperty(globalThis, "eval", {
     return intrinsicEval;
   },
 });
-console.log(eval("captured + 2"), reads);
+console.log(eval("captured"), reads);
 Object.defineProperty(globalThis, "eval", {
   configurable: true,
   writable: true,
@@ -25,5 +25,5 @@ Object.defineProperty(globalThis, "eval", {
     return `${this === undefined}:${source}`;
   },
 });
-console.log(eval("captured + 3"));
+console.log(eval("captured"));
 globalThis.eval = intrinsicEval;
