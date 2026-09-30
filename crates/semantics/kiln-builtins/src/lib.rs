@@ -175,6 +175,7 @@ declare_ts_builtins! {
             "createSignal",
             "default",
             "dialog",
+            "getActiveDriver",
             "h",
             "nodeRegistry",
             "onCleanup",

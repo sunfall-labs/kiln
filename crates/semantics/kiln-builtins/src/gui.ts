@@ -6,10 +6,23 @@ const G = globalThis as any;
 let nextNodeId = 1;
 export const nodeRegistry = new Map<number, Node>();
 
-// Platform OS Windowing Driver (GTK4 on Linux / AppKit on macOS)
-let gtkInstance: any = null;
-let gtkDriverInitialized = false;
-const nativeHandles = new Map<number, bigint>();
+// Platform OS Windowing Drivers (ADR 0074)
+export interface PlatformDriver {
+  readonly name: string;
+  init(): boolean;
+  getHandle(nodeId: number): bigint | null;
+  createWindow(win: Window): bigint | null;
+  showWindow(win: Window): void;
+  closeWindow(win: Window): void;
+  setWindowContent(winHandle: bigint, childHandle: bigint): void;
+  createWidget(node: Node): bigint | null;
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void;
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
+  removeChild(parentHandle: bigint, childHandle: bigint): void;
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
+  disposeWidget(node: Node): void;
+  pumpEvents(): boolean;
+}
 
 function toCStr(ffi: any, str: string): bigint {
   const enc = new TextEncoder();
@@ -17,187 +30,410 @@ function toCStr(ffi: any, str: string): bigint {
   return ffi.getRawPointer(bytes.buffer);
 }
 
-function getGtkDriver() {
-  if (gtkDriverInitialized) return gtkInstance;
-  gtkDriverInitialized = true;
+function fromCStr(ffi: any, ptr: bigint, maxLen = 4096): string {
+  if (!ptr || !ffi || typeof ffi.toArrayBuffer !== "function") return "";
   try {
-    const ffi = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.ffi) || null;
-    if (!ffi) return null;
-    const hasDisplay = typeof process !== "undefined" && process.env && (process.env.WAYLAND_DISPLAY || process.env.DISPLAY);
-    if (!hasDisplay) return null;
-
-    const libName = process.platform === "linux" ? "libgtk-4.so.1" : null;
-    if (!libName) return null;
-
-    const gtk = ffi.dlopen(libName, {
-      gtk_init_check: { arguments: [], return: "i32" },
-      gtk_window_new: { arguments: [], return: "pointer" },
-      gtk_window_set_title: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_window_set_default_size: { arguments: ["pointer", "i32", "i32"], return: "void" },
-      gtk_window_set_child: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_window_present: { arguments: ["pointer"], return: "void" },
-      gtk_window_close: { arguments: ["pointer"], return: "void" },
-      gtk_box_new: { arguments: ["i32", "i32"], return: "pointer" },
-      gtk_box_append: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_box_remove: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_button_new_with_label: { arguments: ["pointer"], return: "pointer" },
-      gtk_button_set_label: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_label_new: { arguments: ["pointer"], return: "pointer" },
-      gtk_label_set_text: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_entry_new: { arguments: [], return: "pointer" },
-      gtk_editable_set_text: { arguments: ["pointer", "pointer"], return: "void" },
-      gtk_switch_new: { arguments: [], return: "pointer" },
-      gtk_switch_set_active: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_scale_new_with_range: { arguments: ["i32", "f64", "f64", "f64"], return: "pointer" },
-      gtk_range_set_value: { arguments: ["pointer", "f64"], return: "void" },
-      gtk_widget_set_margin_top: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_widget_set_margin_bottom: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_widget_set_margin_start: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_widget_set_margin_end: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_widget_set_halign: { arguments: ["pointer", "i32"], return: "void" },
-      gtk_widget_set_valign: { arguments: ["pointer", "i32"], return: "void" },
-      g_signal_connect_data: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "i32"], return: "u64" },
-      g_main_context_iteration: { arguments: ["pointer", "i32"], return: "i32" },
-    });
-
-    if (gtk && gtk.functions && gtk.functions.gtk_init_check && gtk.functions.gtk_init_check() === 1) {
-      gtkInstance = gtk;
-      return gtkInstance;
-    }
-  } catch (_) {}
-  return null;
-}
-
-function updateGtkProperty(handle: bigint, tag: string, name: string, value: any): void {
-  if (!gtkInstance) return;
-  const ffi = (process as any).__kilnNativeModules?.ffi;
-  if (!ffi) return;
-  try {
-    if (tag === "button" && name === "label") {
-      gtkInstance.functions.gtk_button_set_label(handle, toCStr(ffi, String(value)));
-    } else if (tag === "text" && (name === "text" || name === "value")) {
-      gtkInstance.functions.gtk_label_set_text(handle, toCStr(ffi, String(value)));
-    } else if (tag === "textinput" && name === "value") {
-      gtkInstance.functions.gtk_editable_set_text(handle, toCStr(ffi, String(value)));
-    } else if (tag === "slider" && name === "value") {
-      gtkInstance.functions.gtk_range_set_value(handle, Number(value));
-    } else if (tag === "toggle" && name === "checked") {
-      gtkInstance.functions.gtk_switch_set_active(handle, value ? 1 : 0);
-    } else if (tag === "window" && name === "title") {
-      gtkInstance.functions.gtk_window_set_title(handle, toCStr(ffi, String(value)));
-    }
-  } catch (_) {}
-}
-
-function realizeGtkNode(gtk: any, ffi: any, node: Node): bigint | null {
-  let handle = nativeHandles.get(node.id);
-  if (handle) return handle;
-
-  try {
-    if (node.tag === "vstack") {
-      const spacing = node.getProperty("spacing") || 0;
-      handle = gtk.functions.gtk_box_new(1 /* GTK_ORIENTATION_VERTICAL */, spacing);
-    } else if (node.tag === "hstack") {
-      const spacing = node.getProperty("spacing") || 0;
-      handle = gtk.functions.gtk_box_new(0 /* GTK_ORIENTATION_HORIZONTAL */, spacing);
-    } else if (node.tag === "button") {
-      const label = node.getProperty("label") || "";
-      handle = gtk.functions.gtk_button_new_with_label(toCStr(ffi, String(label)));
-      const callbackPtr = gtk.lib.registerCallback(
-        { arguments: ["pointer", "pointer"], return: "void" },
-        () => {
-          turnMailbox.post(node.id, "click");
-        }
-      );
-      gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "clicked"), callbackPtr, 0n, 0n, 0);
-    } else if (node.tag === "text") {
-      const text = node.getProperty("text") || "";
-      handle = gtk.functions.gtk_label_new(toCStr(ffi, String(text)));
-    } else if (node.tag === "textinput") {
-      handle = gtk.functions.gtk_entry_new();
-      const val = node.getProperty("value");
-      if (val) gtk.functions.gtk_editable_set_text(handle, toCStr(ffi, String(val)));
-    } else if (node.tag === "slider") {
-      const min = node.getProperty("min") || 0;
-      const max = node.getProperty("max") || 100;
-      handle = gtk.functions.gtk_scale_new_with_range(0, min, max, 1.0);
-      const val = node.getProperty("value");
-      if (val !== undefined) gtk.functions.gtk_range_set_value(handle, Number(val));
-    } else if (node.tag === "toggle") {
-      handle = gtk.functions.gtk_switch_new();
-      const chk = node.getProperty("checked");
-      if (chk) gtk.functions.gtk_switch_set_active(handle, 1);
-    } else {
-      handle = gtk.functions.gtk_box_new(1, 0);
-    }
-
-    if (handle) {
-      nativeHandles.set(node.id, handle);
-      if (node.tag === "vstack" || node.tag === "hstack") {
-        for (let i = 0; i < node.children.length; i++) {
-          const childHandle = realizeGtkNode(gtk, ffi, node.children[i]);
-          if (childHandle) {
-            gtk.functions.gtk_box_append(handle, childHandle);
-          }
-        }
-      }
-    }
+    const buf = ffi.toArrayBuffer(ptr, maxLen);
+    const u8 = new Uint8Array(buf);
+    let len = 0;
+    while (len < u8.length && u8[len] !== 0) len++;
+    return new TextDecoder().decode(u8.subarray(0, len));
   } catch (_) {
-    return null;
+    return "";
+  }
+}
+
+export class Gtk4Driver implements PlatformDriver {
+  readonly name = "gtk4";
+  private initialized = false;
+  private gtk: any = null;
+  private ffi: any = null;
+  private handles = new Map<number, bigint>();
+  private callbacks = new Map<number, bigint[]>();
+
+  init(): boolean {
+    if (this.initialized) return this.gtk !== null;
+    this.initialized = true;
+    try {
+      this.ffi = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.ffi) || null;
+      if (!this.ffi) return false;
+      const hasDisplay = typeof process !== "undefined" && process.env && (process.env.WAYLAND_DISPLAY || process.env.DISPLAY);
+      if (!hasDisplay) return false;
+      if (process.platform !== "linux") return false;
+
+      this.gtk = this.ffi.dlopen("libgtk-4.so.1", {
+        gtk_init_check: { arguments: [], return: "i32" },
+        gtk_window_new: { arguments: [], return: "pointer" },
+        gtk_window_set_title: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_window_set_default_size: { arguments: ["pointer", "i32", "i32"], return: "void" },
+        gtk_window_set_child: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_window_present: { arguments: ["pointer"], return: "void" },
+        gtk_window_close: { arguments: ["pointer"], return: "void" },
+        gtk_box_new: { arguments: ["i32", "i32"], return: "pointer" },
+        gtk_box_append: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_box_remove: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_button_new_with_label: { arguments: ["pointer"], return: "pointer" },
+        gtk_button_set_label: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_label_new: { arguments: ["pointer"], return: "pointer" },
+        gtk_label_set_text: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_entry_new: { arguments: [], return: "pointer" },
+        gtk_editable_set_text: { arguments: ["pointer", "pointer"], return: "void" },
+        gtk_editable_get_text: { arguments: ["pointer"], return: "pointer" },
+        gtk_switch_new: { arguments: [], return: "pointer" },
+        gtk_switch_set_active: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_switch_get_active: { arguments: ["pointer"], return: "i32" },
+        gtk_scale_new_with_range: { arguments: ["i32", "f64", "f64", "f64"], return: "pointer" },
+        gtk_range_set_value: { arguments: ["pointer", "f64"], return: "void" },
+        gtk_range_get_value: { arguments: ["pointer"], return: "f64" },
+        gtk_widget_set_margin_top: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_widget_set_margin_bottom: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_widget_set_margin_start: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_widget_set_margin_end: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_widget_set_halign: { arguments: ["pointer", "i32"], return: "void" },
+        gtk_widget_set_valign: { arguments: ["pointer", "i32"], return: "void" },
+        g_signal_connect_data: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "i32"], return: "u64" },
+        g_main_context_iteration: { arguments: ["pointer", "i32"], return: "i32" },
+        g_main_context_pending: { arguments: ["pointer"], return: "i32" },
+      });
+
+      if (this.gtk && this.gtk.functions && this.gtk.functions.gtk_init_check && this.gtk.functions.gtk_init_check() === 1) {
+        return true;
+      }
+    } catch (_) {}
+    this.gtk = null;
+    return false;
   }
 
-  return handle || null;
-}
+  getHandle(nodeId: number): bigint | null {
+    return this.handles.get(nodeId) || null;
+  }
 
-function showGtkWindow(win: Window): void {
-  const gtk = getGtkDriver();
-  if (!gtk) return;
-  try {
-    const ffi = (process as any).__kilnNativeModules?.ffi;
-    let winHandle = nativeHandles.get(win.id);
+  createWindow(win: Window): bigint | null {
+    if (!this.gtk) return null;
+    let handle = this.handles.get(win.id);
+    if (handle) return handle;
+
+    try {
+      handle = this.gtk.functions.gtk_window_new();
+      this.handles.set(win.id, handle);
+      this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, win.title || "Kiln Window"));
+      this.gtk.functions.gtk_window_set_default_size(handle, win.width || 800, win.height || 600);
+
+      const closeCallbackPtr = this.gtk.lib.registerCallback(
+        { arguments: ["pointer", "pointer"], return: "i32" },
+        () => {
+          win.visible = false;
+          turnMailbox.post(win.id, "close");
+          return 0;
+        }
+      );
+      this.callbacks.set(win.id, [closeCallbackPtr]);
+      this.gtk.functions.g_signal_connect_data(handle, toCStr(this.ffi, "close-request"), closeCallbackPtr, 0n, 0n, 0);
+      return handle;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  setWindowContent(winHandle: bigint, childHandle: bigint): void {
+    if (!this.gtk) return;
+    try {
+      this.gtk.functions.gtk_widget_set_margin_top(childHandle, 24);
+      this.gtk.functions.gtk_widget_set_margin_bottom(childHandle, 24);
+      this.gtk.functions.gtk_widget_set_margin_start(childHandle, 24);
+      this.gtk.functions.gtk_widget_set_margin_end(childHandle, 24);
+      this.gtk.functions.gtk_window_set_child(winHandle, childHandle);
+    } catch (_) {}
+  }
+
+  showWindow(win: Window): void {
+    if (!this.gtk) return;
+    let winHandle = this.handles.get(win.id);
     if (!winHandle) {
-      winHandle = gtk.functions.gtk_window_new();
-      nativeHandles.set(win.id, winHandle);
-      gtk.functions.gtk_window_set_title(winHandle, toCStr(ffi, win.title || "Kiln Window"));
-      gtk.functions.gtk_window_set_default_size(winHandle, win.width || 800, win.height || 600);
+      winHandle = this.createWindow(win);
+    }
+    if (winHandle) {
+      if (win.content) {
+        const childHandle = this.createWidget(win.content);
+        if (childHandle) {
+          this.setWindowContent(winHandle, childHandle);
+        }
+      }
+      this.gtk.functions.gtk_window_present(winHandle);
+      this.pumpEvents();
+    }
+  }
 
+  closeWindow(win: Window): void {
+    const handle = this.handles.get(win.id);
+    if (handle && this.gtk) {
       try {
-        const closeCallbackPtr = gtk.lib.registerCallback(
-          { arguments: ["pointer", "pointer"], return: "i32" },
+        this.gtk.functions.gtk_window_close(handle);
+      } catch (_) {}
+    }
+  }
+
+  createWidget(node: Node): bigint | null {
+    if (!this.gtk) return null;
+    let handle = this.handles.get(node.id);
+    if (handle) return handle;
+
+    try {
+      const ffi = this.ffi;
+      const gtk = this.gtk;
+      const nodeCallbacks: bigint[] = [];
+
+      if (node.tag === "vstack") {
+        const spacing = node.getProperty("spacing") || 0;
+        handle = gtk.functions.gtk_box_new(1 /* GTK_ORIENTATION_VERTICAL */, spacing);
+      } else if (node.tag === "hstack") {
+        const spacing = node.getProperty("spacing") || 0;
+        handle = gtk.functions.gtk_box_new(0 /* GTK_ORIENTATION_HORIZONTAL */, spacing);
+      } else if (node.tag === "button") {
+        const label = node.getProperty("label") || "";
+        handle = gtk.functions.gtk_button_new_with_label(toCStr(ffi, String(label)));
+        const callbackPtr = gtk.lib.registerCallback(
+          { arguments: ["pointer", "pointer"], return: "void" },
           () => {
-            win.visible = false;
-            win.dispatchEvent("close");
+            turnMailbox.post(node.id, "click");
+          }
+        );
+        nodeCallbacks.push(callbackPtr);
+        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "clicked"), callbackPtr, 0n, 0n, 0);
+      } else if (node.tag === "text") {
+        const text = node.getProperty("text") || "";
+        handle = gtk.functions.gtk_label_new(toCStr(ffi, String(text)));
+      } else if (node.tag === "textinput") {
+        handle = gtk.functions.gtk_entry_new();
+        const val = node.getProperty("value");
+        if (val) gtk.functions.gtk_editable_set_text(handle, toCStr(ffi, String(val)));
+        const changedCallbackPtr = gtk.lib.registerCallback(
+          { arguments: ["pointer", "pointer"], return: "void" },
+          () => {
+            const text = fromCStr(ffi, gtk.functions.gtk_editable_get_text(handle));
+            turnMailbox.post(node.id, "input", text);
+            turnMailbox.post(node.id, "change", text);
+          }
+        );
+        nodeCallbacks.push(changedCallbackPtr);
+        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "changed"), changedCallbackPtr, 0n, 0n, 0);
+      } else if (node.tag === "slider") {
+        const min = node.getProperty("min") || 0;
+        const max = node.getProperty("max") || 100;
+        handle = gtk.functions.gtk_scale_new_with_range(0, min, max, 1.0);
+        const val = node.getProperty("value");
+        if (val !== undefined) gtk.functions.gtk_range_set_value(handle, Number(val));
+        const sliderCallbackPtr = gtk.lib.registerCallback(
+          { arguments: ["pointer", "pointer"], return: "void" },
+          () => {
+            const currentVal = gtk.functions.gtk_range_get_value(handle);
+            turnMailbox.post(node.id, "change", currentVal);
+          }
+        );
+        nodeCallbacks.push(sliderCallbackPtr);
+        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "value-changed"), sliderCallbackPtr, 0n, 0n, 0);
+      } else if (node.tag === "toggle") {
+        handle = gtk.functions.gtk_switch_new();
+        const chk = node.getProperty("checked");
+        if (chk) gtk.functions.gtk_switch_set_active(handle, 1);
+        const toggleCallbackPtr = gtk.lib.registerCallback(
+          { arguments: ["pointer", "i32", "pointer"], return: "i32" },
+          () => {
+            const active = gtk.functions.gtk_switch_get_active(handle) !== 0;
+            turnMailbox.post(node.id, "toggle", active);
             return 0;
           }
         );
-        gtk.functions.g_signal_connect_data(winHandle, toCStr(ffi, "close-request"), closeCallbackPtr, 0n, 0n, 0);
-      } catch (_) {}
+        nodeCallbacks.push(toggleCallbackPtr);
+        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "state-set"), toggleCallbackPtr, 0n, 0n, 0);
+      } else {
+        handle = gtk.functions.gtk_box_new(1, 0);
+      }
 
-      if (win.content) {
-        const childHandle = realizeGtkNode(gtk, ffi, win.content);
-        if (childHandle) {
-          try {
-            gtk.functions.gtk_widget_set_margin_top(childHandle, 24);
-            gtk.functions.gtk_widget_set_margin_bottom(childHandle, 24);
-            gtk.functions.gtk_widget_set_margin_start(childHandle, 24);
-            gtk.functions.gtk_widget_set_margin_end(childHandle, 24);
-          } catch (_) {}
-          gtk.functions.gtk_window_set_child(winHandle, childHandle);
+      if (handle) {
+        this.handles.set(node.id, handle);
+        if (nodeCallbacks.length > 0) {
+          this.callbacks.set(node.id, nodeCallbacks);
+        }
+        if (node.tag === "vstack" || node.tag === "hstack") {
+          for (let i = 0; i < node.children.length; i++) {
+            const childHandle = this.createWidget(node.children[i]);
+            if (childHandle) {
+              gtk.functions.gtk_box_append(handle, childHandle);
+            }
+          }
         }
       }
+    } catch (_) {
+      return null;
     }
-    gtk.functions.gtk_window_present(winHandle);
-    gtk.functions.g_main_context_iteration(0n, 0);
-  } catch (_) {}
-}
+    return handle || null;
+  }
 
-function closeGtkWindow(win: Window): void {
-  const handle = nativeHandles.get(win.id);
-  if (handle && gtkInstance) {
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void {
+    if (!this.gtk) return;
     try {
-      gtkInstance.functions.gtk_window_close(handle);
+      if (tag === "button" && name === "label") {
+        this.gtk.functions.gtk_button_set_label(handle, toCStr(this.ffi, String(value)));
+      } else if (tag === "text" && (name === "text" || name === "value")) {
+        this.gtk.functions.gtk_label_set_text(handle, toCStr(this.ffi, String(value)));
+      } else if (tag === "textinput" && name === "value") {
+        this.gtk.functions.gtk_editable_set_text(handle, toCStr(this.ffi, String(value)));
+      } else if (tag === "slider" && name === "value") {
+        this.gtk.functions.gtk_range_set_value(handle, Number(value));
+      } else if (tag === "toggle" && name === "checked") {
+        this.gtk.functions.gtk_switch_set_active(handle, value ? 1 : 0);
+      } else if (tag === "window" && name === "title") {
+        this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, String(value)));
+      }
     } catch (_) {}
   }
+
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
+    if (!this.gtk) return;
+    try {
+      this.gtk.functions.gtk_box_append(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  removeChild(parentHandle: bigint, childHandle: bigint): void {
+    if (!this.gtk) return;
+    try {
+      this.gtk.functions.gtk_box_remove(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
+    if (!this.gtk) return;
+    try {
+      this.gtk.functions.gtk_box_remove(parentHandle, childHandle);
+      this.gtk.functions.gtk_box_append(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  disposeWidget(node: Node): void {
+    const handle = this.handles.get(node.id);
+    if (handle) {
+      if (node.tag === "window" && this.gtk) {
+        try {
+          this.gtk.functions.gtk_window_close(handle);
+        } catch (_) {}
+      }
+      this.handles.delete(node.id);
+    }
+    this.callbacks.delete(node.id);
+  }
+
+  pumpEvents(): boolean {
+    if (!this.gtk) return false;
+    let hadEvents = false;
+    try {
+      while (this.gtk.functions.g_main_context_iteration(0n, 0) !== 0) {
+        hadEvents = true;
+      }
+    } catch (_) {}
+    return hadEvents;
+  }
+}
+
+export class AppKitDriver implements PlatformDriver {
+  readonly name = "appkit";
+  private initialized = false;
+  private handles = new Map<number, bigint>();
+
+  init(): boolean {
+    if (this.initialized) return true;
+    this.initialized = true;
+    return typeof process !== "undefined" && process.platform === "darwin";
+  }
+
+  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
+  createWindow(win: Window): bigint | null { return null; }
+  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
+  showWindow(win: Window): void { win.visible = true; }
+  closeWindow(win: Window): void { win.visible = false; }
+  createWidget(node: Node): bigint | null { return null; }
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  removeChild(parentHandle: bigint, childHandle: bigint): void {}
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  disposeWidget(node: Node): void { this.handles.delete(node.id); }
+  pumpEvents(): boolean { return false; }
+}
+
+export class Win32Driver implements PlatformDriver {
+  readonly name = "win32";
+  private initialized = false;
+  private handles = new Map<number, bigint>();
+
+  init(): boolean {
+    if (this.initialized) return true;
+    this.initialized = true;
+    return typeof process !== "undefined" && process.platform === "win32";
+  }
+
+  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
+  createWindow(win: Window): bigint | null { return null; }
+  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
+  showWindow(win: Window): void { win.visible = true; }
+  closeWindow(win: Window): void { win.visible = false; }
+  createWidget(node: Node): bigint | null { return null; }
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  removeChild(parentHandle: bigint, childHandle: bigint): void {}
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  disposeWidget(node: Node): void { this.handles.delete(node.id); }
+  pumpEvents(): boolean { return false; }
+}
+
+export class HeadlessDriver implements PlatformDriver {
+  readonly name = "headless";
+  private handles = new Map<number, bigint>();
+
+  init(): boolean { return true; }
+  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
+  createWindow(win: Window): bigint | null { return null; }
+  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
+  showWindow(win: Window): void { win.visible = true; }
+  closeWindow(win: Window): void { win.visible = false; }
+  createWidget(node: Node): bigint | null { return null; }
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  removeChild(parentHandle: bigint, childHandle: bigint): void {}
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
+  disposeWidget(node: Node): void { this.handles.delete(node.id); }
+  pumpEvents(): boolean { return false; }
+}
+
+let activeDriver: PlatformDriver | null = null;
+
+export function getActiveDriver(): PlatformDriver {
+  if (activeDriver) return activeDriver;
+
+  if (typeof process !== "undefined") {
+    if (process.platform === "linux") {
+      const gtk = new Gtk4Driver();
+      if (gtk.init()) {
+        activeDriver = gtk;
+        return activeDriver;
+      }
+    } else if (process.platform === "darwin") {
+      const appkit = new AppKitDriver();
+      if (appkit.init()) {
+        activeDriver = appkit;
+        return activeDriver;
+      }
+    } else if (process.platform === "win32") {
+      const win32 = new Win32Driver();
+      if (win32.init()) {
+        activeDriver = win32;
+        return activeDriver;
+      }
+    }
+  }
+
+  activeDriver = new HeadlessDriver();
+  return activeDriver;
 }
 
 export class Node {
@@ -216,6 +452,10 @@ export class Node {
 
   dispose(): void {
     nodeRegistry.delete(this.id);
+    const driver = getActiveDriver();
+    if (driver) {
+      driver.disposeWidget(this);
+    }
     for (let i = 0; i < this.children.length; i++) {
       this.children[i].dispose();
     }
@@ -247,12 +487,11 @@ export class Node {
     if (index >= 0) {
       this.children.splice(index, 1);
       child.parent = null;
-      const parentHandle = nativeHandles.get(this.id);
-      const childHandle = nativeHandles.get(child.id);
-      if (parentHandle && childHandle && gtkInstance) {
-        try {
-          gtkInstance.functions.gtk_box_remove(parentHandle, childHandle);
-        } catch (_) {}
+      const driver = getActiveDriver();
+      const parentHandle = driver.getHandle(this.id);
+      const childHandle = driver.getHandle(child.id);
+      if (parentHandle && childHandle) {
+        driver.removeChild(parentHandle, childHandle);
       }
       if (typeof G.__kilnGuiRemoveNode === "function") {
         G.__kilnGuiRemoveNode(this.id, child.id);
@@ -275,18 +514,40 @@ export class Node {
     } else {
       this.children.push(child);
     }
-    const parentHandle = nativeHandles.get(this.id);
-    if (parentHandle && gtkInstance) {
-      const ffi = (process as any).__kilnNativeModules?.ffi;
-      const childHandle = realizeGtkNode(gtkInstance, ffi, child);
+    const driver = getActiveDriver();
+    const parentHandle = driver.getHandle(this.id);
+    if (parentHandle) {
+      const childHandle = driver.createWidget(child);
       if (childHandle) {
-        try {
-          gtkInstance.functions.gtk_box_append(parentHandle, childHandle);
-        } catch (_) {}
+        const anchorHandle = anchor ? driver.getHandle(anchor.id) || null : null;
+        driver.insertChild(parentHandle, childHandle, anchorHandle);
       }
     }
     if (typeof G.__kilnGuiInsertNode === "function") {
       G.__kilnGuiInsertNode(this.id, child.id, anchor ? anchor.id : 0);
+    }
+  }
+
+  moveChild(child: Node, beforeAnchor: Node | null): void {
+    const oldIndex = this.children.indexOf(child);
+    if (oldIndex < 0) return;
+    this.children.splice(oldIndex, 1);
+    if (beforeAnchor) {
+      const newIndex = this.children.indexOf(beforeAnchor);
+      if (newIndex >= 0) {
+        this.children.splice(newIndex, 0, child);
+      } else {
+        this.children.push(child);
+      }
+    } else {
+      this.children.push(child);
+    }
+    const driver = getActiveDriver();
+    const parentHandle = driver.getHandle(this.id);
+    const childHandle = driver.getHandle(child.id);
+    if (parentHandle && childHandle) {
+      const anchorHandle = beforeAnchor ? driver.getHandle(beforeAnchor.id) || null : null;
+      driver.reorderChild(parentHandle, childHandle, anchorHandle);
     }
   }
 
@@ -296,10 +557,14 @@ export class Node {
       let eventName = name.slice(2).toLowerCase();
       if (eventName === "press") eventName = "click";
       this.addEventListener(eventName, value);
+      if (eventName === "change") {
+        this.addEventListener("input", value);
+      }
     }
-    const handle = nativeHandles.get(this.id);
+    const driver = getActiveDriver();
+    const handle = driver.getHandle(this.id);
     if (handle) {
-      updateGtkProperty(handle, this.tag, name, value);
+      driver.updateProperty(handle, this.tag, name, value);
     }
     if (typeof G.__kilnGuiSetProperty === "function") {
       G.__kilnGuiSetProperty(this.id, name, value);
@@ -331,6 +596,15 @@ export class Node {
   }
 
   dispatchEvent(event: string, ...args: any[]): void {
+    if ((event === "input" || event === "change") && typeof args[0] === "string") {
+      this.properties.value = args[0];
+    } else if (event === "change" && typeof args[0] === "number") {
+      this.properties.value = args[0];
+    } else if (event === "toggle" && typeof args[0] === "boolean") {
+      this.properties.checked = args[0];
+    } else if (event === "close") {
+      this.properties.visible = false;
+    }
     const list = this.listeners[event];
     if (list) {
       for (let i = 0; i < list.length; i++) {
@@ -387,18 +661,12 @@ export class Window extends Node {
     }
     if (node) {
       this.appendChild(node);
-      const winHandle = nativeHandles.get(this.id);
-      if (winHandle && gtkInstance) {
-        const ffi = (process as any).__kilnNativeModules?.ffi;
-        const childHandle = realizeGtkNode(gtkInstance, ffi, node);
+      const driver = getActiveDriver();
+      const winHandle = driver.getHandle(this.id);
+      if (winHandle) {
+        const childHandle = driver.createWidget(node);
         if (childHandle) {
-          try {
-            gtkInstance.functions.gtk_widget_set_margin_top(childHandle, 24);
-            gtkInstance.functions.gtk_widget_set_margin_bottom(childHandle, 24);
-            gtkInstance.functions.gtk_widget_set_margin_start(childHandle, 24);
-            gtkInstance.functions.gtk_widget_set_margin_end(childHandle, 24);
-            gtkInstance.functions.gtk_window_set_child(winHandle, childHandle);
-          } catch (_) {}
+          driver.setWindowContent(winHandle, childHandle);
         }
       }
     }
@@ -406,7 +674,8 @@ export class Window extends Node {
 
   show(): void {
     this.visible = true;
-    showGtkWindow(this);
+    const driver = getActiveDriver();
+    driver.showWindow(this);
     if (typeof G.__kilnGuiShowWindow === "function") {
       G.__kilnGuiShowWindow(this.id);
     }
@@ -414,7 +683,8 @@ export class Window extends Node {
 
   close(): void {
     this.visible = false;
-    closeGtkWindow(this);
+    const driver = getActiveDriver();
+    driver.closeWindow(this);
     if (typeof G.__kilnGuiCloseWindow === "function") {
       G.__kilnGuiCloseWindow(this.id);
     }
@@ -823,13 +1093,9 @@ const mailboxQueue: MailboxTurn[] = [];
 let isExecutingTurn = false;
 
 export const turnMailbox = {
-  pumpEvents(): void {
-    const gtk = getGtkDriver();
-    if (gtk) {
-      try {
-        while (gtk.functions.g_main_context_iteration(0n, 0) !== 0) {}
-      } catch (_) {}
-    }
+  pumpEvents(): boolean {
+    const driver = getActiveDriver();
+    return driver ? driver.pumpEvents() : false;
   },
   post(targetId: number, event: string, ...args: any[]): void {
     mailboxQueue.push({ targetId, event, args });
@@ -989,13 +1255,29 @@ export function onCleanup(fn: () => void): void {
 
 export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
   return new Promise((resolve) => {
-    const id = setInterval(() => {
-      turnMailbox.pumpEvents();
+    let currentInterval = intervalMs;
+    let timerId: any = null;
+
+    const tick = () => {
+      const hadEvents = turnMailbox.pumpEvents();
       if (win && !win.visible) {
-        clearInterval(id);
+        if (timerId !== null) clearInterval(timerId);
         resolve();
+        return;
       }
-    }, intervalMs);
+
+      // Adaptive idle regulation (ADR 0074 §4):
+      // If events occurred or turn queue was processed, keep fast 60fps pump (16ms).
+      // If idle, back off to 48ms (~20fps) to minimize CPU usage, ramping back up instantly upon interaction.
+      const targetInterval = hadEvents ? intervalMs : Math.min(intervalMs * 3, 50);
+      if (targetInterval !== currentInterval) {
+        currentInterval = targetInterval;
+        clearInterval(timerId);
+        timerId = setInterval(tick, currentInterval);
+      }
+    };
+
+    timerId = setInterval(tick, currentInterval);
   });
 }
 
@@ -1025,5 +1307,6 @@ export default {
   untrack,
   onCleanup,
   runLoop,
+  getActiveDriver,
 };
 
