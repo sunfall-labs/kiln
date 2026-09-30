@@ -1173,7 +1173,7 @@ pub(crate) fn call_native(
                 // Into the store `prototype_of` already looks in, so the two agree. A function
                 // is an object here too: setting its prototype is how a program gives a
                 // constructor inherited statics without `extends`.
-                record_prototype(&target, prototype.clone());
+                record_prototype_in(intrinsics, &target, prototype.clone());
             }
             target
         }
@@ -1187,7 +1187,7 @@ pub(crate) fn call_native(
                     message: "Cannot convert undefined or null to object".to_owned(),
                 });
             };
-            prototype_of(&object)
+            prototype_of_in(intrinsics, &object)
         }
         // Both read the clock, which lives on the machine and is virtual -- see ADR 0015.
         Native::SymbolFor | Native::SymbolKeyFor => {
@@ -1290,7 +1290,7 @@ pub(crate) fn call_native(
                     message: "Cannot convert undefined or null to object".to_owned(),
                 });
             }
-            prototype_of(receiver)
+            prototype_of_in(intrinsics, receiver)
         }
         Native::ProtoSetter => {
             if matches!(receiver, Value::Undefined | Value::Null) {
@@ -1303,7 +1303,12 @@ pub(crate) fn call_native(
             // is what keeps `x.__proto__ = 1` from being an error in ordinary code.
             if matches!(
                 prototype,
-                Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null
+                Value::Object(_)
+                    | Value::Function(_)
+                    | Value::Array(_)
+                    | Value::Native(_, _)
+                    | Value::Callback(_, _)
+                    | Value::Null
             ) {
                 // A change the object cannot take is a `TypeError`, exactly as it is through
                 // `Object.setPrototypeOf`: this accessor is Annex B's spelling of that
@@ -1311,7 +1316,7 @@ pub(crate) fn call_native(
                 if !prototype_may_change(intrinsics, receiver, &prototype) {
                     return Err(prototype_change_refused());
                 }
-                record_prototype(receiver, prototype);
+                record_prototype_in(intrinsics, receiver, prototype);
             }
             Value::Undefined
         }

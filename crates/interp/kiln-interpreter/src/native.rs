@@ -1653,6 +1653,14 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::TypedArray),
                 RealmId::PRIMARY,
             )),
+            // The shared constructor owns these methods; each concrete constructor inherits the
+            // same callable through its [[Prototype]] link and supplies itself as `this`.
+            (Self::TypedArrayIntrinsic, "of") => {
+                Some(Value::Native(Self::TypedArrayOf(TypedKind::Int8), RealmId::PRIMARY))
+            }
+            (Self::TypedArrayIntrinsic, "from") => {
+                Some(Value::Native(Self::TypedArrayFrom(TypedKind::Int8), RealmId::PRIMARY))
+            }
             (Self::TypedArrayConstructor(kind), "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::TypedArrayFor(kind)),
                 RealmId::PRIMARY,
@@ -1664,11 +1672,11 @@ impl Native {
             (Self::ProxyConstructor, "revocable") => {
                 Some(Value::Native(Self::ProxyRevocable, RealmId::PRIMARY))
             }
-            (Self::TypedArrayConstructor(kind), "of") => {
-                Some(Value::Native(Self::TypedArrayOf(kind), RealmId::PRIMARY))
+            (Self::TypedArrayConstructor(_), "of") => {
+                Some(Value::Native(Self::TypedArrayOf(TypedKind::Int8), RealmId::PRIMARY))
             }
-            (Self::TypedArrayConstructor(kind), "from") => {
-                Some(Value::Native(Self::TypedArrayFrom(kind), RealmId::PRIMARY))
+            (Self::TypedArrayConstructor(_), "from") => {
+                Some(Value::Native(Self::TypedArrayFrom(TypedKind::Int8), RealmId::PRIMARY))
             }
             (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
                 Some(Value::Number(kind.width() as f64))

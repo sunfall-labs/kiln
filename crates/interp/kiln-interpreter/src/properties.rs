@@ -18,7 +18,7 @@ pub(super) fn prototype_may_change(
     target: &Value,
     prototype: &Value,
 ) -> bool {
-    if same_value(&prototype_of(target), prototype) {
+    if same_value(&prototype_of_in(intrinsics, target), prototype) {
         return true;
     }
     if !is_extensible_target(intrinsics, target) {
@@ -42,9 +42,28 @@ pub(super) fn prototype_may_change(
         if matches!(link, Value::Proxy(_)) {
             return true;
         }
-        link = prototype_of(&link);
+        link = prototype_of_in(intrinsics, &link);
     }
     true
+}
+
+/// `prototype_of` plus the mutable link recorded for a native intrinsic in its realm store.
+pub(super) fn prototype_of_in(intrinsics: &Intrinsics, target: &Value) -> Value {
+    intrinsics
+        .prototype_override(target)
+        .unwrap_or_else(|| prototype_of(target))
+}
+
+pub(super) fn record_prototype_in(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    prototype: Value,
+) -> bool {
+    if intrinsic_key(target).is_some() {
+        intrinsics.record_prototype(target, prototype)
+    } else {
+        record_prototype(target, prototype)
+    }
 }
 
 /// How far the cycle check walks before it gives up and allows the write.
@@ -1383,6 +1402,27 @@ impl Default for Intrinsics {
 }
 
 impl Intrinsics {
+    /// A materialized intrinsic may have an ordinary mutable [[Prototype]] link of its own.
+    pub(super) fn prototype_override(&self, target: &Value) -> Option<Value> {
+        let identity = intrinsic_key(target)?;
+        self.entries
+            .borrow()
+            .iter()
+            .find(|(held, _)| *held == identity)
+            .and_then(|(_, data)| data.prototype().cloned())
+    }
+
+    /// Store a changed [[Prototype]] on the same per-realm record that owns intrinsic properties.
+    pub(super) fn record_prototype(&self, target: &Value, prototype: Value) -> bool {
+        let Some(identity) = intrinsic_key(target) else {
+            return false;
+        };
+        self.materialize(target);
+        let mut entries = self.entries.borrow_mut();
+        Self::data(&mut entries, identity).set_prototype(prototype);
+        true
+    }
+
     /// `realm`'s prototype for one error kind, built on first use.
     ///
     /// Per realm rather than per execution, because `e instanceof TypeError` compares it by
@@ -2816,6 +2856,18 @@ pub(super) fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
 }
 
 pub(super) fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
+    match target {
+        // `from` and `of` live on `%TypedArray%` and are inherited by all concrete constructors.
+        // `Uint8Array` alone receives the two TypeScript-installed byte codecs as own statics.
+        Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8), _) => {
+            return &["BYTES_PER_ELEMENT", "fromBase64", "fromHex"];
+        }
+        Value::Native(Native::TypedArrayConstructor(_), _) => {
+            return &["BYTES_PER_ELEMENT"];
+        }
+        Value::Native(Native::TypedArrayIntrinsic, _) => return &["from", "of"],
+        _ => {}
+    }
     let tabulated = intrinsic_tabulated_property_names(target);
     if !tabulated.is_empty() {
         return tabulated;
@@ -2939,16 +2991,9 @@ pub(super) fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'
             MEMBERS
         }
         Value::Native(Native::TypedArrayConstructor(kind), _) => match kind {
-            // A view's elements are bytes only here, which is why these two are `Uint8Array`'s
-            // alone and not `%TypedArray%`'s.
-            TypedKind::Uint8 => {
-                const MEMBERS: &[&str] = kiln_builtin_surface::members("Uint8Array");
-                MEMBERS
-            }
-            _ => {
-                const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArrayConstructor%");
-                MEMBERS
-            }
+            // The complete own-property list above is intentionally narrower than the surface
+            // table: from/of remain readable through `%TypedArray%`, but aren't own here.
+            _ => &[],
         },
         _ => &[],
     }

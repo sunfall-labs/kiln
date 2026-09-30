@@ -715,6 +715,11 @@ pub(super) fn inherited_object_property(
 /// the tables whose members are published by earlier, more specific arms -- `EventEmitter` and the
 /// two stream tables -- owning what they publish.
 pub(super) fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
+    if matches!(native, Native::TypedArrayConstructor(_)) && matches!(key, "from" | "of") {
+        // These are members of `%TypedArray%` inherited through the constructor's [[Prototype]],
+        // even though `Native::property` answers them for direct reads on concrete constructors.
+        return None;
+    }
     if matches!(native, Native::PrototypeOf(PrototypeTable::Array)) {
         if key == WellKnown::Unscopables.property_key() {
             return Some(Value::Null);

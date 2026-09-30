@@ -1,6 +1,14 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn inherited_native_property(&self, target: &Value, name: &str) -> Value {
+        match self.intrinsics.prototype_override(target) {
+            Some(Value::Null) => Value::Undefined,
+            Some(prototype) => self.property(&prototype, name),
+            None => native_inherited_property(&self.intrinsics, target, name),
+        }
+    }
+
     /// Resolve a VM-managed property without invoking a program-defined accessor.
     pub(super) fn property(&self, target: &Value, name: &str) -> Value {
         // Every intrinsic kind answers `constructor` with the built-in that makes it. Handled
@@ -231,7 +239,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
                 // Deleted, so the read carries on *up* the chain rather than back into the
                 // table that still has the answer the program removed.
-                Overridden::Absent => native_inherited_property(&self.intrinsics, target, name),
+                Overridden::Absent => self.inherited_native_property(target, name),
                 // An error constructor's `prototype` is a per-realm object rather than a table
                 // entry, so `native.property` has nothing to answer with and the read used to
                 // walk on up to `Function.prototype` and come back `undefined`. Only the named
@@ -261,11 +269,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             string_exotic(target, name).unwrap_or(Value::Undefined)
                         }
                         Some(Value::Undefined) => {
-                            native_inherited_property(&self.intrinsics, target, name)
+                            self.inherited_native_property(target, name)
                         }
                         Some(found) => found,
                         None => identity_property(target, name).unwrap_or_else(|| {
-                            native_inherited_property(&self.intrinsics, target, name)
+                            self.inherited_native_property(target, name)
                         }),
                     }
                 }

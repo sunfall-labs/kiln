@@ -2487,7 +2487,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(target, Value::Proxy(_)) {
                     return self.proxy_get_prototype_of(&target, instruction);
                 }
-                Ok(prototype_of(&target))
+                Ok(prototype_of_in(&self.intrinsics, &target))
             }
             Native::ReflectSetPrototypeOf => {
                 let target = self.reflect_target(arguments.first(), "setPrototypeOf")?;
@@ -2519,12 +2519,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `OrdinarySetPrototypeOf` step 3: the prototype it already has is a change that
                 // succeeds -- `Reflect.setPrototypeOf(Object.prototype, null)` is true, although
                 // that object's chain lives in its kind and could not take a different one.
-                if same_value(&prototype_of(&target), &prototype) {
+                if same_value(&prototype_of_in(&self.intrinsics, &target), &prototype) {
                     return Ok(Value::Boolean(true));
                 }
                 // A value with no store keeps its chain in its kind, so there is nowhere to put
                 // a new one. Reported as a refusal, which is what this operation exists to say.
-                Ok(Value::Boolean(record_prototype(&target, prototype)))
+                Ok(Value::Boolean(record_prototype_in(
+                    &self.intrinsics,
+                    &target,
+                    prototype,
+                )))
             }
             Native::ReflectGetOwnPropertyDescriptor => {
                 let target = self.reflect_target(arguments.first(), "getOwnPropertyDescriptor")?;

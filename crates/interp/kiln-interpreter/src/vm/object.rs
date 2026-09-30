@@ -433,7 +433,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_prototype_of(target, instruction);
         }
-        Ok(prototype_of(target))
+        Ok(prototype_of_in(&self.intrinsics, target))
     }
 
     /// `proxy.[[IsExtensible]]()`.
@@ -509,7 +509,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return Ok(prototype_of(target));
+            return Ok(prototype_of_in(&self.intrinsics, target));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
