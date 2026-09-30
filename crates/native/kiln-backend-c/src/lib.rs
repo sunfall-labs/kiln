@@ -5340,8 +5340,39 @@ fn render_module_positioned(
             }),
         };
     if has_live_direct_eval {
+        // Keep the source identity and the surviving IR location in the refusal. A module graph
+        // may contain hundreds of independently emitted files, and the graph worker otherwise
+        // reports only this generic feature name when one translation unit cannot be lowered.
+        let direct_eval_site = pruned
+            .code
+            .iter()
+            .enumerate()
+            .find_map(|(pc, instruction)| {
+                matches!(instruction, Instruction::DirectEval(_))
+                    .then_some(format!("entry instruction {pc}"))
+            })
+            .or_else(|| {
+                (0..pruned.functions.len()).find_map(|function_index| {
+                    if liveness.as_ref().is_some_and(|(reachable, _, _)| {
+                        !reachable.contains(&function_index)
+                    }) {
+                        return None;
+                    }
+                    pruned.functions[function_index]
+                        .code
+                        .iter()
+                        .enumerate()
+                        .find_map(|(pc, instruction)| {
+                            matches!(instruction, Instruction::DirectEval(_))
+                                .then_some(format!("function {function_index} instruction {pc}"))
+                        })
+                })
+            })
+            .unwrap_or_else(|| "unknown instruction".to_owned());
         return Err(EmitError::Unsupported {
-            feature: "a direct `eval` call in reachable native code".to_owned(),
+            feature: format!(
+                "a direct `eval` call in reachable native code at {diagnostic_site} ({direct_eval_site})"
+            ),
         });
     }
     if policy.compact || policy.omit_source {
