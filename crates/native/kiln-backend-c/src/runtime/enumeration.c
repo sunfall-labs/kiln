@@ -898,6 +898,41 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         kiln_object *object = kiln_c99_object_of(target);
         status = kiln_c99_append_enumerable_object_keys(object, built, 1);
         if (status != KILN_C99_OK) return status;
+    } else if (target.tag == KILN_VALUE_BUILTIN) {
+        /* A built-in constructor can have enumerable own statics even though its callable
+         * properties are not held in an ordinary object store. Walk its authoritative own-key
+         * list and use the same descriptor path as Object.getOwnPropertyDescriptor; this keeps
+         * `Object.keys(Buffer)` and `for (const key in Buffer)` aligned with the members the
+         * builtin actually exposes (notably Buffer's legacy enumerable statics). */
+        kiln_value all;
+        status = kiln_c99_builtin_own_keys(target.bits, &all);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < kiln_c99_array_of(all)->count; ++index) {
+            kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(all)->elements[index]);
+            kiln_value descriptor;
+            kiln_value enumerable;
+            int found = 0;
+            if (key.tag != KILN_VALUE_STRING) continue; /* for-in ignores symbols */
+            if (kiln_c99_same_name_key((const kiln_string *)key.ptr, "length") ||
+                kiln_c99_same_name_key((const kiln_string *)key.ptr, "name") ||
+                kiln_c99_same_name_key((const kiln_string *)key.ptr, "prototype")) {
+                /* The callable slots are own but never enumerable, and some builtin descriptor
+                 * paths intentionally leave their derived descriptors to the callable model. */
+                continue;
+            }
+            status = kiln_c99_describe_property_key(
+                host, target, (const kiln_string *)key.ptr, NULL, &descriptor, &found, depth,
+                thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!found) continue;
+            status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth,
+                                  thrown);
+            if (status != KILN_C99_OK) return status;
+            if (kiln_c99_truthy(enumerable)) {
+                status = kiln_c99_array_push(built, key);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
     } else if (target.tag == KILN_VALUE_REGEXP) {
         kiln_value store = kiln_c99_regexp_of(target)->properties;
         if (store.tag == KILN_VALUE_OBJECT) {
