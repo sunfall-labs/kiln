@@ -1118,6 +1118,9 @@ method_ids! {
     (KILN_C99_METHOD_SHARE_RAW, 544, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_IS_RAW, 545, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_WEAK_RAW, 546, Direct; 0, 0),
+    /* Existing primitive-wrapper valueOf methods need identities distinct from Object's. */
+    (KILN_C99_METHOD_BOOLEAN_VALUE_OF, 549, Generic; 0, 0),
+    (KILN_C99_METHOD_SYMBOL_VALUE_OF, 550, Generic; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -1569,7 +1572,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "toString",
      code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "valueOf",
-     code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+     code(KILN_C99_METHOD_SYMBOL_VALUE_OF)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "constructor",
      ctor(KILN_C99_BUILTIN_SYMBOL)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "@@toStringTag",
@@ -1630,7 +1633,7 @@ builtin_surface! {
 
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "constructor", ctor(KILN_C99_BUILTIN_BOOLEAN)),
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "toString", code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
-    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_BOOLEAN_VALUE_OF)),
 
     (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "constructor", ctor(KILN_C99_BUILTIN_BIGINT)),
     (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "toString", code(KILN_C99_METHOD_NUMBER_TO_STRING)),

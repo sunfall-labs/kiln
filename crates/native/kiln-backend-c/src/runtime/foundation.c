@@ -387,6 +387,9 @@ static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
                                       kiln_value *thrown);
 static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_new_primitive_wrapper(kiln_value *out, kiln_value primitive);
+static int kiln_c99_unwrap_primitive_wrapper(kiln_value receiver, uint8_t kind,
+                                             kiln_value *primitive);
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
                                     size_t key_len, kiln_value descriptor, int depth,
                                     kiln_value *thrown);

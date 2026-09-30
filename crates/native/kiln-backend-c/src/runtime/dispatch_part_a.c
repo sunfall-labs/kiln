@@ -1445,6 +1445,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
+    if (code == KILN_C99_METHOD_NUMBER_VALUE_OF || code == KILN_C99_METHOD_NUMBER_TO_STRING ||
+        code == KILN_C99_METHOD_NUMBER_TO_FIXED ||
+        code == KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL ||
+        code == KILN_C99_METHOD_NUMBER_TO_PRECISION) {
+        kiln_value primitive;
+        if (kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_NUMBER, &primitive) ||
+            kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_BIGINT, &primitive)) {
+            receiver = primitive;
+        } else if (receiver.tag != KILN_VALUE_NUMBER && receiver.tag != KILN_VALUE_BIGINT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Number.prototype method called on an incompatible receiver");
+        }
+    }
     if (code == KILN_C99_METHOD_INTL_SEGMENT_RAW)
         return kiln_c99_intl_segment_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_STRING_LOCALE_CASE_RAW) {

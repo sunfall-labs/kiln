@@ -55,19 +55,90 @@ static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, s
     return KILN_C99_OK;
 }
 
+static uint8_t kiln_c99_primitive_wrapper_kind(kiln_value primitive) {
+    switch (primitive.tag) {
+    case KILN_VALUE_STRING: return KILN_C99_WRAPPER_STRING;
+    case KILN_VALUE_NUMBER: return KILN_C99_WRAPPER_NUMBER;
+    case KILN_VALUE_BOOLEAN: return KILN_C99_WRAPPER_BOOLEAN;
+    case KILN_VALUE_SYMBOL: return KILN_C99_WRAPPER_SYMBOL;
+    case KILN_VALUE_BIGINT: return KILN_C99_WRAPPER_BIGINT;
+    default: return KILN_C99_WRAPPER_NONE;
+    }
+}
+
+static int kiln_c99_unwrap_primitive_wrapper(kiln_value receiver, uint8_t kind,
+                                             kiln_value *primitive) {
+    if (receiver.tag != KILN_VALUE_OBJECT) return 0;
+    kiln_object *object = kiln_c99_object_of(receiver);
+    if (object->primitive_wrapper_kind != kind) return 0;
+    *primitive = object->boxed_primitive;
+    return 1;
+}
+
+/* Primitive wrappers are ordinary realm-owned objects with one extra internal slot. String's
+ * indexed characters and length are materialized as ordinary own properties so existing property
+ * reflection, Object.assign and spread share the normal store machinery. */
+static int kiln_c99_new_primitive_wrapper(kiln_value *out, kiln_value primitive) {
+    static const uint64_t prototype_ids[] = {
+        0, KILN_C99_BUILTIN_STRING_PROTOTYPE, KILN_C99_BUILTIN_NUMBER_PROTOTYPE,
+        KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE,
+        KILN_C99_BUILTIN_BIGINT_PROTOTYPE
+    };
+    uint8_t kind = kiln_c99_primitive_wrapper_kind(primitive);
+    kiln_value built;
+    kiln_object *object;
+    int status;
+    if (kind == KILN_C99_WRAPPER_NONE) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_new_object(&built);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(built);
+    /* Wrapper-owned descriptors are exotic: making this one a dictionary lets the ordinary
+     * storage helpers carry their exact attributes without a wrapper-specific shape family. */
+    object->shape = NULL;
+    object->slots = NULL;
+    object->slot_capacity = 0;
+    object->primitive_wrapper_kind = kind;
+    kiln_c99_heap_store_value(object, &object->boxed_primitive, primitive);
+    kiln_c99_heap_store_value(object, &object->prototype,
+                              kiln_c99_builtin(prototype_ids[kind]));
+    if (kind == KILN_C99_WRAPPER_STRING) {
+        const kiln_string *text = primitive.ptr == NULL ? &kiln_c99_empty_string
+                                                         : (const kiln_string *)primitive.ptr;
+        size_t index;
+        char key[32];
+        for (index = 0; index < text->unit_len; ++index) {
+            int length = snprintf(key, sizeof key, "%zu", index);
+            kiln_value character = kiln_val_to_boundary(
+                kiln_c99_val_from_unit(kiln_string_unit_at(text, index)));
+            if (length < 0 || (size_t)length >= sizeof key) return KILN_C99_INVALID_ARGUMENT;
+            status = kiln_c99_put(NULL, built, key, (size_t)length, character, 0, NULL);
+            if (status != KILN_C99_OK) return status;
+            object = kiln_c99_object_of(built);
+            object->properties[object->count - 1].writable = 0;
+            object->properties[object->count - 1].configurable = 0;
+        }
+        status = kiln_c99_put(NULL, built, "length", 6,
+                              kiln_c99_number((double)text->unit_len), 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        object = kiln_c99_object_of(built);
+        object->properties[object->count - 1].enumerable = 0;
+        object->properties[object->count - 1].writable = 0;
+        object->properties[object->count - 1].configurable = 0;
+    }
+    *out = built;
+    return KILN_C99_OK;
+}
+
 /* `Object(x)`, which is `new Object(x)`: nothing becomes an empty object and a reference is
  * handed straight back -- the identity `Object(o) === o` is what makes it usable as a coercion.
- * A primitive would become a wrapper object, which this backend does not have, so it refuses
- * rather than handing back the primitive and calling it an object. */
+ * Primitives become ordinary wrapper objects with their matching prototype and internal slot. */
 static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc) {
     kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
     if (subject.tag == KILN_VALUE_UNDEFINED || subject.tag == KILN_VALUE_NULL) {
         return kiln_c99_new_object(out);
     }
-    if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
-        subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
-        KILN_C99_REFUSE("Object() of a primitive this backend has no wrapper for");
-    }
+    if (kiln_c99_primitive_wrapper_kind(subject) != KILN_C99_WRAPPER_NONE)
+        return kiln_c99_new_primitive_wrapper(out, subject);
     *out = subject;
     return KILN_C99_OK;
 }

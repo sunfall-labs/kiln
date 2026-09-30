@@ -163,16 +163,18 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
                                              callee.bits == KILN_C99_BUILTIN_BOOLEAN)) {
-        /* `new String("hi")` is a *wrapper object*, not a string: `typeof` says "object", it is
-         * never `===` its own contents, and `new Boolean(false)` is truthy. This backend has no
-         * wrapper objects, and it used to answer with the primitive -- the same thing `String(x)`
-         * gives -- which read as though the constructor had worked.
-         *
-         * That was safe only while the interpreter did the same, and it no longer is: the
-         * interpreter has wrappers now, so the shared answer became a silent disagreement about
-         * `typeof`, `===` and truthiness all at once. A refusal is the honest state until the
-         * object model grows a wrapper, because there is no primitive that behaves like one. */
-        KILN_C99_REFUSE("a primitive wrapper constructor");
+        kiln_value primitive;
+        /* String(symbol) is permitted, but `new String(symbol)` cannot erase the Symbol's type
+         * and still be a String wrapper. Number and Boolean use their call conversion unchanged. */
+        if (callee.bits == KILN_C99_BUILTIN_STRING && argc > 0 &&
+            args[0].tag == KILN_VALUE_SYMBOL) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot convert a Symbol value to a string");
+        }
+        status = kiln_c99_call(host, &primitive, callee, kiln_c99_undefined(), args, argc,
+                               depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_new_primitive_wrapper(result, primitive);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_REGEXP) {
         /* `new RegExp(source, flags)` builds exactly what `RegExp(source, flags)` builds -- the

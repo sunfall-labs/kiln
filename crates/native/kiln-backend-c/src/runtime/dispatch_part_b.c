@@ -855,11 +855,17 @@
              * recognises an error it did not construct, across realms where `instanceof` cannot
              * answer. `[object Object]` was the answer before, in both engines; the interpreter
              * was fixed first and this is the other half. */
-            case KILN_VALUE_OBJECT:
-                tag = kiln_c99_object_of(receiver)->arguments_brand ? "Arguments"
-                      : kiln_c99_object_of(receiver)->error_brand   ? "Error"
-                                                                    : "Object";
+            case KILN_VALUE_OBJECT: {
+                kiln_object *object = kiln_c99_object_of(receiver);
+                tag = object->primitive_wrapper_kind == KILN_C99_WRAPPER_STRING ? "String"
+                      : object->primitive_wrapper_kind == KILN_C99_WRAPPER_NUMBER ? "Number"
+                      : object->primitive_wrapper_kind == KILN_C99_WRAPPER_BOOLEAN ? "Boolean"
+                      : object->primitive_wrapper_kind == KILN_C99_WRAPPER_SYMBOL ? "Symbol"
+                      : object->primitive_wrapper_kind == KILN_C99_WRAPPER_BIGINT ? "BigInt"
+                      : object->arguments_brand ? "Arguments"
+                      : object->error_brand ? "Error" : "Object";
                 break;
+            }
             default: tag = "Object"; break;
             }
             if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
@@ -910,7 +916,32 @@
             }
             *result = receiver;
             return KILN_C99_OK;
+        case KILN_C99_METHOD_BOOLEAN_VALUE_OF:
+            if (receiver.tag == KILN_VALUE_BOOLEAN) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
+            if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_BOOLEAN, result))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Boolean.prototype.valueOf called on an incompatible receiver");
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_SYMBOL_VALUE_OF:
+            if (receiver.tag == KILN_VALUE_SYMBOL) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
+            if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_SYMBOL, result))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Symbol.prototype.valueOf called on an incompatible receiver");
+            return KILN_C99_OK;
         case KILN_C99_METHOD_PRIMITIVE_TO_STRING:
+            if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_BOOLEAN,
+                                                  &receiver) &&
+                !kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_SYMBOL,
+                                                  &receiver) &&
+                receiver.tag == KILN_VALUE_OBJECT)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Primitive.prototype.toString called on an incompatible receiver");
             *result = kiln_c99_text(receiver);
             return KILN_C99_OK;
         case KILN_C99_METHOD_DATE_PARSE: {
@@ -2272,7 +2303,10 @@
     }
     if ((groups & KILN_C99_GROUP_STRING_DISPATCH)) {
         if (receiver.tag != KILN_VALUE_STRING) {
-            KILN_C99_REFUSE("a String.prototype method on a receiver that is not a string");
+            if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_STRING,
+                                                  &receiver))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "String.prototype method called on an incompatible receiver");
         }
         return kiln_c99_invoke_string_method(host, result, code, receiver, args, argc, depth,
                                              thrown);

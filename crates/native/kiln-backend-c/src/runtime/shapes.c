@@ -1406,6 +1406,8 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->candidate_properties = 0;
     object->candidate_slots = 0;
     object->candidate_elements = 0;
+    object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -1750,6 +1752,8 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->candidate_properties = 0;
     object->candidate_slots = 0;
     object->candidate_elements = 0;
+    object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

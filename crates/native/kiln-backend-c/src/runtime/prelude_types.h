@@ -1141,6 +1141,15 @@ typedef struct kiln_sealed_values {
  * their layout or the shape's slot numbering. See realms issue 08's same-binary RSS comparison. */
 #define KILN_C99_INLINE_SLOTS 8
 
+enum {
+    KILN_C99_WRAPPER_NONE = 0,
+    KILN_C99_WRAPPER_STRING = 1,
+    KILN_C99_WRAPPER_NUMBER = 2,
+    KILN_C99_WRAPPER_BOOLEAN = 3,
+    KILN_C99_WRAPPER_SYMBOL = 4,
+    KILN_C99_WRAPPER_BIGINT = 5
+};
+
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
@@ -1221,6 +1230,11 @@ typedef struct kiln_object {
     uint32_t candidate_slots;
     /* Provenance for a shaped object's separately allocated numeric elements. */
     uint32_t candidate_elements;
+    /* Boxed primitive for String/Number/Boolean/Symbol/BigInt wrapper objects. The wrapper is
+     * still an ordinary object for identity, properties and `typeof`; only the matching
+     * prototype methods and ToPrimitive inspect this slot. */
+    uint8_t primitive_wrapper_kind;
+    kiln_value boxed_primitive;
 } kiln_object;
 
 typedef struct kiln_c99_candidate_object_properties {

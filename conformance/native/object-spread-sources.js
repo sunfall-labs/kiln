@@ -97,8 +97,8 @@ console.log('proxy filtered  ', JSON.stringify({ ...inventive }));
 // A string's indices are own enumerable properties, so they are what a spread of one produces.
 // `length` is not among them, for the same reason a function's is not.
 console.log('string          ', JSON.stringify({ ...'ab' }));
-// A boxed String is deliberately absent: `new String` is a native gap of its own, and a probe
-// that refuses on a neighbouring feature stops measuring the one it was written for.
+// A boxed String spreads its indexed own properties just as a string primitive does.
+console.log('boxed string    ', JSON.stringify({ ...new String('ab') }));
 
 // Nullish contributes nothing rather than throwing, which is the one place object spread is more
 // forgiving than array spread. A number, a boolean and a symbol have nothing of their own.

@@ -415,6 +415,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
     case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: return "toLocaleString";
     case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_BOOLEAN_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_SYMBOL_VALUE_OF: return "valueOf";
     case KILN_C99_METHOD_COLLECTION_GET: return "get";
     case KILN_C99_METHOD_COLLECTION_SET: return "set";
     case KILN_C99_METHOD_COLLECTION_ADD: return "add";

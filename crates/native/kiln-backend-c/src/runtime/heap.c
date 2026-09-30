@@ -4297,6 +4297,7 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
             object->module_namespace || object->arguments_brand || object->error_brand ||
             object->layout_token != 0 || object->accessor_count != 0 ||
             object->read_only_seen || object->frozen || object->not_extensible ||
+            object->primitive_wrapper_kind != KILN_C99_WRAPPER_NONE ||
             (object->prototype.tag != KILN_VALUE_UNDEFINED &&
              object->prototype.tag != KILN_VALUE_NULL)) return 0;
         if (object->elements != NULL || object->element_count != 0 ||
@@ -5621,7 +5622,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             kiln_c99_graph_in_batch(heap, chunks, count, object->slots) ||
             kiln_c99_graph_in_batch(heap, chunks, count, object->elements) ||
             kiln_c99_graph_in_batch(heap, chunks, count, object->sealed) ||
-            kiln_c99_graph_value_in_batch(heap, chunks, count, &object->prototype))
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &object->prototype) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &object->boxed_primitive))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         if (object->count > object->capacity || object->element_count > object->element_capacity ||
             (object->count != 0 && object->properties == NULL) ||
@@ -7920,6 +7922,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_object *object = (kiln_object *)payload;
         kiln_c99_gc_trace_object_properties(heap, object);
         kiln_c99_gc_mark_value(heap, &object->prototype);
+        kiln_c99_gc_mark_value(heap, &object->boxed_primitive);
         break;
     }
     case KILN_GC_CLOSURE: {
