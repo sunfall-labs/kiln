@@ -1608,7 +1608,7 @@
                     status = kiln_c99_describe_property_key(host, args[0], name, canonical,
                                                             &descriptor, &found, depth, thrown);
                     if (status == KILN_C99_OK && found)
-                        status = kiln_c99_put_mode_key(host, built, name, canonical, descriptor, 0, 0,
+                        status = kiln_c99_put_mode_key(host, built, name, canonical, descriptor, 0,
                                                   depth, thrown);
                 }
                 if (status == KILN_C99_OK) *result = built;
