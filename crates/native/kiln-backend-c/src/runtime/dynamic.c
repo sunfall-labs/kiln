@@ -1836,7 +1836,6 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
     if (lex.curr.kind == KILN_DYN_LPAREN) {
         kiln_dyn_lexer_next(&lex);
         if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
-            status = KILN_C99_CONTROL_ERROR;
             goto direct_eval_unsupported;
         }
         kiln_dyn_token_free(&lex.curr);
@@ -1845,15 +1844,14 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
         lex.len = source_len;
         kiln_dyn_lexer_next(&lex);
     } else if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
-        status = KILN_C99_CONTROL_ERROR;
         goto direct_eval_unsupported;
     }
     status = kiln_dyn_eval_expr(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
                                 depth, &completion, thrown);
     if (status == KILN_C99_OK && lex.curr.kind != KILN_DYN_EOF)
-        status = KILN_C99_CONTROL_ERROR;
+        goto direct_eval_unsupported;
     if (status == KILN_C99_OK && completion.tag != KILN_VALUE_FUNCTION)
-        status = KILN_C99_CONTROL_ERROR;
+        goto direct_eval_unsupported;
     if (status == KILN_C99_OK) {
         if (strict_context) kiln_c99_closure_of(completion)->strict = 1;
         *out = completion;
@@ -1862,9 +1860,9 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
     goto direct_eval_done;
 direct_eval_unsupported:
     kiln_dyn_token_free(&lex.curr);
-    kiln_c99_note_refusal("native direct eval", 0,
-                          "unsupported direct eval source (expected function expression)",
-                          (size_t)kiln_c99_diagnostic_active_depth);
+    kiln_dyn_scope_destroy(&scope);
+    free(source_owned);
+    KILN_C99_REFUSE("unsupported direct eval source (expected function expression)");
 direct_eval_done:
     kiln_dyn_scope_destroy(&scope);
     free(source_owned);
