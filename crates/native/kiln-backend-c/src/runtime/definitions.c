@@ -899,6 +899,12 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
         int is_name = kiln_c99_same_name_key(view, "name");
         if (is_name || kiln_c99_same_name_key(view, "length")) {
+            if (closure != NULL &&
+                kiln_c99_store_has(kiln_c99_closure_store(closure), view, canonical)) {
+                return kiln_c99_describe_property_key(
+                    host, kiln_c99_closure_store(closure), view, canonical, out, found,
+                    depth, thrown);
+            }
             kiln_value value = closure == NULL ? kiln_c99_undefined() : is_name
                                    ? (closure->name == NULL
                                           ? kiln_c99_from_units(NULL, 0)

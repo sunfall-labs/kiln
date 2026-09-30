@@ -645,6 +645,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
+            /* `name` and `length` begin as closure metadata, but both are configurable own
+             * properties. A program can redefine either in the callable's store, and reads must
+             * then observe that descriptor just like any other own property. */
+            return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
+                                    depth, thrown);
+        }
         if (kiln_c99_same_name_key(key, "prototype") &&
             !closure->arrow &&
             (!closure->asynchronous || closure->async_generator) &&

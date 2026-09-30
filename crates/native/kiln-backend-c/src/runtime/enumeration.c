@@ -698,6 +698,14 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
             return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_DATE) {
+        /* A Date's timestamp is its internal slot; properties created by the program live in its
+         * separate ordinary store and can be deleted there like any other configurable own key. */
+        kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+                   ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown)
+                   : KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
         /* A member the program wrote onto a built-in lives in the built-in's store, and deleting
          * it puts the table's member back in view (`delete Float64Array.prototype.map` after a
