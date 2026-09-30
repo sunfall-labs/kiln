@@ -1184,15 +1184,23 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (explicit_name) {
             name_value = kiln_c99_copy_text(fn_name, fn_name_len);
             if (name_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            kiln_c99_gc_keep_alive(&name_value);
             closure_name = (const kiln_string *)name_value.ptr;
         }
         upvals[0] = kiln_c99_copy_text(&lex->src[pstart], plen);
+        kiln_c99_gc_keep_alive(&upvals[0]);
         upvals[1] = kiln_c99_copy_text(&lex->src[bstart], blen);
+        kiln_c99_gc_keep_alive(&upvals[0]);
+        kiln_c99_gc_keep_alive(&upvals[1]);
         kiln_value env_obj;
         int status = kiln_c99_new_object(&env_obj);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&env_obj);
         status = kiln_dyn_capture_environment(host, scope, env_obj, 0, thrown);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&upvals[0]);
+        kiln_c99_gc_keep_alive(&upvals[1]);
+        kiln_c99_gc_keep_alive(&env_obj);
         upvals[2] = env_obj;
         kiln_val val_upvals[3] = {
             kiln_val_from_boundary(upvals[0]),
