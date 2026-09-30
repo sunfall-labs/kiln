@@ -1640,6 +1640,22 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
                     *out = array->elements[slot];
                     return KILN_C99_OK;
                 }
+            } else if (gc_kind == KILN_GC_TYPED_ARRAY) {
+                const kiln_typed_array *view = (const kiln_typed_array *)ptr;
+                const kiln_typed_buffer *buffer = view->buffer;
+                /* Number indices on ordinary fixed numeric views need no property-key string.
+                 * Keep BigInt allocation, shared storage, detached/out-of-bounds views
+                 * and all coercible keys on the authoritative integer-indexed exotic path. */
+                if (buffer != NULL && !buffer->detached && buffer->shared == NULL &&
+                    !kiln_c99_typed_kind_is_bigint(view->kind) &&
+                    slot < view->length && view->byte_offset <= buffer->byte_length) {
+                    size_t width = kiln_c99_typed_width(view->kind);
+                    size_t remaining = buffer->byte_length - view->byte_offset;
+                    if (slot < remaining / width) {
+                        *out = kiln_c99_val_from_double(kiln_typed_load(view, slot));
+                        return KILN_C99_OK;
+                    }
+                }
             } else if (gc_kind == KILN_GC_OBJECT) {
                 const kiln_object *object = (const kiln_object *)ptr;
                 if (object->elements != NULL && slot < object->element_count && object->elements[slot] != KILN_VAL_HOLE) {
