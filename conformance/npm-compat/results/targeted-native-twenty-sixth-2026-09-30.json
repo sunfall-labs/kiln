@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "coverage": "14 focused native probes; invalid builds are not compatibility verdicts",
+  "source_commit": "48c6e15be30d3687edd6d6452a54a107747689f5",
+  "kiln_sha256": "6e3b39077e1a43d393d05731a5add1495c02cb450ebdc6f7211e2e01ee02095f",
+  "counts": {
+    "matched": 0,
+    "refused": 0,
+    "diverged": 1,
+    "invalid": 13
+  },
+  "blockers": [
+    "Dynamic Function coercion references undefined KILN_C99_HINT_STRING; corrected in 14e3e4e8",
+    "require.resolve-only target still required in native graph validation",
+    "Literal direct eval exposes require(util) without runtime request metadata"
+  ],
+  "raw_log": "target/npm-compat-evidence/bootstrap-native-twenty-sixth.log",
+  "full_npm_coverage": false
+}
