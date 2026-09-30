@@ -25,6 +25,30 @@ const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
         "node:fs",
         "readFileSync",
     ),
+    (
+        "KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC",
+        "node:fs",
+        "writeFileSync",
+    ),
+    ("KILN_C99_METHOD_NODE_FS_MKDIR_SYNC", "node:fs", "mkdirSync"),
+    ("KILN_C99_METHOD_NODE_FS_STAT_SYNC", "node:fs", "statSync"),
+    ("KILN_C99_METHOD_NODE_FS_LSTAT_SYNC", "node:fs", "lstatSync"),
+    (
+        "KILN_C99_METHOD_NODE_FS_READDIR_SYNC",
+        "node:fs",
+        "readdirSync",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_REALPATH_SYNC",
+        "node:fs",
+        "realpathSync",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_UNLINK_SYNC",
+        "node:fs",
+        "unlinkSync",
+    ),
+    ("KILN_C99_METHOD_NODE_FS_RMDIR_SYNC", "node:fs", "rmdirSync"),
 ];
 
 const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {

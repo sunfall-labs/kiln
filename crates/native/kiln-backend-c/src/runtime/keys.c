@@ -162,6 +162,46 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    {
+        kiln_typed_kind kind;
+        if (kiln_c99_builtin_typed_kind(builtin, &kind)) {
+            /* Concrete typed-array constructors own the standard callable properties and their
+             * element-width constant. Their `from`, `of`, and species behavior is inherited from
+             * `%TypedArray%`, so do not report those as own keys here. */
+            status = kiln_c99_new_array(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("BYTES_PER_ELEMENT", 17));
+            if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+            if (status == KILN_C99_OK) *out = built;
+            return status;
+        }
+    }
+    if (builtin >= KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE &&
+        builtin <= KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME) {
+        static const char *const names[] = {"length", "name", "prototype", "from", "compare"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        if (builtin == KILN_C99_BUILTIN_TEMPORAL_INSTANT) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("fromEpochMilliseconds", 21));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("fromEpochNanoseconds", 20));
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (builtin == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
         /* The shared iterator prototype is an intrinsic rather than a table-driven namespace.
          * Its methods are dispatched by `kiln_c99_iterator_prototype_method`, and the symbol
@@ -222,11 +262,9 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         return status;
     }
     if (!kiln_c99_is_namespace(builtin)) {
-        /* A constructor whose statics are not table-driven -- the typed-array constructors and
-         * `Temporal`'s eight types -- still cannot list itself, because its members are computed
-         * from the kind rather than declared. A short list a caller could not tell from a
-         * complete one is worse than a refusal, so it stays a refusal and lands in the drift
-         * test's backlog by name. */
+        /* A constructor with a genuinely unmodeled kind-specific static surface cannot claim a
+         * complete own-key list. Keep the refusal until its reads and descriptors have an
+         * equally authoritative owner. */
         KILN_C99_REFUSE("own keys of a built-in whose statics are computed from its kind rather "
                         "than declared");
     }

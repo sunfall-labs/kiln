@@ -5,3 +5,6 @@ console.log(Reflect.ownKeys(Function).join(","));
 console.log(Function.length, Function.name, typeof Function.prototype);
 console.log(String.prototype.indexOf.length, "abc".indexOf.length);
 console.log(BigInt.isBuffer === undefined);
+console.log(Reflect.ownKeys(Uint8Array).join(","));
+console.log(Object.getOwnPropertyNames(Float64Array).join(","));
+console.log(Object.getOwnPropertyDescriptor(Uint8Array, "BYTES_PER_ELEMENT").value);
