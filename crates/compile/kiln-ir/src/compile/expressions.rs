@@ -163,10 +163,8 @@ impl super::Compiler {
                 self.expression(inline);
                 let end = self.emit_jump(Instruction::Jump(0));
                 self.patch_jump(fallback);
-                self.push_constant(Constant::Undefined);
                 self.expression(argument);
-                self.code.push(Instruction::NewArray { count: 1 });
-                self.code.push(Instruction::Apply);
+                self.code.push(Instruction::Call { argc: 1 });
                 self.patch_jump(end);
             }
             ExpressionKind::This => self.load_this(),
