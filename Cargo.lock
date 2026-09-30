@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-module-resolver"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "oxc_resolver",
  "serde_json",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-test262"
-version = "0.1.0"
+version = "0.0.0"
 
 [[package]]
 name = "kiln-url"
