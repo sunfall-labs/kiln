@@ -298,6 +298,7 @@ typedef enum {
     KILN_DYN_NULLISH,
     KILN_DYN_NOT,
     KILN_DYN_DOT,
+    KILN_DYN_ELLIPSIS,
     KILN_DYN_COMMA,
     KILN_DYN_COLON,
     KILN_DYN_QUESTION,
@@ -704,7 +705,16 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         }
         lex->curr.kind = KILN_DYN_PERCENT;
         return;
-    case '.': lex->curr.kind = KILN_DYN_DOT; return;
+    case '.':
+        if (lex->pos + 1 < lex->len && lex->src[lex->pos] == '.' &&
+            lex->src[lex->pos + 1] == '.') {
+            lex->pos += 2;
+            lex->curr.kind = KILN_DYN_ELLIPSIS;
+            lex->curr.len = 3;
+        } else {
+            lex->curr.kind = KILN_DYN_DOT;
+        }
+        return;
     case ',': lex->curr.kind = KILN_DYN_COMMA; return;
     case ':': lex->curr.kind = KILN_DYN_COLON; return;
     case ';': lex->curr.kind = KILN_DYN_SEMI; return;
@@ -918,7 +928,24 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_dyn_lexer_next(lex);
         int status = kiln_c99_new_object(out);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(out);
         while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+            if (lex->curr.kind == KILN_DYN_ELLIPSIS) {
+                kiln_value source;
+                kiln_dyn_lexer_next(lex);
+                status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                            &source, thrown);
+                if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(&source);
+                status = kiln_c99_spread_object(host, *out, source, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (lex->curr.kind == KILN_DYN_COMMA) {
+                    kiln_dyn_lexer_next(lex);
+                } else {
+                    break;
+                }
+                continue;
+            }
             const char *key_name = NULL;
             size_t key_len = 0;
             if (kiln_dyn_is_ident_name(lex->curr.kind) || lex->curr.kind == KILN_DYN_STR) {
