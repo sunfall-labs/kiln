@@ -1025,6 +1025,34 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
 KILN_DEF_TIMSORT(val, kiln_val, kiln_c99_sort_context, kiln_c99_sort_compare_val)
 KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
 
+/* The language has a distinct prototype object for Map and Set iterators. Keep one of each in
+ * the realm so Object.getPrototypeOf can distinguish them from plain objects and so repeated
+ * iterators share the same identity. Their iteration state remains on the instance. */
+static int kiln_c99_collection_iterator_prototype(int is_map, kiln_value *out) {
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    kiln_value *slot = is_map ? &realm->map_iterator_prototype : &realm->set_iterator_prototype;
+    int status;
+    if (slot->tag == KILN_VALUE_OBJECT) {
+        *out = *slot;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    *slot = *out;
+    status = kiln_c99_set_prototype(*out, kiln_c99_builtin(KILN_C99_BUILTIN_ITERATOR_PROTOTYPE));
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_define_method(*out, "next", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT));
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, *out, "@@toStringTag", 13,
+                              kiln_c99_copy_text(is_map ? "Map Iterator" : "Set Iterator",
+                                                 is_map ? 12 : 12),
+                              0, NULL);
+    }
+    return status;
+}
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {

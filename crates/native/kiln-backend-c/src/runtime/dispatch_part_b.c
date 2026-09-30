@@ -109,7 +109,15 @@
                             (code == KILN_C99_METHOD_COLLECTION_SELF && collection->is_map);
                 int wants_keys = code == KILN_C99_METHOD_COLLECTION_KEYS;
                 kiln_value iterator;
+                kiln_value prototype;
                 status = kiln_c99_new_object(&iterator);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_collection_iterator_prototype(collection->is_map,
+                                                                    &prototype);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_set_prototype(iterator, prototype);
+                }
                 if (status == KILN_C99_OK) {
                     status = kiln_c99_put(host, iterator, "@@iterated", 10, receiver, depth,
                                           thrown);
@@ -122,11 +130,6 @@
                     /* 0 the value, 1 the key, 2 a `[key, value]` pair. */
                     status = kiln_c99_put(host, iterator, "@@part", 6,
                                           kiln_c99_number(pairs ? 2.0 : (wants_keys ? 1.0 : 0.0)),
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, iterator, "next", 4,
-                                          kiln_c99_method(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT),
                                           depth, thrown);
                 }
                 if (status == KILN_C99_OK) {

@@ -1017,6 +1017,9 @@ typedef struct kiln_c99_realm_state {
      * built on first construction. */
     kiln_value native_prototypes[sizeof kiln_c99_native_constructors /
                                  sizeof *kiln_c99_native_constructors];
+    /* Map and Set iterators use distinct realm-owned prototype identities. */
+    kiln_value map_iterator_prototype;
+    kiln_value set_iterator_prototype;
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
     kiln_c99_unit_block **units;
     size_t unit_capacity;

@@ -1631,6 +1631,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number(target.bits == KILN_C99_METHOD_REGEXP_TO_STRING ? 0.0 : 1.0);
             return KILN_C99_OK;
         }
+        /* The own slots above are synthetic (name/length and supported prototype); whatever the
+         * program added to Function.prototype is inherited by every native function as well. */
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host,
+                                                       KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         KILN_C99_ABSENT("not the native method's name, supported length or constructor prototype, "
                         "nor a property in its own or callable-prototype stores",
                         out);
