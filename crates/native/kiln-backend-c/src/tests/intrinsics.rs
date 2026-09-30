@@ -504,6 +504,17 @@ int main(void) {
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }
 
+"#
+    .to_string();
+    let run = run_with_main(&generated, &wrapper, "symbol-registry");
+    assert!(
+        run.status.success(),
+        "native symbol registry failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn unique_symbols_are_collected_but_property_keys_keep_their_identity() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
@@ -561,16 +572,6 @@ int main(void) {
     assert!(
         run.status.success(),
         "unique symbol weak lifetime fixture failed ({:?}): {}",
-        run.status.code(),
-        String::from_utf8_lossy(&run.stderr)
-    );
-}
-"#
-    .to_string();
-    let run = run_with_main(&generated, &wrapper, "symbol-registry");
-    assert!(
-        run.status.success(),
-        "native symbol registry failed ({:?}): {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
