@@ -615,3 +615,33 @@ and its `resolve("console")` guard; the shape of the `Value` and `HostValue` enu
   module initialisation does not itself drive a generator or reach the timer path. Not verified.
 - The Effect "marginal requirement" table is read off the manifest and the twelve source files,
   not off a run. Nothing in `conformance/` has ever run under kiln.
+
+---
+
+## 8. Remeasured 2026-09-30 — this ladder is done
+
+Everything above was written 2026-08-29 against a compiler with no heap and no calls.
+Re-taken with `./target/debug/kiln --one-shot test` (binary built 2026-09-29 21:41,
+one commit behind a moving `main`; see `AGENTS.md` on clock readings):
+
+- `conformance/guard`: **20/20 pass**, live. Every predicted unlock in §4 came true;
+  the ladder's running totals now read 20/20, not 0/20.
+- `conformance/effect`: `results/baseline.json` (recorded 2026-09-06, runner
+  `kiln-cli 0.0.0`) has **01–12 pass**, 13–15 `needs-bundle`. A live run in this
+  checkout skips 15/15 — `generated bundle is missing, stale, or unverified;
+  rebuild it with conformance/effect/build.sh` — so the recorded 12 stands and the
+  live tree needs a bundle rebuild, not a compiler fix.
+- Corpus shape changed: `conformance/status.sh` now reports **91 tests**
+  (20 guard, 15 effect, 48 regress, 8 server), not 32. The regress and server
+  groups postdate this document entirely.
+- §1's "no heap / no call frames / only `hello.ts` runs" is superseded:
+  `crates/interp/kiln-interpreter/src/` is ~32k lines across modules,
+  `crates/semantics/kiln-builtins/src/` is ~20k lines of TypeScript,
+  and `examples/` holds ~20+ runnable programs.
+- §5's shared floor (module loading, promises with a real microtask queue) is built
+  for effect 01–12; §6's "today there are none" for builtins is superseded by the
+  `kiln-builtins` corpus above.
+
+The per-step predictions in §4 are kept as written — they are the falsifiable record,
+and they passed. New work belongs in the Test262 chunk baseline, the native surface
+inventory, and the gate suites, not on this ladder.
