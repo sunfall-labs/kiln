@@ -13,7 +13,7 @@
 # against, not a threshold to enforce.
 #
 # Usage:
-#   ./run.sh                      # full corpus (360 packages)
+#   ./run.sh                      # full corpus (361 packages)
 #   ./run.sh ms mime              # subset by package name
 #   TIMEOUT_S=300 ./run.sh        # per-package timeout (default 600)
 #
