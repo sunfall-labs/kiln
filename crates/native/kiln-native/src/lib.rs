@@ -2381,7 +2381,10 @@ impl NativeBuilder {
         let members = kiln_graph::analyze_demanded_members(graph, &demand.live, &demand.slots);
         let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members);
         if trace_emit {
-            eprintln!("kiln: graph selection and member analysis {}ms", emit_started.elapsed().as_millis());
+            eprintln!(
+                "kiln: graph selection and member analysis {}ms",
+                emit_started.elapsed().as_millis()
+            );
         }
         let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
@@ -2411,7 +2414,12 @@ impl NativeBuilder {
                 },
             )?;
             if let Some(started) = module_started {
-                eprintln!("kiln: module emission {}ms {} generated-C {}", started.elapsed().as_millis(), logical_path, if generated_c_hit { "hit" } else { "miss" });
+                eprintln!(
+                    "kiln: module emission {}ms {} generated-C {}",
+                    started.elapsed().as_millis(),
+                    logical_path,
+                    if generated_c_hit { "hit" } else { "miss" }
+                );
             }
             Ok((logical_path, emitted, generated_c_hit))
         })?;
@@ -2455,7 +2463,15 @@ impl NativeBuilder {
                     .then_some(RELEASE_BOOTSTRAP_UNIT_BYTES),
             )?;
         if let Some(started) = bootstrap_started {
-            eprintln!("kiln: bootstrap emission {}ms generated-C {}", started.elapsed().as_millis(), if bootstrap_generated_c_hit { "hit" } else { "miss" });
+            eprintln!(
+                "kiln: bootstrap emission {}ms generated-C {}",
+                started.elapsed().as_millis(),
+                if bootstrap_generated_c_hit {
+                    "hit"
+                } else {
+                    "miss"
+                }
+            );
         }
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
@@ -2475,7 +2491,10 @@ impl NativeBuilder {
             Some(&bootstrap),
         )?;
         if let Some(started) = launcher_started {
-            eprintln!("kiln: launcher emission {}ms", started.elapsed().as_millis());
+            eprintln!(
+                "kiln: launcher emission {}ms",
+                started.elapsed().as_millis()
+            );
         }
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();

@@ -1296,7 +1296,7 @@ impl ResolutionPolicy for PinnedPackageResolver {
                 .path
                 .extension()
                 .and_then(|extension| extension.to_str()),
-                Some("mjs" | "mts" | "cjs" | "cts")
+            Some("mjs" | "mts" | "cjs" | "cts")
         ) {
             Ok(Some(node_module_format(&module.path, None)?))
         } else {

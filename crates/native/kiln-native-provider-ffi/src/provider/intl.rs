@@ -1,7 +1,7 @@
 use super::INVALID_ARGUMENT;
+use kiln_intl::Setting;
 use kiln_intl::casemap::map_case_utf16;
 use kiln_intl::datetime::{DateTimeFormat, Options as DateTimeOptions, TimeZoneChoice};
-use kiln_intl::Setting;
 use kiln_intl::segmenter::Segmenter;
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -17,7 +17,9 @@ fn json_skip(nodes: &[kiln_json::Node], index: usize) -> Option<usize> {
     let mut at = index.checked_add(1)?;
     match node.tag {
         kiln_json::TAG_ARRAY => {
-            for _ in 0..node.len { at = json_skip(nodes, at)?; }
+            for _ in 0..node.len {
+                at = json_skip(nodes, at)?;
+            }
         }
         kiln_json::TAG_OBJECT => {
             for _ in 0..node.len {
@@ -33,7 +35,9 @@ fn json_skip(nodes: &[kiln_json::Node], index: usize) -> Option<usize> {
 fn json_member(doc: &kiln_json::Document, object: usize, wanted: &str) -> Option<usize> {
     let nodes = doc.nodes();
     let parent = nodes.get(object)?;
-    if parent.tag != kiln_json::TAG_OBJECT { return None; }
+    if parent.tag != kiln_json::TAG_OBJECT {
+        return None;
+    }
     let mut at = object.checked_add(1)?;
     for _ in 0..parent.len {
         let key = nodes.get(at)?;
@@ -51,22 +55,34 @@ fn json_member(doc: &kiln_json::Document, object: usize, wanted: &str) -> Option
 
 fn json_string(doc: &kiln_json::Document, index: usize) -> Result<String, ()> {
     let node = doc.nodes().get(index).ok_or(())?;
-    if node.tag != kiln_json::TAG_STRING { return Err(()); }
+    if node.tag != kiln_json::TAG_STRING {
+        return Err(());
+    }
     String::from_utf16(&doc.string(node).ok_or(())?.to_units()).map_err(|_| ())
 }
 
-fn json_optional_string(doc: &kiln_json::Document, object: usize, key: &str) -> Result<Option<String>, ()> {
-    json_member(doc, object, key).map(|index| json_string(doc, index)).transpose()
+fn json_optional_string(
+    doc: &kiln_json::Document,
+    object: usize,
+    key: &str,
+) -> Result<Option<String>, ()> {
+    json_member(doc, object, key)
+        .map(|index| json_string(doc, index))
+        .transpose()
 }
 
 fn parse_datetime_spec(bytes: &[u8]) -> Result<(Vec<String>, DateTimeOptions), ()> {
     let doc = kiln_json::parse_owned(bytes).map_err(|_| ())?;
     let nodes = doc.nodes();
     let root = nodes.first().ok_or(())?;
-    if root.tag != kiln_json::TAG_OBJECT { return Err(()); }
+    if root.tag != kiln_json::TAG_OBJECT {
+        return Err(());
+    }
     let locales_index = json_member(&doc, 0, "locales").ok_or(())?;
     let locales_node = nodes.get(locales_index).ok_or(())?;
-    if locales_node.tag != kiln_json::TAG_ARRAY { return Err(()); }
+    if locales_node.tag != kiln_json::TAG_ARRAY {
+        return Err(());
+    }
     let mut locales = Vec::with_capacity(locales_node.len as usize);
     let mut at = locales_index + 1;
     for _ in 0..locales_node.len {
@@ -74,14 +90,21 @@ fn parse_datetime_spec(bytes: &[u8]) -> Result<(Vec<String>, DateTimeOptions), (
         at = json_skip(nodes, at).ok_or(())?;
     }
     let options_index = json_member(&doc, 0, "options").ok_or(())?;
-    if nodes.get(options_index).is_none_or(|node| node.tag != kiln_json::TAG_OBJECT) { return Err(()); }
+    if nodes
+        .get(options_index)
+        .is_none_or(|node| node.tag != kiln_json::TAG_OBJECT)
+    {
+        return Err(());
+    }
     let options = DateTimeOptions {
         calendar: json_optional_string(&doc, options_index, "calendar")?,
         numbering_system: json_optional_string(&doc, options_index, "numberingSystem")?,
         hour12: match json_member(&doc, options_index, "hour12") {
             None => None,
             Some(index) => match nodes.get(index).ok_or(())?.tag {
-                kiln_json::TAG_TRUE => Some(true), kiln_json::TAG_FALSE => Some(false), _ => return Err(()),
+                kiln_json::TAG_TRUE => Some(true),
+                kiln_json::TAG_FALSE => Some(false),
+                _ => return Err(()),
             },
         },
         hour_cycle: json_optional_string(&doc, options_index, "hourCycle")?,
@@ -102,7 +125,9 @@ fn parse_datetime_spec(bytes: &[u8]) -> Result<(Vec<String>, DateTimeOptions), (
             None => None,
             Some(index) => {
                 let value = nodes.get(index).ok_or(())?.as_number().ok_or(())?;
-                if !(1.0..=3.0).contains(&value) { return Err(()); }
+                if !(1.0..=3.0).contains(&value) {
+                    return Err(());
+                }
                 Some(value as u8)
             }
         },
@@ -115,10 +140,18 @@ fn parse_datetime_spec(bytes: &[u8]) -> Result<(Vec<String>, DateTimeOptions), (
 
 fn parse_time_zone(text: &str) -> Option<TimeZoneChoice> {
     let mut chars = text.chars();
-    let sign = match chars.next()? { '+' => 1, '-' => -1, _ => return kiln_intl::datetime::canonical_time_zone(text) };
+    let sign = match chars.next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return kiln_intl::datetime::canonical_time_zone(text),
+    };
     let rest: Vec<char> = chars.collect();
     let digits = |part: &[char]| -> Option<i32> {
-        if part.len() == 2 && part.iter().all(char::is_ascii_digit) { part.iter().collect::<String>().parse().ok() } else { None }
+        if part.len() == 2 && part.iter().all(char::is_ascii_digit) {
+            part.iter().collect::<String>().parse().ok()
+        } else {
+            None
+        }
     };
     let (hours, minutes) = match rest.len() {
         2 => (digits(&rest)?, 0),
@@ -126,7 +159,9 @@ fn parse_time_zone(text: &str) -> Option<TimeZoneChoice> {
         5 if rest[2] == ':' => (digits(&rest[..2])?, digits(&rest[3..])?),
         _ => return None,
     };
-    if hours > 23 || minutes > 59 { return None; }
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
     Some(TimeZoneChoice::Offset(sign * (hours * 3600 + minutes * 60)))
 }
 
@@ -134,8 +169,11 @@ fn json_quote(out: &mut String, value: &str) {
     out.push('"');
     for ch in value.chars() {
         match ch {
-            '"' => out.push_str("\\\""), '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"), '\r' => out.push_str("\\r"), '\t' => out.push_str("\\t"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
             ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
             ch => out.push(ch),
         }
@@ -143,16 +181,25 @@ fn json_quote(out: &mut String, value: &str) {
     out.push('"');
 }
 
-fn datetime_result(formatter: &DateTimeFormat, epoch: f64, operation: u32) -> Result<String, kiln_intl::Error> {
+fn datetime_result(
+    formatter: &DateTimeFormat,
+    epoch: f64,
+    operation: u32,
+) -> Result<String, kiln_intl::Error> {
     match operation {
         0 => formatter.format(epoch),
         1 => {
             let parts = formatter.format_to_parts(epoch)?;
             let mut out = String::from("[");
             for (index, (kind, value)) in parts.iter().enumerate() {
-                if index != 0 { out.push(','); }
-                out.push_str("{\"type\":"); json_quote(&mut out, kind);
-                out.push_str(",\"value\":"); json_quote(&mut out, value); out.push('}');
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push_str("{\"type\":");
+                json_quote(&mut out, kind);
+                out.push_str(",\"value\":");
+                json_quote(&mut out, value);
+                out.push('}');
             }
             out.push(']');
             Ok(out)
@@ -161,15 +208,23 @@ fn datetime_result(formatter: &DateTimeFormat, epoch: f64, operation: u32) -> Re
             let options = formatter.resolved_options();
             let mut out = String::from("{");
             for (index, (key, value)) in options.iter().enumerate() {
-                if index != 0 { out.push(','); }
-                json_quote(&mut out, key); out.push(':');
+                if index != 0 {
+                    out.push(',');
+                }
+                json_quote(&mut out, key);
+                out.push(':');
                 match value {
                     Setting::String(value) => json_quote(&mut out, value),
                     Setting::Number(value) => out.push_str(&value.to_string()),
                     Setting::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
                     Setting::Strings(values) => {
                         out.push('[');
-                        for (index, value) in values.iter().enumerate() { if index != 0 { out.push(','); } json_quote(&mut out, value); }
+                        for (index, value) in values.iter().enumerate() {
+                            if index != 0 {
+                                out.push(',');
+                            }
+                            json_quote(&mut out, value);
+                        }
                         out.push(']');
                     }
                     Setting::Undefined => out.push_str("null"),
@@ -186,13 +241,23 @@ fn datetime_result(formatter: &DateTimeFormat, epoch: f64, operation: u32) -> Re
 /// facade. The formatter and output bytes are thread-local, keyed by the canonical request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_intl_datetime_format(
-    spec: *const u8, spec_len: u64, epoch_milliseconds: f64, operation: u32,
-    out: *mut *const u8, out_len: *mut u64,
+    spec: *const u8,
+    spec_len: u64,
+    epoch_milliseconds: f64,
+    operation: u32,
+    out: *mut *const u8,
+    out_len: *mut u64,
 ) -> i32 {
-    if out.is_null() || out_len.is_null() || spec.is_null() || operation > 2 { return INVALID_ARGUMENT; }
-    let Ok(spec_len) = usize::try_from(spec_len) else { return INVALID_ARGUMENT; };
+    if out.is_null() || out_len.is_null() || spec.is_null() || operation > 2 {
+        return INVALID_ARGUMENT;
+    }
+    let Ok(spec_len) = usize::try_from(spec_len) else {
+        return INVALID_ARGUMENT;
+    };
     let bytes = unsafe { core::slice::from_raw_parts(spec, spec_len) };
-    let Ok(spec_text) = core::str::from_utf8(bytes) else { return INVALID_ARGUMENT; };
+    let Ok(spec_text) = core::str::from_utf8(bytes) else {
+        return INVALID_ARGUMENT;
+    };
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         DATETIME_FORMATTER.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -205,11 +270,19 @@ pub unsafe extern "C" fn kiln_intl_datetime_format(
             datetime_result(formatter, epoch_milliseconds, operation).map_err(|_| -3)
         })
     }));
-    let answer = match built { Ok(Ok(answer)) => answer, Ok(Err(status)) => return status, Err(_) => return -2 };
+    let answer = match built {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(status)) => return status,
+        Err(_) => return -2,
+    };
     DATETIME_RESULT.with(|result| {
         let mut result = result.borrow_mut();
-        result.clear(); result.extend_from_slice(answer.as_bytes());
-        unsafe { out.write(result.as_ptr()); out_len.write(result.len() as u64); }
+        result.clear();
+        result.extend_from_slice(answer.as_bytes());
+        unsafe {
+            out.write(result.as_ptr());
+            out_len.write(result.len() as u64);
+        }
     });
     0
 }
@@ -317,17 +390,35 @@ pub unsafe extern "C" fn kiln_intl_string_case(
     capacity: u64,
     out_len: *mut u64,
 ) -> i32 {
-    if out_len.is_null() || (units.is_null() && count != 0) || (locale.is_null() && locale_len != 0) || uppercase > 1 {
+    if out_len.is_null()
+        || (units.is_null() && count != 0)
+        || (locale.is_null() && locale_len != 0)
+        || uppercase > 1
+    {
         return INVALID_ARGUMENT;
     }
     let (Ok(count), Ok(locale_len)) = (usize::try_from(count), usize::try_from(locale_len)) else {
         return INVALID_ARGUMENT;
     };
-    let input = if count == 0 { &[] } else { unsafe { core::slice::from_raw_parts(units, count) } };
-    let tag = if locale_len == 0 { &[] } else { unsafe { core::slice::from_raw_parts(locale, locale_len) } };
-    let Ok(tag) = core::str::from_utf8(tag) else { return INVALID_ARGUMENT; };
+    let input = if count == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(units, count) }
+    };
+    let tag = if locale_len == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(locale, locale_len) }
+    };
+    let Ok(tag) = core::str::from_utf8(tag) else {
+        return INVALID_ARGUMENT;
+    };
     let mapped = catch_unwind(AssertUnwindSafe(|| {
-        let locale = if locale.is_null() && locale_len == 0 { None } else { Some(tag) };
+        let locale = if locale.is_null() && locale_len == 0 {
+            None
+        } else {
+            Some(tag)
+        };
         map_case_utf16(input, locale, uppercase != 0)
     }));
     match mapped {

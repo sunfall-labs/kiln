@@ -2041,6 +2041,7 @@ version = "0.1.0"
 dependencies = [
  "fixed_decimal",
  "icu_calendar",
+ "icu_casemap",
  "icu_collator",
  "icu_datetime",
  "icu_decimal",
@@ -2172,8 +2173,8 @@ name = "kiln-native-provider-ffi"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
- "kiln-host-abi",
  "kiln-date-core",
+ "kiln-host-abi",
  "kiln-intl",
  "kiln-json",
  "kiln-native-provider-contract",

@@ -729,7 +729,9 @@ pub fn program_provider_capabilities(
             Some("Intl") => required.with(ProviderCapability::Intl),
             // Two `String.prototype` methods answer from the Intl engine's tables (collation and
             // normalization are ICU4X data), so a program that calls either demands it by name.
-            Some("localeCompare" | "normalize" | "toLocaleLowerCase" | "toLocaleUpperCase") => required.with(ProviderCapability::Intl),
+            Some("localeCompare" | "normalize" | "toLocaleLowerCase" | "toLocaleUpperCase") => {
+                required.with(ProviderCapability::Intl)
+            }
             Some(
                 "parallelMap" | "parallelFilter" | "parallelFlatMap" | "parallelReduce"
                 | "parallelSort",
@@ -780,8 +782,11 @@ pub fn retained_provider_capabilities(
     {
         required = required.with(ProviderCapability::Parallel);
     }
-    if members.names.contains("localeCompare") || members.names.contains("normalize") ||
-        members.names.contains("toLocaleLowerCase") || members.names.contains("toLocaleUpperCase") {
+    if members.names.contains("localeCompare")
+        || members.names.contains("normalize")
+        || members.names.contains("toLocaleLowerCase")
+        || members.names.contains("toLocaleUpperCase")
+    {
         required = required.with(ProviderCapability::Intl);
     }
 

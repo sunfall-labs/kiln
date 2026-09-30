@@ -20,15 +20,24 @@ pub fn map_case(text: &str, tag: Option<&str>, uppercase: bool) -> Result<String
 ///
 /// ICU4X accepts Unicode scalar strings. Splitting at unpaired surrogates lets its contextual
 /// rules operate on each valid run while retaining JavaScript's otherwise-unrepresentable units.
-pub fn map_case_utf16(units: &[u16], tag: Option<&str>, uppercase: bool) -> Result<Vec<u16>, Error> {
+pub fn map_case_utf16(
+    units: &[u16],
+    tag: Option<&str>,
+    uppercase: bool,
+) -> Result<Vec<u16>, Error> {
     let canonical = locale::canonicalize(tag.unwrap_or(locale::DEFAULT))?;
-    let parsed = Locale::try_from_str(&canonical)
-        .map_err(|_| Error::range(format!("Incorrect locale information provided: {canonical}")))?;
+    let parsed = Locale::try_from_str(&canonical).map_err(|_| {
+        Error::range(format!(
+            "Incorrect locale information provided: {canonical}"
+        ))
+    })?;
     let mapper = CaseMapper::new();
     let mut answer = Vec::with_capacity(units.len());
     let mut run = String::new();
     let flush = |run: &mut String, answer: &mut Vec<u16>| {
-        if run.is_empty() { return; }
+        if run.is_empty() {
+            return;
+        }
         let mapped = if uppercase {
             mapper.uppercase_to_string(run.as_str(), &parsed.id)
         } else {
@@ -70,7 +79,9 @@ mod tests {
 
     #[test]
     fn preserves_unpaired_utf16_units_around_contextual_mapping() {
-        assert_eq!(map_case_utf16(&[0xd800, b'I' as u16, 0xdc00], Some("tr"), false).unwrap(),
-                   [0xd800, 0x0131, 0xdc00]);
+        assert_eq!(
+            map_case_utf16(&[0xd800, b'I' as u16, 0xdc00], Some("tr"), false).unwrap(),
+            [0xd800, 0x0131, 0xdc00]
+        );
     }
 }

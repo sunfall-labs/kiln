@@ -35,8 +35,8 @@
 //! the same bytes on every machine. ADR 0029 §4 says the same thing from the other side -- "host
 //! time, timezone and locale data remain explicit inputs".
 
-pub mod collator;
 pub mod casemap;
+pub mod collator;
 pub mod datetime;
 pub mod displaynames;
 pub mod duration;
