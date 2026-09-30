@@ -795,8 +795,8 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 }
                 if (source_shape == NULL) {
                     if (named != 0)
-                        memcpy(properties + numeric_count, source->properties,
-                               named * sizeof *properties);
+                        kiln_c99_heap_copy_properties(copy, properties + numeric_count,
+                                                     source->properties, named);
                 } else {
                     for (i = 0; i < named; ++i) {
                         kiln_property *property = &properties[numeric_count + i];

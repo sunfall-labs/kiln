@@ -416,7 +416,7 @@ static inline int kiln_c99_val_set_private_cached(kiln_val receiver, kiln_val br
                 if (KILN_LIKELY(site->member_slot < obj->slot_capacity)) {
                     if ((obj->shape->double_slots_mask & (1u << site->member_slot)) == 0 || KILN_VAL_IS_NUMBER(member)) {
                         kiln_c99_prototype_touched(obj);
-                        obj->slots[site->member_slot] = member;
+                        kiln_c99_heap_store_val(obj, &obj->slots[site->member_slot], member);
                         return 1;
                     }
                 }

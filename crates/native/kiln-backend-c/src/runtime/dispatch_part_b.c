@@ -2693,8 +2693,8 @@
          * is why the corpus passed; `zig cc` traps, and UBSan calls it "applying zero offset to
          * null pointer". Guarding on the count says what the code already meant. */
         if (tail != 0) {
-            memmove(array->elements + start + inserting, array->elements + start + removing,
-                    tail * sizeof *array->elements);
+            kiln_c99_heap_move_vals(array, array->elements + start + inserting,
+                                     array->elements + start + removing, tail);
         }
         /* The gap is filled *under* the final count, not before it. `kiln_val_from_boundary`
          * allocates for any string of more than one byte, and the collector traces an array's
@@ -2726,8 +2726,7 @@
         }
         /* `memmove` rather than a loop, because the source and the destination overlap by design
          * -- that overlap is the whole reason the method exists. */
-        memmove(array->elements + target, array->elements + start,
-                moving * sizeof *array->elements);
+        kiln_c99_heap_move_vals(array, array->elements + target, array->elements + start, moving);
         *result = receiver;
         return KILN_C99_OK;
     }
@@ -3143,8 +3142,7 @@
         }
         *result = array->elements[0] == KILN_VAL_HOLE ? kiln_c99_undefined()
                                                        : kiln_val_to_boundary(array->elements[0]);
-        memmove(array->elements, array->elements + 1,
-                (array->count - 1) * sizeof *array->elements);
+        kiln_c99_heap_move_vals(array, array->elements, array->elements + 1, array->count - 1);
         array->count -= 1;
         return KILN_C99_OK;
     }
@@ -3154,7 +3152,7 @@
         if (status != KILN_C99_OK) {
             return status;
         }
-        memmove(array->elements + argc, array->elements, array->count * sizeof *array->elements);
+        kiln_c99_heap_move_vals(array, array->elements + argc, array->elements, array->count);
         /* Same ordering as `splice` above, and for the same reason: the opened gap is made
          * traceable and the count published before any conversion allocates into it. */
         for (added = 0; added < argc; ++added) {

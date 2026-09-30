@@ -298,7 +298,15 @@ static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_react
         if (promise->reactions == &promise->inline_reaction) {
             moved = (kiln_reaction *)malloc(grown * sizeof *moved);
             if (moved == NULL) return KILN_C99_OUT_OF_MEMORY;
-            memcpy(moved, promise->reactions, promise->count * sizeof *moved);
+            for (size_t index = 0; index < promise->count; ++index) {
+                moved[index].continuation = promise->reactions[index].continuation;
+                kiln_c99_heap_store_value(promise, &moved[index].on_fulfilled,
+                                          promise->reactions[index].on_fulfilled);
+                kiln_c99_heap_store_value(promise, &moved[index].on_rejected,
+                                          promise->reactions[index].on_rejected);
+                kiln_c99_heap_store_value(promise, &moved[index].derived,
+                                          promise->reactions[index].derived);
+            }
             /* The promise owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
             kiln_c99_gc_note_finalizable(promise);
         } else {

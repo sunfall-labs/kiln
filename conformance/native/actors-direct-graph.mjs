@@ -90,6 +90,33 @@ try {
   const lateRetry = await owner.ref.call('echo', [lateTicket]);
   if (lateRetry.answer !== 23) throw new Error('post-factory alias retry failed');
 
+  // Warm the decoupled module's cached private-field setter with ordinary object values.
+  // A later candidate write must record the outside owner even on the cache hit.
+  class PrivateHolder {
+    #held;
+    set(value) { this.#held = value; }
+    read() { return this.#held; }
+  }
+  const privateHolder = new PrivateHolder();
+  privateHolder.set({ answer: 0 });
+  privateHolder.set({ answer: -1 });
+  let privateAlias;
+  const privateTicket = transfer(isolate(() => {
+    privateAlias = { answer: 29 };
+    return privateAlias;
+  }));
+  privateHolder.set(privateAlias);
+  privateAlias = undefined;
+  let privateRefused = false;
+  try { await owner.ref.call('echo', [privateTicket]); }
+  catch (error) { privateRefused = error.name === 'DataCloneError'; }
+  if (!privateRefused || privateHolder.read().answer !== 29) {
+    throw new Error('cached private-field alias moved');
+  }
+  privateHolder.set(undefined);
+  const privateRetry = await owner.ref.call('echo', [privateTicket]);
+  if (privateRetry.answer !== 29) throw new Error('private-field alias retry failed');
+
   let retainedChild;
   const childAlias = transfer(isolate(() => ({ child: retainedChild = { value: 21 } })));
   let childRefused = false;

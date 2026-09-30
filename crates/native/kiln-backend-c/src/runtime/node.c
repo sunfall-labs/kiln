@@ -349,8 +349,8 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                                       0, NULL);
                 if (status != KILN_C99_OK) return status;
                 if (kiln_c99_strict_equal(callback, wanted)) {
-                    memmove(stored->elements + index - 1, stored->elements + index,
-                            (stored->count - index) * sizeof *stored->elements);
+                    kiln_c99_heap_move_vals(stored, stored->elements + index - 1,
+                                             stored->elements + index, stored->count - index);
                     --stored->count;
                     break;
                 }
@@ -380,8 +380,8 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                     size_t live;
                     for (live = 0; live < stored->count; ++live) {
                         if (stored->elements[live] == copy->elements[index]) {
-                            memmove(stored->elements + live, stored->elements + live + 1,
-                                    (stored->count - live - 1) * sizeof *stored->elements);
+                            kiln_c99_heap_move_vals(stored, stored->elements + live,
+                                                     stored->elements + live + 1, stored->count - live - 1);
                             --stored->count;
                             break;
                         }

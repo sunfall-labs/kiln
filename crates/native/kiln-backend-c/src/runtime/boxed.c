@@ -295,7 +295,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         }
                         kiln_array *arr = kiln_c99_array_of(built);
                         if (groups <= sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0])) {
-                            kiln_c99_heap_store_pointer(arr, &arr->elements, arr->inline_elements);
+                            kiln_c99_heap_store_interior_pointer(arr, &arr->elements, offsetof(kiln_array, inline_elements));
                             arr->capacity = sizeof(arr->inline_elements) / sizeof(arr->inline_elements[0]);
                         } else {
                             status = kiln_c99_array_reserve(arr, groups);
@@ -2086,7 +2086,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
                     kiln_val first = arr->elements[0] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : arr->elements[0];
                     arr->count -= 1;
                     if (arr->count > 0) {
-                        memmove(arr->elements, arr->elements + 1, arr->count * sizeof *arr->elements);
+                        kiln_c99_heap_move_vals(arr, arr->elements, arr->elements + 1, arr->count);
                     }
                     *out = first;
                     return KILN_C99_OK;

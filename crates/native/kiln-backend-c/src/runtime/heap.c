@@ -3093,11 +3093,21 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
     memcpy(slot, &pointer, sizeof pointer);
 }
 
+/* An offset constructed from this allocation cannot name another candidate group. Unlike
+ * borrowed pointers, these self-owned layout edges need no incoming-owner ledger lookup.
+ * Callers use offsetof for inline fields or sizeof(owner type) for an allocated tail. */
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_interior_pointer(
+    const void *owner_payload, void *slot, size_t offset) {
+    const void *pointer = (const char *)owner_payload + offset;
+    memcpy(slot, &pointer, sizeof pointer);
+}
+
 static void kiln_c99_candidate_record_vals(const void *owner_payload,
                                             const kiln_val *values, size_t count) {
     kiln_gc_heap *heap;
     if (kiln_c99_no_write_depth != 0 || count == 0) return;
-    heap = kiln_c99_gc_heap();
+    heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL)) heap = kiln_c99_gc_heap();
     if (heap == NULL || heap->candidate_ledger_groups == 0) return;
     for (size_t index = 0; index < count; ++index) {
         kiln_val value = values[index];
@@ -3109,7 +3119,28 @@ static void kiln_c99_candidate_record_vals(const void *owner_payload,
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
     const void *owner_payload, kiln_val *destination, const kiln_val *source, size_t count) {
     memcpy(destination, source, count * sizeof *source);
-    kiln_c99_candidate_record_vals(owner_payload, destination, count);
+    if (kiln_c99_no_write_depth != 0 || count == 0) return;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL || heap->candidate_ledger_groups != 0))
+        kiln_c99_candidate_record_vals(owner_payload, destination, count);
+}
+
+/* Relocation is restricted to the same owner's existing storage. Witnesses name that
+ * stable owner, not a slot address, so moving its bytes cannot introduce a new incoming
+ * owner. Cross-owner copies must use heap_copy_vals instead. No allocation or user code
+ * runs between the copy and publishing the replacement buffer. */
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_relocate_vals(
+    const void *owner_payload, kiln_val *destination, const kiln_val *source, size_t count) {
+    (void)owner_payload;
+    memcpy(destination, source, count * sizeof *source);
+}
+
+/* The source and destination are ranges of one owner's existing value buffer. Overlap
+ * changes positions, not incoming owner identity; the weak owner witness remains valid. */
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_move_vals(
+    const void *owner_payload, kiln_val *destination, const kiln_val *source, size_t count) {
+    (void)owner_payload;
+    memmove(destination, source, count * sizeof *source);
 }
 
 static void kiln_c99_candidate_record_property(const void *owner_payload,
@@ -3131,6 +3162,17 @@ static void kiln_c99_candidate_record_property(const void *owner_payload,
         kiln_c99_candidate_record_pointer_store(heap, owner_payload,
             (const void *)(uintptr_t)property->value.bits);
     }
+}
+
+static void kiln_c99_heap_copy_properties(const void *owner_payload,
+                                          kiln_property *destination,
+                                          const kiln_property *source, size_t count) {
+    memcpy(destination, source, count * sizeof *source);
+    if (kiln_c99_no_write_depth != 0 || count == 0) return;
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->candidate_ledger_groups == 0) return;
+    for (size_t index = 0; index < count; ++index)
+        kiln_c99_candidate_record_property(owner_payload, &destination[index]);
 }
 
 /* Whole descriptors carry keys and either data or accessor values. Copying their storage

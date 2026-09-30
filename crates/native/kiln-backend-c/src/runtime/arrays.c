@@ -72,7 +72,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     if (array->elements == NULL && needed <= sizeof array->inline_elements / sizeof array->inline_elements[0]) {
         /* An array's first elements live in the array: a parsed `[1, 2, 3]` or a `push` onto
          * `[]` used to malloc four slots it had room for already. */
-        kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
+        kiln_c99_heap_store_interior_pointer(array, &array->elements, offsetof(kiln_array, inline_elements));
         array->capacity = sizeof array->inline_elements / sizeof array->inline_elements[0];
         return KILN_C99_OK;
     }
@@ -106,7 +106,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
         header->capacity = grown;
         header->generation = 1;
         moved = (kiln_val *)(header + 1);
-        if (array->elements != NULL) memcpy(moved, array->elements, array->count * sizeof(kiln_val));
+        if (array->elements != NULL) kiln_c99_heap_relocate_vals(array, moved, array->elements, array->count);
         if (kiln_c99_array_elements_owned(array)) free(array->elements);
         array->candidate_elements = 1;
     } else if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
@@ -114,7 +114,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
         if (moved == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        memcpy(moved, array->elements, array->count * sizeof(kiln_val));
+        kiln_c99_heap_relocate_vals(array, moved, array->elements, array->count);
     } else {
         moved = (kiln_val *)realloc(array->elements, grown * sizeof(kiln_val));
         if (moved == NULL) {
@@ -162,11 +162,11 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     }
     kiln_c99_array_init(array, is_numeric);
     if (in_block > 0) {
-        kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(array + 1));
+        kiln_c99_heap_store_interior_pointer(array, &array->elements, sizeof(kiln_array));
         array->capacity = in_block;
     } else if (capacity > 0) {
         if (capacity <= inline_capacity) {
-            kiln_c99_heap_store_pointer(array, &array->elements, array->inline_elements);
+            kiln_c99_heap_store_interior_pointer(array, &array->elements, offsetof(kiln_array, inline_elements));
             array->capacity = inline_capacity;
         } else {
             int status = kiln_c99_array_reserve(array, capacity);

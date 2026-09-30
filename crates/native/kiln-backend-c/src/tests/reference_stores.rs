@@ -167,10 +167,25 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
     found
 }
 
+fn reference_sources() -> Vec<(&'static str, &'static str)> {
+    let mut sources = crate::prelude_source_parts();
+    sources.extend([
+        (
+            "runtime/prelude_types.h",
+            include_str!("../runtime/prelude_types.h"),
+        ),
+        (
+            "runtime/prelude_declarations.h",
+            include_str!("../runtime/prelude_declarations.h"),
+        ),
+    ]);
+    sources
+}
+
 #[test]
 fn audited_reference_fields_use_store_authorities() {
     let mut failures = Vec::new();
-    for (path, source) in crate::prelude_source_parts() {
+    for (path, source) in reference_sources() {
         for offset in direct_reference_writes(source) {
             let line = source[..offset]
                 .bytes()
@@ -205,4 +220,166 @@ fn reference_guard_catches_macro_and_indexed_writes_without_matching_reads() {
         kiln_c99_heap_store_val(array, &array->elements[0], value);
     "#;
     assert_eq!(direct_reference_writes(source).len(), 8);
+}
+
+fn raw_reference_copies(source: &str) -> Vec<usize> {
+    let words = tokens(source);
+    let mut found = Vec::new();
+    for index in 0..words.len().saturating_sub(1) {
+        if !matches!(words[index].0, "memcpy" | "memmove") || words[index + 1].0 != "(" {
+            continue;
+        }
+        let mut depth = 1;
+        let mut next = index + 2;
+        while next < words.len() && depth != 0 {
+            match words[next].0 {
+                "(" => depth += 1,
+                ")" => depth -= 1,
+                _ => {}
+            }
+            next += 1;
+        }
+        let call = &words[index + 2..next];
+        if call.iter().any(|w| {
+            matches!(
+                w.0,
+                "kiln_val" | "kiln_value" | "kiln_property" | "kiln_reaction"
+            )
+        }) || call.windows(2).any(|w| {
+            w[0].0 == "->"
+                && matches!(
+                    w[1].0,
+                    "slots"
+                        | "elements"
+                        | "properties"
+                        | "upvalues"
+                        | "inline_upvalues"
+                        | "locals"
+                        | "queue_promises"
+                        | "queue_sent"
+                        | "reactions"
+                        | "cached_elements"
+                )
+        }) {
+            found.push(words[index].1);
+        }
+    }
+    found
+}
+
+#[test]
+fn audited_reference_copies_use_bulk_store_authorities() {
+    let mut failures = Vec::new();
+    for (path, source) in reference_sources() {
+        for offset in raw_reference_copies(source) {
+            let line = source[..offset]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            failures.push(format!("{path}:{line}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "raw copies bypass reference-store authorities:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn reference_copy_guard_distinguishes_value_buffers_from_bytes() {
+    let source = r#"
+        // memcpy(destination, array->elements, count);
+        memcpy(destination, bytes, length);
+        memcpy(&bits, &number, sizeof bits);
+        memcpy(destination, source, count * sizeof(kiln_val));
+        memcpy(destination, promise->reactions, count * sizeof *destination);
+        memmove(array->elements + offset[0], source, count * sizeof *source);
+        kiln_c99_heap_copy_vals(array, destination, source, count);
+    "#;
+    assert_eq!(raw_reference_copies(source).len(), 3);
+}
+
+fn foreign_owner_relocations(source: &str) -> Vec<usize> {
+    let words = tokens(source);
+    let mut found = Vec::new();
+    for index in 0..words.len().saturating_sub(1) {
+        if !matches!(
+            words[index].0,
+            "kiln_c99_heap_move_vals" | "kiln_c99_heap_relocate_vals"
+        ) || words[index + 1].0 != "("
+        {
+            continue;
+        }
+        let mut arguments = Vec::new();
+        let mut start = index + 2;
+        let mut next = start;
+        let mut depth = 0;
+        while next < words.len() {
+            match words[next].0 {
+                "(" | "[" => depth += 1,
+                ")" if depth == 0 => {
+                    arguments.push(&words[start..next]);
+                    break;
+                }
+                ")" | "]" => depth -= 1,
+                "," if depth == 0 => {
+                    arguments.push(&words[start..next]);
+                    start = next + 1;
+                }
+                _ => {}
+            }
+            next += 1;
+        }
+        // The authority definitions declare a const void* owner; they are not calls.
+        if arguments
+            .first()
+            .is_some_and(|arg| arg.first().is_some_and(|w| w.0 == "const"))
+        {
+            continue;
+        }
+        let valid = arguments.len() == 4
+            && arguments[0].len() == 1
+            && arguments[2].len() >= 3
+            && arguments[2][0].0 == arguments[0][0].0
+            && arguments[2][1].0 == "->"
+            && matches!(arguments[2][2].0, "elements" | "slots");
+        if !valid {
+            found.push(words[index].1);
+        }
+    }
+    found
+}
+
+#[test]
+fn relocation_sources_belong_to_the_same_owner() {
+    let mut failures = Vec::new();
+    for (path, source) in reference_sources() {
+        for offset in foreign_owner_relocations(source) {
+            let line = source[..offset]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            failures.push(format!("{path}:{line}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "relocation requires same-owner source storage:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn relocation_guard_rejects_foreign_and_aliased_sources() {
+    let source = r#"
+        kiln_c99_heap_move_vals(array, array->elements, array->elements + 1, count);
+        kiln_c99_heap_relocate_vals(object, moved, object->slots, count);
+        kiln_c99_heap_move_vals(array, array->elements, other->elements, count);
+        kiln_c99_heap_relocate_vals(object, moved, arbitrary_pointer, count);
+        kiln_c99_heap_copy_vals(object, moved, other->slots, count);
+    "#;
+    assert_eq!(foreign_owner_relocations(source).len(), 2);
 }

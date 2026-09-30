@@ -2219,9 +2219,13 @@ static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_val(
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_value(
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_interior_pointer(
 static void kiln_c99_candidate_record_vals(const void *owner_payload,
 static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_relocate_vals(
+static KILN_ALWAYS_INLINE inline void kiln_c99_heap_move_vals(
 static void kiln_c99_candidate_record_property(const void *owner_payload,
+static void kiln_c99_heap_copy_properties(const void *owner_payload,
 static void kiln_c99_heap_store_property(const void *owner_payload, kiln_property *slot,
 static inline void kiln_c99_gc_keep_alive(const void *payload) {
 typedef char kiln_c99_block_kind_offset_agrees[sizeof(kiln_gc_block) - offsetof(kiln_gc_block, kind) ==
