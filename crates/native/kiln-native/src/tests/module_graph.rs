@@ -902,13 +902,13 @@ fn native_commonjs_require_resolve_returns_path_without_evaluating_target() {
         .expect("write package type");
     fs::write(
         root.path.join("target.cjs"),
-        "console.log('target evaluated'); module.exports = 42;",
+        "globalThis.__requireResolveTargetEvaluated = true; module.exports = 42;",
     )
     .expect("write resolve target");
     let entry = root.path.join("main.cjs");
     fs::write(
         &entry,
-        "const resolve = require.resolve; console.log(resolve('./target.cjs').slice(-10) === 'target.cjs');",
+        "const resolve = require.resolve; const builtin = resolve('node:path'); const local = resolve('./target.cjs'); console.log(builtin === 'node:path', local.endsWith('/target.cjs'), globalThis.__requireResolveTargetEvaluated === undefined);",
     )
     .expect("write require.resolve entry");
     let graph = ModuleGraph::build_node(
@@ -935,7 +935,7 @@ fn native_commonjs_require_resolve_returns_path_without_evaluating_target() {
             },
         )
         .expect("native require.resolve graph builds and runs");
-    assert_eq!(report.stdout, b"true\n");
+    assert_eq!(report.stdout, b"true true true\n");
 }
 
 #[test]
