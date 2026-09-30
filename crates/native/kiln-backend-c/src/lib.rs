@@ -3542,7 +3542,7 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
         for raw_idx in 0..raw_len {
             writeln!(
                 output,
-                "        raw_arr->elements[{raw_idx}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_raw_{raw_idx});"
+                "        kiln_c99_heap_store_val(raw_arr, &raw_arr->elements[{raw_idx}], KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_raw_{raw_idx}));"
             )
             .unwrap();
         }
@@ -3565,13 +3565,13 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
             if cooked.is_some() {
                 writeln!(
                     output,
-                    "        cooked_arr->elements[{cooked_idx}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_cooked_{cooked_idx});"
+                    "        kiln_c99_heap_store_val(cooked_arr, &cooked_arr->elements[{cooked_idx}], KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_site_{site_idx}_cooked_{cooked_idx}));"
                 )
                 .unwrap();
             } else {
                 writeln!(
                     output,
-                    "        cooked_arr->elements[{cooked_idx}] = KILN_VAL_UNDEFINED;"
+                    "        kiln_c99_heap_store_val(cooked_arr, &cooked_arr->elements[{cooked_idx}], KILN_VAL_UNDEFINED);"
                 )
                 .unwrap();
             }
@@ -3588,7 +3588,7 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
         )
         .unwrap();
         writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
-        writeln!(output, "        raw_slot->value = raw_built;").unwrap();
+        writeln!(output, "        kiln_c99_heap_store_value(kiln_c99_object_of(props), &raw_slot->value, raw_built);").unwrap();
         writeln!(output, "        raw_slot->writable = 0;").unwrap();
         writeln!(output, "        raw_slot->enumerable = 0;").unwrap();
         writeln!(output, "        raw_slot->configurable = 0;").unwrap();
@@ -3598,7 +3598,11 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
             "        kiln_c99_object_of(props)->read_only_seen = 1;"
         )
         .unwrap();
-        writeln!(output, "        cooked_arr->properties = props;").unwrap();
+        writeln!(
+            output,
+            "        kiln_c99_heap_store_value(cooked_arr, &cooked_arr->properties, props);"
+        )
+        .unwrap();
         writeln!(output, "        cooked_arr->frozen = 1;").unwrap();
 
         writeln!(
@@ -3920,7 +3924,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
     }}
     data = kiln_c99_object_of(object);
     data->shape = NULL;
-    data->prototype = kiln_c99_null();
+    kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     for (index = 0; index < count; ++index) {{
         size_t source = order[index];
         kiln_property *slot;
@@ -3949,7 +3953,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             goto namespace_failure;
         }}
         data->count += 1;
-        slot->value = value;
+        kiln_c99_heap_store_value(data, &slot->value, value);
         slot->symbol_hidden = 0;
         slot->writable = 1;
         slot->enumerable = 1;
@@ -3961,7 +3965,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         kiln_property *tag;
         status = kiln_c99_own_slot(object, "@@toStringTag", 13, &tag);
         if (status == KILN_C99_OK) {{
-            tag->value = kiln_c99_copy_text("Module", 6);
+            kiln_c99_heap_store_value(data, &tag->value, kiln_c99_copy_text("Module", 6));
             if (tag->value.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
             tag->writable = 0;
             kiln_c99_object_of(object)->read_only_seen = 1;

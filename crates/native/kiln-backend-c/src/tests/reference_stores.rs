@@ -554,3 +554,27 @@ fn callable_slot_guard_checks_aliases_within_their_function() {
     "#;
     assert_eq!(callable_slot_alias_writes(source).len(), 2);
 }
+
+#[test]
+fn generated_template_and_namespace_values_use_store_authorities() {
+    let mut program = super::program(vec![], vec![kiln_ir::Instruction::Return], 0);
+    program.template_sites.push(kiln_ir::TemplateSite {
+        raw: vec!["raw".into(), "invalid escape".into()],
+        cooked: vec![Some("cooked".into()), None],
+    });
+    let mut source = String::new();
+    crate::render_template_sites(&mut source, &program, "store_guard", false);
+    crate::render_namespace_wrapper(&mut source, "store_guard");
+    assert!(source.contains("raw_slot") && source.contains("namespace_wrapper"));
+    assert!(
+        direct_reference_writes(&source).is_empty(),
+        "generated array storage bypasses the owner authority"
+    );
+    let words = tokens(&source);
+    assert!(
+        !words.windows(3).any(|part| part[0].0 == "->"
+            && matches!(part[1].0, "value" | "getter" | "setter" | "prototype")
+            && part[2].0 == "="),
+        "generated descriptor aliases bypass the owner authority"
+    );
+}

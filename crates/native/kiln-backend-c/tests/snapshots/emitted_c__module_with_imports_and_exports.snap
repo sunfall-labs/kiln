@@ -108,7 +108,7 @@ int kiln_module_7643a063497963b40af48b5464131ae3_namespace_wrapper(kiln_value *r
     }
     data = kiln_c99_object_of(object);
     data->shape = NULL;
-    data->prototype = kiln_c99_null();
+    kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     for (index = 0; index < count; ++index) {
         size_t source = order[index];
         kiln_property *slot;
@@ -137,7 +137,7 @@ int kiln_module_7643a063497963b40af48b5464131ae3_namespace_wrapper(kiln_value *r
             goto namespace_failure;
         }
         data->count += 1;
-        slot->value = value;
+        kiln_c99_heap_store_value(data, &slot->value, value);
         slot->symbol_hidden = 0;
         slot->writable = 1;
         slot->enumerable = 1;
@@ -149,7 +149,7 @@ int kiln_module_7643a063497963b40af48b5464131ae3_namespace_wrapper(kiln_value *r
         kiln_property *tag;
         status = kiln_c99_own_slot(object, "@@toStringTag", 13, &tag);
         if (status == KILN_C99_OK) {
-            tag->value = kiln_c99_copy_text("Module", 6);
+            kiln_c99_heap_store_value(data, &tag->value, kiln_c99_copy_text("Module", 6));
             if (tag->value.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
             tag->writable = 0;
             kiln_c99_object_of(object)->read_only_seen = 1;

@@ -2032,3 +2032,64 @@ fn executable_length_specialization() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_namespace_constructor_records_candidate_exports() {
+    let module = ModuleProgram {
+        program: program(vec![], vec![Instruction::Return], 0),
+        ..Default::default()
+    };
+    let generated = emit_module_with_logical_path(&module, "src/namespace-ledger.js")
+        .expect("namespace module emits");
+    let wrapper = r#"
+static int namespace_ledger_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value root, namespace_object;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    static const char *names[] = {"value"};
+    static const size_t lengths[] = {5};
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 0;
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&root) != KILN_C99_OK) return 1;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 2;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 3;
+    if (MODULE_namespace_wrapper(&namespace_object, names, lengths, &root, 1) !=
+            KILN_C99_OK || group->incoming_owners.count != 1 ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 4;
+    /* The fixture releases the snapshot's edge directly; public namespaces are immutable. */
+    kiln_object *owner = kiln_c99_object_of(namespace_object);
+    kiln_c99_heap_store_value(owner, &owner->properties[0].value, kiln_c99_undefined());
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 5;
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 6;
+    status = kiln_realm_enter(realm, namespace_ledger_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 7;
+    return status;
+}
+"#
+    .replace(
+        "MODULE_namespace_wrapper",
+        &format!("{}_namespace_wrapper", generated.symbol),
+    );
+    let run = run_with_main(&generated, &wrapper, "namespace-constructor-ledger");
+    assert!(
+        run.status.success(),
+        "namespace ledger failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("candidate ledger disagrees"));
+}
