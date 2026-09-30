@@ -146,6 +146,22 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_FUNCTION) {
+        /* Function is a callable constructor rather than a table-driven namespace. Its complete
+         * own-key list is fixed by the language; the own-property store appends program-defined
+         * additions in insertion order. This is used by get-intrinsic when it checks whether an
+         * intrinsic constructor owns `prototype`. */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (!kiln_c99_is_namespace(builtin)) {
         /* A constructor whose statics are not table-driven -- the typed-array constructors and
          * `Temporal`'s eight types -- still cannot list itself, because its members are computed

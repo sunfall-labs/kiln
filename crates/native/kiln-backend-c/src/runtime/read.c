@@ -2127,6 +2127,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * `Set.isBuffer` must receive undefined instead of a backend refusal. */
             KILN_C99_ABSENT("Set constructor has no other string-named statics", out);
         }
+        if (target.bits == KILN_C99_BUILTIN_BIGINT &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            /* BigInt's only ordinary string statics are asIntN and asUintN, handled through the
+             * shared surface above. Other names such as the feature probe BigInt.isBuffer are
+             * absent by the complete constructor definition. */
+            KILN_C99_ABSENT("BigInt constructor has no other string-named statics", out);
+        }
         {
             /* An absent name on a table-driven built-in is `undefined`, exactly as it is on an
              * object the program built: `Object.nope` is not a gap here, it is what the language

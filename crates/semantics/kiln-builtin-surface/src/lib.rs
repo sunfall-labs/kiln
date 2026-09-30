@@ -209,6 +209,8 @@ pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
     ("String", "fromCharCode", 1),
     ("String", "fromCodePoint", 1),
     ("String", "raw", 1),
+    // Primitive-dispatched methods use PURE_MEMBERS rather than PROTOTYPE_SURFACE.
+    ("String.prototype", "indexOf", 1),
     ("Symbol", "for", 1),
     ("Symbol", "keyFor", 1),
     ("performance", "now", 0),

@@ -11,6 +11,13 @@ pub(crate) struct MethodId {
 
 const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 
+/// Native dispatch IDs that implement a shared prototype member through primitive-special
+/// dispatch rather than the builtin receiver table. The member's semantics and arity still come
+/// from `kiln_builtin_surface`; this table only connects the C dispatch ID to its public owner.
+const NATIVE_METHOD_PROTOTYPE_BINDINGS: &[(&str, &str, &str)] = &[
+    ("KILN_C99_METHOD_STRING_INDEX_OF", "String.prototype", "indexOf"),
+];
+
 const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() == 0 || needle.len() > haystack.len() {
         return false;
@@ -37,12 +44,19 @@ const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-fn method_declared_length(method: &str) -> u32 {
+fn method_declared_length(method: &MethodId) -> u32 {
+    for (native_id, owner, member) in NATIVE_METHOD_PROTOTYPE_BINDINGS {
+        if *native_id == method.name {
+            if let Some(length) = kiln_builtin_surface::native_function_length(owner, member) {
+                return length as u32;
+            }
+        }
+    }
     let mut length = None;
     let mut index = 0;
     while index < BUILTIN_SURFACE.len() {
         let member = BUILTIN_SURFACE[index];
-        if bytes_contain(member.answers.as_bytes(), method.as_bytes()) {
+        if bytes_contain(member.answers.as_bytes(), method.name.as_bytes()) {
             if let Some(candidate) = kiln_builtin_surface::native_function_length(
                 member.owner,
                 member.name,
@@ -158,7 +172,7 @@ fn compute_native_method_length_rows() -> String {
     use std::fmt::Write as _;
     let mut rows = String::new();
     for method in METHOD_IDS {
-        let length = method_declared_length(method.name);
+        let length = method_declared_length(method);
         if length != METHOD_LENGTH_UNSPECIFIED {
             writeln!(
                 rows,
@@ -2286,7 +2300,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 33,
+        sites: 34,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2298,7 +2312,8 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     kiln_c99_is_typed_array_member, RegExp instance slots followed by the complete \
                     RegExp.prototype and Object.prototype stores/tables, and native callable own \
                     slots, the callable stores and prototype tables, Set constructor string statics (name, \
-                    length and prototype), then BUILTIN_SURFACE plus \
+                    length and prototype), BigInt constructor string statics (asIntN and asUintN are \
+                    handled above), then BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
                     a synchronous generator has no `@@asyncIterator` member (only async \
                     generators define it); and a bound function's `prototype` is decided by \
