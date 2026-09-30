@@ -1720,7 +1720,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             *result = kiln_c99_array_of(collected)->count == 0 ? kiln_c99_null() : collected;
             break;
         case KILN_C99_METHOD_STRING_MATCH_ALL:
-            status = kiln_c99_new_iterator(result, collected);
+            status = kiln_c99_new_iterator(result, collected, 2);
             break;
         case KILN_C99_METHOD_SPLIT:
             status = kiln_c99_array_push(collected,

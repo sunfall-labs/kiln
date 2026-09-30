@@ -1033,7 +1033,7 @@
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                return kiln_c99_new_iterator(result, snapshot);
+                return kiln_c99_new_iterator(result, snapshot, 0);
             }
             /* A string's `@@iterator` is this same method, and it walks *characters*: an astral
              * pair is one step, which is the difference between iterating a string and indexing
@@ -1053,7 +1053,7 @@
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                return kiln_c99_new_iterator(result, snapshot);
+                return kiln_c99_new_iterator(result, snapshot, 1);
             }
             if (receiver.tag != KILN_VALUE_ARRAY) {
                 KILN_C99_REFUSE("an array iteration method on a receiver that is not an array");
@@ -1071,7 +1071,7 @@
             if (status != KILN_C99_OK) {
                 return status;
             }
-            return kiln_c99_new_iterator(result, snapshot);
+            return kiln_c99_new_iterator(result, snapshot, 0);
         }
         case KILN_C99_METHOD_GENERATOR_SELF:
             if (receiver.tag != KILN_VALUE_GENERATOR) {
@@ -3258,7 +3258,7 @@
         if (status != KILN_C99_OK) {
             return status;
         }
-        return kiln_c99_new_iterator(result, snapshot);
+        return kiln_c99_new_iterator(result, snapshot, 0);
     }
     case KILN_C99_METHOD_REDUCE: {
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();

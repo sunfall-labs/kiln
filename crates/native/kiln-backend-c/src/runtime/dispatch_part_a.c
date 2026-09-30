@@ -1053,6 +1053,32 @@ static int kiln_c99_collection_iterator_prototype(int is_map, kiln_value *out) {
     return status;
 }
 
+/* Array, String, RegExp String and TypedArray iterators also have distinct prototype identities.
+ * Their common Iterator.prototype remains the parent, where lazy helpers live. */
+static int kiln_c99_builtin_iterator_prototype(int kind, kiln_value *out) {
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    kiln_value *slot;
+    const char *tag;
+    size_t tag_len;
+    int status;
+    switch (kind) {
+    case 0: slot = &realm->array_iterator_prototype; tag = "Array Iterator"; tag_len = 14; break;
+    case 1: slot = &realm->string_iterator_prototype; tag = "String Iterator"; tag_len = 15; break;
+    case 2: slot = &realm->regexp_string_iterator_prototype; tag = "RegExp String Iterator"; tag_len = 22; break;
+    default: slot = &realm->typed_array_iterator_prototype; tag = "Array Iterator"; tag_len = 14; break;
+    }
+    if (slot->tag == KILN_VALUE_OBJECT) { *out = *slot; return KILN_C99_OK; }
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    *slot = *out;
+    status = kiln_c99_set_prototype(*out, kiln_c99_builtin(KILN_C99_BUILTIN_ITERATOR_PROTOTYPE));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "next", 4, kiln_c99_method(KILN_C99_METHOD_ITERATOR_NEXT));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "@@toStringTag", 13, kiln_c99_copy_text(tag, tag_len), 0, NULL);
+    return status;
+}
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {

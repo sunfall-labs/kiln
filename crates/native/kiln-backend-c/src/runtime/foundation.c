@@ -647,7 +647,8 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
                                  kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown);
-static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
+static int kiln_c99_new_iterator(kiln_value *out, kiln_value items, int kind);
+static int kiln_c99_builtin_iterator_prototype(int kind, kiln_value *out);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
 static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t entry_idx, kiln_value key);
@@ -1022,7 +1023,11 @@ typedef struct kiln_c99_realm_state {
      * built on first construction. */
     kiln_value native_prototypes[sizeof kiln_c99_native_constructors /
                                  sizeof *kiln_c99_native_constructors];
-    /* Map and Set iterators use distinct realm-owned prototype identities. */
+    /* Iterator families have distinct realm-owned prototype identities. */
+    kiln_value array_iterator_prototype;
+    kiln_value string_iterator_prototype;
+    kiln_value regexp_string_iterator_prototype;
+    kiln_value typed_array_iterator_prototype;
     kiln_value map_iterator_prototype;
     kiln_value set_iterator_prototype;
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
