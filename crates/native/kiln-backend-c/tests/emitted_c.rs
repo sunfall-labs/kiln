@@ -1896,6 +1896,50 @@ fn polymorphic_inline_cache_prelude_surface() {
 }
 
 #[test]
+fn emitted_property_cache_hits_record_the_heap_owner() {
+    let mut p = program(
+        vec![Constant::String("value".into())],
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    p.functions.push(function(
+        "store",
+        2,
+        2,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::SetProperty(0),
+            Instruction::Return,
+        ],
+        Vec::new(),
+    ));
+    let source = kiln_backend_c::emit_with_policy(
+        &p,
+        kiln_backend_c::EmissionPolicy {
+            decoupled_prelude: true,
+            compact: true,
+            ..Default::default()
+        },
+    )
+    .expect("decoupled property write emits")
+    .source;
+    assert!(
+        source.contains("ku_pic_poly_write("),
+        "must exercise generated property caches"
+    );
+    for (owner, slot, value) in [("obj", "slot", "val"), ("ku_obj", "ku_s0", "ku_v")] {
+        assert!(
+            source.contains(&format!(
+                "kiln_c99_heap_store_val({owner}, &{owner}->slots[{slot}], {value});"
+            )),
+            "cache hit must supply the owning object to the reference authority"
+        );
+        assert!(!source.contains(&format!("{owner}->slots[{slot}] = {value};")));
+    }
+}
+
+#[test]
 fn emitted_cache_sites_are_zero_backed() {
     let mut p = program(
         vec![Constant::String("x".into())],

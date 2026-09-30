@@ -90,6 +90,29 @@ try {
   const lateRetry = await owner.ref.call('echo', [lateTicket]);
   if (lateRetry.answer !== 23) throw new Error('post-factory alias retry failed');
 
+  // Exercise both first-shape and additional-shape hits at one property write site.
+  function cacheStore(holder, value) { holder.value = value; }
+  const cacheHolders = [{ value: {} }, { extra: true, value: {} }];
+  for (let i = 0; i < 12; i++) cacheStore(cacheHolders[i % 2], { warm: i });
+  for (let i = 0; i < cacheHolders.length; i++) {
+    let escaped;
+    const cacheTicket = transfer(isolate(() => {
+      escaped = { answer: 51 + i };
+      return escaped;
+    }));
+    cacheStore(cacheHolders[i], escaped);
+    escaped = undefined;
+    let cacheRefused = false;
+    try { await owner.ref.call('echo', [cacheTicket]); }
+    catch (error) { cacheRefused = error.name === 'DataCloneError'; }
+    if (!cacheRefused || cacheHolders[i].value.answer !== 51 + i) {
+      throw new Error('cached property alias moved');
+    }
+    cacheStore(cacheHolders[i], undefined);
+    const cacheReply = await owner.ref.call('echo', [cacheTicket]);
+    if (cacheReply.answer !== 51 + i) throw new Error('cached property clear did not permit retry');
+  }
+
   // Warm the decoupled module's cached private-field setter with ordinary object values.
   // A later candidate write must record the outside owner even on the cache hit.
   class PrivateHolder {

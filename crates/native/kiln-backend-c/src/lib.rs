@@ -4205,7 +4205,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
 } while (0)\n");
     }
     if has_write_property {
-        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t count = kiln_c99_site_count(site);\n    for (uint32_t i = 1; i < count; ++i) {\n        if (shape == kiln_c99_slot_key(&site->entries[i].shape) && site->entries[i].transition_to == NULL) {\n            uint32_t slot = site->entries[i].slot;\n            if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n                kiln_c99_prototype_touched(obj);\n                obj->slots[slot] = val;\n                kiln_c99_site_answered(site, i);\n                return 1;\n            }\n        }\n    }\n    return 0;\n}\n");
+        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t count = kiln_c99_site_count(site);\n    for (uint32_t i = 1; i < count; ++i) {\n        if (shape == kiln_c99_slot_key(&site->entries[i].shape) && site->entries[i].transition_to == NULL) {\n            uint32_t slot = site->entries[i].slot;\n            if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n                kiln_c99_prototype_touched(obj);\n                kiln_c99_heap_store_val(obj, &obj->slots[slot], val);\n                kiln_c99_site_answered(site, i);\n                return 1;\n            }\n        }\n    }\n    return 0;\n}\n");
         output.push_str("#define KU_WRITE_PROPERTY(OBJECT, KEY, VAL, STRICT, SITE, PC, OP, UNWIND) do { \\\n\
     kiln_c99_site *ku_s = (SITE); \\\n\
     kiln_val ku_t = (OBJECT); \\\n\
@@ -4217,7 +4217,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             if (KILN_LIKELY((ku_obj->shape->double_slots_mask & (1u << ku_s0)) == 0 || KILN_VAL_IS_NUMBER(ku_v))) { \\\n\
                 if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
                     kiln_c99_prototype_touched(ku_obj); \\\n\
-                    ku_obj->slots[ku_s0] = ku_v; \\\n\
+                    kiln_c99_heap_store_val(ku_obj, &ku_obj->slots[ku_s0], ku_v); \\\n\
                     break; \\\n\
                 } \\\n\
             } \\\n\
