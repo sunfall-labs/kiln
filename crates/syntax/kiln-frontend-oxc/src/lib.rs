@@ -1372,6 +1372,7 @@ fn lower_parsed_in_context(
     let body = lowerer.statements(&parsed.program.body);
 
     let module = Module {
+        module_id: Arc::from(path),
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
         source_kind: source_kind(source_type),

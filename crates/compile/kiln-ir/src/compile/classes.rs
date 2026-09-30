@@ -60,6 +60,8 @@ impl super::Compiler {
         // class nested inside one -- names its private fields in this class's own scope.
         self.private_scopes.push(self.next_private_scope);
         self.next_private_scope += 1;
+        self.private_scope_modules
+            .push(self.private_module_id.clone());
         // Declared here so every method compiled below captures it; what it holds is minted
         // once, where the class is evaluated.
         let brand = self.declare_home_binding(class.span);
@@ -467,6 +469,9 @@ impl super::Compiler {
         self.private_scopes
             .pop()
             .expect("this class pushed its own private scope");
+        self.private_scope_modules
+            .pop()
+            .expect("this class pushed its module identity");
         self.private_brands
             .pop()
             .expect("this class pushed its own brand");

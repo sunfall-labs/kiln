@@ -5642,9 +5642,10 @@ mod parallel_tests;
 
 /// The reserved key an instance stores its class's brand under, derived from a private name.
 ///
-/// `@@private:{scope}:{member}` becomes `@@private:{scope}:%brand`: one brand per class, shared
-/// by every private member it declares. Derived here rather than passed, so the instruction
-/// keeps the shape the interpreter gives it.
+/// The first token is an opaque module-and-scope identity, so it becomes the brand key by
+/// replacing only the final member token. One brand is shared by every private member declared
+/// by that class. Derived here rather than passed, so the instruction keeps the shape the
+/// interpreter gives it.
 fn private_brand_key_of(name: &str) -> String {
     match name
         .strip_prefix("@@private:")

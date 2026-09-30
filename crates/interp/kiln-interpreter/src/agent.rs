@@ -904,6 +904,7 @@ fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(
     };
     let (program, strictness) = compile(&EvalSource {
         source,
+        module_id: "<agent-eval>",
         outer: &[],
         strict: false,
         global_var_scope: true,

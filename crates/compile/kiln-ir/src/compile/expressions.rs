@@ -1964,11 +1964,13 @@ impl super::Compiler {
             let private_scopes = self
                 .private_scopes
                 .iter()
+                .zip(&self.private_scope_modules)
                 .zip(&self.private_declarations)
-                .map(|(scope, names)| {
+                .map(|((scope, module_id), names)| {
                     let mut names: Vec<String> = names.iter().cloned().collect();
                     names.sort();
                     PrivateScope {
+                        module_id: module_id.clone(),
                         scope: *scope,
                         names,
                     }
@@ -1981,6 +1983,8 @@ impl super::Compiler {
                 Some(self.emit_arguments(arguments))
             };
             self.code.push(Instruction::DirectEval(Box::new(EvalSite {
+                module_id: self.private_module_id.clone(),
+                source_offset: span.start,
                 bindings,
                 strict: self.strict,
                 argc,

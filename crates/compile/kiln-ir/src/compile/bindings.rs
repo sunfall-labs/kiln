@@ -21,7 +21,14 @@ impl super::Compiler {
 
     /// The brand key of the class currently being compiled, for the store that installs it.
     pub(super) fn own_private_brand_key(&self) -> String {
-        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            "%brand",
+        )
     }
 
     /// Read `name` from the bindings around it, ignoring any `with` object.

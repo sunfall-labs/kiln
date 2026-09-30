@@ -192,6 +192,7 @@ pub fn compile_eval_with_strictness(
     // its brand check would accept the caller's instances.
     for scope in &options.private_scopes {
         compiler.private_scopes.push(scope.scope);
+        compiler.private_scope_modules.push(scope.module_id.clone());
         compiler
             .private_declarations
             .push(scope.names.iter().cloned().collect());
@@ -871,6 +872,12 @@ struct Compiler {
     /// A stack because a class can be declared inside another's method, and each has its own
     /// private names.
     private_scopes: Vec<u32>,
+    /// The source module that owns each scope, parallel to `private_scopes`. Class ordinals are
+    /// local to one compiler; these identities keep their reserved property keys disjoint when
+    /// a graph compiles each module independently.
+    private_scope_modules: Vec<String>,
+    /// Stable identity of the module currently being compiled, used for classes declared here.
+    private_module_id: String,
     /// The hidden binding holding each open class's *brand*: the identity that tells one
     /// evaluation of a class from another. `private_scopes` distinguishes one class body from
     /// another and is fixed at compile time; two evaluations of one body share it, which is why

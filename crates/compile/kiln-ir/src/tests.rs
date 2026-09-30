@@ -3,6 +3,7 @@ use kiln_hir::*;
 
 fn module(body: Vec<Statement>) -> Module {
     Module {
+        module_id: "".into(),
         // These modules are built as HIR rather than parsed, so there is no text their spans
         // point into. A function compiled from one answers `toString` with the empty string,
         // which is what "no source" means here.

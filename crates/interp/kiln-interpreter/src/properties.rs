@@ -858,8 +858,8 @@ pub(super) fn own_private_element(target: &Value, key: &str) -> Option<(Property
     ))
 }
 
-/// A private name as the program spelled it, without the scope-numbered reservation it is keyed
-/// under: `x` from `@@private:3:x`.
+/// A private name as the program spelled it, without the module-and-scope reservation it is keyed
+/// under: `x` from `@@private:<module-scope>:x`.
 pub(super) fn private_display_name(key: &str) -> &str {
     let reserved = key.strip_prefix(PRIVATE_KEY_PREFIX).unwrap_or(key);
     reserved.split_once(':').map_or(reserved, |(_, name)| name)

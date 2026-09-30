@@ -81,6 +81,8 @@ impl super::Compiler {
             mapped_arguments: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
+            private_scope_modules: Vec::new(),
+            private_module_id: module.module_id.to_string(),
             private_brands: Vec::new(),
             next_private_scope: 0,
             private_declarations: Vec::new(),
@@ -271,12 +273,23 @@ impl super::Compiler {
         // a nested class does not shadow a name it never mentioned.
         for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
             if declared.contains(name) {
-                return private_key(self.private_scopes[depth], name);
+                return private_key(
+                    &self.private_scope_modules[depth],
+                    self.private_scopes[depth],
+                    name,
+                );
             }
         }
         // Undeclared anywhere. A syntax error in its own right, reported where the name is used
         // rather than invented into some other class's scope.
-        private_key(self.private_scopes.last().copied().unwrap_or(0), name)
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            name,
+        )
     }
 
     /// The brand binding of the class that *declares* `name`, mirroring [`Self::private_key`].
@@ -296,10 +309,21 @@ impl super::Compiler {
     pub(super) fn private_brand_key(&self, name: &str) -> String {
         for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
             if declared.contains(name) {
-                return private_key(self.private_scopes[depth], "%brand");
+                return private_key(
+                    &self.private_scope_modules[depth],
+                    self.private_scopes[depth],
+                    "%brand",
+                );
             }
         }
-        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            "%brand",
+        )
     }
 
     pub(super) fn resolve_module_local(&self, name: &str) -> Option<u32> {

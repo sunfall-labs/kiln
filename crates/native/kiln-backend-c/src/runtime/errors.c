@@ -269,7 +269,7 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
 
 /* A private element refusing what was asked of it: a TypeError naming the member.
  *
- * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
+ * The stored key is `@@private:<module-scope>:<name>` -- reserved so nothing that enumerates own string
  * properties can see it and no computed access can spell it -- and the message wants the `<name>`
  * half, spelled the way the program spells it.
  *

@@ -1442,6 +1442,8 @@ impl Default for ExecutionLimits {
 /// [`kiln_ir::compile_eval`] promises to bind them to.
 pub struct EvalSource<'a> {
     pub source: &'a str,
+    /// Stable module/call-site identity for private scopes created by this dynamic compilation.
+    pub module_id: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],
     pub strict: bool,
     /// Whether this eval's `var` and function declarations belong to the global environment

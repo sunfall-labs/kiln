@@ -64,7 +64,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             .flat_map(|scope| scope.names.iter().cloned())
             .collect(),
     };
-    let module = parse_eval("<eval>", &source, &allow);
+    let module = parse_eval(request.module_id, &source, &allow);
     if let Some(diagnostic) = module.diagnostics.first() {
         return Err(EvalCompileError::Syntax(diagnostic.message.clone()));
     }

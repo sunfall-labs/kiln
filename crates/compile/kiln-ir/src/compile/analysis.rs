@@ -1637,8 +1637,21 @@ pub(super) fn private_kind(kind: kiln_hir::MethodKind) -> PrivateKind {
 ///
 /// Reserved rather than ordinary, so nothing that enumerates own string properties can see it and
 /// no computed access can spell it -- `obj["#x"]` names a different property, as it should.
-pub(super) fn private_key(scope: u32, name: &str) -> String {
-    format!("@@private:{scope}:{name}")
+pub(super) fn private_key(module_id: &str, scope: u32, name: &str) -> String {
+    // The module identity is hex-encoded so it cannot introduce a separator into the reserved
+    // key grammar. A class ordinal is only unique within one Compiler; graph modules compile
+    // independently, so the stable module identity is part of the property key as well.
+    if module_id.is_empty() {
+        // Hand-built HIR fixtures have no source graph identity; retain their compact local
+        // spelling while parsed/linked modules always supply one.
+        return format!("@@private:{scope}:{name}");
+    }
+    let mut identity = String::with_capacity(module_id.len() * 2 + 8);
+    for byte in module_id.bytes() {
+        use std::fmt::Write as _;
+        write!(identity, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("@@private:{identity}-{scope}:{name}")
 }
 
 /// The names a pattern binds, in source order.

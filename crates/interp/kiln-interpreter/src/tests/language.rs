@@ -71,6 +71,8 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
             Instruction::StoreCell(0),
             Instruction::Const(1),
             Instruction::DirectEval(Box::new(EvalSite {
+                module_id: "<language-test>".to_owned(),
+                source_offset: 0,
                 bindings: vec![kiln_ir::EvalBinding {
                     name: "x".to_owned(),
                     access: EvalAccess::Cell(0),

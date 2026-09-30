@@ -226,8 +226,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // carries none of the syntactic context a direct one does.
         let new_target = site.map_or(kiln_ir::EvalNewTarget::Forbidden, |site| site.new_target);
         let no_private_scopes: [kiln_ir::PrivateScope; 0] = [];
+        let eval_module_id = site.map_or_else(
+            || "<indirect-eval>".to_owned(),
+            |site| format!("{}#eval-{}", site.module_id, site.source_offset),
+        );
         let (program, program_strictness) = compile(&EvalSource {
             source,
+            module_id: &eval_module_id,
             outer: &outer,
             strict,
             global_var_scope,

@@ -52,6 +52,9 @@ pub struct Diagnostic {
 // compiler passes to diagnose it without confusing syntax checking with backend coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
+    /// Stable identity of the source within its module graph. Private names use this together
+    /// with their class-local scope so separately compiled modules cannot alias private brands.
+    pub module_id: Arc<str>,
     /// The text every [`Span`] in this module indexes into.
     ///
     /// A span is a byte range and nothing else, so without the text beside it it names a
@@ -1242,6 +1245,7 @@ mod tests {
     #[test]
     fn runtime_names_exclude_types_and_unresolved_stars() {
         let module = Module {
+            module_id: "".into(),
             source: "".into(),
             strict: false,
             source_kind: SourceKind::TypeScript,

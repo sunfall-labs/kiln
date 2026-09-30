@@ -1005,13 +1005,13 @@ pub enum EvalDeclaration {
 ///
 /// The names alone would not do. A private element is stored under a key built from the class's
 /// *identity* -- `class A { #v } class B { #v }` declare two different fields -- and that
-/// identity is a counter belonging to the compiler that compiled the class. An eval'd source is
-/// compiled by a second compiler whose counter starts at zero, so a name resolved there against a
-/// fresh identity would name a slot no object of the enclosing class carries, and the brand check
-/// would report the class as not having declared its own field. The identity travels with the
-/// names for that reason.
+/// identity is a counter belonging to the compiler that compiled the class, qualified by its
+/// stable module identity. An eval'd source is compiled by a second compiler, so the enclosing
+/// module identity travels with its names when eval resolves an outer private name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateScope {
+    /// Stable source/module identity for the class declaration.
+    pub module_id: String,
     pub scope: u32,
     /// Sorted, because the bytecode is a cache key and a hash set has no order to promise.
     pub names: Vec<String>,
@@ -1054,6 +1054,12 @@ pub struct EvalBinding {
 /// table would cost every program a field it never uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalSite {
+    /// Module containing the call site, used to make classes compiled by `eval` disjoint from
+    /// classes in other independently compiled modules.
+    pub module_id: String,
+    /// Byte offset of this call site; eval-created class scopes remain disjoint from other eval
+    /// sites in the same source.
+    pub source_offset: u32,
     /// The names in scope where the call is written, innermost binding first so a shadowed outer
     /// name never wins.
     pub bindings: Vec<EvalBinding>,
