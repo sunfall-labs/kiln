@@ -162,7 +162,6 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_EVAL_ERROR:
     case KILN_C99_BUILTIN_EVAL:
     case KILN_C99_BUILTIN_URL:
-    case KILN_C99_BUILTIN_BUFFER:
     case KILN_C99_BUILTIN_WEAK_REF:
     case KILN_C99_BUILTIN_FINALIZATION_REGISTRY:
     case KILN_C99_BUILTIN_TEMPORAL_INSTANT:
@@ -190,6 +189,8 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_FLOAT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY:
+    /* Node's Buffer constructor takes at least (size, fill, encoding) in its declared signature. */
+    case KILN_C99_BUILTIN_BUFFER:
     /* `SuppressedError(error, suppressed, message)`: three, as node answers; it sat in the
      * two-group beside `AggregateError` and no test read it. */
     case KILN_C99_BUILTIN_SUPPRESSED_ERROR:

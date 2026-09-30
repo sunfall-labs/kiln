@@ -103,10 +103,115 @@ pub const BOOTSTRAP_STATICS: &[(&str, &str)] = &[
     ("Iterator", "zipKeyed"),
 ];
 
-/// Declared lengths for selected built-in functions whose identity is shared by the interpreter
-/// and native callable facade. This keeps reflection metadata at the same owner as the public
-/// surface instead of in a backend-only switch.
+/// Declared lengths for callable built-in members whose identity is shared by both engines.
+/// Prototype methods derive their lengths from `PROTOTYPE_SURFACE`; this table covers static
+/// methods, which are part of `BUILTIN_SURFACE`. Keeping the arity beside the shared public
+/// surface prevents the interpreter and native callable facade from maintaining separate
+/// reflection metadata.
 pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
+    ("AbortSignal", "abort", 0),
+    ("AbortSignal", "any", 1),
+    ("AbortSignal", "timeout", 1),
+    ("Array", "from", 1),
+    ("Array", "isArray", 1),
+    ("Array", "of", 0),
+    ("ArrayBuffer", "isView", 1),
+    ("Buffer", "alloc", 3),
+    ("Buffer", "allocUnsafe", 2),
+    ("Buffer", "allocUnsafeSlow", 2),
+    ("Buffer", "byteLength", 2),
+    ("Buffer", "concat", 2),
+    ("Buffer", "from", 3),
+    ("Buffer", "isBuffer", 1),
+    ("Date", "UTC", 7),
+    ("Date", "now", 0),
+    ("Date", "parse", 1),
+    ("Error", "captureStackTrace", 2),
+    ("Iterator", "from", 1),
+    ("JSON", "parse", 2),
+    ("JSON", "stringify", 3),
+    ("Math", "abs", 1),
+    ("Math", "acos", 1),
+    ("Math", "acosh", 1),
+    ("Math", "asin", 1),
+    ("Math", "asinh", 1),
+    ("Math", "atan", 1),
+    ("Math", "atan2", 2),
+    ("Math", "atanh", 1),
+    ("Math", "cbrt", 1),
+    ("Math", "ceil", 1),
+    ("Math", "clz32", 1),
+    ("Math", "cos", 1),
+    ("Math", "cosh", 1),
+    ("Math", "exp", 1),
+    ("Math", "expm1", 1),
+    ("Math", "floor", 1),
+    ("Math", "fround", 1),
+    ("Math", "hypot", 2),
+    ("Math", "imul", 2),
+    ("Math", "log", 1),
+    ("Math", "log10", 1),
+    ("Math", "log1p", 1),
+    ("Math", "log2", 1),
+    ("Math", "max", 2),
+    ("Math", "min", 2),
+    ("Math", "pow", 2),
+    ("Math", "random", 0),
+    ("Math", "round", 1),
+    ("Math", "sign", 1),
+    ("Math", "sin", 1),
+    ("Math", "sinh", 1),
+    ("Math", "sqrt", 1),
+    ("Math", "tan", 1),
+    ("Math", "tanh", 1),
+    ("Math", "trunc", 1),
+    ("Number", "isFinite", 1),
+    ("Number", "isInteger", 1),
+    ("Number", "isNaN", 1),
+    ("Number", "isSafeInteger", 1),
+    ("Number", "parseFloat", 1),
+    ("Number", "parseInt", 2),
+    ("Object", "assign", 2),
+    ("Object", "create", 2),
+    ("Object", "defineProperties", 2),
+    ("Object", "defineProperty", 3),
+    ("Object", "entries", 1),
+    ("Object", "freeze", 1),
+    ("Object", "fromEntries", 1),
+    ("Object", "getOwnPropertyNames", 1),
+    ("Object", "getOwnPropertySymbols", 1),
+    ("Object", "getPrototypeOf", 1),
+    ("Object", "hasOwn", 2),
+    ("Object", "is", 2),
+    ("Object", "isExtensible", 1),
+    ("Object", "isFrozen", 1),
+    ("Object", "preventExtensions", 1),
+    ("Object", "setPrototypeOf", 2),
+    ("Object", "values", 1),
+    ("Promise", "all", 1),
+    ("Promise", "allSettled", 1),
+    ("Promise", "any", 1),
+    ("Promise", "race", 1),
+    ("Promise", "reject", 1),
+    ("Promise", "resolve", 1),
+    ("Promise", "withResolvers", 0),
+    ("Proxy", "revocable", 2),
+    ("Reflect", "apply", 3),
+    ("Reflect", "construct", 2),
+    ("Reflect", "defineProperty", 3),
+    ("Reflect", "deleteProperty", 2),
+    ("Reflect", "get", 2),
+    ("Reflect", "getOwnPropertyDescriptor", 2),
+    ("Reflect", "getPrototypeOf", 1),
+    ("Reflect", "has", 2),
+    ("Reflect", "ownKeys", 1),
+    ("Reflect", "set", 3),
+    ("String", "fromCharCode", 1),
+    ("String", "fromCodePoint", 1),
+    ("String", "raw", 1),
+    ("Symbol", "for", 1),
+    ("Symbol", "keyFor", 1),
+    ("performance", "now", 0),
     ("Object", "keys", 1),
     ("Object", "getOwnPropertyDescriptor", 2),
     ("Object", "getOwnPropertyDescriptors", 1),
@@ -134,13 +239,11 @@ pub const fn native_function_length(owner: &str, member: &str) -> Option<usize> 
     while index < PROTOTYPE_SURFACE.len() {
         let row = PROTOTYPE_SURFACE[index];
         if same(row.prototype.name(), owner) {
-            if let MemberKey::Named(name) = row.key {
-                if same(name, member) {
-                    if let MemberKind::Method { length } = row.kind {
-                        return Some(length);
-                    }
-                    return None;
+            if same(row.key.property_key(), member) {
+                if let MemberKind::Method { length } = row.kind {
+                    return Some(length);
                 }
+                return None;
             }
         }
         index += 1;
