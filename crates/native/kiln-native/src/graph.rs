@@ -3621,7 +3621,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
             for ((failure_importer, failure_specifier), message) in
                 graph.runtime_failures(&node.path)
             {
-                if failure_importer != node.path {
+                if failure_importer != &node.path {
                     continue;
                 }
                 writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
