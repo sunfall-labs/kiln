@@ -422,26 +422,111 @@ fn discover_node_runtime_requests_from_semantic(
         }
     }
 
-    struct RequireReferenceVisitor<'a> {
-        scoping: &'a oxc_semantic::Scoping,
-        loaders: &'a HashMap<SymbolId, String>,
-        importer: Option<String>,
+    fn reference_loader<'a>(
+        expression: &Expression<'a>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        let reference = identifier.reference_id.get()?;
+        let symbol = scoping.get_reference(reference).symbol_id()?;
+        loaders.get(&symbol).cloned()
     }
-    impl<'a> oxc_ast_visit::Visit<'a> for RequireReferenceVisitor<'a> {
-        fn visit_identifier_reference(
-            &mut self,
-            identifier: &oxc_ast::ast::IdentifierReference<'a>,
-        ) {
-            let Some(reference) = identifier.reference_id.get() else {
-                return;
-            };
-            let Some(symbol) = self.scoping.get_reference(reference).symbol_id() else {
-                return;
-            };
-            if let Some(importer) = self.loaders.get(&symbol) {
-                self.importer = Some(importer.clone());
+
+    fn wrapper_return_loader<'a>(
+        expression: &Expression<'a>,
+        parameters: &HashSet<SymbolId>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        match expression {
+            Expression::Identifier(_) => reference_loader(expression, scoping, loaders),
+            Expression::ConditionalExpression(value) => {
+                wrapper_return_loader(&value.consequent, parameters, scoping, loaders).or_else(
+                    || wrapper_return_loader(&value.alternate, parameters, scoping, loaders),
+                )
             }
+            Expression::LogicalExpression(value) => {
+                wrapper_return_loader(&value.left, parameters, scoping, loaders)
+                    .or_else(|| wrapper_return_loader(&value.right, parameters, scoping, loaders))
+            }
+            Expression::SequenceExpression(value) => value
+                .expressions
+                .last()
+                .and_then(|last| wrapper_return_loader(last, parameters, scoping, loaders)),
+            Expression::CallExpression(call) => {
+                let importer = reference_loader(&call.callee, scoping, loaders)?;
+                let forwards_parameter = call.arguments.iter().any(|argument| {
+                    let Argument::Identifier(identifier) = argument else {
+                        return false;
+                    };
+                    identifier
+                        .reference_id
+                        .get()
+                        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                        .is_some_and(|symbol| parameters.contains(&symbol))
+                });
+                forwards_parameter.then_some(importer)
+            }
+            _ => None,
         }
+    }
+
+    fn function_loader<'a>(
+        expression: &Expression<'a>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        let mut parameter_symbols = HashSet::new();
+        let mut returns = Vec::new();
+        match expression {
+            Expression::ArrowFunctionExpression(function) => {
+                for parameter in &function.params.items {
+                    parameter.pattern.bound_names(&mut |identifier| {
+                        if let Some(symbol) = identifier.symbol_id.get() {
+                            parameter_symbols.insert(symbol);
+                        }
+                    });
+                }
+                match &function.body {
+                    ArrowFunctionBody::Expression(expression) => returns.push(expression.as_ref()),
+                    ArrowFunctionBody::FunctionBody(body) => {
+                        for statement in &body.statements {
+                            if let Statement::ReturnStatement(returned) = statement {
+                                if let Some(argument) = &returned.argument {
+                                    returns.push(argument.as_ref());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Expression::FunctionExpression(function) => {
+                for parameter in &function.params.items {
+                    parameter.pattern.bound_names(&mut |identifier| {
+                        if let Some(symbol) = identifier.symbol_id.get() {
+                            parameter_symbols.insert(symbol);
+                        }
+                    });
+                }
+                let Some(body) = &function.body else {
+                    return None;
+                };
+                for statement in &body.statements {
+                    if let Statement::ReturnStatement(returned) = statement {
+                        if let Some(argument) = &returned.argument {
+                            returns.push(argument.as_ref());
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+        returns.into_iter().find_map(|returned| {
+            wrapper_return_loader(returned, &parameter_symbols, scoping, loaders)
+        })
     }
 
     // Bundlers wrap lexical `require` in one or more local functions (esbuild names its helper
@@ -467,18 +552,6 @@ fn discover_node_runtime_requests_from_semantic(
             let Some(init) = &declarator.init else {
                 continue;
             };
-            let is_function_wrapper = matches!(
-                init,
-                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-            );
-            let is_function_factory = matches!(
-                init,
-                Expression::CallExpression(call)
-                    if matches!(
-                        call.callee,
-                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-                    )
-            );
             let is_symbol_alias = if let Expression::Identifier(identifier) = init {
                 identifier
                     .reference_id
@@ -488,16 +561,14 @@ fn discover_node_runtime_requests_from_semantic(
             } else {
                 false
             };
-            if !is_function_wrapper && !is_function_factory && !is_symbol_alias {
-                continue;
-            }
-            let mut visitor = RequireReferenceVisitor {
-                scoping,
-                loaders: &require_symbols,
-                importer: None,
+            let importer = if is_symbol_alias {
+                reference_loader(init, scoping, &require_symbols)
+            } else if let Expression::CallExpression(call) = init {
+                function_loader(&call.callee, scoping, &require_symbols)
+            } else {
+                function_loader(init, scoping, &require_symbols)
             };
-            oxc_ast_visit::Visit::visit_expression(&mut visitor, init);
-            if let Some(importer) = visitor.importer {
+            if let Some(importer) = importer {
                 aliases.push((symbol, importer));
             }
         }
@@ -4110,6 +4181,15 @@ mod tests {
         assert!(
             loaded_value.is_empty(),
             "a module value returned by require is not itself a loader"
+        );
+
+        let ordinary = discover_node_runtime_requests(
+            "fixture.mjs",
+            "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const notLoader = (id) => ({ os: require('os') }); notLoader('path');",
+        );
+        assert!(
+            ordinary.is_empty(),
+            "a function that uses require internally but returns another value is not a loader"
         );
     }
 
