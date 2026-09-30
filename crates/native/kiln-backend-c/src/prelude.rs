@@ -2801,7 +2801,8 @@ const _: () = assert_refusals_name_themselves(
 /// the user-supplied encoding retains its headed string's explicit length.
 /// Computed builtin own-key tables measure their fixed literal name/symbol rows (four sites).
 /// Dynamic function captures measure the parser's NUL-terminated identifier buffer (one site).
-pub const C_STRING_LENGTH_SITES: usize = 83;
+/// Site 84 measures a constructor own-key name from a fixed NUL-terminated literal table.
+pub const C_STRING_LENGTH_SITES: usize = 84;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
