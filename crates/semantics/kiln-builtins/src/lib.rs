@@ -178,6 +178,7 @@ declare_ts_builtins! {
             "h",
             "nodeRegistry",
             "onCleanup",
+            "runLoop",
             "systemTheme",
             "turnMailbox",
             "untrack",

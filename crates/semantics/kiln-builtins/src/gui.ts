@@ -50,6 +50,12 @@ function getGtkDriver() {
       gtk_switch_set_active: { arguments: ["pointer", "i32"], return: "void" },
       gtk_scale_new_with_range: { arguments: ["i32", "f64", "f64", "f64"], return: "pointer" },
       gtk_range_set_value: { arguments: ["pointer", "f64"], return: "void" },
+      gtk_widget_set_margin_top: { arguments: ["pointer", "i32"], return: "void" },
+      gtk_widget_set_margin_bottom: { arguments: ["pointer", "i32"], return: "void" },
+      gtk_widget_set_margin_start: { arguments: ["pointer", "i32"], return: "void" },
+      gtk_widget_set_margin_end: { arguments: ["pointer", "i32"], return: "void" },
+      gtk_widget_set_halign: { arguments: ["pointer", "i32"], return: "void" },
+      gtk_widget_set_valign: { arguments: ["pointer", "i32"], return: "void" },
       g_signal_connect_data: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "i32"], return: "u64" },
       g_main_context_iteration: { arguments: ["pointer", "i32"], return: "i32" },
     });
@@ -154,9 +160,28 @@ function showGtkWindow(win: Window): void {
       nativeHandles.set(win.id, winHandle);
       gtk.functions.gtk_window_set_title(winHandle, toCStr(ffi, win.title || "Kiln Window"));
       gtk.functions.gtk_window_set_default_size(winHandle, win.width || 800, win.height || 600);
+
+      try {
+        const closeCallbackPtr = gtk.lib.registerCallback(
+          { arguments: ["pointer", "pointer"], return: "i32" },
+          () => {
+            win.visible = false;
+            win.dispatchEvent("close");
+            return 0;
+          }
+        );
+        gtk.functions.g_signal_connect_data(winHandle, toCStr(ffi, "close-request"), closeCallbackPtr, 0n, 0n, 0);
+      } catch (_) {}
+
       if (win.content) {
         const childHandle = realizeGtkNode(gtk, ffi, win.content);
         if (childHandle) {
+          try {
+            gtk.functions.gtk_widget_set_margin_top(childHandle, 24);
+            gtk.functions.gtk_widget_set_margin_bottom(childHandle, 24);
+            gtk.functions.gtk_widget_set_margin_start(childHandle, 24);
+            gtk.functions.gtk_widget_set_margin_end(childHandle, 24);
+          } catch (_) {}
           gtk.functions.gtk_window_set_child(winHandle, childHandle);
         }
       }
@@ -222,6 +247,13 @@ export class Node {
     if (index >= 0) {
       this.children.splice(index, 1);
       child.parent = null;
+      const parentHandle = nativeHandles.get(this.id);
+      const childHandle = nativeHandles.get(child.id);
+      if (parentHandle && childHandle && gtkInstance) {
+        try {
+          gtkInstance.functions.gtk_box_remove(parentHandle, childHandle);
+        } catch (_) {}
+      }
       if (typeof G.__kilnGuiRemoveNode === "function") {
         G.__kilnGuiRemoveNode(this.id, child.id);
       }
@@ -242,6 +274,16 @@ export class Node {
       }
     } else {
       this.children.push(child);
+    }
+    const parentHandle = nativeHandles.get(this.id);
+    if (parentHandle && gtkInstance) {
+      const ffi = (process as any).__kilnNativeModules?.ffi;
+      const childHandle = realizeGtkNode(gtkInstance, ffi, child);
+      if (childHandle) {
+        try {
+          gtkInstance.functions.gtk_box_append(parentHandle, childHandle);
+        } catch (_) {}
+      }
     }
     if (typeof G.__kilnGuiInsertNode === "function") {
       G.__kilnGuiInsertNode(this.id, child.id, anchor ? anchor.id : 0);
@@ -345,6 +387,20 @@ export class Window extends Node {
     }
     if (node) {
       this.appendChild(node);
+      const winHandle = nativeHandles.get(this.id);
+      if (winHandle && gtkInstance) {
+        const ffi = (process as any).__kilnNativeModules?.ffi;
+        const childHandle = realizeGtkNode(gtkInstance, ffi, node);
+        if (childHandle) {
+          try {
+            gtkInstance.functions.gtk_widget_set_margin_top(childHandle, 24);
+            gtkInstance.functions.gtk_widget_set_margin_bottom(childHandle, 24);
+            gtkInstance.functions.gtk_widget_set_margin_start(childHandle, 24);
+            gtkInstance.functions.gtk_widget_set_margin_end(childHandle, 24);
+            gtkInstance.functions.gtk_window_set_child(winHandle, childHandle);
+          } catch (_) {}
+        }
+      }
     }
   }
 
@@ -931,6 +987,18 @@ export function onCleanup(fn: () => void): void {
   }
 }
 
+export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
+  return new Promise((resolve) => {
+    const id = setInterval(() => {
+      turnMailbox.pumpEvents();
+      if (win && !win.visible) {
+        clearInterval(id);
+        resolve();
+      }
+    }, intervalMs);
+  });
+}
+
 export default {
   Node,
   Window,
@@ -956,5 +1024,6 @@ export default {
   batch,
   untrack,
   onCleanup,
+  runLoop,
 };
 
