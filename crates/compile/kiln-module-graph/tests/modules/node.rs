@@ -328,6 +328,39 @@ fn runtime_commonjs_cycle_preserves_partially_initialized_exports() {
 }
 
 #[test]
+fn runtime_commonjs_cycle_observes_replaced_module_exports_during_evaluation() {
+    let project = TempProject::new();
+    project.write(
+        "range.cjs",
+        "class Range {} module.exports = Range; const Comparator = require('./comparator.cjs'); Range.Comparator = Comparator;",
+    );
+    project.write(
+        "comparator.cjs",
+        "const Range = require('./range.cjs'); class Comparator {} Comparator.Range = Range; module.exports = Comparator;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const Range = createRequire(import.meta.url)('./range.cjs'); console.log(Range.Comparator.Range === Range);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("build replacement CommonJS cycle");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute replacement CommonJS cycle");
+    assert_eq!(host.output, ["true"]);
+}
+
+#[test]
 fn create_require_url_object_passes_its_href_to_the_host() {
     let project = TempProject::new();
     let entry = project.write(

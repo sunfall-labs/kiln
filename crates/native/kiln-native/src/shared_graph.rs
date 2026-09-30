@@ -893,6 +893,14 @@ typedef struct {wrapper_symbol}_realm_context {{
         writeln!(output, "    status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.prepare_symbol).unwrap();
     }
     for (index, (node, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut output, index, &module.symbol, plan, true);
+                writeln!(output, "    if (status != KILN_C99_OK) goto cleanup;").unwrap();
+            }
+        }
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
         if module.instantiation.is_none() {
             continue;
         }
@@ -909,6 +917,17 @@ typedef struct {wrapper_symbol}_realm_context {{
             } = graph_import_value(graph, modules, &indices, node, import)?
             {
                 writeln!(output, "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];").unwrap();
+            }
+            if let NativeGraphImport::Namespace { provider_index } =
+                graph_import_value(graph, modules, &indices, node, import)?
+            {
+                if modules[provider_index].1.instantiation.is_some() {
+                    writeln!(
+                        output,
+                        "    import_arrays[{index}][{import_index}] = namespaces[{provider_index}];"
+                    )
+                    .unwrap();
+                }
             }
         }
     }
@@ -1020,9 +1039,17 @@ typedef struct {wrapper_symbol}_realm_context {{
         if index == entry_index {
             output.push_str("    *result = module_result;\n");
         }
-        if let Some(plan) = &namespace_plans[index] {
-            write_graph_namespace_build(&mut output, index, &modules[index].1.symbol, plan, true);
-            output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
+        if modules[index].1.instantiation.is_none() {
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(
+                    &mut output,
+                    index,
+                    &modules[index].1.symbol,
+                    plan,
+                    true,
+                );
+                output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
+            }
         }
     }
     let opentui_cleanup = if has_any_dynamic_import {

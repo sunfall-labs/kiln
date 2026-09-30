@@ -2262,6 +2262,17 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
         return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
     status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    /* Namespace descriptors retain their export cell instead of copying its value. This makes
+     * reads observe later writes and lets the same object be published before a cyclic module is
+     * evaluated. */
+    if (status == KILN_C99_OK && target.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_object_of(target)->module_namespace && out->tag == KILN_VALUE_CELL) {
+        kiln_val *cell = kiln_c99_cell_of(*out);
+        if (cell == NULL) return KILN_C99_CONTROL_ERROR;
+        status = kiln_c99_val_check_tdz(*cell, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_val_to_boundary(*cell);
+    }
     if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_program_symbol(key)) {
         /* `Boolean[Symbol.for("immer-draftable")]`, which a bundled `immer` reads off every
          * value's constructor. A built-in carries a program's symbol only through the store the

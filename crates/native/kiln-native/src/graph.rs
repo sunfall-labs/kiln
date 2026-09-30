@@ -1708,28 +1708,68 @@ pub(super) fn cycle_module_paths(graph: &ModuleGraph) -> std::collections::HashS
     // Modules participating in a cycle and their ESM dependencies are instantiated before any
     // evaluation. The dependency closure supplies live cells for imports captured by closures
     // created in the cyclic component; unrelated acyclic modules keep their single-entry ABI.
-    let mut cyclic = std::collections::HashSet::new();
-    for node in graph
+    let nodes = graph
         .modules()
         .filter(|node| node.source == ModuleSource::Source)
-    {
-        let mut pending = node
-            .dependencies
-            .iter()
-            .map(|edge| edge.target.clone())
-            .collect::<Vec<_>>();
-        let mut visited = std::collections::HashSet::new();
-        while let Some(path) = pending.pop() {
-            if path == node.path {
-                cyclic.insert(node.path.clone());
-                break;
+        .collect::<Vec<_>>();
+    let indices = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.path.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut edges = vec![Vec::new(); nodes.len()];
+    let mut reverse = vec![Vec::new(); nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        for dependency in &node.dependencies {
+            if let Some(&target) = indices.get(&dependency.target) {
+                edges[index].push(target);
+                reverse[target].push(index);
             }
-            if !visited.insert(path.clone()) {
-                continue;
+        }
+    }
+    // Iterative Kosaraju keeps stack use bounded even for a deeply nested package graph.
+    let mut seen = vec![false; nodes.len()];
+    let mut finish_order = Vec::with_capacity(nodes.len());
+    for start in 0..nodes.len() {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![(start, 0usize)];
+        while let Some((index, next_edge)) = stack.last_mut() {
+            if *next_edge < edges[*index].len() {
+                let target = edges[*index][*next_edge];
+                *next_edge += 1;
+                if !seen[target] {
+                    seen[target] = true;
+                    stack.push((target, 0));
+                }
+            } else {
+                finish_order.push(*index);
+                stack.pop();
             }
-            if let Some(next) = graph.module(&path) {
-                pending.extend(next.dependencies.iter().map(|edge| edge.target.clone()));
+        }
+    }
+    let mut component_seen = vec![false; nodes.len()];
+    let mut cyclic = std::collections::HashSet::new();
+    for start in finish_order.into_iter().rev() {
+        if component_seen[start] {
+            continue;
+        }
+        component_seen[start] = true;
+        let mut members = Vec::new();
+        let mut stack = vec![start];
+        while let Some(index) = stack.pop() {
+            members.push(index);
+            for &source in &reverse[index] {
+                if !component_seen[source] {
+                    component_seen[source] = true;
+                    stack.push(source);
+                }
             }
+        }
+        if members.len() > 1 || edges[start].contains(&start) {
+            cyclic.extend(members.into_iter().map(|index| nodes[index].path.clone()));
         }
     }
     let mut pending = cyclic.iter().cloned().collect::<Vec<_>>();
@@ -1755,6 +1795,7 @@ pub(super) enum NativeNamespaceValue {
     Binding {
         provider_index: usize,
         export_index: usize,
+        live_cell: bool,
     },
     Namespace {
         provider_index: usize,
@@ -1856,7 +1897,7 @@ pub(super) fn graph_import_value(
                 path: node.path.clone(),
             })
         })?;
-        if provider_index >= importer_index {
+        if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none() {
             return Err(NativeError::Emit(EmitError::Unsupported {
                 feature: "self or cyclic namespace imports in native module graphs".to_owned(),
             }));
@@ -1876,7 +1917,8 @@ pub(super) fn graph_import_value(
                     path: node.path.clone(),
                 })
             })?;
-            if provider_index >= importer_index {
+            if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none()
+            {
                 return Err(NativeError::Emit(EmitError::Unsupported {
                     feature: format!(
                         "`{}`, imported across a module cycle before `{}` has run, in native module graphs",
@@ -2035,6 +2077,7 @@ pub(super) fn graph_namespace_plans(
                         NativeNamespaceValue::Binding {
                             provider_index,
                             export_index,
+                            live_cell: modules[provider_index].1.instantiation.is_some(),
                         }
                     }
                     Some(ResolvedExport::CommonJsNamed { module, .. }) => {
@@ -2043,6 +2086,7 @@ pub(super) fn graph_namespace_plans(
                         NativeNamespaceValue::Binding {
                             provider_index,
                             export_index,
+                            live_cell: modules[provider_index].1.instantiation.is_some(),
                         }
                     }
                     Some(ResolvedExport::Namespace { module }) => {
@@ -2051,7 +2095,9 @@ pub(super) fn graph_namespace_plans(
                                 path: module.clone(),
                             })
                         })?;
-                        if provider_index >= module_index {
+                        if provider_index >= module_index
+                            && modules[provider_index].1.instantiation.is_none()
+                        {
                             return Err(NativeError::Emit(EmitError::Unsupported {
                                 feature:
                                     "self or cyclic namespace re-exports in native module graphs"
@@ -2712,11 +2758,27 @@ pub(super) fn write_graph_namespace_build(
             NativeNamespaceValue::Binding {
                 provider_index,
                 export_index,
+                live_cell: true,
             } if shared => format!("export_arrays[{provider_index}][{export_index}]"),
             NativeNamespaceValue::Binding {
                 provider_index,
                 export_index,
-            } => format!("kiln_exports_{provider_index}[{export_index}]"),
+                live_cell: true,
+            } => format!("kiln_cells_{provider_index}[{export_index}]"),
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+                ..
+            } if shared => {
+                format!("export_arrays[{provider_index}][{export_index}]")
+            }
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+                ..
+            } => {
+                format!("kiln_exports_{provider_index}[{export_index}]")
+            }
             NativeNamespaceValue::Namespace { provider_index } => {
                 format!("{namespaces}[{provider_index}]")
             }
@@ -3849,6 +3911,14 @@ static int kiln_graph_enter(void *opaque) {
         };
         writeln!(output, "        status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.prepare_symbol).unwrap();
     }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+                writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+            }
+        }
+    }
     for (index, (node, _)) in modules.iter().enumerate() {
         if !modules[index].1.instantiation.is_some() {
             continue;
@@ -3866,6 +3936,13 @@ static int kiln_graph_enter(void *opaque) {
             } = graph_import_value(graph, modules, &indices, node, import)?
             {
                 writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_cells_{provider_index}[{export_index}];").unwrap();
+            }
+            if let NativeGraphImport::Namespace { provider_index } =
+                graph_import_value(graph, modules, &indices, node, import)?
+            {
+                if modules[provider_index].1.instantiation.is_some() {
+                    writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];").unwrap();
+                }
             }
         }
     }
@@ -3944,14 +4021,22 @@ static int kiln_graph_enter(void *opaque) {
                 "            kiln_namespaces[{index}] = kiln_exports_{index}[0];"
             )
             .unwrap();
-            if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
-                writeln!(
+            if module.instantiation.is_none() {
+                if let Some(plan) = &namespace_plans[index] {
+                    write_graph_namespace_build(
+                        &mut evaluation,
+                        index,
+                        &module.symbol,
+                        plan,
+                        false,
+                    );
+                    writeln!(
                     evaluation,
                     "            if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
+                }
             }
             if !is_async {
                 evaluation.push_str("    state->phase = KILN_MODULE_EVALUATED;\n");
@@ -3989,14 +4074,22 @@ static int kiln_graph_enter(void *opaque) {
             if node.path == graph.entry() {
                 evaluation.push_str("                graph->entry_result = (promise != NULL) ? promise->value : *result;\n");
             }
-            if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
-                writeln!(
+            if module.instantiation.is_none() {
+                if let Some(plan) = &namespace_plans[index] {
+                    write_graph_namespace_build(
+                        &mut evaluation,
+                        index,
+                        &module.symbol,
+                        plan,
+                        false,
+                    );
+                    writeln!(
                     evaluation,
                     "                if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
+                }
             }
             evaluation.push_str(
                 r#"                state->module_settling = 0;

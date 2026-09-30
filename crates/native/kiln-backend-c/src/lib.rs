@@ -647,6 +647,11 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
             .code
             .truncate(module.link_facts.module_instantiation_end as usize);
         instantiation.program.code.push(Instruction::Return);
+        // An instantiation entrypoint is linked as one auxiliary object. Do not let the normal
+        // large-module splitter return chunks that CModuleUnit cannot currently retain.
+        let mut instantiation_policy = policy.clone();
+        instantiation_policy.compact = false;
+        instantiation_policy.parallel_workers_unit = false;
         let mut source = module_cells::with_plan(region.clone(), || {
             render_module_with_unit(
                 &instantiation,
@@ -655,7 +660,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 Some(&symbol),
                 true,
                 true,
-                &policy,
+                &instantiation_policy,
                 false,
                 logical_path,
             )
@@ -4134,13 +4139,6 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         size_t source = order[index];
         kiln_property *slot;
         kiln_value value = values[source];
-        while (value.tag == KILN_VALUE_CELL) {{
-            if (value.bits == 0) {{
-                status = KILN_C99_CONTROL_ERROR;
-                goto namespace_failure;
-            }}
-            value = kiln_val_to_boundary(*kiln_c99_cell_of(value));
-        }}
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
         if (status != KILN_C99_OK) {{

@@ -999,6 +999,7 @@ impl GraphExecutor<'_> {
             graph: self,
             commonjs_cache: &commonjs_cache,
             cache_targets,
+            module_objects: HashMap::new(),
             values: &mut values as *mut _,
             states: &mut commonjs_states as *mut _,
             total_steps: &mut total_steps as *mut _,
@@ -1479,6 +1480,9 @@ struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
     graph: &'graph ModuleGraph,
     commonjs_cache: &'graph HashMap<PathBuf, Cell>,
     cache_targets: HashMap<*const std::cell::RefCell<Value>, PathBuf>,
+    /// Current wrapper objects are retained while their CommonJS bodies run. A cyclic require
+    /// reads `module.exports` here so a replacement published before the back-edge is visible.
+    module_objects: HashMap<PathBuf, Value>,
     values: *mut HashMap<PathBuf, HashMap<String, Value>>,
     states: *mut HashMap<PathBuf, CommonJsExecutionState>,
     total_steps: *mut u64,
@@ -1801,6 +1805,8 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             ));
         }
         let module_object = ordinary_object([("exports".to_owned(), initial_exports.clone())]);
+        self.module_objects
+            .insert(path.to_path_buf(), module_object.clone());
         let imports = vec![
             initial_exports,
             Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::for_module(
@@ -2045,6 +2051,15 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 let target = dependency.target;
                 if let Some(cell) = self.commonjs_cache.get(&target) {
                     self.execute_target(&target, false)?;
+                    if matches!(
+                        unsafe { (&*self.states).get(&target) },
+                        Some(CommonJsExecutionState::Executing)
+                    ) {
+                        if let Some(module_object) = self.module_objects.get(&target) {
+                            return Ok(own_data_property(module_object, "exports")
+                                .unwrap_or_else(|| cell.borrow().clone()));
+                        }
+                    }
                     return Ok(cell.borrow().clone());
                 }
                 if let Some(provider) = unsafe { (&*self.values).get(&target) } {
