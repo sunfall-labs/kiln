@@ -38,6 +38,24 @@ delete (globalThis as any).__kilnTypedArraySort;
     return;
   }
 
+  // `%TypedArray%` owns the generic static constructors. Concrete typed-array constructors
+  // inherit these through their [[Prototype]], so publishing them on Uint8Array alone makes
+  // `Object.getOwnPropertyNames(Object.getPrototypeOf(Uint8Array))` incomplete in the native
+  // bootstrap even though direct reads on each concrete constructor happen to work.
+  const sharedConstructor = Object.getPrototypeOf(Uint8Array);
+  if (sharedConstructor) {
+    Object.defineProperty(sharedConstructor, "from", {
+      value: Uint8Array.from,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(sharedConstructor, "of", {
+      value: Uint8Array.of,
+      writable: true,
+      configurable: true,
+    });
+  }
+
   Object.defineProperty(Uint8Array, "fromBase64", {
     value: function fromBase64(input: any, options?: any): Uint8Array {
       if (typeof input !== "string") {
