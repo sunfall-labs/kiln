@@ -996,6 +996,9 @@ pub(super) fn native_bootstrap_families(
             .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
     };
     let mut selected = 0;
+    if builtin(&["JSON"]) || names(&["stringify"]) {
+        selected |= family::JSON;
+    }
     if names(&["toLocaleLowerCase", "toLocaleUpperCase"]) {
         selected |= family::STRING_LOCALE;
     }

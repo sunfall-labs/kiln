@@ -1407,6 +1407,9 @@ pub const EXTENSIONS_BOOTSTRAP_SOURCE: &str = include_str!("extensions.ts");
 /// Error subclass prototypes and `SuppressedError` (ADR 0005, ADR 0063 rule 4).
 pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
 
+/// Native JSON replacer traversal over the existing serializer primitive.
+pub const JSON_BOOTSTRAP_SOURCE: &str = include_str!("json.ts");
+
 /// Annex B HTML and Object.prototype extensions and Array.fromAsync (ADR 0005, ADR 0063 rule 4).
 pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 
@@ -1473,7 +1476,8 @@ pub mod native_bootstrap_family {
     pub const OBJECT_REFLECT: u32 = 1 << 9;
     pub const STRING_LOCALE: u32 = 1 << 10;
     pub const INTL_DATETIME: u32 = 1 << 11;
-    pub const ALL: u32 = (1 << 12) - 1;
+    pub const JSON: u32 = 1 << 12;
+    pub const ALL: u32 = (1 << 13) - 1;
 }
 
 /// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
@@ -1490,6 +1494,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
+        selected(family::JSON, JSON_BOOTSTRAP_SOURCE),
         selected(
             family::STRING_LOCALE | family::INTL_DATETIME,
             LOCALE_TOOLS_BOOTSTRAP_SOURCE,
@@ -1512,6 +1517,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
     ]
     .join("\n");
     let cleanup: &[(u32, &str)] = &[
+        (family::JSON, "__kilnJsonSerialize"),
         (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
         (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),
