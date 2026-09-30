@@ -2769,7 +2769,9 @@ const _: () = assert_refusals_name_themselves(
 /// Stack snapshots measure the emitted source name, a NUL-terminated C literal.
 /// Buffer encoding comparisons measure only the fixed NUL-terminated encoding-name literal;
 /// the user-supplied encoding retains its headed string's explicit length.
-pub const C_STRING_LENGTH_SITES: usize = 78;
+/// Computed builtin own-key tables measure their fixed literal name/symbol rows (four sites).
+/// Dynamic function captures measure the parser's NUL-terminated identifier buffer (one site).
+pub const C_STRING_LENGTH_SITES: usize = 83;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
