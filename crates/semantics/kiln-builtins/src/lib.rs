@@ -754,6 +754,17 @@ declare_ts_builtins! {
             "default",
         ],
     },
+    Tls {
+        variant: Tls,
+        file: "node/tls.ts",
+        logical_path: "node:tls.ts",
+        source_const: TLS_SOURCE,
+        exports_const: TLS_EXPORTS,
+        sample_source_check: "export function connect",
+        presence_test: tls_builtin_source_is_present,
+        compilation_test: tls_builtin_compiles_cleanly,
+        exports: ["connect", "createServer", "default"],
+    },
     AsyncHooks {
         variant: AsyncHooks,
         file: "node/async_hooks.ts",
