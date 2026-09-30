@@ -491,14 +491,18 @@ fn discover_node_runtime_requests_from_semantic(
                     });
                 }
                 match &function.body {
-                    ArrowFunctionBody::Expression(expression) => returns.push(expression.as_ref()),
                     ArrowFunctionBody::FunctionBody(body) => {
                         for statement in &body.statements {
                             if let Statement::ReturnStatement(returned) = statement {
                                 if let Some(argument) = &returned.argument {
-                                    returns.push(argument.as_ref());
+                                    returns.push(argument);
                                 }
                             }
+                        }
+                    }
+                    body => {
+                        if let Some(expression) = body.as_expression() {
+                            returns.push(expression);
                         }
                     }
                 }
@@ -517,7 +521,7 @@ fn discover_node_runtime_requests_from_semantic(
                 for statement in &body.statements {
                     if let Statement::ReturnStatement(returned) = statement {
                         if let Some(argument) = &returned.argument {
-                            returns.push(argument.as_ref());
+                            returns.push(argument);
                         }
                     }
                 }
