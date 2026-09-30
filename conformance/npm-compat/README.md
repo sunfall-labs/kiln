@@ -49,8 +49,9 @@ output compares identical permutations across engines.
 `run.sh` builds `target/release/kiln` first if it is missing. Two environment
 quirks it handles: the native backend shells out to `cargo`/`rustc` (via the
 `CARGO`/`RUSTC` env vars, not just `PATH`), and it stages a ~2GB
-number-provider build under `$TMPDIR`, so `TMPDIR` points at `./tmp` here
-instead of a small tmpfs `/tmp`.
+number-provider build under `$TMPDIR`, so `TMPDIR` defaults to `~/.cache/kiln/npm-tmp`
+instead of a small tmpfs `/tmp`. This short path also keeps daemon sockets
+below Unix path limits in deeply nested worktrees; override with `KILN_NPM_TMPDIR`.
 
 `mise run npm-compat` does the same from the repo root.
 

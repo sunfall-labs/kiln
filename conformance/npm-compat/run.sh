@@ -23,7 +23,7 @@
 # Two environment quirks the native backend needs, handled here:
 # - it shells out to cargo/rustc (CARGO/RUSTC env vars, not just PATH)
 # - it stages a ~2GB number-provider build under $TMPDIR, so TMPDIR points
-#   at a scratch dir here instead of a small tmpfs /tmp
+#   at a short durable cache path instead of a small tmpfs /tmp
 set -u
 
 # Needs bash 4+ (associative arrays). Same re-exec pattern as scripts/gate.sh.
@@ -45,8 +45,8 @@ OUT="$HERE/results"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ).$$"
 RAW="$OUT/raw/$RUN_ID"
 
-mkdir -p "$RAW" "$HERE/tmp"
-export TMPDIR="$HERE/tmp"
+export TMPDIR="${KILN_NPM_TMPDIR:-$HOME/.cache/kiln/npm-tmp}"
+mkdir -p "$RAW" "$TMPDIR"
 # Match the declared UTC realm timezone rather than the launcher's local timezone.
 export TZ=UTC
 export CARGO="${CARGO:-$(command -v cargo)}"
