@@ -3689,6 +3689,55 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     continue;
                 }
                 kiln_value src_val = args[argument];
+                if (src_val.tag == KILN_VALUE_ARRAY || src_val.tag == KILN_VALUE_TYPED_ARRAY ||
+                    src_val.tag == KILN_VALUE_PROXY || src_val.tag == KILN_VALUE_SHARED) {
+                    kiln_value keys;
+                    status = kiln_c99_all_own_keys(host, src_val, &keys, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    /* Snapshot keys before any getter or target setter runs. Recheck each own
+                     * descriptor, since an earlier copy may have deleted a later property. */
+                    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+                        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+                        kiln_value name = kiln_c99_property_key(key);
+                        const kiln_string *view = (const kiln_string *)name.ptr;
+                        kiln_value descriptor, enumerable, copied;
+                        int found;
+                        status = kiln_c99_describe_property_key(host, src_val, view, NULL,
+                            &descriptor, &found, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                        if (!found) continue;
+                        status = kiln_c99_get(host, descriptor, "enumerable", 10,
+                            &enumerable, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                        if (!kiln_c99_truthy(enumerable)) continue;
+                        status = kiln_c99_get_computed(host, src_val, key, &copied, depth, thrown);
+                        if (status == KILN_C99_OK)
+                            status = kiln_c99_put_mode_key(host, target, view, NULL,
+                                copied, 0, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                    continue;
+                }
+                if (src_val.tag == KILN_VALUE_NUMBER || src_val.tag == KILN_VALUE_BOOLEAN ||
+                    src_val.tag == KILN_VALUE_SYMBOL || src_val.tag == KILN_VALUE_BIGINT)
+                    continue;
+                if (src_val.tag == KILN_VALUE_STRING) {
+                    size_t count;
+                    uint16_t *units = NULL;
+                    status = kiln_c99_to_units(src_val, &units, &count);
+                    free(units);
+                    if (status != KILN_C99_OK) return status;
+                    for (index = 0; index < count; ++index) {
+                        kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                        kiln_value copied;
+                        status = kiln_c99_get_computed(host, src_val, key, &copied, depth, thrown);
+                        if (status == KILN_C99_OK)
+                            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)key.ptr,
+                                NULL, copied, 0, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                    continue;
+                }
                 if (src_val.tag == KILN_VALUE_FUNCTION || src_val.tag == KILN_VALUE_METHOD ||
                     src_val.tag == KILN_VALUE_BOUND || src_val.tag == KILN_VALUE_BUILTIN) {
                     kiln_value store;

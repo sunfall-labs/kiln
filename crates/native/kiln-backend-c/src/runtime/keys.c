@@ -296,6 +296,28 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        kiln_value extra;
+        for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
+            if (array->elements[index] != KILN_VAL_HOLE)
+                status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status != KILN_C99_OK) return status;
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_all_own_keys(host, array->properties, &extra, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < kiln_c99_array_of(extra)->count; ++index) {
+                status = kiln_c99_array_push(built,
+                    kiln_val_to_boundary(kiln_c99_array_of(extra)->elements[index]));
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        *out = built;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
