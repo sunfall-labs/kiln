@@ -606,6 +606,37 @@ console.log(fs === nodeFs, typeof processBuiltin.run);
 }
 
 #[test]
+fn commonjs_resolve_only_target_metadata_survives_live_reduction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.cjs",
+        "console.log(require.resolve('./target.cjs'));",
+    );
+    project.write("target.cjs", "globalThis.shouldNotLoad = true;\n");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build resolve-only graph");
+    let demand = reduce_all_live_demand(&graph);
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("reduce resolve-only graph");
+    let reduced_entry = reduced.module(&entry).expect("reduced entry");
+    let request = reduced_entry
+        .runtime_dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == "./target.cjs")
+        .expect("resolve-only request metadata retained");
+    assert!(request.resolve_only);
+    assert!(reduced.module(&request.target).is_none());
+}
+
+#[test]
 fn create_require_uses_its_captured_file_as_the_resolution_base() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("nested")).unwrap();

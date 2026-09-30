@@ -1174,7 +1174,11 @@ impl ModuleGraph {
             node.runtime_dependencies = node
                 .runtime_dependencies
                 .iter()
-                .filter(|dependency| demand.live.contains(&dependency.target))
+                // A resolve-only request needs its canonical path in the reduced graph's
+                // resolver metadata, but its target is deliberately not a live module.
+                .filter(|dependency| {
+                    dependency.resolve_only || demand.live.contains(&dependency.target)
+                })
                 .cloned()
                 .collect();
             let mut imports = Vec::with_capacity(original_imports.len());
