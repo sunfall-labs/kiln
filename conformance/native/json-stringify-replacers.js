@@ -28,3 +28,6 @@ JSON.parse('{"n":1e2,"s":"\\u0061","a":[true,null]}', (_key, value, context) => 
 });
 console.log(tokens.join('|'));
 console.log(JSON.parse('{"a":{"old":1},"a":null}', (_key, value) => value).a === null);
+
+console.log(JSON.parse('prefix{"a":2}suffix'.slice(6, -6)).a);
+console.log(JSON.parse('prefix"\u0100"suffix'.slice(6, -6)));

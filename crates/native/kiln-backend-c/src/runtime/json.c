@@ -1447,7 +1447,12 @@ static int kiln_c99_json_document(const kiln_string *source, kiln_val *out) {
     const kiln_json_node *nodes = NULL;
     size_t count = 0;
     kiln_string text = {0, KILN_STRING_LATIN1, NULL};
-    int32_t parsed = kiln_json_parse(source, &nodes, &count, &text);
+    /* The provider accepts canonical width flags, while a runtime substring also carries its
+     * GC slice marker. Its data already names the bounded view: normalize the transport header
+     * without copying the characters or passing the ownership-only bit across the ABI. */
+    kiln_string input = *source;
+    input.flags &= ~KILN_STRING_SLICED;
+    int32_t parsed = kiln_json_parse(&input, &nodes, &count, &text);
     if (parsed == -1) {
         KILN_C99_REFUSE_INTERNAL("JSON.parse, which turns it into a SyntaxError the program can catch");
     }
