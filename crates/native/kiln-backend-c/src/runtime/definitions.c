@@ -1372,10 +1372,26 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         /* The names the table answers to, asked the same way `getOwnPropertyNames` asks so the
          * two cannot disagree. A hit is a member the program can reach and is therefore own; a
          * miss is not proof of absence, because the table is still growing, so it refuses. */
-        if (kiln_c99_builtin_own_keys(target.bits, &names) == KILN_C99_OK &&
-            kiln_c99_keys_contain(names, view)) {
-            *found = 1;
-            return KILN_C99_OK;
+        if (kiln_c99_builtin_own_keys(target.bits, &names) == KILN_C99_OK) {
+            kiln_array *listed = kiln_c99_array_of(names);
+            size_t index;
+            for (index = 0; index < listed->count; ++index) {
+                kiln_value member = kiln_val_to_boundary(listed->elements[index]);
+                /* Built-in own-key lists can contain symbols (for example Iterator.prototype's
+                 * @@iterator). Compare symbol identity when the query is a symbol; comparing its
+                 * internal spelling against string rows misses a real own key and can conflate a
+                 * same-spelled ordinary string with the symbol. */
+                if (key.tag == KILN_VALUE_SYMBOL) {
+                    if (member.tag == KILN_VALUE_SYMBOL && member.bits == key.bits) {
+                        *found = 1;
+                        return KILN_C99_OK;
+                    }
+                } else if (member.tag == KILN_VALUE_STRING &&
+                           kiln_string_equal((const kiln_string *)member.ptr, view)) {
+                    *found = 1;
+                    return KILN_C99_OK;
+                }
+            }
         }
         KILN_C99_REFUSE("an own-property question about a built-in member the surface table does "
                         "not list");
