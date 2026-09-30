@@ -3957,37 +3957,34 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
         kiln_c99_heap_store_pointer(work, &work->socket, socket);
         if (code == KILN_C99_METHOD_NODE_SOCKET_WRITE) {
-            kiln_value text = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-            uint8_t *owned = NULL;
-            size_t text_len = 0;
-            status = kiln_c99_string_to_utf8_lossy(text, &owned, &text_len);
+            kiln_c99_node_byte_span span;
+            status = kiln_c99_node_http_byte_span(argc > 0 ? args[0] : kiln_c99_undefined(), &span);
             if (status != KILN_C99_OK) return status;
             work->kind = KILN_REALM_OP_TCP_WRITE;
             status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
-                                         owned, text_len, work,
+                                         span.bytes, span.len, work,
                                          &socket->write_request);
-            free(owned);
+            kiln_c99_node_http_byte_span_release(&span);
             if (status != KILN_C99_OK) return status;
             *result = kiln_c99_boolean(1);
             return KILN_C99_OK;
         }
         if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
-            kiln_value text = kiln_c99_text(args[0]);
-            uint8_t *owned = NULL;
-            size_t text_len = 0;
-            status = kiln_c99_string_to_utf8_lossy(text, &owned, &text_len);
+            kiln_c99_node_byte_span span;
+            status = kiln_c99_node_http_byte_span(args[0], &span);
             if (status != KILN_C99_OK) return status;
             work->kind = KILN_REALM_OP_TCP_WRITE;
             socket->shutdown_after_write = 1;
             status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
             if (status != KILN_C99_OK) {
+                kiln_c99_node_http_byte_span_release(&span);
                 kiln_c99_gc_release(work);
                 return status;
             }
             status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
-                                         owned, text_len, work,
+                                         span.bytes, span.len, work,
                                          &socket->write_request);
-            free(owned);
+            kiln_c99_node_http_byte_span_release(&span);
             if (status != KILN_C99_OK) {
                 socket->shutdown_after_write = 0;
                 return status;
