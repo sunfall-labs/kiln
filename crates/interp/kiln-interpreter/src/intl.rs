@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use kiln_host_abi::HostOps;
 use kiln_intl as engine;
+use kiln_string::StringUnits;
 
 use crate::{
     ArrayData, ErrorKind, ExecutionError, Native, ObjectData, PrimitiveHint, RealmId, Value, Vm,
@@ -592,15 +593,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         "String.prototype case mapping called on null or undefined",
                     ));
                 }
-                let text = self.intl_string_argument(Some(receiver), instruction)?;
+                let text = self.intl_string_units_argument(Some(receiver), instruction)?;
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
-                let mapped = kiln_intl::casemap::map_case(
-                    &text,
+                let mapped = kiln_intl::casemap::map_case_utf16(
+                    &text.to_units(),
                     locales.first().map(String::as_str),
                     matches!(adapter, Adapter::StringToLocaleUpperCase),
                 )
                 .map_err(failure)?;
-                Ok(Value::String(mapped.into()))
+                Ok(Value::String(StringUnits::from_units(&mapped)))
             }
         }
     }
@@ -1961,6 +1962,27 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             return Err(ExecutionError::SymbolIsNotAString);
         }
         Ok(primitive.to_display_string())
+    }
+
+    /// The UTF-16-preserving counterpart used by String locale case methods. A Rust `String`
+    /// cannot carry a lone JavaScript surrogate, so taking the scalar display path here would
+    /// silently turn it into U+FFFD before the shared ICU4X mapper sees it.
+    fn intl_string_units_argument(
+        &mut self,
+        value: Option<&Value>,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
+        let Some(value) = value else {
+            return Ok(StringUnits::from("undefined"));
+        };
+        if matches!(value, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        primitive.to_string_units_checked()
     }
 }
 
