@@ -1666,8 +1666,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::String(String::new().into()));
                 };
                 // A string hint, because that is what `String(x)` asks for -- so an object with
-                // both `valueOf` and `toString` uses the second.
+                // both `valueOf` and `toString` uses the second. The call form's Symbol
+                // exception applies only when the input itself is a Symbol primitive; a boxed
+                // Symbol still goes through ordinary ToString after ToPrimitive and throws.
                 let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
+                if matches!(primitive, Value::Symbol(_)) && !matches!(value, Value::Symbol(_)) {
+                    return Err(ExecutionError::SymbolIsNotAString);
+                }
                 Ok(Value::String(primitive.to_display_string().into()))
             }
             // `JSON.parse(text, reviver)`. The reviver is called on every value the text
@@ -2689,16 +2694,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
-                // `ToString(S)`, which for an object *calls* its `toString`. The display
-                // spelling is the machine's: `/\.14/.exec({ toString: () => Math.PI })` matched
-                // against the literal text "[object Object]" and answered null. Units travel
-                // losslessly: a lone surrogate in the subject stays the unit the language
-                // counts rather than becoming U+FFFD before the matcher sees it.
+                // RegExp.exec/test use the language's ToString, which calls object conversion
+                // hooks and rejects Symbols (including boxed Symbols) rather than using their
+                // diagnostic display spelling. Keep the result in UTF-16 units so lone
+                // surrogates remain intact for the matcher.
                 let subject_units: StringUnits = match arguments.first() {
-                    Some(argument) if is_an_object(argument) && !is_callable(argument) => {
-                        self.as_text_units(argument, instruction)?
-                    }
-                    Some(argument) => argument.to_string_units_checked()?,
+                    Some(argument) => self.as_text_units(argument, instruction)?,
                     None => StringUnits::default(),
                 };
                 let subject: Vec<u16> = subject_units.to_units().into_vec();
