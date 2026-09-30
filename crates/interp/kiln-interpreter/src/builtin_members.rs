@@ -826,7 +826,7 @@ pub(super) fn bigint_method(name: &str) -> Value {
         ) => Value::Native(Native::BigIntToString, RealmId::PRIMARY),
         kiln_builtin_surface::SemanticBinding::BigIntMethod(
             kiln_builtin_surface::BigIntMethod::ValueOf,
-        ) => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
+        ) => Value::Native(Native::BigIntValueOf, RealmId::PRIMARY),
         kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
             Value::String(tag.to_owned().into())
         }

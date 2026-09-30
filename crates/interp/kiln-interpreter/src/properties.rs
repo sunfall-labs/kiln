@@ -785,7 +785,10 @@ pub(super) fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
     let boxed = wrapped_primitive(receiver)?;
     let opens = match native {
         // `Object.prototype.valueOf` is deliberately absent: it answers with the box.
-        Native::PrimitiveValueOf | Native::PrimitiveToString | Native::BigIntToString => true,
+        Native::PrimitiveToString => matches!(boxed, Value::Symbol(_)),
+        Native::SymbolValueOf => matches!(boxed, Value::Symbol(_)),
+        Native::StringValueOf => matches!(boxed, Value::String(_)),
+        Native::BigIntValueOf | Native::BigIntToString => matches!(boxed, Value::BigInt(_)),
         Native::NumberToString
         | Native::NumberToFixed
         | Native::NumberToExponential
@@ -1065,6 +1068,21 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
             Some(length) => length,
             None => return None,
         },
+        N::ObjectKeys => kiln_builtin_surface::native_function_length("Object", "keys")
+            .unwrap_or(1) as f64,
+        N::ObjectGetOwnPropertyDescriptor => {
+            kiln_builtin_surface::native_function_length("Object", "getOwnPropertyDescriptor")
+                .unwrap_or(2) as f64
+        }
+        N::FunctionCall | N::FunctionApply | N::FunctionBind => {
+            let member = match native {
+                N::FunctionCall => "call",
+                N::FunctionApply => "apply",
+                _ => "bind",
+            };
+            kiln_builtin_surface::native_function_length("Function.prototype", member)
+                .unwrap_or(1) as f64
+        }
 
         // The zero-argument built-ins: every accessor, every `toString`, and the collection
         // constructors, which take their contents through an optional argument.
@@ -1077,6 +1095,9 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::DateNow
         | N::PerformanceNow
         | N::NumberValueOf
+        | N::StringValueOf
+        | N::SymbolValueOf
+        | N::BigIntValueOf
         | N::ObjectToLocaleString
         | N::ObjectValueOf
         | N::ObjectToStringTag
@@ -1172,7 +1193,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::ObjectCreate
         | N::ObjectSetPrototypeOf
         | N::ObjectDefineProperties
-        | N::ObjectGetOwnPropertyDescriptor
         | N::ObjectHasOwn
         | N::ObjectIs
         | N::ReflectGet
@@ -1205,7 +1225,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::StringReplaceAll
         | N::ParseInt
         | N::RegExpConstructor
-        | N::FunctionApply
         | N::PromiseThen
         | N::ProxyConstructor
         | N::ProxyRevocable
@@ -1712,7 +1731,7 @@ impl Intrinsics {
                         Property::Value(Value::Native(Native::PrimitiveToString, realm))
                     }
                     kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                        Property::Value(Value::Native(Native::PrimitiveValueOf, realm))
+                        Property::Value(Value::Native(Native::SymbolValueOf, realm))
                     }
                     kiln_builtin_surface::SemanticBinding::SymbolDescription => {
                         Property::Accessor {
@@ -1771,7 +1790,7 @@ impl Intrinsics {
                     ) => Property::Value(Value::Native(Native::BigIntToString, realm)),
                     kiln_builtin_surface::SemanticBinding::BigIntMethod(
                         kiln_builtin_surface::BigIntMethod::ValueOf,
-                    ) => Property::Value(Value::Native(Native::PrimitiveValueOf, realm)),
+                    ) => Property::Value(Value::Native(Native::BigIntValueOf, realm)),
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Then,
                     ) => Property::Value(Value::Native(Native::PromiseThen, realm)),
@@ -2355,7 +2374,7 @@ pub(super) fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String,
                         Property::Value(Value::Native(Native::PrimitiveToString, RealmId::PRIMARY))
                     }
                     kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                        Property::Value(Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY))
+                        Property::Value(Value::Native(Native::SymbolValueOf, RealmId::PRIMARY))
                     }
                     kiln_builtin_surface::SemanticBinding::SymbolDescription => {
                         Property::Accessor {
@@ -2405,7 +2424,7 @@ pub(super) fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String,
                     ) => Property::Value(Value::Native(Native::BigIntToString, RealmId::PRIMARY)),
                     kiln_builtin_surface::SemanticBinding::BigIntMethod(
                         kiln_builtin_surface::BigIntMethod::ValueOf,
-                    ) => Property::Value(Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)),
+                    ) => Property::Value(Value::Native(Native::BigIntValueOf, RealmId::PRIMARY)),
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Then,
                     ) => Property::Value(Value::Native(Native::PromiseThen, RealmId::PRIMARY)),

@@ -103,6 +103,33 @@ pub const BOOTSTRAP_STATICS: &[(&str, &str)] = &[
     ("Iterator", "zipKeyed"),
 ];
 
+/// Declared lengths for selected built-in functions whose identity is shared by the interpreter
+/// and native callable facade. This keeps reflection metadata at the same owner as the public
+/// surface instead of in a backend-only switch.
+pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
+    ("Object", "keys", 1),
+    ("Object", "getOwnPropertyDescriptor", 2),
+    ("Object", "getOwnPropertyDescriptors", 1),
+    ("Function.prototype", "call", 1),
+    ("Function.prototype", "apply", 2),
+    ("Function.prototype", "bind", 1),
+    ("RegExp.prototype", "test", 1),
+    ("RegExp.prototype", "exec", 1),
+    ("RegExp.prototype", "toString", 0),
+];
+
+pub const fn native_function_length(owner: &str, member: &str) -> Option<usize> {
+    let mut index = 0;
+    while index < NATIVE_FUNCTION_LENGTHS.len() {
+        let (candidate_owner, candidate_member, length) = NATIVE_FUNCTION_LENGTHS[index];
+        if same(candidate_owner, owner) && same(candidate_member, member) {
+            return Some(length);
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Whether `global.member` is one of the [`BOOTSTRAP_STATICS`].
 pub fn is_bootstrap_static(global: &str, member: &str) -> bool {
     BOOTSTRAP_STATICS

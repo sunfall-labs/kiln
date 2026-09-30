@@ -370,23 +370,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let built = call_native(&self.intrinsics, native, &Value::Undefined, &arguments)?;
                 self.stack.push(built);
             }
-            // `new String(x)` is `String(x)` in a box. The conversion is the same one the call
-            // form does -- which for an object argument runs its `toString`, so it goes through
-            // the machine -- and only the boxing differs.
-            // `String(symbol)` describes the symbol; `new String(symbol)` refuses it. A symbol
-            // is the one value with no string of its own, and boxing the description would hand
-            // back an object that no longer knows which symbol it came from.
-            Value::Native(Native::StringConstructor, _)
-                if matches!(arguments.first(), Some(Value::Symbol(_))) =>
-            {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "a symbol cannot be converted to a string".to_owned(),
-                });
+            // Construction uses ordinary ToString after ToPrimitive, so a direct or boxed
+            // Symbol throws here. The call form `String(symbol)` has a deliberate special case
+            // that returns its description instead.
+            Value::Native(Native::StringConstructor, _) => {
+                let value = arguments.first().unwrap_or(&Value::Undefined);
+                let primitive = self.as_primitive(value, PrimitiveHint::String, current)?;
+                if matches!(primitive, Value::Symbol(_)) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "a symbol cannot be converted to a string".to_owned(),
+                    });
+                }
+                self.stack.push(wrap_primitive(Value::String(
+                    primitive.to_display_string().into(),
+                )));
             }
             Value::Native(
-                native @ (Native::StringConstructor
-                | Native::NumberConstructor
-                | Native::BooleanConstructor),
+                native @ (Native::NumberConstructor | Native::BooleanConstructor),
                 _,
             ) => {
                 let primitive =

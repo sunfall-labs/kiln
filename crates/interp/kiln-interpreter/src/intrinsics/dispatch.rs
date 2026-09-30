@@ -1723,7 +1723,31 @@ pub(crate) fn call_native(
         Native::MathLog10 => Value::Number(argument_number(arguments)?.log10()),
         Native::MathExp => Value::Number(argument_number(arguments)?.exp()),
         // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
-        Native::PrimitiveValueOf | Native::StringToStringMethod => receiver.clone(),
+        Native::PrimitiveValueOf => receiver.clone(),
+        Native::StringValueOf | Native::StringToStringMethod => match receiver {
+            Value::String(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "String.prototype method called on incompatible receiver".to_owned(),
+                });
+            }
+        },
+        Native::SymbolValueOf => match receiver {
+            Value::Symbol(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Symbol.prototype.valueOf called on incompatible receiver".to_owned(),
+                });
+            }
+        },
+        Native::BigIntValueOf => match receiver {
+            Value::BigInt(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "BigInt.prototype.valueOf called on incompatible receiver".to_owned(),
+                });
+            }
+        },
         // Every hint answers the same thing, which is the point: a symbol does not become a
         // number or a string, so the reduction ends here and the caller refuses it.
         Native::SymbolToPrimitive => match receiver {

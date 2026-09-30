@@ -456,6 +456,9 @@ pub enum Native {
     NumberToString,
     NumberToFixed,
     NumberValueOf,
+    StringValueOf,
+    SymbolValueOf,
+    BigIntValueOf,
     StringAt,
     StringCharAt,
     StringCharCodeAt,
@@ -1253,7 +1256,7 @@ impl Native {
                             Value::Native(Native::PrimitiveToString, RealmId::PRIMARY)
                         }
                         kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                            Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)
+                            Value::Native(Native::SymbolValueOf, RealmId::PRIMARY)
                         }
                         kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
                             Value::String(tag.to_owned().into())

@@ -7,6 +7,37 @@ pub(crate) struct MethodId {
     pub(crate) groups: u32,
     pub(crate) numeric_arguments: u32,
     pub(crate) textual_arguments: u32,
+    pub(crate) declared_length: u32,
+}
+
+const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
+
+const fn method_declared_length(method: &str) -> u32 {
+    let identity = match method {
+        "KILN_C99_METHOD_OBJECT_KEYS" => Some(("Object", "keys")),
+        "KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR" => {
+            Some(("Object", "getOwnPropertyDescriptor"))
+        }
+        "KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS" => {
+            Some(("Object", "getOwnPropertyDescriptors"))
+        }
+        "KILN_C99_METHOD_FUNCTION_CALL" => Some(("Function.prototype", "call")),
+        "KILN_C99_METHOD_FUNCTION_APPLY" => Some(("Function.prototype", "apply")),
+        "KILN_C99_METHOD_FUNCTION_BIND" => Some(("Function.prototype", "bind")),
+        "KILN_C99_METHOD_REGEXP_TEST" => Some(("RegExp.prototype", "test")),
+        "KILN_C99_METHOD_REGEXP_EXEC" => Some(("RegExp.prototype", "exec")),
+        "KILN_C99_METHOD_REGEXP_TO_STRING" => Some(("RegExp.prototype", "toString")),
+        _ => None,
+    };
+    match identity {
+        Some((owner, member)) => {
+            match kiln_builtin_surface::native_function_length(owner, member) {
+                Some(length) => length as u32,
+                None => METHOD_LENGTH_UNSPECIFIED,
+            }
+        }
+        None => METHOD_LENGTH_UNSPECIFIED,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,6 +122,23 @@ pub(crate) fn render_native_constructor_table() -> String {
     }
     table.push_str("};\n");
     table
+}
+
+fn render_native_method_length_rows() -> String {
+    use std::fmt::Write as _;
+    let mut rows = String::new();
+    for method in METHOD_IDS {
+        if method.declared_length != METHOD_LENGTH_UNSPECIFIED {
+            writeln!(
+                rows,
+                "    case UINT64_C({}): return UINT32_C({});",
+                method.value,
+                method.declared_length
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    rows
 }
 
 macro_rules! native_constructor {
@@ -284,6 +332,7 @@ macro_rules! method_ids {
                 groups: method_group_bits!($first_group $(, $group)*),
                 numeric_arguments: $numeric,
                 textual_arguments: $textual,
+                declared_length: method_declared_length(stringify!($name)),
             }),*
         ];
 
@@ -1265,6 +1314,15 @@ macro_rules! kiln_extension_c_flag {
 }
 
 macro_rules! builtin_member_row {
+    ($builtin:ident, $name:literal, accessor()) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_ACCESSOR, 0, 0.0, \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
     ($builtin:ident, $name:literal, code($code:ident)) => {
         concat!(
             "    {",
@@ -1671,6 +1729,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "has", code(KILN_C99_METHOD_COLLECTION_HAS)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "keys", code(KILN_C99_METHOD_COLLECTION_KEYS)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "set", code(KILN_C99_METHOD_COLLECTION_SET)),
+    (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "size", accessor()),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "values", code(KILN_C99_METHOD_COLLECTION_VALUES)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "@@iterator", code(KILN_C99_METHOD_COLLECTION_SELF)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "@@toStringTag", text("Map")),
@@ -1683,6 +1742,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "forEach", code(KILN_C99_METHOD_COLLECTION_FOR_EACH)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "has", code(KILN_C99_METHOD_COLLECTION_HAS)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "keys", code(KILN_C99_METHOD_COLLECTION_KEYS)),
+    (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "size", accessor()),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "values", code(KILN_C99_METHOD_COLLECTION_VALUES)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "@@iterator", code(KILN_C99_METHOD_COLLECTION_SELF)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "@@toStringTag", text("Set")),
@@ -2597,6 +2657,12 @@ static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code) {
         return (kiln_c99_method_metadata){UINT32_C(0), UINT32_C(0), UINT32_C(0)};
     }
 }
+static uint32_t kiln_c99_method_declared_length(uint64_t code) {
+    switch (code) {
+/* KILN_NATIVE_METHOD_LENGTH_ROWS */
+    default: return UINT32_MAX;
+    }
+}
 "#
         )
     };
@@ -2610,6 +2676,7 @@ macro_rules! method_metadata_decl {
     uint32_t textual_arguments;
 } kiln_c99_method_metadata;
 static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
+static uint32_t kiln_c99_method_declared_length(uint64_t code);
 "#
     };
 }
@@ -4540,6 +4607,7 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 #define KILN_C99_MEMBER_SYMBOL 4
 #define KILN_C99_MEMBER_BUILTIN 5
 #define KILN_C99_MEMBER_UNSCOPABLES 6
+#define KILN_C99_MEMBER_ACCESSOR 7
 
 typedef struct {
     uint16_t builtin;
@@ -4692,6 +4760,11 @@ pub fn runtime_prelude_header() -> &'static str {
 }
 
 fn build_runtime_prelude_source(src: &str) -> String {
+    let src = src.replace(
+        "/* KILN_NATIVE_METHOD_LENGTH_ROWS */",
+        &render_native_method_length_rows(),
+    );
+    let src = src.as_str();
     let mut out = String::with_capacity(src.len() + 1024);
     const VARS_TO_EXPORT: &[&str] = &[
         "kiln_c99_diagnostic_active_depth",

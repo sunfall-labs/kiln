@@ -184,6 +184,9 @@ pub(super) fn native_js_name(native: &Native) -> String {
         // An accessor is named for what it reads, prefixed with the half it is.
         Native::TypedArrayToStringTag => "get [Symbol.toStringTag]".to_owned(),
         Native::StringToStringMethod => "toString".to_owned(),
+        Native::StringValueOf | Native::SymbolValueOf | Native::BigIntValueOf => {
+            "valueOf".to_owned()
+        }
         // A `DataView` accessor is named for the member it is published under, not for the Rust
         // variant behind it. Sixteen of them share four variants, so derivation gave all eight
         // getters the name `dataViewGet` -- which test262 checks by descriptor, and which any

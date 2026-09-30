@@ -223,7 +223,7 @@ pub(super) fn string_property(name: &str) -> Value {
         // and `String.prototype.toLocaleString` is neither: it is inherited from
         // `Object.prototype`, so publishing one here made it an own property that is not one.
         "toString" => Value::Native(Native::StringToStringMethod, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::StringValueOf, RealmId::PRIMARY),
         "match" => Value::Native(Native::StringMatch, RealmId::PRIMARY),
         "matchAll" => Value::Native(Native::StringMatchAll, RealmId::PRIMARY),
         "search" => Value::Native(Native::StringSearch, RealmId::PRIMARY),

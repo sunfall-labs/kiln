@@ -1,8 +1,18 @@
-const native = Object.getOwnPropertyDescriptor;
-native.compatProbe = 7;
-console.log(Object.keys(native).join(","));
-console.log(Reflect.ownKeys(native).sort().join(","));
-console.log(Object.getOwnPropertyDescriptor(native, "name").enumerable);
+const samples = [
+  [Object.keys, 1],
+  [Object.getOwnPropertyDescriptor, 2],
+  [Function.prototype.call, 1],
+  [Function.prototype.apply, 2],
+  [Function.prototype.bind, 1],
+  [/x/.test, 1],
+  [/x/.exec, 1],
+  [/x/.toString, 0],
+];
 
-const expression = /x/;
-console.log(expression.length === undefined, expression.hasOwnProperty("length"));
+for (const [fn, length] of samples) {
+  const descriptor = Object.getOwnPropertyDescriptor(fn, "length");
+  console.log(fn.length, descriptor.value, descriptor.writable,
+    descriptor.enumerable, descriptor.configurable);
+}
+console.log(Object.keys.hasOwnProperty("length"));
+console.log(/x/.hasOwnProperty("lastIndex"), /x/.hasOwnProperty("source"));

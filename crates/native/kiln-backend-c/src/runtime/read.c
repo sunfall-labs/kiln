@@ -1665,12 +1665,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                   : kiln_c99_copy_text(method, strlen(method));
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "length") &&
-            (target.bits == KILN_C99_METHOD_REGEXP_TEST ||
-             target.bits == KILN_C99_METHOD_REGEXP_EXEC ||
-             target.bits == KILN_C99_METHOD_REGEXP_TO_STRING)) {
-            *out = kiln_c99_number(target.bits == KILN_C99_METHOD_REGEXP_TO_STRING ? 0.0 : 1.0);
-            return KILN_C99_OK;
+        if (kiln_c99_same_name_key(key, "length")) {
+            uint32_t length = kiln_c99_method_declared_length(target.bits);
+            if (length != UINT32_MAX) {
+                *out = kiln_c99_number((double)length);
+                return KILN_C99_OK;
+            }
         }
         /* The own slots above are synthetic (name/length and supported prototype); whatever the
          * program added to Function.prototype is inherited by every native function as well. */
@@ -1680,6 +1680,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
+            /* Native callables inherit Object.prototype through Function.prototype too. */
+            status = kiln_c99_prototype_store_read(host,
+                                                  KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                  key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            uint64_t inherited = kiln_c99_namespace_method(
+                KILN_C99_BUILTIN_OBJECT_PROTOTYPE, intrinsic_key, intrinsic_len);
+            if (inherited != 0) {
+                *out = kiln_c99_method(inherited);
+                return KILN_C99_OK;
+            }
         }
         KILN_C99_ABSENT("not the native method's name, supported length or constructor prototype, "
                         "nor a property in its own or callable-prototype stores",

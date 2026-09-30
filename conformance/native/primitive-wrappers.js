@@ -27,3 +27,4 @@ try { Number.prototype.valueOf.call(boolean); } catch (error) { console.log(erro
 try { Symbol.prototype.valueOf.call(number); }
 catch (error) { console.log(error instanceof TypeError); }
 try { new String(Symbol('s')); } catch (error) { console.log(error instanceof TypeError); }
+try { new String(Object(Symbol('s'))); } catch (error) { console.log(error instanceof TypeError); }
