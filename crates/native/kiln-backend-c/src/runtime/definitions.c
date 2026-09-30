@@ -463,7 +463,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             }
             if (current.value.tag == KILN_VALUE_CELL) {
                 kiln_val *cell = kiln_c99_cell_of(current.value);
-                if (cell == NULL) KILN_C99_REFUSE_INTERNAL("namespace descriptor cell has no storage");
+                if (cell == NULL) KILN_C99_REFUSE("namespace descriptor cell has no storage");
                 status = kiln_c99_val_check_tdz(*cell, thrown);
                 if (status != KILN_C99_OK) return status;
                 current.value = kiln_val_to_boundary(*cell);
@@ -971,7 +971,7 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         if (kiln_c99_property_read_own(object, view, ikey, &property)) {
             if (object->module_namespace && property.value.tag == KILN_VALUE_CELL) {
                 kiln_val *cell = kiln_c99_cell_of(property.value);
-                if (cell == NULL) KILN_C99_REFUSE_INTERNAL("namespace descriptor cell has no storage");
+                if (cell == NULL) KILN_C99_REFUSE("namespace descriptor cell has no storage");
                 status = kiln_c99_val_check_tdz(*cell, thrown);
                 if (status != KILN_C99_OK) return status;
                 property.value = kiln_val_to_boundary(*cell);
