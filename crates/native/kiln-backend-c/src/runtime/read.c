@@ -1698,6 +1698,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
             if (stored != KILN_C99_OK || found) return stored;
         }
+        if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+            if (kiln_c99_same_name_key(key, "name")) {
+                *out = kiln_c99_copy_text("require", 7);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "length")) {
+                *out = kiln_c99_number(1.0);
+                return KILN_C99_OK;
+            }
+        }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
         if (kiln_c99_same_name_key(key, "name")) {

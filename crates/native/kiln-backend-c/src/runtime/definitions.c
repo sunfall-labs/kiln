@@ -734,12 +734,31 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
          * store. Describe a written key through that same store instead of sending this custom
          * callable tag to the exotic-object refusal below. */
         status = kiln_c99_callable_store(target, &store, 0);
-        if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT ||
-            !kiln_c99_store_has(store, view, canonical)) {
-            return status;
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, view, canonical)) {
+            return kiln_c99_describe_property_key(host, store, view, canonical, out, found, depth,
+                                                  thrown);
         }
-        return kiln_c99_describe_property_key(host, store, view, canonical, out, found, depth,
-                                              thrown);
+        if (!kiln_c99_same_name_key(view, "name") &&
+            !kiln_c99_same_name_key(view, "length")) return KILN_C99_OK;
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "value", 5,
+                                  kiln_c99_same_name_key(view, "name")
+                                      ? kiln_c99_copy_text("require", 7)
+                                      : kiln_c99_number(1.0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
+                                  NULL);
+        if (status == KILN_C99_OK) {
+            *found = 1;
+            *out = built;
+        }
+        return status;
     }
     if (target.tag == KILN_VALUE_SHARED) {
         kiln_value value;
