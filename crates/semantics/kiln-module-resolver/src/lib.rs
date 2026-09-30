@@ -1296,17 +1296,17 @@ impl ResolutionPolicy for PinnedPackageResolver {
                 .path
                 .extension()
                 .and_then(|extension| extension.to_str()),
-            Some("mjs" | "cjs")
+                Some("mjs" | "mts" | "cjs" | "cts")
         ) {
             Ok(Some(node_module_format(&module.path, None)?))
         } else {
-            self.formats
-                .get(&module.path)
-                .copied()
-                .map(Some)
-                .ok_or_else(|| ResolveError::NodeFormatNotPinned {
+            match self.formats.get(&module.path).copied() {
+                Some(format) => Ok(Some(format)),
+                None if self.node_builtins => Err(ResolveError::NodeFormatNotPinned {
                     path: module.path.clone(),
-                })
+                }),
+                None => Ok(None),
+            }
         }
     }
 }
@@ -2424,6 +2424,16 @@ mod tests {
             std::iter::empty::<(PathBuf, String, PathBuf)>(),
         )
         .expect("ordinary pinned resolver");
+        assert_eq!(
+            ordinary
+                .node_format(&ResolvedModule::new(
+                    fs::canonicalize(&importer).unwrap(),
+                    ResolutionKind::Relative,
+                ))
+                .unwrap(),
+            None,
+            "missing metadata keeps ordinary source policy unchanged"
+        );
         assert!(matches!(
             ordinary.resolve("node:http", &importer),
             Err(ResolveError::InvalidSpecifier {

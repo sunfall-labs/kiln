@@ -403,6 +403,16 @@ pub(crate) fn include_reachable_dependencies(
     Ok((resolutions, formats))
 }
 
+fn needs_node_source_format(path: &Path, node: bool) -> bool {
+    node || path
+        .components()
+        .any(|component| component.as_os_str() == "node_modules")
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "mjs" | "mts" | "cjs" | "cts"))
+}
+
 pub(crate) fn include_reachable_dependencies_with_includes(
     root: &Path,
     entry: &str,
@@ -523,16 +533,24 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         })?;
         let resolved_importer =
             kiln_module_resolver::ResolvedModule::new(importer.clone(), ResolutionKind::Relative);
-        let importer_format = resolver
-            .node_format(&resolved_importer)
-            .map_err(|error| Error::BadInput(error.to_string()))?
-            .ok_or_else(|| {
-                Error::BadInput(format!(
-                    "Node resolver did not classify source {}",
-                    importer.display()
-                ))
-            })?;
-        node_formats.insert(importer.clone(), to_wire_node_format(importer_format));
+        let importer_format = if needs_node_source_format(&importer, node) {
+            Some(
+                resolver
+                    .node_format(&resolved_importer)
+                    .map_err(|error| Error::BadInput(error.to_string()))?
+                    .ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "Node resolver did not classify source {}",
+                            importer.display()
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if let Some(format) = importer_format {
+            node_formats.insert(importer.clone(), to_wire_node_format(format));
+        }
         if importer
             .extension()
             .and_then(|e| e.to_str())
@@ -541,7 +559,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             // Data files (JSON, JSON5, JSONC, YAML, TOML) are leaf nodes in the module graph.
             continue;
         }
-        let commonjs = importer_format == ResolverNodeModuleFormat::CommonJs;
+        let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
         let (module, static_requires) = if commonjs {
             let (module, requires) =
                 kiln_frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
@@ -637,7 +655,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             // Package format determines how every source module is parsed and how its
             // dependencies are collected, even when the Node builtin adapter is disabled.
             // Keep builtin availability (`node`) separate from module-format metadata.
-            if !asset {
+            if !asset && needs_node_source_format(&target, node) {
                 let format = resolver
                     .node_format(&resolved.module)
                     .map_err(|error| Error::BadInput(error.to_string()))?
@@ -1260,7 +1278,46 @@ mod tests {
                     .into_owned()
             )
         );
-        assert_eq!(node_formats.len(), 3);
+        assert_eq!(node_formats.len(), 2);
+        assert!(
+            node_formats
+                .iter()
+                .all(|format| format.path.contains("node_modules/pkg/"))
+        );
+    }
+
+    #[test]
+    fn ordinary_typescript_modules_keep_the_default_esm_policy_without_node_mode() {
+        let tree = Tree::new("ordinary-typescript-esm-policy");
+        tree.file("src/main.ts");
+        tree.file("src/dep.ts");
+        std::fs::write(
+            tree.0.join("src/main.ts"),
+            "import { value } from './dep.ts'; export const result = value;\n",
+        )
+        .expect("write ESM entry");
+        std::fs::write(tree.0.join("src/dep.ts"), "export const value = 42;\n")
+            .expect("write ESM dependency");
+        let entry = tree
+            .0
+            .join("src/main.ts")
+            .canonicalize()
+            .expect("canonical entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (_, node_formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            false,
+        )
+        .expect("capture ordinary TypeScript graph");
+
+        assert!(node_formats.is_empty());
+        assert!(texts.iter().any(|(path, _)| path.ends_with("dep.ts")));
     }
 
     #[test]
