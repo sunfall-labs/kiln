@@ -1,9 +1,9 @@
 [package]
 name = "kiln-module-resolver"
-version = "0.0.0"
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/sunfall-labs/kiln"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # Keep module resolution below the frontend and graph layers. Oxc owns Node and TypeScript package
 # rules; package-manager state and dependency installation remain caller-owned.
