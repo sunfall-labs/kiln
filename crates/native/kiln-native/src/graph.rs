@@ -1410,7 +1410,7 @@ pub(super) fn append_runtime_digest(
     native_runtime_failures: Option<&BTreeMap<(PathBuf, PathBuf, String), String>>,
 ) {
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
-    for (index, (node, module)) in modules.iter().enumerate() {
+    for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
     for (node, _) in modules {

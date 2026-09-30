@@ -14,6 +14,22 @@
     }
 
     const Proto = Iterator.prototype;
+    const tagMethods = {
+        get() { return "Iterator"; },
+        set(this: any, value: any) {
+            if (!isObject(this) || this === Proto) {
+                throw new TypeError("Cannot set Iterator.prototype @@toStringTag on this receiver");
+            }
+            Object.defineProperty(this, Symbol.toStringTag, {
+                value, writable: true, enumerable: true, configurable: true,
+            });
+        },
+    };
+    Object.defineProperty(tagMethods.get, "name", { value: "get [Symbol.toStringTag]", configurable: true });
+    Object.defineProperty(tagMethods.set, "name", { value: "set [Symbol.toStringTag]", configurable: true });
+    Object.defineProperty(Proto, Symbol.toStringTag, {
+        get: tagMethods.get, set: tagMethods.set, enumerable: false, configurable: true,
+    });
 
     // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`); an
     // optional parameter has a default (`x: any = undefined`) so `length` does not count it.

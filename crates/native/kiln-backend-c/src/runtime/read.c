@@ -2207,11 +2207,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_same_name_key(key, "name"))) {
                 KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
             }
-            if (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
-                kiln_c99_same_name_key(key, "@@toStringTag")) {
-                *out = kiln_c99_copy_text("Iterator", 8);
-                return KILN_C99_OK;
-            }
             if (target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Method get Set.prototype.size called on incompatible receiver");

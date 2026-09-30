@@ -799,7 +799,12 @@ pub(crate) fn call_native(
                     message: "get size: receiver does not have the required internal slot".to_owned(),
                 });
             };
-            if is_weak_collection(receiver) || collection_state(receiver).is_none() {
+            let expected_map = match arguments.get(1) {
+                Some(Value::Boolean(kind)) => Some(*kind),
+                _ => None,
+            };
+            if is_weak_collection(receiver) || !collection_state(receiver)
+                .is_some_and(|(_, is_map)| Some(is_map) == expected_map) {
                 return Err(ExecutionError::TypeErrorMessage {
                     message: "get size: receiver does not have the required internal slot".to_owned(),
                 });

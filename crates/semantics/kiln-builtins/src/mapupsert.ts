@@ -3,7 +3,7 @@
 
 (function installMapUpsert() {
   if (typeof Map === "undefined" || !Map.prototype) return;
-  const __kilnCollectionSize: ((collection: any) => number) | undefined =
+  const __kilnCollectionSize: ((collection: any, isMap: boolean) => number) | undefined =
     (globalThis as any).__kilnCollectionSize;
   delete (globalThis as any).__kilnCollectionSize;
   const Proto = Map.prototype;
@@ -51,7 +51,7 @@
   });
 
   if (__kilnCollectionSize !== undefined) {
-    const mapGetter = function() { return __kilnCollectionSize(this); };
+    const mapGetter = function() { return __kilnCollectionSize(this, true); };
     Object.defineProperty(mapGetter, "name", { value: "get size", configurable: true });
     Object.defineProperty(Proto, "size", {
       get: mapGetter,
@@ -61,7 +61,7 @@
   }
 
   if (typeof Set !== "undefined" && Set.prototype && __kilnCollectionSize !== undefined) {
-    const setGetter = function() { return __kilnCollectionSize(this); };
+    const setGetter = function() { return __kilnCollectionSize(this, false); };
     Object.defineProperty(setGetter, "name", { value: "get size", configurable: true });
     Object.defineProperty(Set.prototype, "size", {
       get: setGetter,
