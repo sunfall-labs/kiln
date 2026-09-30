@@ -1439,6 +1439,26 @@ pub(super) fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAcces
     }
 }
 
+/// Whether a machine-backed accessor is an own property of `target`.
+///
+/// `machine_accessor` also follows the constructor inheritance that ordinary property reads
+/// need. In particular, concrete typed-array constructors inherit `%TypedArray%[@@species]`.
+/// Reflection over own keys and own descriptors must not turn that inherited getter into an own
+/// property of every concrete constructor (or of functions inheriting one of those constructors).
+pub(super) fn machine_own_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
+    if key == WellKnown::Species.property_key()
+        && matches!(
+            target,
+            Value::Native(Native::TypedArrayConstructor(_), _)
+                | Value::Function(_)
+                | Value::Bound(_)
+        )
+    {
+        return None;
+    }
+    machine_accessor(target, key)
+}
+
 /// Whether this built-in defines `Symbol.species`, which is the eight the specification names
 /// and nothing else -- a constructor that does not define one inherits whatever its own
 /// prototype has, which for the nine view constructors is `%TypedArray%`'s.

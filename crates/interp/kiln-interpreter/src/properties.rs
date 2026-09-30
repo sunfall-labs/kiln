@@ -3116,7 +3116,7 @@ pub(super) fn own_symbol_keys_units(intrinsics: &Intrinsics, target: &Value) -> 
             // absent from `getOwnPropertySymbols`.
             let published = !matches!(native.property(key), None | Some(Value::Undefined))
                 || intrinsic_accessor(target, key).is_some()
-                || machine_accessor(target, key).is_some()
+                || machine_own_accessor(target, key).is_some()
                 || (matches!(native, Native::PrototypeOf(PrototypeTable::Array))
                     && key == WellKnown::Unscopables.property_key());
             if published {
@@ -3378,7 +3378,7 @@ pub(super) fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attr
     //
     // An accessor carries no `writable` at all: the flag is not part of its descriptor, so the
     // `false` is the absence of one rather than a claim about assignment.
-    if intrinsic_accessor(target, key).is_some() || machine_accessor(target, key).is_some() {
+    if intrinsic_accessor(target, key).is_some() || machine_own_accessor(target, key).is_some() {
         return Some(Attributes {
             writable: false,
             enumerable: false,

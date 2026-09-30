@@ -1440,6 +1440,13 @@
                     *result = kiln_c99_object_of(store)->prototype;
                     return KILN_C99_OK;
                 }
+                /* Concrete typed-array constructors inherit the abstract %TypedArray%
+                 * constructor. Keep this link separate from the `prototype` property, which
+                 * names the matching concrete instance prototype. */
+                if (kiln_c99_builtin_typed_kind(subject.bits, &typed_kind)) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY);
+                    return KILN_C99_OK;
+                }
                 if (kiln_c99_typed_prototype_kind(subject.bits, &typed_kind)) {
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
                     return KILN_C99_OK;
