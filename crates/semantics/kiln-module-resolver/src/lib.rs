@@ -1289,7 +1289,7 @@ impl ResolutionPolicy for PinnedPackageResolver {
         &self,
         module: &ResolvedModule,
     ) -> Result<Option<NodeModuleFormat>, ResolveError> {
-        if !self.node_builtins || module.kind == ResolutionKind::Builtin {
+        if module.kind == ResolutionKind::Builtin {
             Ok(None)
         } else if matches!(
             module
@@ -1945,6 +1945,34 @@ mod tests {
             pinned.node_format(&resolved).unwrap(),
             Some(NodeModuleFormat::EsModule)
         );
+    }
+
+    #[test]
+    fn pinned_source_format_is_available_without_node_builtins() {
+        let project = TempProject::new();
+        let importer = fs::canonicalize(project.write("main.js", "")).expect("canonical importer");
+        let target = fs::canonicalize(project.write("pkg/index.js", "")).expect("canonical target");
+        let pinned = PinnedPackageResolver::new_with_formats(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+            [(target.clone(), NodeModuleFormat::CommonJs)],
+        )
+        .expect("construct ordinary pinned resolver");
+        let resolved = pinned
+            .resolve("./pkg/index.js", &importer)
+            .expect("resolve explicit module");
+
+        assert_eq!(
+            pinned.node_format(&resolved).unwrap(),
+            Some(NodeModuleFormat::CommonJs)
+        );
+        assert!(matches!(
+            pinned.resolve("node:http", &importer),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::UrlScheme,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -523,24 +523,16 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         })?;
         let resolved_importer =
             kiln_module_resolver::ResolvedModule::new(importer.clone(), ResolutionKind::Relative);
-        let importer_format = if node {
-            Some(
-                resolver
-                    .node_format(&resolved_importer)
-                    .map_err(|error| Error::BadInput(error.to_string()))?
-                    .ok_or_else(|| {
-                        Error::BadInput(format!(
-                            "Node resolver did not classify source {}",
-                            importer.display()
-                        ))
-                    })?,
-            )
-        } else {
-            None
-        };
-        if let Some(format) = importer_format {
-            node_formats.insert(importer.clone(), to_wire_node_format(format));
-        }
+        let importer_format = resolver
+            .node_format(&resolved_importer)
+            .map_err(|error| Error::BadInput(error.to_string()))?
+            .ok_or_else(|| {
+                Error::BadInput(format!(
+                    "Node resolver did not classify source {}",
+                    importer.display()
+                ))
+            })?;
+        node_formats.insert(importer.clone(), to_wire_node_format(importer_format));
         if importer
             .extension()
             .and_then(|e| e.to_str())
@@ -549,7 +541,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             // Data files (JSON, JSON5, JSONC, YAML, TOML) are leaf nodes in the module graph.
             continue;
         }
-        let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
+        let commonjs = importer_format == ResolverNodeModuleFormat::CommonJs;
         let (module, static_requires) = if commonjs {
             let (module, requires) =
                 kiln_frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
@@ -642,7 +634,10 @@ pub(crate) fn include_reachable_dependencies_with_includes(
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(is_asset_extension);
-            if node && !asset {
+            // Package format determines how every source module is parsed and how its
+            // dependencies are collected, even when the Node builtin adapter is disabled.
+            // Keep builtin availability (`node`) separate from module-format metadata.
+            if !asset {
                 let format = resolver
                     .node_format(&resolved.module)
                     .map_err(|error| Error::BadInput(error.to_string()))?
@@ -1265,7 +1260,7 @@ mod tests {
                     .into_owned()
             )
         );
-        assert!(node_formats.is_empty());
+        assert_eq!(node_formats.len(), 3);
     }
 
     #[test]
