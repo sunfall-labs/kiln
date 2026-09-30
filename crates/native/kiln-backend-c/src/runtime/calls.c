@@ -913,10 +913,10 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_c99_heap_store_value(kiln_c99_object_of(store), &kiln_c99_object_of(store)->prototype, prototype);
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(target.bits)) {
-        /* Prototype tables are real objects in the language even though this backend represents
-         * their immutable method surface by an interned builtin id. A relink is observable and
-         * therefore needs an ordinary mutable store, just like a function's static chain. */
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        /* Built-in callables and prototype tables both have mutable [[Prototype]] links even
+         * though their intrinsic surfaces are represented by interned ids. Keep the link in the
+         * same own-property store used by reads and reflection. */
         kiln_value store;
         int status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;

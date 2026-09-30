@@ -1421,10 +1421,6 @@
             if (subject.tag == KILN_VALUE_BUILTIN) {
                 kiln_typed_kind typed_kind;
                 kiln_value store;
-                if (subject.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
-                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
-                    return KILN_C99_OK;
-                }
                 int stored = kiln_c99_callable_store(subject, &store, 0);
                 if (stored != KILN_C99_OK) return stored;
                 if (store.tag == KILN_VALUE_OBJECT &&
@@ -1441,6 +1437,10 @@
                 }
                 if (kiln_c99_typed_prototype_kind(subject.bits, &typed_kind)) {
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+                    return KILN_C99_OK;
+                }
+                if (subject.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
                     return KILN_C99_OK;
                 }
                 if (subject.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
@@ -1486,8 +1486,8 @@
                 return KILN_C99_OK;
             }
             if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION && subject.tag != KILN_VALUE_BOUND &&
-                kiln_c99_exotic_store(subject) == NULL &&
-                !(subject.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(subject.bits))) {
+                subject.tag != KILN_VALUE_BUILTIN &&
+                kiln_c99_exotic_store(subject) == NULL) {
                 KILN_C99_REFUSE("Object.setPrototypeOf on a value with no prototype slot");
             }
             {
