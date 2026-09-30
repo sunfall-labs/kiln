@@ -726,7 +726,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
             writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = kiln_c99_copy_text({}, (size_t){}); return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY; }}", native_c_string(&dependency.specifier), dependency.specifier.len(), native_c_string(&resolved), resolved.len()).unwrap();
         }
         for ((failure_importer, failure_specifier), message) in graph.runtime_failures(&node.path) {
-            if failure_importer != node.path {
+            if failure_importer != &node.path {
                 continue;
             }
             writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
