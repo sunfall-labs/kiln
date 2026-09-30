@@ -931,6 +931,49 @@ type NativeBootstrapCache = (
 );
 static NATIVE_BOOTSTRAPS: OnceLock<std::sync::Mutex<NativeBootstrapCache>> = OnceLock::new();
 
+/// `process.getBuiltinModule` for the native backend, written in TypeScript over the
+/// `__kilnHostModuleCreateRequire` intrinsic (ADR 0005: builtins are TypeScript, not C).
+/// The C runtime leaves the name absent on its process object; this snippet installs the
+/// implementation when a process global exists and does not already provide one. The id gate
+/// uses the resolver's canonical builtin list so the answer matches node: a builtin name, with
+/// or without the `node:` prefix, returns the linked builtin's namespace; anything else
+/// returns `undefined`; a non-string id throws a TypeError like node's `validateString`.
+/// The filename handed to the create-require intrinsic is never used for relative resolution
+/// here -- only `node:` specifiers are ever required through it -- so it names this bootstrap.
+fn native_get_builtin_module_bootstrap() -> String {
+    let mut names: Vec<&str> = kiln_builtins::ts_builtin_specifiers()
+        .into_iter()
+        .filter_map(|specifier| specifier.strip_prefix("node:"))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let list = names
+        .iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"
+if (typeof globalThis.process !== "undefined" && globalThis.process !== null && !globalThis.process.getBuiltinModule) {{
+    const __kilnBuiltinModuleNames = new Set([{list}]);
+    let __kilnBuiltinRequire;
+    globalThis.process.getBuiltinModule = function getBuiltinModule(id) {{
+        if (typeof id !== "string") {{
+            throw new TypeError('The "id" argument must be of type string');
+        }}
+        const name = id.startsWith("node:") ? id.slice(5) : id;
+        if (!__kilnBuiltinModuleNames.has(name)) return undefined;
+        if (__kilnBuiltinRequire === undefined) {{
+            __kilnBuiltinRequire =
+                globalThis.__kilnHostModuleCreateRequire("/kiln/runtime-bootstrap.ts");
+        }}
+        return __kilnBuiltinRequire("node:" + name);
+    }};
+}}
+"#
+    )
+}
+
 fn compile_native_builtin_bootstrap(
     node: bool,
     retain_url: bool,
@@ -943,14 +986,15 @@ fn compile_native_builtin_bootstrap(
         ""
     };
     let common_ts_builtins = kiln_builtins::common_bootstrap_source_selected(families);
+    let get_builtin_module = native_get_builtin_module_bootstrap();
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}",
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}\n{get_builtin_module}",
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}"
         )
     };
     let source_digest = Digest::hash(source.as_bytes());

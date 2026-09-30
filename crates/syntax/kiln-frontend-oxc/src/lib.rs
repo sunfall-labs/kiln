@@ -328,10 +328,16 @@ fn discover_node_runtime_requests_from_semantic(
     }
 
     fn literal_argument(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
-        let Some(Argument::StringLiteral(literal)) = call.arguments.first() else {
-            return None;
-        };
-        Some(literal.value.to_string())
+        match call.arguments.first()? {
+            Argument::StringLiteral(literal) => Some(literal.value.to_string()),
+            // `` `node:os` `` with no interpolations is as static as `"node:os"`.
+            Argument::TemplateLiteral(template)
+                if template.expressions.is_empty() && template.quasis.len() == 1 =>
+            {
+                Some(template.quasis[0].value.cooked.as_ref()?.to_string())
+            }
+            _ => None,
+        }
     }
 
     fn imported_factory_base(
@@ -460,13 +466,12 @@ fn discover_node_runtime_requests_from_semantic(
             });
             continue;
         } else if let Expression::StaticMemberExpression(member) = &call.callee {
-            let Expression::Identifier(process) = &member.object else {
-                continue;
-            };
-            if process.name != "process"
-                || member.property.name != "getBuiltinModule"
-                || !process.is_global_reference(scoping)
-            {
+            // `x.getBuiltinModule(id)`: the receiver is usually the global `process`, but
+            // bundlers routinely alias it (`e.getBuiltinModule(...)` with `e` a parameter),
+            // so any receiver is accepted. A literal id is a statically-provable builtin
+            // request (ADR 0067 §2); a user-defined `getBuiltinModule` merely links one
+            // extra builtin, which is harmless.
+            if member.property.name != "getBuiltinModule" {
                 continue;
             }
             let Some(specifier) = literal_argument(call) else {
@@ -3985,6 +3990,28 @@ mod tests {
                 .map(|request| request.specifier)
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn node_runtime_discovery_accepts_aliased_get_builtin_module_receiver() {
+        // Bundlers alias `process` (e.g. a parameter named `e`); the builtin id is still
+        // statically provable, so it is still a link-time request.
+        let source = r#"
+            function bundle(e) {
+                e.getBuiltinModule("node:os");
+                e.getBuiltinModule(`node:path`);
+            }
+            process.getBuiltinModule("node:util");
+        "#;
+        let mut requests = discover_node_runtime_requests("fixture.mjs", source);
+        requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        assert_eq!(
+            requests
+                .into_iter()
+                .map(|request| request.specifier)
+                .collect::<Vec<_>>(),
+            ["node:os", "node:path", "node:util"]
         );
     }
 
