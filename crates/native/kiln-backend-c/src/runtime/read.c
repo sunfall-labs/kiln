@@ -2119,7 +2119,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * refusing; that is the honest answer for a question we cannot yet ask. */
             int owned = 0;
             (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
-            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
+            if ((owned || kiln_c99_has_surface(target.bits)) &&
+                !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
                                 out);

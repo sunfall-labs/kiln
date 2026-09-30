@@ -30,6 +30,12 @@ console.log("kinds", "get" in Map.prototype, "add" in Map.prototype, "add" in Se
 console.log("weak", "get" in WeakMap.prototype, "add" in WeakMap.prototype, "add" in WeakSet.prototype, "get" in WeakSet.prototype);
 console.log("kindread", typeof Map.prototype.add, typeof Set.prototype.get, typeof (WeakSet.prototype as any).get);
 
+// Built-in constructors with a shared member surface still answer genuinely absent names as
+// undefined. `kind-of` probes `value.constructor.isBuffer` for arbitrary values, including Set;
+// Set does not have an `isBuffer` property and that probe must take its ordinary fallback.
+console.log("missing-constructor-members", typeof (Set as any).isBuffer,
+  (Set as any).isBuffer === undefined, "isBuffer" in (Set as any));
+
 // A string carries `@@iterator` and no `values` beside it.
 console.log("strvalues", typeof String.prototype.values, typeof "ab".values, [..."ab"].join("-"));
 

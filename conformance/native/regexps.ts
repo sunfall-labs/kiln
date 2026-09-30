@@ -43,6 +43,20 @@ console.log(new RegExp("a+", "g").source, new RegExp(/x/i).flags, new RegExp(/x/
 console.log(new RegExp("").source === "(?:)" || new RegExp("").source === "", RegExp("b").test("abc"));
 try { new RegExp("("); console.log("no throw"); } catch (error: any) { console.log("bad", error.constructor.name); }
 
+// is-regex's robust brand check uses both the own data descriptor and RegExpExec's ToString.
+// The marker conversion throws; a non-RegExp must not accidentally pass this test.
+const regexMarker = {};
+const badStringifier = {
+  toString() { throw regexMarker; },
+  valueOf() { throw regexMarker; },
+  [Symbol.toPrimitive]() { throw regexMarker; },
+};
+const lastIndexDescriptor = Object.getOwnPropertyDescriptor(/x/, "lastIndex");
+let regexExecMarker = false;
+try { /x/.exec(badStringifier as any); } catch (error) { regexExecMarker = error === regexMarker; }
+console.log("regex-brand-primitives", lastIndexDescriptor?.value, lastIndexDescriptor?.writable,
+  lastIndexDescriptor?.enumerable, lastIndexDescriptor?.configurable, regexExecMarker);
+
 // The string methods that take a pattern. `replace` with a plain string was already here; these
 // are the ones that need the engine, and `replace` with a *function* is the one that needs the
 // interpreter -- which is why they are not where the other string methods are.
