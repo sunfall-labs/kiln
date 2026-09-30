@@ -15,7 +15,7 @@ kiln-runtime = { workspace = true }
 kiln-shared-graph = { workspace = true }
 kiln-temporal = { workspace = true }
 kiln-json = { workspace = true }
-kiln-intl = { workspace = true }
+kiln-intl = { workspace = true, features = ["timezone_database"] }
 kiln-url = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-number-core = { workspace = true }

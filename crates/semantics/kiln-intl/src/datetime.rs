@@ -22,19 +22,10 @@
 //!
 //! # The realm has one timezone, and it is not the host's
 //!
-//! ADR 0015 fixed the realm's zone at UTC and its clock at the epoch. `Intl.DateTimeFormat` is the
-//! place the specification lets a program name a zone *explicitly*, which is the form ADR 0015
-//! called honest, so a named zone is accepted, validated and reported. Rendering one is a
-//! different question: ICU4X ships the IANA identifier table and metazone offset *periods*, not a
-//! transition database, so for a zone that observes daylight saving there is no way to say which
-//! of its two offsets applies at a given instant. Formatting in such a zone is refused with a
-//! `RangeError` rather than answered with the standard offset -- the difference between the two is
-//! an hour, twice a year, silently.
-
-// `VariantOffsetsCalculator` is deprecated upstream as "a bad approximation of a time zone
-// database", which is exactly what this module uses it to establish: it asks whether a zone has a
-// second offset so that a zone it cannot choose an offset for is refused rather than guessed at.
-#![allow(deprecated)]
+//! ADR 0015 fixes the realm's implicit zone at UTC and its clock at the epoch. An explicit
+//! `timeZone` uses the compiled IANA TZif database, shared with Temporal, to resolve the offset at
+//! each instant. This keeps the answer independent of the machine's local zone while correctly
+//! handling daylight-saving transitions, aliases, and historical offsets.
 
 use std::cell::RefCell;
 
@@ -49,8 +40,14 @@ use icu_locale_core::preferences::extensions::unicode::keywords::{
     CalendarAlgorithm, HourCycle, NumberingSystem,
 };
 use icu_time::zone::iana::IanaParserExtended;
-use icu_time::zone::{UtcOffset, VariantOffsetsCalculator};
+use icu_time::zone::UtcOffset;
 use icu_time::{DateTime, TimeZone, ZonedDateTime};
+#[cfg(feature = "timezone_database")]
+use timezone_provider::provider::TimeZoneProvider;
+#[cfg(feature = "timezone_database")]
+use timezone_provider::tzif::CompiledTzdbProvider;
+#[cfg(feature = "timezone_database")]
+use std::sync::OnceLock;
 
 use crate::locale::{RelevantKey, Resolution};
 use crate::{Error, Setting};
@@ -344,8 +341,6 @@ pub struct DateTimeFormat {
     calendar: String,
     numbering_system: String,
     zone: TimeZoneChoice,
-    /// The offset formatting uses, or `None` for a zone whose offset this build cannot pin down.
-    offset: Option<UtcOffset>,
     date_style: Option<String>,
     time_style: Option<String>,
     /// The components read back out of the resolved pattern, in `resolvedOptions()` order.
@@ -455,7 +450,6 @@ impl DateTimeFormat {
             .time_zone
             .clone()
             .unwrap_or(TimeZoneChoice::Offset(0));
-        let offset = resolve_offset(&zone);
 
         let field_set = build_field_set(&options)?;
         let formatter = DateTimeFormatter::try_new(preferences, field_set)
@@ -480,7 +474,6 @@ impl DateTimeFormat {
             calendar,
             numbering_system,
             zone,
-            offset,
             date_style: options.date_style.clone(),
             time_style: options.time_style.clone(),
             components: Vec::new(),
@@ -495,30 +488,27 @@ impl DateTimeFormat {
         Ok(built)
     }
 
-    /// The instant, as ICU4X's zoned input, or a refusal for a zone this build cannot render in.
+    /// The instant, as ICU4X's zoned input using the exact offset at that instant.
     ///
     /// `naming` is the instant the zone's *name* is resolved at, which is the instant itself for a
     /// single date and the start of the range for both ends of a range: ICU4X treats two inputs
     /// whose zone-name timestamps differ as being in incomparable zones and falls straight back to
     /// `{start} - {end}`, and the two ends of a range are by construction in one zone.
     fn at(&self, epoch_milliseconds: f64, naming: f64) -> Result<ZonedInstant, Error> {
-        let Some(offset) = self.offset else {
-            return Err(Error::range(format!(
-                "no time zone transition data for {}: the realm can render a fixed-offset zone \
-                 and refuses a daylight-saving one rather than guess which offset applies",
-                self.time_zone()
-            )));
-        };
+        let offset = resolve_offset(&self.zone, epoch_milliseconds).ok_or_else(|| {
+            Error::range(format!("time zone {} has no transition data", self.time_zone()))
+        })?;
+        let naming_offset = resolve_offset(&self.zone, naming).ok_or_else(|| {
+            Error::range(format!("time zone {} has no transition data", self.time_zone()))
+        })?;
         let milliseconds = epoch_milliseconds as i64;
         let zoned = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(milliseconds, offset);
         let id = match &self.zone {
             TimeZoneChoice::Named(_, id) => *id,
             TimeZoneChoice::Offset(_) => TimeZone::UNKNOWN,
         };
-        // A zone that has a daylight variant never reaches here, so the variant is Standard by
-        // construction rather than by assumption.
-        let naming = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, offset);
-        let info = id.with_offset(Some(offset)).at_date_time(DateTime {
+        let naming = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, naming_offset);
+        let info = id.with_offset(Some(naming_offset)).at_date_time(DateTime {
             date: naming.date,
             time: naming.time,
         });
@@ -954,26 +944,27 @@ fn numbering_system_for_zero(zero: char) -> &'static str {
     }
 }
 
-/// The offset a zone choice formats with, or `None` when this build cannot say.
-fn resolve_offset(zone: &TimeZoneChoice) -> Option<UtcOffset> {
+/// Resolve the exact offset at an instant, or `None` when timezone data was not linked.
+fn resolve_offset(zone: &TimeZoneChoice, epoch_milliseconds: f64) -> Option<UtcOffset> {
     match zone {
         TimeZoneChoice::Offset(seconds) => UtcOffset::try_from_seconds(*seconds).ok(),
-        TimeZoneChoice::Named(_, id) => {
-            use icu_time::zone::ZoneNameTimestamp;
-            #[allow(deprecated)]
-            let calculator = VariantOffsetsCalculator::new();
-            #[allow(deprecated)]
-            let offsets = calculator.compute_offsets_from_time_zone_and_name_timestamp(
-                *id,
-                ZoneNameTimestamp::far_in_future(),
-            )?;
-            // A zone with a daylight variant has two offsets and no transition data to choose
-            // between them. Refusing is the whole point: the alternative is an hour wrong for
-            // half the year, which reads as correct.
-            if offsets.daylight.is_some() {
+        TimeZoneChoice::Named(name, _) => {
+            #[cfg(feature = "timezone_database")]
+            {
+                static TZDB: OnceLock<CompiledTzdbProvider> = OnceLock::new();
+                let provider = TZDB.get_or_init(CompiledTzdbProvider::default);
+                let zone = provider.get(name.as_bytes()).ok()?;
+                let timestamp_ns = (epoch_milliseconds as i128).checked_mul(1_000_000)?;
+                let seconds = provider
+                    .transition_nanoseconds_for_utc_epoch_nanoseconds(zone, timestamp_ns)
+                    .ok()?
+                    .0;
+                UtcOffset::try_from_seconds(i32::try_from(seconds).ok()?).ok()
+            }
+            #[cfg(not(feature = "timezone_database"))]
+            {
+                let _ = (name, epoch_milliseconds);
                 None
-            } else {
-                Some(offsets.standard)
             }
         }
     }
@@ -1603,7 +1594,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_offset_zone_renders_and_a_daylight_one_is_refused() {
+    #[cfg(feature = "timezone_database")]
+    fn named_daylight_zone_uses_the_transition_at_each_instant() {
         let india = DateTimeFormat::new(
             &["en-US".to_owned()],
             Options {
@@ -1620,16 +1612,16 @@ mod tests {
         let vancouver = DateTimeFormat::new(
             &["en-US".to_owned()],
             Options {
+                hour: Some("2-digit".to_owned()),
+                minute: Some("2-digit".to_owned()),
+                hour_cycle: Some("h23".to_owned()),
                 time_zone: canonical_time_zone("America/Vancouver"),
                 ..Options::default()
             },
         )
         .unwrap();
-        // Refused rather than answered with the standard offset, which would be an hour wrong for
-        // half of every year and look entirely plausible.
-        let refusal = vancouver.format(0.0).expect_err("a DST zone is refused");
-        assert_eq!(refusal.kind, crate::ErrorKind::Range);
-        // The identifier is still reported: recognising a zone and rendering in it are separate.
+        assert_eq!(vancouver.format(1_705_320_000_000.0).unwrap(), "04:00");
+        assert_eq!(vancouver.format(1_719_835_200_000.0).unwrap(), "05:00");
         assert_eq!(vancouver.time_zone(), "America/Vancouver");
     }
 

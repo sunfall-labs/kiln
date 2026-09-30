@@ -79,6 +79,7 @@ regress = { version = "0.12", default-features = false, features = ["backend-pik
 # brings the IANA zone database in so a program that names a zone explicitly gets a real answer;
 # nothing here ever asks the host which zone it is in.
 temporal_rs = { version = "0.2.6", default-features = false, features = ["std", "compiled_data"] }
+timezone_provider = { version = "0.2.6", default-features = false, features = ["tzif"] }
 # The internationalization engine behind `Intl`, linked rather than rewritten for the reason
 # ADR 0025 gives for `regress` and ADR 0029 §4 names ICU4X for: locale negotiation, collation and
 # number spellout are CLDR-shaped, and a second implementation would agree on `en-US` and disagree

@@ -2053,6 +2053,7 @@ dependencies = [
  "icu_plurals",
  "icu_segmenter",
  "icu_time",
+ "timezone_provider",
  "writeable",
 ]
 
