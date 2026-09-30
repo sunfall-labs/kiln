@@ -59,7 +59,7 @@
       const sites: any[] = [];
       const configuredLimit = ErrorCtor.stackTraceLimit;
       const limit = typeof configuredLimit === "number"
-        ? Math.max(0, configuredLimit) : 0;
+        ? Math.max(0, Math.floor(configuredLimit)) : 0;
       for (let i = 0; i < frames.length && i < limit; i++) {
         const frame = frames[i];
         const site: any = {};

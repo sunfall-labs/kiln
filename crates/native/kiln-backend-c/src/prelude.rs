@@ -13,22 +13,28 @@ pub(crate) struct MethodId {
 const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 
 const fn method_declared_length(method: &str) -> u32 {
-    let identity = match method {
-        "KILN_C99_METHOD_OBJECT_KEYS" => Some(("Object", "keys")),
-        "KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR" => {
-            Some(("Object", "getOwnPropertyDescriptor"))
+    let identities = [
+        ("KILN_C99_METHOD_OBJECT_KEYS", "Object", "keys"),
+        ("KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR", "Object", "getOwnPropertyDescriptor"),
+        ("KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS", "Object", "getOwnPropertyDescriptors"),
+        ("KILN_C99_METHOD_FUNCTION_CALL", "Function.prototype", "call"),
+        ("KILN_C99_METHOD_FUNCTION_APPLY", "Function.prototype", "apply"),
+        ("KILN_C99_METHOD_FUNCTION_BIND", "Function.prototype", "bind"),
+        ("KILN_C99_METHOD_REGEXP_TEST", "RegExp.prototype", "test"),
+        ("KILN_C99_METHOD_REGEXP_EXEC", "RegExp.prototype", "exec"),
+        ("KILN_C99_METHOD_REGEXP_TO_STRING", "RegExp.prototype", "toString"),
+    ];
+    let mut identity = None;
+    let mut index = 0;
+    while index < identities.len() {
+        let (candidate, owner, member) = identities[index];
+        if method.len() == candidate.len() &&
+            bytes_match_at(method.as_bytes(), 0, candidate.as_bytes()) {
+            identity = Some((owner, member));
+            break;
         }
-        "KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS" => {
-            Some(("Object", "getOwnPropertyDescriptors"))
-        }
-        "KILN_C99_METHOD_FUNCTION_CALL" => Some(("Function.prototype", "call")),
-        "KILN_C99_METHOD_FUNCTION_APPLY" => Some(("Function.prototype", "apply")),
-        "KILN_C99_METHOD_FUNCTION_BIND" => Some(("Function.prototype", "bind")),
-        "KILN_C99_METHOD_REGEXP_TEST" => Some(("RegExp.prototype", "test")),
-        "KILN_C99_METHOD_REGEXP_EXEC" => Some(("RegExp.prototype", "exec")),
-        "KILN_C99_METHOD_REGEXP_TO_STRING" => Some(("RegExp.prototype", "toString")),
-        _ => None,
-    };
+        index += 1;
+    }
     match identity {
         Some((owner, member)) => {
             match kiln_builtin_surface::native_function_length(owner, member) {
@@ -2233,7 +2239,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_callable_store_lookup",
-        sites: 4,
+        sites: 5,
         proved_by: "a callable with no property store has no own member at all, so there is no \
                     list to be short of",
     },

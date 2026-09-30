@@ -87,8 +87,8 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
             host, callee, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
             &default_prototype, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        status = kiln_c99_get_prototype_from_constructor(host, new_target, &target_prototype,
-                                                          default_prototype, depth, thrown);
+        status = kiln_c99_get_prototype_from_constructor(host, new_target, default_prototype,
+                                                          &target_prototype, depth, thrown);
         if (status != KILN_C99_OK) return status;
         if (kiln_c99_is_object_value(*result)) {
             return kiln_c99_set_prototype(*result, target_prototype);
