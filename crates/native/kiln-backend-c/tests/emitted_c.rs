@@ -1099,11 +1099,11 @@ fn runtime_prelude_size() {
     // Sharing wide boundary-value copies adds one helper; measured total: 66,511 lines.
     // Registered CommonJS context authority and root-slot address checks add 49 lines
     // (66,560 measured before this comment). Constructors and inventories are emitted once.
-    // Symbol-keyed `Object.defineProperties` descriptors participate on both sides of the
-    // same loop (strings-then-symbols passes, symbol-aware enumerability, symbol trap keys):
-    // about +31 lines over the 66,560 above, so 66,650 leaves the usual small margin.
-    // Two existing functions edited, no section duplicated.
-    const CEILING_LINES: usize = 66_650;
+// Symbol-keyed Object.defineProperties adds about 31 lines through its existing
+    // string/symbol passes and trap-key handling; no section is duplicated.
+    // Independent context witnesses and canonical-key ownership enable candidate-scaled
+    // admission (66,653 lines before the symbol change). Sum both branches' ceiling growth.
+    const CEILING_LINES: usize = 66_760;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

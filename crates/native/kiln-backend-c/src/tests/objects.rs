@@ -3408,6 +3408,135 @@ int main(void) {
 }
 
 #[test]
+fn executable_large_canonical_keys_are_independently_owned() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int key_authority_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    size_t length = 65536;
+    char *bytes = malloc(length);
+    kiln_string view, *copy;
+    kiln_value root;
+    const kiln_string *key;
+    (void)context;
+    if (bytes == NULL) return 1;
+    memset(bytes, 'k', length);
+    view = (kiln_string){ (uint32_t)length, KILN_STRING_LATIN1, bytes };
+    heap->fallback = 0; heap->enabled = 0;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 2;
+    copy = kiln_c99_gc_alloc_key_copy(&view);
+    if (copy == NULL || kiln_c99_candidate_large_find(heap, (kiln_gc_block *)copy - 1) != NULL)
+        return 3;
+    /* The real insertion path has the same ownership contract, even for a spelling
+     * first observed during an exclusive factory. */
+    key = kiln_c99_intern_key(&view);
+    if (key == NULL || key == &view ||
+        kiln_c99_candidate_large_find(heap, (kiln_gc_block *)key - 1) != NULL ||
+        kiln_c99_interned_key_in(heap, key) != key) return 4;
+    if (kiln_c99_new_object(&root) != KILN_C99_OK) return 5;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 6;
+    kiln_c99_actor_candidate_seal(heap, root);
+    free(bytes);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 7;
+    status = kiln_realm_enter(realm, key_authority_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 8;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "large-canonical-key-authority");
+    assert!(
+        run.status.success(),
+        "key authority failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_candidate_context_inventory_predates_factory_and_tracks_revocation() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int context_inventory_call(void *context, kiln_host *host, kiln_value specifier,
+                                  kiln_value *result, kiln_value *thrown) {
+    (void)context; (void)host; (void)specifier; (void)thrown;
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+}
+static void context_inventory_mark(void *heap, void *context, int phase) {
+    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_value(heap, context);
+}
+static int context_inventory_visit(void *context, kiln_gc_visit_root_fn visit, void *anchor) {
+    return visit(anchor, context, KILN_GC_VISIT_VALUE);
+}
+static int context_inventory_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value anchor = kiln_c99_undefined(), function, root;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    (void)context;
+    heap->fallback = 0; heap->enabled = 0;
+    /* No candidate exists when this host authority is published. */
+    if (kiln_c99_commonjs_require_value_with_roots(&function, context_inventory_call,
+          &anchor, context_inventory_visit, &anchor) != KILN_C99_OK ||
+        heap->candidate_context_owners.count != 1) return 1;
+    if (!kiln_c99_actor_candidate_begin(heap) || kiln_c99_new_object(&root) != KILN_C99_OK)
+        return 2;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 3;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 4;
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
+        KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 5;
+    if (kiln_realm_gc_register_roots_with_visitor(context_inventory_mark,
+          context_inventory_visit, &anchor, 0) != KILN_C99_OK ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+          KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 6;
+    /* Expiration has no corresponding GC-field write. The independent inventory must
+     * still reject the certificate; ordinary incoming-store witnesses cannot see it. */
+    kiln_test_registered_count = 0;
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
+        KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 7;
+    heap->candidate_context_inventory_failed = 1;
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
+        KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 8;
+    heap->candidate_context_inventory_failed = 0;
+    /* The inventory is weak: freeing this authority removes its witness without retaining
+     * the callable or requiring its root registration to survive. */
+    kiln_c99_gc_release(function.ptr);
+    kiln_c99_candidate_prune_owners(heap);
+    if (heap->candidate_context_owners.count != 0 ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+          KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 11;
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    status = kiln_realm_enter(realm, context_inventory_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 10;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-context-inventory");
+    assert!(
+        run.status.success(),
+        "context inventory failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_candidate_ledger_covers_callable_prototype_slot_aliases() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -3491,8 +3620,10 @@ static int ledger_audit_entry(void *context) {
     *owner = kiln_val_from_boundary(root);
     if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
             KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 5;
+    /* The injected raw C store violates the production authority. Only the independent
+     * oracle observes it; source guards prevent this path in generated/runtime code. */
     if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
-            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 6;
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 6;
     kiln_c99_val_store_cell(owner, kiln_val_from_boundary(root));
     if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
             KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 7;
@@ -3504,7 +3635,7 @@ static int ledger_audit_entry(void *context) {
     if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
             KILN_C99_GRAPH_OUTGOING_UNPROVEN ||
         kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
-            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 11;
+            KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 11;
     free(batch);
     return 0;
 }
@@ -6645,19 +6776,19 @@ static int weak_resource_alias_entry(void *context) {
         !kiln_c99_actor_candidate_end(heap, 1)) return 2;
     kiln_c99_actor_candidate_seal(heap, root);
     batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root.ptr - 1);
-    if (kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 3;
+    if (kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL, 0)) return 3;
     if (!kiln_c99_gc_weak_resource_register(heap, root, payload, weak_resource_drop) ||
-        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 4;
+        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL, 0)) return 4;
     kiln_c99_gc_weak_resource_release(heap, root);
     if (weak_resource_drops != 1 || heap->weak_resources != NULL ||
-        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 5;
+        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL, 0)) return 5;
     /* The native payload address is a separate witness, even with an outside handle. */
     if (!kiln_c99_gc_weak_resource_register(heap, outside_handle, (void *)root.ptr,
                                             weak_resource_borrowed_drop) ||
-        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 8;
+        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL, 0)) return 8;
     kiln_c99_gc_weak_resource_release(heap, outside_handle);
     if (weak_resource_drops != 2 ||
-        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 9;
+        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL, 0)) return 9;
     return 0;
 }
 int main(void) {

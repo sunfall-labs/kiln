@@ -480,6 +480,10 @@ typedef struct kiln_gc_heap {
     size_t candidate_ledger_groups;
     kiln_c99_candidate_group *candidate_ledger_head;
     int candidate_ledger_publication_failed;
+    /* Opaque callable contexts need a live root authority even when made before a factory.
+     * Weak block witnesses never keep the callable or its native anchor alive. */
+    kiln_gc_ptrset candidate_context_owners;
+    int candidate_context_inventory_failed;
     /* Temporary realm-thread observer reuses the audited incoming field inventory. */
     void (*graph_pointer_observer)(void *, const void *);
     void *graph_pointer_observer_context;
@@ -4084,7 +4088,7 @@ static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
     return kiln_c99_gc_alloc_ex(kind, size, 0);
 }
 
-static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
+static void *kiln_c99_gc_alloc_tenured_ex(uint32_t kind, size_t size, int capture_candidate) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
     int class_index;
@@ -4118,7 +4122,7 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
     block->size = size;
     block->prev = NULL;
     block->next = heap->head;
-    if (heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+    if (capture_candidate && heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
         !kiln_c99_candidate_large_add(heap, block)) {
         kiln_c99_gc_ptrset_remove(&heap->large_table, block);
         free(block);
@@ -4130,6 +4134,10 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
     heap->bytes += size;
     heap->since_collection += size;
     return block + 1;
+}
+
+static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
+    return kiln_c99_gc_alloc_tenured_ex(kind, size, 1);
 }
 
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
@@ -5138,10 +5146,13 @@ static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
  * for GC, but they still contain an address until purge and cannot point into a moved chunk.
  * This is a useful negative witness, not a complete root enumeration: the provider, generated
  * modules, host handles, conservative stack and edges from outside blocks remain separate. */
+static int kiln_c99_graph_ledger_enabled(void);
+static int kiln_c99_graph_ledger_audit_enabled(void);
+
 static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
                                                    kiln_nursery_chunk *const *chunks,
                                                    size_t count,
-                                                   const kiln_value *excluded_escrow_slot) {
+                                                   const kiln_value *excluded_escrow_slot, int trusted_key_metadata) {
     kiln_c99_graph_root_alias_visitor context = { heap, chunks, count };
     kiln_c99_realm_root_visitor visitor = {
         &context, kiln_c99_graph_realm_value_alias, kiln_c99_graph_realm_val_alias
@@ -5154,12 +5165,16 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
             kiln_c99_graph_value_in_batch(heap, chunks, count, &job->argument) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &job->derived)) return 1;
     }
-    for (index = 0; index < heap->keys.capacity; ++index) {
-        const kiln_key_entry *entry = &heap->keys.entries[index];
-        if (kiln_c99_graph_in_batch(heap, chunks, count, entry->string)) return 1;
-    }
-    for (index = 0; index < KILN_C99_HOT_KEY_COUNT; ++index) {
-        if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
+    /* Production keys are fresh canonical allocations outside candidate ownership.
+     * Keep the full key/hot-key walk for the independent oracle and legacy probes. */
+    if (!trusted_key_metadata) {
+        for (index = 0; index < heap->keys.capacity; ++index) {
+            const kiln_key_entry *entry = &heap->keys.entries[index];
+            if (kiln_c99_graph_in_batch(heap, chunks, count, entry->string)) return 1;
+        }
+        for (index = 0; index < KILN_C99_HOT_KEY_COUNT; ++index) {
+            if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
+        }
     }
     /* Weak resource handles are not GC roots, but their stored addresses must remain in
      * this heap until the registration is removed. Native disposal may still inspect them. */
@@ -5175,7 +5190,7 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
                                            kiln_nursery_chunk *const *chunks, size_t count) {
-    return kiln_c99_graph_has_c_root_alias_except(heap, chunks, count, NULL);
+    return kiln_c99_graph_has_c_root_alias_except(heap, chunks, count, NULL, 0);
 }
 
 /* Only the active request's one escrow slot can be excluded. A second C root containing an
@@ -5187,7 +5202,8 @@ static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
     if (request_id == 0 || realm->isolated_request_id != request_id ||
         realm->isolated_escrow_entry == NULL) return 1;
     return kiln_c99_graph_has_c_root_alias_except(heap, chunks, count,
-                                                   &realm->isolated_escrow_value);
+                                                   &realm->isolated_escrow_value,
+        kiln_c99_graph_ledger_enabled() && !kiln_c99_graph_ledger_audit_enabled());
 }
 
 typedef struct kiln_c99_graph_root_visit {
@@ -5284,7 +5300,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
          * are the complete realm-local pointer layout, including finalizer side ownership. */
         if (kiln_c99_graph_in_batch(heap, chunks, count, facade->owner) ||
             kiln_c99_graph_in_batch(heap, chunks, count, facade->previous) ||
-            kiln_c99_graph_in_batch(heap, chunks, count, facade->next))
+            kiln_c99_graph_in_batch(heap, chunks, count, facade->next) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, facade->hash_next))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
@@ -5645,6 +5662,38 @@ static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
         heap->candidate_ledger_publication_failed = 1;
 }
 
+static int kiln_c99_candidate_context_publish(kiln_gc_heap *heap,
+                                               kiln_commonjs_require *require) {
+    if (heap == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (require->context == NULL && require->root_context == NULL) return KILN_C99_OK;
+    if (kiln_c99_gc_ptrset_insert(&heap->candidate_context_owners,
+                                  ((kiln_gc_block *)require) - 1) != KILN_C99_OK) {
+        heap->candidate_context_inventory_failed = 1;
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    return KILN_C99_OK;
+}
+
+/* Context authority is independent of ordinary store witnesses: it can expire without a
+ * write to this GC object, and an opaque context may predate the first candidate. */
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_context_owners(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count) {
+    if (heap->candidate_context_inventory_failed) return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+    for (size_t index = 0; index < heap->candidate_context_owners.capacity; ++index) {
+        const void *witness = heap->candidate_context_owners.table[index];
+        uintptr_t address = (uintptr_t)witness;
+        kiln_gc_block *owner;
+        kiln_c99_graph_incoming_result result;
+        if (witness == NULL || address > UINTPTR_MAX - sizeof(kiln_gc_block)) continue;
+        owner = kiln_c99_gc_lookup(heap, (const void *)(address + sizeof(kiln_gc_block)));
+        if (owner == NULL || (owner->kind & KILN_GC_KIND_MASK) != KILN_GC_COMMONJS_REQUIRE)
+            continue;
+        result = kiln_c99_graph_outside_block(heap, chunks, count, owner);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+}
+
 static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *heap,
                                                    const kiln_nursery_chunk *chunk) {
     if (chunk->limit < chunk->base ||
@@ -5795,10 +5844,28 @@ static void kiln_c99_candidate_prune_owners(kiln_gc_heap *heap) {
             (void)kiln_c99_gc_ptrset_grow(owners, owners->count);
         }
     }
+    kiln_gc_ptrset *contexts = &heap->candidate_context_owners;
+    for (size_t index = 0; index < contexts->capacity; ) {
+        const void *witness = contexts->table[index];
+        uintptr_t address = (uintptr_t)witness;
+        kiln_gc_block *owner = witness == NULL || address > UINTPTR_MAX - sizeof(kiln_gc_block)
+            ? NULL : kiln_c99_gc_lookup(heap, (const void *)(address + sizeof(kiln_gc_block)));
+        if (witness != NULL && (owner == NULL ||
+            (owner->kind & KILN_GC_KIND_MASK) != KILN_GC_COMMONJS_REQUIRE))
+            kiln_c99_gc_ptrset_remove(contexts, witness);
+        else ++index;
+    }
+    if (contexts->count == 0) {
+        free(contexts->table);
+        memset(contexts, 0, sizeof *contexts);
+    } else if (contexts->capacity > 64 && contexts->count <= contexts->capacity / 8)
+        (void)kiln_c99_gc_ptrset_grow(contexts, contexts->count);
+
 }
 
-/* This is only the ledger's heap-owner observation, not admission. The full outside scan
- * remains authoritative until every producer and mutation seam has complete store coverage. */
+/* Inspect current outside-owner layouts rather than retained slot addresses. All producer,
+ * mutation and emitted cache paths use the common reference authorities. Native opaque
+ * contexts and non-heap roots have their own independent inventories. */
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
     const kiln_gc_heap *heap, const kiln_c99_candidate_group *group,
     kiln_nursery_chunk *const *chunks, size_t count) {
@@ -5860,27 +5927,40 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
-/* Audit real certification boundaries while the full walk remains authoritative. Any
- * disagreement, including incomplete ledger metadata, refuses in audit mode: a successful
- * audited certificate must not hide an unknown inventory behind the full walk's answer. */
+/* Store authorities record potential outside owners; certification inspects their current
+ * layouts, the independent opaque-context inventory, and the separately enumerated roots.
+ * Canonical keys and native shape indexes cannot borrow candidate storage. The full sender
+ * walk remains an explicit diagnostic oracle, never hidden inside ordinary admission. */
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
     const kiln_gc_heap *heap, const kiln_c99_candidate_group *group,
     kiln_nursery_chunk *const *chunks, size_t count, int audit) {
-    kiln_c99_graph_incoming_result full = kiln_c99_graph_scan_outside_heap(heap, chunks, count);
-    if (audit && group != NULL) {
-        kiln_c99_graph_incoming_result ledger = kiln_c99_graph_scan_local_shapes(heap, chunks, count);
-        if (ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED)
-            ledger = kiln_c99_graph_scan_candidate_owners(heap, group, chunks, count);
-        if (ledger != full) {
-            fputs("kiln: candidate ledger disagrees with heap scan: ", stderr);
-            fputs(ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "ledger alias, " :
-                  ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "ledger clear, " : "ledger unproven, ", stderr);
-            fputs(full == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "heap alias\n" :
-                  full == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "heap clear\n" : "heap unproven\n", stderr);
-            return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
-        }
+    kiln_c99_graph_incoming_result ledger, full;
+    if (group == NULL) return kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+    ledger = kiln_c99_graph_scan_context_owners(heap, chunks, count);
+    if (ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED)
+        ledger = kiln_c99_graph_scan_candidate_owners(heap, group, chunks, count);
+    if (!audit && kiln_c99_graph_ledger_enabled()) return ledger;
+    full = kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+    if (audit && ledger != full) {
+        fputs("kiln: candidate ledger disagrees with heap scan: ", stderr);
+        fputs(ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "ledger alias, " :
+              ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "ledger clear, " : "ledger unproven, ", stderr);
+        fputs(full == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "heap alias\n" :
+              full == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "heap clear\n" : "heap unproven\n", stderr);
+        return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
     }
-    return full;
+    return kiln_c99_graph_ledger_enabled() ? ledger : full;
+}
+
+static int kiln_c99_graph_ledger_enabled(void) {
+    static _Thread_local int initialized;
+    static _Thread_local int enabled;
+    if (!initialized) {
+        const char *option = getenv("KILN_GRAPH_LEDGER");
+        enabled = option == NULL || strcmp(option, "0") != 0;
+        initialized = 1;
+    }
+    return enabled;
 }
 
 static int kiln_c99_graph_ledger_audit_enabled(void) {
@@ -6977,7 +7057,10 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
         return NULL;
     }
     total = storage;
-    copy = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, total);
+    /* Canonical keys belong to the realm's independent key table, never to an exclusive
+     * factory graph. This applies to large keys too, not just slab-sized strings. Shape
+     * metadata retains only these canonical keys and native shape allocations. */
+    copy = (kiln_string *)kiln_c99_gc_alloc_tenured_ex(KILN_GC_STRING, total, 0);
     if (copy == NULL) return NULL;
     copy->unit_len = view->unit_len;
     copy->flags = enc | kiln_c99_key_domain(view);
@@ -7945,7 +8028,7 @@ static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {
     for (facade = heap->shared_facades; facade != NULL; facade = facade->next) {
         size_t bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation,
                                                      facade->node) & (capacity - 1);
-        facade->hash_next = buckets[bucket];
+        kiln_c99_heap_store_pointer(facade, &facade->hash_next, buckets[bucket]);
         buckets[bucket] = facade;
     }
     free(heap->shared_facade_buckets);
@@ -7957,21 +8040,25 @@ static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {
 static void kiln_c99_shared_facade_insert(kiln_gc_heap *heap, kiln_shared_facade *facade) {
     size_t bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation,
                                                  facade->node) & (heap->shared_facade_capacity - 1);
-    facade->hash_next = heap->shared_facade_buckets[bucket];
+    kiln_c99_heap_store_pointer(facade, &facade->hash_next, heap->shared_facade_buckets[bucket]);
     heap->shared_facade_buckets[bucket] = facade;
     heap->shared_facade_count++;
 }
 
 static void kiln_c99_shared_facade_remove(kiln_gc_heap *heap, kiln_shared_facade *facade) {
     kiln_shared_facade **at;
+    kiln_shared_facade *previous = NULL;
     size_t bucket;
     if (heap->shared_facade_capacity == 0) return;
     bucket = kiln_c99_shared_facade_hash(facade->graph, facade->generation, facade->node) &
              (heap->shared_facade_capacity - 1);
-    for (at = &heap->shared_facade_buckets[bucket]; *at != NULL; at = &(*at)->hash_next) {
+    for (at = &heap->shared_facade_buckets[bucket]; *at != NULL;
+         previous = *at, at = &(*at)->hash_next) {
         if (*at == facade) {
-            *at = facade->hash_next;
-            facade->hash_next = NULL;
+            if (previous != NULL)
+                kiln_c99_heap_store_pointer(previous, &previous->hash_next, facade->hash_next);
+            else *at = facade->hash_next; /* The independently owned realm bucket head. */
+            kiln_c99_heap_store_pointer(facade, &facade->hash_next, NULL);
             heap->shared_facade_count--;
             return;
         }
@@ -7993,10 +8080,10 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_gc_heap *owner = (kiln_gc_heap *)facade->owner;
         if (owner != NULL) {
             kiln_c99_shared_facade_remove(owner, facade);
-            if (facade->previous != NULL) facade->previous->next = facade->next;
+            if (facade->previous != NULL) kiln_c99_heap_store_pointer(facade->previous, &facade->previous->next, facade->next);
             else owner->shared_facades = facade->next;
-            if (facade->next != NULL) facade->next->previous = facade->previous;
-            facade->owner = NULL;
+            if (facade->next != NULL) kiln_c99_heap_store_pointer(facade->next, &facade->next->previous, facade->previous);
+            kiln_c99_heap_store_pointer(facade, &facade->owner, NULL);
         }
         if (facade->lease != 0) {
             (void)kiln_shared_graph_release(facade->lease);
@@ -8852,10 +8939,10 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         facade->lease = 0;
         facade->arena.base = NULL;
         facade->arena.length = 0;
-        facade->owner = NULL;
-        facade->previous = NULL;
-        facade->next = NULL;
-        facade->hash_next = NULL;
+        kiln_c99_heap_store_pointer(facade, &facade->owner, NULL);
+        kiln_c99_heap_store_pointer(facade, &facade->previous, NULL);
+        kiln_c99_heap_store_pointer(facade, &facade->next, NULL);
+        kiln_c99_heap_store_pointer(facade, &facade->hash_next, NULL);
         facade = next;
     }
     heap->shared_facades = NULL;
@@ -8863,6 +8950,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     heap->shared_facade_buckets = NULL;
     heap->shared_facade_capacity = 0;
     heap->shared_facade_count = 0;
+    free(heap->candidate_context_owners.table);
     free(heap->large_table.table);
     free(heap->slab_table.table);
     free(heap->stack);

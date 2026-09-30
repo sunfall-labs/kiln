@@ -148,3 +148,17 @@ available".
   message, the graph, the table, the map callback) so every runtime does the same work.
 - `go/` -- one Go program with a subcommand per workload, printing the same JSON lines.
 - `results-<date>.md` -- one file per recorded baseline.
+
+### Direct transfer and unrelated sender state
+
+`js/actor-transfer-scaling.mjs <objects|keys|shapes> <count> <samples>` holds unrelated
+sender objects while repeatedly moving the same one-object factory graph. Run separate processes
+at 0, 1,000, 10,000 and 100,000 retained objects, with interleaved rounds of the same native binary.
+`keys` adds distinct dynamic property names; `shapes` adds distinct pairs of names and shape paths.
+Every row checks both the received value and the retained sender state. Use `KILN_GRAPH_LEDGER=0`
+for the full-scan comparison and `KILN_GRAPH_LEDGER_AUDIT=1` for strict oracle agreement.
+
+The reported time includes sender collection, certification, mailbox delivery and the actor's
+reply; it is an end-to-end handoff measurement. It must not be presented as certification-only
+cost. The candidate owner inventory removes the sender-wide heap/key/shape inspection from
+certification; unrelated live roots and ordinary collector work can still affect this row.
