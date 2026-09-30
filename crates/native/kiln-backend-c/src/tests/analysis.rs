@@ -716,7 +716,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
             local_slot: 0,
         }],
     );
-    module.program.link_facts.module_instantiation_end = 4;
+    module.link_facts.module_instantiation_end = 4;
     let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
         &module,
         "fixture.js",
