@@ -815,7 +815,7 @@ fn render_prepare_module_cells(
         if slots.contains_key(&binding.local_slot) {
             writeln!(
                 output,
-                "    cells[{index}] = kiln_val_binding_to_boundary(locals[{}]);",
+                "    cells[{index}] = kiln_val_to_boundary(locals[{}]);",
                 binding.local_slot
             )
             .unwrap();
