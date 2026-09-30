@@ -177,8 +177,9 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::Namespace { module }) => {
-                namespace_demands.insert(module.clone());
-                if live.insert(module.clone()) {
+                let newly_live = live.insert(module.clone());
+                let newly_demanded = namespace_demands.insert(module.clone());
+                if newly_live || newly_demanded {
                     queue.push_back(module.clone());
                 }
             }
