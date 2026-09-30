@@ -97,6 +97,21 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_TYPED_ARRAY) {
+        /* `%TypedArray%` is the abstract constructor inherited by each concrete view
+         * constructor. Its standard callable own keys precede the public statics installed by
+         * the shared TypeScript bootstrap (`of`, `from`, then `@@species`). */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (kiln_c99_has_surface(builtin)) {
         /* A table-driven built-in can describe itself, which is the one thing the hand-written
          * chains could never do: the names it answers to *are* its rows. Refusing here is what

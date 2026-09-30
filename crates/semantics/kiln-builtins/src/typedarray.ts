@@ -44,16 +44,28 @@ delete (globalThis as any).__kilnTypedArraySort;
   // bootstrap even though direct reads on each concrete constructor happen to work.
   const sharedConstructor = Object.getPrototypeOf(Uint8Array);
   if (sharedConstructor) {
-    Object.defineProperty(sharedConstructor, "from", {
-      value: Uint8Array.from,
-      writable: true,
-      configurable: true,
-    });
+    // Node exposes these shared static own keys in `of`, then `from` order.
     Object.defineProperty(sharedConstructor, "of", {
       value: Uint8Array.of,
       writable: true,
       configurable: true,
     });
+    Object.defineProperty(sharedConstructor, "from", {
+      value: Uint8Array.from,
+      writable: true,
+      configurable: true,
+    });
+    if (typeof Symbol !== "undefined" && Symbol.species) {
+      const speciesGetter = function(this: any): any { return this; };
+      Object.defineProperty(speciesGetter, "name", {
+        value: "get [Symbol.species]",
+        configurable: true,
+      });
+      Object.defineProperty(sharedConstructor, Symbol.species, {
+        get: speciesGetter,
+        configurable: true,
+      });
+    }
   }
 
   Object.defineProperty(Uint8Array, "fromBase64", {

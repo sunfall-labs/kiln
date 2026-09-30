@@ -282,9 +282,9 @@ pub fn is_bootstrap_static(global: &str, member: &str) -> bool {
 pub struct Builtin {
     /// The global as a program spells it. Two entries are not globals a program can name:
     /// `%TypedArray%` is the intrinsic the concrete views inherit from, and
-    /// `%TypedArrayConstructor%` is the shared shape of every view constructor except `Uint8Array`,
-    /// which has two statics of its own. Both are spelled the way the specification spells an
-    /// intrinsic, so they cannot collide with a global.
+    /// `%TypedArrayConstructor%` is the shared parent of the concrete view constructors. Both
+    /// intrinsic names are spelled the way the specification spells them, so they cannot collide
+    /// with a global.
     pub global: &'static str,
     /// Its own members, in the order reflection reports them.
     pub members: &'static [&'static str],
@@ -535,13 +535,13 @@ pub const SURFACE: &[Builtin] = &[
     },
     Builtin {
         global: "%TypedArrayConstructor%",
-        members: &["of", "from", "BYTES_PER_ELEMENT"],
+        members: &["of", "from"],
     },
     Builtin {
         // The two base64 helpers are `Uint8Array`'s alone: they read and write *bytes*, and no
         // other view's element is a byte.
         global: "Uint8Array",
-        members: &["of", "from", "BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
+        members: &["BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
     },
     Builtin {
         // `now` is the only member either engine answers. The rest of the Performance interface
