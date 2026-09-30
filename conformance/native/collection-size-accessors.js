@@ -17,3 +17,5 @@ for (const getter of [mapSize.get, setSize.get]) {
 for (const [getter, receiver] of [[mapSize.get, set], [setSize.get, map]]) {
   try { getter.call(receiver); } catch (error) { console.log(error instanceof TypeError); }
 }
+
+console.log(Object.hasOwn(mapSize.get, 'prototype'), Object.hasOwn(setSize.get, 'prototype'));

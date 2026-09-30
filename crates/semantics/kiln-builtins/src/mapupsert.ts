@@ -51,7 +51,7 @@
   });
 
   if (__kilnCollectionSize !== undefined) {
-    const mapGetter = function() { return __kilnCollectionSize(this, true); };
+    const mapGetter = { size(this: any) { return __kilnCollectionSize(this, true); } }.size;
     Object.defineProperty(mapGetter, "name", { value: "get size", configurable: true });
     Object.defineProperty(Proto, "size", {
       get: mapGetter,
@@ -61,7 +61,7 @@
   }
 
   if (typeof Set !== "undefined" && Set.prototype && __kilnCollectionSize !== undefined) {
-    const setGetter = function() { return __kilnCollectionSize(this, false); };
+    const setGetter = { size(this: any) { return __kilnCollectionSize(this, false); } }.size;
     Object.defineProperty(setGetter, "name", { value: "get size", configurable: true });
     Object.defineProperty(Set.prototype, "size", {
       get: setGetter,
