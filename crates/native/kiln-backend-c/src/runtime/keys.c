@@ -278,6 +278,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         }
         *out = built;
         return KILN_C99_OK;
+    } else if (target.tag == KILN_VALUE_DATE) {
+        target = ((kiln_date *)(uintptr_t)target.bits)->properties;
     } else if (target.tag == KILN_VALUE_COLLECTION) {
         target = kiln_c99_collection_of(target)->properties;
     } else if (target.tag == KILN_VALUE_GENERATOR) {
@@ -414,6 +416,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
  * the same question, so the two kinds answer it in one place rather than each spelling out where
  * it keeps its store. */
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {
+    if (target.tag == KILN_VALUE_DATE)
+        return &((kiln_date *)(uintptr_t)target.bits)->properties;
     if (target.tag == KILN_VALUE_GENERATOR) return &kiln_c99_generator_of(target)->properties;
     if (target.tag == KILN_VALUE_BOUND) return &((kiln_bound *)(uintptr_t)target.bits)->properties;
     if (target.tag == KILN_VALUE_ARRAY) {

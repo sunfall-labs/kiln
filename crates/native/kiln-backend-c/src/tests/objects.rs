@@ -4462,7 +4462,7 @@ int main(void) {
     kiln_c99_graph_capsule capsule;
     kiln_shape shape;
     kiln_object *object;
-    double *date;
+    kiln_date *date;
     kiln_value root;
     uint64_t reservation = 92;
     kiln_c99_gc_heap_init(&sender);
@@ -4471,7 +4471,7 @@ int main(void) {
                                         sender.nursery.capacity)) return 1;
     object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT,
                                                sizeof *object);
-    date = (double *)kiln_c99_par_alloc(&candidate, KILN_GC_DATE, sizeof *date);
+    date = (kiln_date *)kiln_c99_par_alloc(&candidate, KILN_GC_DATE, sizeof *date);
     if (object == NULL || date == NULL) return 2;
     memset(&shape, 0, sizeof shape);
     shape.shared = 1;
@@ -4483,7 +4483,8 @@ int main(void) {
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, date);
-    *date = 123456.0;
+    date->time = 123456.0;
+    date->properties = kiln_c99_undefined();
     kiln_c99_par_arena_seal(&candidate);
     kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;

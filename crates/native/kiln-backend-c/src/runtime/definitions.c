@@ -1212,9 +1212,13 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         return kiln_c99_own_property_present(host, store, key, found, depth, thrown);
     }
+    case KILN_VALUE_DATE: {
+        kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+        return kiln_c99_own_property_present(host, store, key, found, depth, thrown);
+    }
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_PROMISE:
-    case KILN_VALUE_DATE:
     case KILN_VALUE_TEMPORAL:
     case KILN_VALUE_NUMBER:
     case KILN_VALUE_BOOLEAN:

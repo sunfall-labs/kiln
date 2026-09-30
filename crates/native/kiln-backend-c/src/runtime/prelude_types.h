@@ -2912,6 +2912,13 @@ typedef struct kiln_generator {
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
  * is no local variant of any of these to keep in step. */
+/* Timestamp stays first so existing Date arithmetic keeps its scalar load. Named/private
+ * properties and subclass prototypes are ordinary object state owned by the Date allocation. */
+typedef struct kiln_date {
+    double time;
+    kiln_value properties;
+} kiln_date;
+
 typedef struct kiln_date_parts {
     int64_t year;
     int month;

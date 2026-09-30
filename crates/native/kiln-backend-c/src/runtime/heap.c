@@ -4674,9 +4674,11 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
     case KILN_GC_CELL:
         if (block->size < sizeof(kiln_val)) return 0;
         return kiln_c99_graph_follow_val(walk, *(const kiln_val *)(block + 1));
-    case KILN_GC_DATE:
-        /* Date owns one mutable timestamp and no pointer-bearing side storage. */
-        return block->size == sizeof(double);
+    case KILN_GC_DATE: {
+        const kiln_date *date = (const kiln_date *)(block + 1);
+        return block->size == sizeof *date &&
+               kiln_c99_graph_follow_val(walk, kiln_val_from_boundary(date->properties));
+    }
     case KILN_GC_OBJECT: {
         const kiln_object *object = (const kiln_object *)(block + 1);
         size_t index;
@@ -5543,9 +5545,12 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
                kiln_c99_graph_in_batch(heap, chunks, count, store->next)
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
-    case KILN_GC_DATE:
-        return block->size == sizeof(double) ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
-                                             : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    case KILN_GC_DATE: {
+        const kiln_date *date = (const kiln_date *)(block + 1);
+        if (block->size != sizeof *date) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_value_in_batch(heap, chunks, count, &date->properties)
+            ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
     case KILN_GC_REGEXP: {
         const kiln_regexp *regexp = (const kiln_regexp *)(block + 1);
         if (block->size < sizeof *regexp || regexp->cached_group_count > 32)
@@ -8080,9 +8085,11 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         }
         break;
     }
+    case KILN_GC_DATE:
+        kiln_c99_gc_mark_value(heap, &((kiln_date *)payload)->properties);
+        break;
     case KILN_GC_STRING:
     case KILN_GC_BYTES:
-    case KILN_GC_DATE:
     case KILN_GC_TYPED_BUFFER:
     default:
         break;

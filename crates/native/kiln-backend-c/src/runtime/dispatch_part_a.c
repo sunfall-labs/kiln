@@ -3646,6 +3646,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return status;
                 }
                 object = kiln_c99_object_of(store);
+            } else if (kiln_c99_exotic_store(args[0]) != NULL) {
+                kiln_value store = *kiln_c99_exotic_store(args[0]);
+                if (store.tag != KILN_VALUE_OBJECT) {
+                    status = kiln_c99_new_array(&built);
+                    *result = built;
+                    return status;
+                }
+                object = kiln_c99_object_of(store);
             } else if (args[0].tag == KILN_VALUE_OBJECT) {
                 object = kiln_c99_object_of(args[0]);
             } else {
