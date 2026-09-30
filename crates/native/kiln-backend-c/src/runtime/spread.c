@@ -825,7 +825,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                                                 copy->properties[i].key), depth + 1,
                         &cloned_key);
                     if (status != KILN_C99_OK) return status;
-                    copy->properties[i].key = (const kiln_string *)KILN_VAL_PTR(cloned_key);
+                    kiln_c99_heap_store_pointer(copy, &copy->properties[i].key, KILN_VAL_PTR(cloned_key));
                 }
                 kiln_value item = copy->properties[i].value;
                 kiln_val cloned;

@@ -910,7 +910,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             char num_buf[32];
             size_t nlen = kiln_c99_double_to_js((double)i, num_buf);
             const kiln_string *ikey = kiln_c99_intern(num_buf, nlen);
-            object->properties[pos].key = ikey;
+            kiln_c99_heap_store_pointer(object, &object->properties[pos].key, ikey);
             object->properties[pos].enumerable = 1;
             object->properties[pos].writable = 1;
             object->properties[pos].configurable = 1;

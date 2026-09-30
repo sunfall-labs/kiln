@@ -29,8 +29,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     }
     kiln_c99_heap_store_pointer(frame, &frame->locals, (kiln_val *)(frame + 1));
     kiln_c99_heap_store_pointer(frame, &frame->stack, frame->locals + locals);
-    frame->handlers = NULL;
-    frame->handler_stack = NULL;
+    kiln_c99_heap_store_pointer(frame, &frame->handlers, NULL);
+    kiln_c99_heap_store_pointer(frame, &frame->handler_stack, NULL);
     frame->handler_top = 0;
     for (index = 0; index < locals; ++index) {
         kiln_c99_heap_store_val(frame, &frame->locals[index], KILN_VAL_UNDEFINED);

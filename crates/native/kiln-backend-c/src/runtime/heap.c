@@ -7338,6 +7338,14 @@ static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_he
         to_heap->head->prev = last;
     }
     to_heap->head = first;
+    /* All moved owners must be indexed before their initialized fields are published. The
+     * destination may contain live candidates unrelated to the source realm's current TLS. */
+    if (to_heap->candidate_ledger_groups != 0) {
+        for (cur = first; cur != NULL; cur = cur->next) {
+            kiln_c99_candidate_record_owner_layout(to_heap, cur);
+            if (cur == last) break;
+        }
+    }
 }
 
 /*
@@ -7377,15 +7385,16 @@ static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *t
     case KILN_GC_PROMISE: {
         kiln_promise *copy = (kiln_promise *)(promoted + 1);
         if (copy->reactions == &((kiln_promise *)root_ptr)->inline_reaction) {
-            copy->reactions = &copy->inline_reaction;
+            kiln_c99_heap_store_pointer(copy, &copy->reactions, &copy->inline_reaction);
         }
         break;
     }
     case KILN_GC_GENERATOR: {
         kiln_generator *copy = (kiln_generator *)(promoted + 1);
         if (copy->locals == (kiln_val *)((kiln_generator *)root_ptr + 1)) {
-            copy->stack = (kiln_val *)(copy + 1) + (copy->stack - copy->locals);
-            copy->locals = (kiln_val *)(copy + 1);
+            kiln_c99_heap_store_pointer(copy, &copy->stack,
+                                         (kiln_val *)(copy + 1) + (copy->stack - copy->locals));
+            kiln_c99_heap_store_pointer(copy, &copy->locals, (kiln_val *)(copy + 1));
         }
         break;
     }
@@ -7405,6 +7414,7 @@ static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *t
     to_heap->count += 1;
     to_heap->bytes += payload_size;
     to_heap->since_collection += payload_size;
+    kiln_c99_candidate_record_owner_layout(to_heap, promoted);
 
     /* The copied wrapper now owns any external store. Clear the source before releasing its
      * nursery/slab cell so its finalizer neither frees that store nor drops its shared handle. */

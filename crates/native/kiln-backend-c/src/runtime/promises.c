@@ -116,7 +116,7 @@ static int kiln_c99_new_promise(kiln_value *out) {
     promise->handled = 0;
     promise->rejection = KILN_C99_REJECTION_NONE;
     promise->value = kiln_c99_undefined();
-    promise->reactions = NULL;
+    kiln_c99_heap_store_pointer(promise, &promise->reactions, NULL);
     promise->count = 0;
     promise->capacity = 0;
     kiln_c99_heap_store_value(promise, &promise->properties, kiln_c99_undefined());
@@ -288,7 +288,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
  * a doubling malloc'd array that starts by copying the inline one out. */
 static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction) {
     if (promise->capacity == 0) {
-        promise->reactions = &promise->inline_reaction;
+        kiln_c99_heap_store_pointer(promise, &promise->reactions, &promise->inline_reaction);
         promise->capacity = 1;
     }
     if (promise->count == promise->capacity) {
@@ -305,10 +305,10 @@ static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_react
             moved = (kiln_reaction *)realloc(promise->reactions, grown * sizeof *moved);
             if (moved == NULL) return KILN_C99_OUT_OF_MEMORY;
         }
-        promise->reactions = moved;
+        kiln_c99_heap_store_pointer(promise, &promise->reactions, moved);
         promise->capacity = grown;
     }
-    promise->reactions[promise->count] = *reaction;
+    promise->reactions[promise->count].continuation = reaction->continuation;
     kiln_c99_heap_store_value(promise, &promise->reactions[promise->count].on_fulfilled,
                               reaction->on_fulfilled);
     kiln_c99_heap_store_value(promise, &promise->reactions[promise->count].on_rejected,
@@ -400,7 +400,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
     /* A settled promise never takes another reaction into the list -- a later `then` is
      * scheduled at once -- so the list is released now rather than when the promise dies. */
     if (state->reactions != &state->inline_reaction) free(state->reactions);
-    state->reactions = NULL;
+    kiln_c99_heap_store_pointer(state, &state->reactions, NULL);
     state->capacity = 0;
     return KILN_C99_OK;
 }

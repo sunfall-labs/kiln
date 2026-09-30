@@ -6393,3 +6393,78 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_candidate_ledger_records_destination_wrapper_publication() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap *destination = (kiln_gc_heap *)malloc(sizeof *destination);
+    kiln_gc_heap *source = (kiln_gc_heap *)malloc(sizeof *source);
+    kiln_val *root, *owners[2];
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk *batch[1];
+    kiln_value root_value;
+    if (destination == NULL || source == NULL) return 1;
+    kiln_c99_gc_heap_init(destination);
+    kiln_c99_gc_heap_init(source);
+    kiln_c99_gc_heap_register(destination);
+    kiln_c99_gc_heap_register(source);
+    kiln_test_heap = destination;
+    ++kiln_test_generation;
+    if (!kiln_c99_actor_candidate_begin(destination)) return 2;
+    root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 3;
+    kiln_c99_val_store_cell(root, KILN_VAL_UNDEFINED);
+    group = destination->actor_candidate_group;
+    root_value = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root, NULL, 0);
+    if (!kiln_c99_actor_candidate_end(destination, 1)) return 4;
+    kiln_c99_actor_candidate_seal(destination, root_value);
+    batch[0] = kiln_c99_nursery_chunk_of(destination, (kiln_gc_block *)root - 1);
+    kiln_test_heap = source;
+    ++kiln_test_generation;
+    /* Stage references privately in the source, then publish a copied cell and a large
+     * moved cell. The destination ledger must not depend on the active source heap's TLS. */
+    for (size_t i = 0; i < 2; ++i) {
+        kiln_val *original = (kiln_val *)(i == 0
+            ? kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *original)
+            : kiln_c99_gc_alloc_tenured(KILN_GC_CELL, 32768));
+        if (original == NULL) return 5;
+        kiln_c99_val_store_cell(original, kiln_val_from_boundary(root_value));
+        if (group->incoming_owners.count != i) return 6;
+        owners[i] = (kiln_val *)kiln_c99_gc_splice_sublist(source, destination, original);
+        if (owners[i] == NULL || group->incoming_owners.count != i + 1 ||
+            destination->candidate_ledger_publication_failed ||
+            kiln_c99_graph_scan_incoming_heap_checked(destination, group, batch, 1, 1) !=
+                KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 7;
+    }
+    kiln_test_heap = destination;
+    ++kiln_test_generation;
+    for (size_t i = 0; i < 2; ++i)
+        kiln_c99_val_store_cell(owners[i], KILN_VAL_UNDEFINED);
+    if (kiln_c99_graph_scan_incoming_heap_checked(destination, group, batch, 1, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 8;
+    kiln_c99_gc_teardown_begin(destination);
+    kiln_c99_gc_teardown_end(destination);
+    kiln_test_heap = source;
+    ++kiln_test_generation;
+    kiln_c99_gc_teardown_begin(source);
+    kiln_c99_gc_teardown_end(source);
+    kiln_test_heap = NULL;
+    ++kiln_test_generation;
+    return 0;
+}
+"#;
+    let run = run_with_main(
+        &generated,
+        wrapper,
+        "candidate-destination-publication-ledger",
+    );
+    assert!(
+        run.status.success(),
+        "destination publication ledger failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

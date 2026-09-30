@@ -98,6 +98,15 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
                 | "properties"
                 | "buffer"
                 | "upvalues"
+                | "inline_upvalues"
+                | "locals"
+                | "queue_promises"
+                | "queue_sent"
+                | "handlers"
+                | "handler_stack"
+                | "reactions"
+                | "cached_elements"
+                | "cached_subject_ptr"
         );
         let collection_entry =
             field == "entries" && index > 0 && words[index - 1].0 == "collection";
@@ -117,15 +126,23 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
                 next += 1;
             }
         }
-        if collection_entry {
-            if words.get(next).is_none_or(|w| w.0 != ".")
-                || words
+        if collection_entry || matches!(field, "properties" | "reactions") {
+            if words.get(next).is_some_and(|w| w.0 == ".") {
+                let allowed_fields: &[&str] = match field {
+                    "reactions" => &["on_fulfilled", "on_rejected", "derived"],
+                    "properties" => &["key", "value", "getter", "setter"],
+                    _ => &["key", "value"],
+                };
+                if words
                     .get(next + 1)
-                    .is_none_or(|w| !matches!(w.0, "key" | "value"))
-            {
+                    .is_none_or(|w| !allowed_fields.contains(&w.0))
+                {
+                    continue;
+                }
+                next += 2;
+            } else if collection_entry {
                 continue;
             }
-            next += 2;
         }
         if words.get(next).is_some_and(|w| {
             matches!(
@@ -181,7 +198,11 @@ fn reference_guard_catches_macro_and_indexed_writes_without_matching_reads() {
         object->slots += 1;
         array->elements[index] |= KILN_TAG_OBJECT_PREFIX;
         array->elements[index] <<= 1;
+        promise->reactions[index].derived = value;
+        object->properties[index].getter = value;
+        object->properties[index].key = pointer;
+        promise->reactions[index].continuation = 1;
         kiln_c99_heap_store_val(array, &array->elements[0], value);
     "#;
-    assert_eq!(direct_reference_writes(source).len(), 5);
+    assert_eq!(direct_reference_writes(source).len(), 8);
 }
