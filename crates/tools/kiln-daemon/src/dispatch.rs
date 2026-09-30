@@ -1389,6 +1389,7 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
                     let payload = match module_payload(
                         engine,
                         &path,
+                        project_root,
                         kiln_module_graph::ModuleSource::Source,
                     ) {
                         Ok(payload) => payload,
