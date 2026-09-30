@@ -757,11 +757,8 @@ int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
     view.data = name;
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
         if (property.accessor) {
-            kiln_val value = KILN_VAL_UNDEFINED;
-            status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(globals),
-                                                    &view, depth, thrown, NULL, &value);
+            status = kiln_c99_get_key(host, globals, &view, NULL, out, depth, thrown);
             if (status != KILN_C99_OK) return status;
-            *out = kiln_val_to_boundary(value);
         } else {
             *out = property.value;
         }
@@ -785,11 +782,8 @@ int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_str
     }
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
         if (property.accessor) {
-            kiln_val value = KILN_VAL_UNDEFINED;
-            status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(globals),
-                                                    name, depth, thrown, NULL, &value);
+            status = kiln_c99_get_key(host, globals, name, NULL, out, depth, thrown);
             if (status != KILN_C99_OK) return status;
-            *out = kiln_val_to_boundary(value);
         } else {
             *out = property.value;
         }
