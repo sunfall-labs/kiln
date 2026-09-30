@@ -6468,3 +6468,58 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_candidate_weak_resource_registration_prevents_move_until_removed() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int weak_resource_drops;
+static void weak_resource_drop(void *payload) { ++weak_resource_drops; free(payload); }
+static void weak_resource_borrowed_drop(void *payload) { (void)payload; ++weak_resource_drops; }
+static int weak_resource_alias_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value root, outside_handle;
+    kiln_nursery_chunk *batch[1];
+    void *payload = malloc(1);
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (payload == NULL || kiln_c99_new_object(&outside_handle) != KILN_C99_OK ||
+        !kiln_c99_actor_candidate_begin(heap)) return 1;
+    if (kiln_c99_new_object(&root) != KILN_C99_OK ||
+        !kiln_c99_actor_candidate_end(heap, 1)) return 2;
+    kiln_c99_actor_candidate_seal(heap, root);
+    batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root.ptr - 1);
+    if (kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 3;
+    if (!kiln_c99_gc_weak_resource_register(heap, root, payload, weak_resource_drop) ||
+        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 4;
+    kiln_c99_gc_weak_resource_release(heap, root);
+    if (weak_resource_drops != 1 || heap->weak_resources != NULL ||
+        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 5;
+    /* The native payload address is a separate witness, even with an outside handle. */
+    if (!kiln_c99_gc_weak_resource_register(heap, outside_handle, (void *)root.ptr,
+                                            weak_resource_borrowed_drop) ||
+        !kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 8;
+    kiln_c99_gc_weak_resource_release(heap, outside_handle);
+    if (weak_resource_drops != 2 ||
+        kiln_c99_graph_has_c_root_alias_except(heap, batch, 1, NULL)) return 9;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 6;
+    status = kiln_realm_enter(realm, weak_resource_alias_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 7;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-weak-resource-root-alias");
+    assert!(
+        run.status.success(),
+        "weak resource alias failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

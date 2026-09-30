@@ -107,10 +107,17 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
                 | "reactions"
                 | "cached_elements"
                 | "cached_subject_ptr"
+                | "diagnostic_source"
+                | "description"
+                | "on_fulfilled"
+                | "on_rejected"
         );
         let collection_entry =
             field == "entries" && index > 0 && words[index - 1].0 == "collection";
-        if !protected && !collection_entry {
+        let bound_reference = index > 0
+            && words[index - 1].0 == "bound"
+            && matches!(field, "target" | "receiver" | "arguments");
+        if !protected && !collection_entry && !bound_reference {
             continue;
         }
         let mut next = index + 2;
@@ -382,4 +389,68 @@ fn relocation_guard_rejects_foreign_and_aliased_sources() {
         kiln_c99_heap_copy_vals(object, moved, other->slots, count);
     "#;
     assert_eq!(foreign_owner_relocations(source).len(), 2);
+}
+
+fn weak_resource_producers(source: &str) -> Vec<String> {
+    let words = tokens(source);
+    let mut producers = Vec::new();
+    for index in 0..words.len().saturating_sub(2) {
+        if words[index].0 != "kiln_c99_gc_weak_resource_register" || words[index + 1].0 != "(" {
+            continue;
+        }
+        // Definitions/prototypes start with the heap type, whereas producer calls pass a value.
+        if words[index + 2].0 == "kiln_gc_heap" {
+            continue;
+        }
+        let mut depth = 1;
+        let mut next = index + 2;
+        while next < words.len() && depth != 0 {
+            match words[next].0 {
+                "(" => depth += 1,
+                ")" => depth -= 1,
+                _ => {}
+            }
+            next += 1;
+        }
+        producers.push(
+            words[index + 2..next.saturating_sub(1)]
+                .iter()
+                .map(|w| w.0)
+                .collect(),
+        );
+    }
+    producers
+}
+
+#[test]
+fn native_weak_resource_payload_producers_are_audited() {
+    let mut producers = Vec::new();
+    for (path, source) in reference_sources() {
+        for producer in weak_resource_producers(source) {
+            producers.push((path.to_owned(), producer));
+        }
+    }
+    // The private prepared arena is closed and owns its graph storage. A new native resource
+    // requires an explicit hidden-reference/lifetime inventory before it can be registered.
+    assert_eq!(
+        producers,
+        vec![(
+            "runtime/spread.c".to_owned(),
+            "heap,handle,arena,kiln_c99_prepared_graph_drop".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn weak_resource_guard_finds_new_payload_seams_and_ignores_comments() {
+    let source = r#"
+        // kiln_c99_gc_weak_resource_register(heap, handle, hidden, drop);
+        static int kiln_c99_gc_weak_resource_register(kiln_gc_heap *heap, kiln_value handle,
+            void *payload, void (*dispose)(void *));
+        kiln_c99_gc_weak_resource_register(heap, handle, hidden, drop);
+    "#;
+    assert_eq!(
+        weak_resource_producers(source),
+        vec!["heap,handle,hidden,drop"]
+    );
 }

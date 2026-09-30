@@ -88,8 +88,7 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
             kiln_c99_gc_release(task);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        for (size_t index = 0; index < argc; ++index)
-            kiln_c99_heap_store_value(task, &task->args[index], args[index]);
+        kiln_c99_heap_copy_values(task, task->args, args, argc);
     }
     /* Counted before the hand-off: a refused hand-off disposes of the task, which uncounts it. */
     task->counted = 0;
@@ -257,23 +256,22 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
     if (bound == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    bound->target = target;
-    bound->receiver = receiver;
-    bound->arguments = NULL;
+    kiln_c99_heap_store_value(bound, &bound->target, target);
+    kiln_c99_heap_store_value(bound, &bound->receiver, receiver);
+    kiln_c99_heap_store_pointer(bound, &bound->arguments, NULL);
     bound->count = count;
     kiln_c99_heap_store_value(bound, &bound->properties, kiln_c99_undefined());
     if (count != 0) {
         /* The argument array is the bound function's alone, so it stays malloc-backed and the
          * KILN_GC_BOUND finaliser is the one place it is released. */
-        bound->arguments = (kiln_value *)malloc(count * sizeof *bound->arguments);
+        kiln_c99_heap_store_pointer(bound, &bound->arguments,
+                                   malloc(count * sizeof *bound->arguments));
         if (bound->arguments == NULL) {
             kiln_c99_gc_release(bound);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        memcpy(bound->arguments, arguments, count * sizeof *bound->arguments);
+        kiln_c99_heap_copy_values(bound, bound->arguments, arguments, count);
     }
-    if (kiln_c99_no_write_depth == 0)
-        kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), (kiln_gc_block *)bound - 1);
     *out = kiln_c99_value(KILN_VALUE_BOUND, (uint64_t)(uintptr_t)bound, NULL, 0);
     return KILN_C99_OK;
 }

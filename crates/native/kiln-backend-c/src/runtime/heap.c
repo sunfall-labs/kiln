@@ -3125,6 +3125,21 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_copy_vals(
         kiln_c99_candidate_record_vals(owner_payload, destination, count);
 }
 
+/* Wide boundary-value buffers have the same ownership rule as compact value buffers. */
+static void kiln_c99_heap_copy_values(const void *owner_payload, kiln_value *destination,
+                                      const kiln_value *source, size_t count) {
+    if (count == 0) return;
+    memcpy(destination, source, count * sizeof *source);
+    if (kiln_c99_no_write_depth != 0) return;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL)) heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->candidate_ledger_groups == 0) return;
+    for (size_t index = 0; index < count; ++index)
+        if (destination[index].tag >= KILN_VALUE_STRING)
+            kiln_c99_candidate_record_pointer_store(heap, owner_payload,
+                (const void *)(uintptr_t)destination[index].bits);
+}
+
 /* Relocation is restricted to the same owner's existing storage. Witnesses name that
  * stable owner, not a slot address, so moving its bytes cannot introduce a new incoming
  * owner. Cross-owner copies must use heap_copy_vals instead. No allocation or user code
@@ -5145,6 +5160,13 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
     }
     for (index = 0; index < KILN_C99_HOT_KEY_COUNT; ++index) {
         if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
+    }
+    /* Weak resource handles are not GC roots, but their stored addresses must remain in
+     * this heap until the registration is removed. Native disposal may still inspect them. */
+    for (const kiln_gc_weak_resource *entry = heap->weak_resources;
+         entry != NULL; entry = entry->next) {
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->handle) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, entry->payload)) return 1;
     }
     return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store) ||
            kiln_c99_graph_in_batch(heap, chunks, count, heap->shared_facades) ||
