@@ -2783,6 +2783,55 @@ fn entry_proto(program: &Program) -> FunctionProto {
     }
 }
 
+/// Replace direct-eval instructions in CFG-unreachable blocks with Nop and report whether any
+/// reachable direct eval remains. Failed CFG construction is conservative: leave that body's
+/// eval instructions intact so the emitter still refuses them.
+fn prune_unreachable_direct_eval(program: &mut Program) -> bool {
+    fn prune_body(proto: &FunctionProto, program: &Program, code: &mut [Instruction]) {
+        let Ok(graph) = build_function_graph(proto, program) else {
+            return;
+        };
+        let mut reachable_blocks = HashSet::from([graph.entry_block]);
+        let mut pending = vec![graph.entry_block];
+        while let Some(block_id) = pending.pop() {
+            if let Some(block) = graph.blocks.get(block_id.0 as usize) {
+                for successor in &block.successors {
+                    if reachable_blocks.insert(*successor) {
+                        pending.push(*successor);
+                    }
+                }
+            }
+        }
+        let reachable_pcs: HashSet<u32> = graph
+            .blocks
+            .iter()
+            .filter(|block| reachable_blocks.contains(&block.id))
+            .flat_map(|block| block.operations.iter().map(|(value, _)| value))
+            .filter_map(|value| graph.origins.get(value).map(|origin| origin.pc))
+            .collect();
+        for (pc, instruction) in code.iter_mut().enumerate() {
+            if matches!(instruction, Instruction::DirectEval(_))
+                && !reachable_pcs.contains(&(pc as u32))
+            {
+                *instruction = Instruction::Nop;
+            }
+        }
+    }
+
+    // Graph construction consults the full function table, so analyze each body against one
+    // immutable snapshot while rewriting the corresponding output program.
+    let snapshot = program.clone();
+    prune_body(&entry_proto(&snapshot), &snapshot, &mut program.code);
+    for index in 0..program.functions.len() {
+        prune_body(
+            &snapshot.functions[index],
+            &snapshot,
+            &mut program.functions[index].code,
+        );
+    }
+    program.has_direct_eval()
+}
+
 /// The typed entries of this unit that `body` calls: every `{symbol}_fn_{index}_t(`.
 fn typed_entry_calls(body: &str, symbol: &str) -> std::collections::BTreeSet<usize> {
     let prefix = format!("{symbol}_fn_");
@@ -5197,15 +5246,22 @@ fn render_module_positioned(
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
+    // A module-wide syntax fact is deliberately conservative for linking, but it is too broad
+    // for native emission: a direct eval after an unconditional return cannot execute and must
+    // not disable closed-world function liveness for the whole module. Use the same CFG that
+    // drives emission to distinguish unreachable eval bytecode from a live eval (which remains
+    // unsupported below).
+    let mut reachable_program = program.clone();
+    let live_direct_eval = prune_unreachable_direct_eval(&mut reachable_program);
     let liveness = policy.live_module_slots.as_ref().map(|demanded| {
         closed_world_function_liveness(
-            program,
+            &reachable_program,
             demanded,
-            module.link_facts.direct_eval,
+            live_direct_eval,
             &module.link_facts.removable_declarations,
         )
     });
-    let mut pruned = program.clone();
+    let mut pruned = reachable_program;
     if let Some((_, dead_pcs, _)) = &liveness {
         for (pc, instruction) in pruned.code.iter_mut().enumerate() {
             if dead_pcs[0].contains(&(pc as u32)) {
