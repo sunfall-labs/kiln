@@ -116,10 +116,10 @@ mod tests {
         );
         let valid = "[:;]".chars().map(u32::from).collect::<Vec<_>>();
         let normalized = normalize_unicode_sets_pattern(&valid);
-        assert!(regress::Regex::from_unicode(normalized, "v").is_ok());
+        assert!(regress::Regex::from_unicode(normalized.into_iter(), "v").is_ok());
         let reserved = "[!!]".chars().map(u32::from).collect::<Vec<_>>();
         let normalized = normalize_unicode_sets_pattern(&reserved);
         assert_eq!(normalized, reserved);
-        assert!(regress::Regex::from_unicode(normalized, "v").is_err());
+        assert!(regress::Regex::from_unicode(normalized.into_iter(), "v").is_err());
     }
 }

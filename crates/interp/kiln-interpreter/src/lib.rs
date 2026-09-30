@@ -682,6 +682,12 @@ pub struct GeneratorData {
     properties: RefCell<ObjectData>,
 }
 
+impl PartialEq for GeneratorData {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
 impl std::ops::Deref for GeneratorData {
     type Target = RefCell<GeneratorState>;
 

@@ -2302,7 +2302,7 @@ pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> 
         } else {
             codepoints.clone()
         };
-        let compiled = Arc::new(regress::Regex::from_unicode(normalized, flags).ok()?);
+        let compiled = Arc::new(regress::Regex::from_unicode(normalized.into_iter(), flags).ok()?);
         if cacheable {
             compiled_regexp_cache()
                 .lock()

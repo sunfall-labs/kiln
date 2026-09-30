@@ -1061,14 +1061,16 @@ fn resolve_transform_options(path: Option<&str>) -> TransformOptions {
     }
 }
 
-fn unwrap_parenthesized_expression(mut expression: &Expression<'_>) -> &Expression<'_> {
+fn unwrap_parenthesized_expression<'a, 'b>(
+    mut expression: &'b Expression<'a>,
+) -> &'b Expression<'a> {
     while let Expression::ParenthesizedExpression(parenthesized) = expression {
         expression = &parenthesized.expression;
     }
     expression
 }
 
-fn function_parameters(expression: &Expression<'_>) -> Option<&FormalParameters<'_>> {
+fn function_parameters<'a, 'b>(expression: &'b Expression<'a>) -> Option<&'b FormalParameters<'a>> {
     match unwrap_parenthesized_expression(expression) {
         Expression::FunctionExpression(function) => Some(&function.params),
         Expression::ArrowFunctionExpression(function) => Some(&function.params),
