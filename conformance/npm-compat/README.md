@@ -30,10 +30,19 @@ threshold to enforce.
 ```sh
 cd conformance/npm-compat
 npm ci                       # once: installs the 360 pinned packages
-./run.sh                     # full corpus; writes results/results-<date>.tsv
+./run.sh                     # full corpus; retains results/raw/<run-id>/ evidence
 ./run.sh ms lodash           # subset by package name
 TIMEOUT_S=300 ./run.sh       # per-package timeout (default 600s)
 ```
+
+Each invocation retains a unique directory under `results/raw/` with full Node,
+compiler, and native stdout/stderr, a TSV, and `results.json`. Unknown filters,
+duplicate inventory names, and missing tests are infrastructure errors. Package
+failures remain informational. Compilation and binary execution have separate
+600-second limits and separate durations; `compile-timeout` and `runtime-timeout`
+identify the failed phase. These wall times include process startup and are
+**not** warmed workload throughput measurements. The JSON records selected and
+deferred coverage, inventory and CLI digests, exact commands, exit codes and timing.
 
 `run.sh` builds `target/release/kiln` first if it is missing. Two environment
 quirks it handles: the native backend shells out to `cargo`/`rustc` (via the
