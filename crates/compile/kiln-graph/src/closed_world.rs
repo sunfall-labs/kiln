@@ -166,16 +166,9 @@ fn stored_declaration(code: &[Instruction], pc: usize) -> Option<(u32, bool)> {
 pub fn closed_world_function_liveness(
     program: &Program,
     demanded: &BTreeSet<u32>,
-    direct_eval: bool,
+    _direct_eval: bool,
     declarations: &[RemovableDeclaration],
 ) -> (HashSet<usize>, Vec<HashSet<u32>>, BTreeSet<u32>) {
-    if direct_eval {
-        return (
-            (0..program.functions.len()).collect(),
-            vec![HashSet::new(); program.functions.len() + 1],
-            (0..program.local_count).collect(),
-        );
-    }
     let parents = function_parent_candidates(program);
     let mut module_live = demanded.clone();
     let mut function_live = vec![BTreeSet::<u32>::new(); program.functions.len()];
@@ -226,6 +219,41 @@ pub fn closed_world_function_liveness(
                         None => changed |= module_live.insert(*slot),
                         Some(index) => changed |= function_live[index].insert(*slot),
                     },
+                    Instruction::DirectEval(site) => {
+                        // The eval compiler can read or write every binding in its site's
+                        // lexical environment. Preserve those cells, but do not let an eval in
+                        // an unreachable function keep unrelated functions and module slots live.
+                        for binding in &site.bindings {
+                            let (binding_owner, slot) = match binding.access {
+                                kiln_ir::EvalAccess::Cell(slot) => (owner, slot),
+                                kiln_ir::EvalAccess::Upvalue(upvalue) => {
+                                    let Some(index) = owner else {
+                                        // A top-level eval cannot name an upvalue. Malformed or
+                                        // hand-authored IR falls back to keeping the whole scope.
+                                        return (
+                                            (0..program.functions.len()).collect(),
+                                            vec![HashSet::new(); program.functions.len() + 1],
+                                            (0..program.local_count).collect(),
+                                        );
+                                    };
+                                    let Some((binding_owner, slot)) =
+                                        captured_slot_owner(program, &parents, index, upvalue)
+                                    else {
+                                        return (
+                                            (0..program.functions.len()).collect(),
+                                            vec![HashSet::new(); program.functions.len() + 1],
+                                            (0..program.local_count).collect(),
+                                        );
+                                    };
+                                    (binding_owner, slot)
+                                }
+                            };
+                            match binding_owner {
+                                None => changed |= module_live.insert(slot),
+                                Some(index) => changed |= function_live[index].insert(slot),
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

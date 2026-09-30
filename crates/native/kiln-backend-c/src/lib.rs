@@ -1259,6 +1259,12 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::EvalError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL_ERROR)")
         }
+        // Reading `eval` as a value (for example through `%eval%` in get-intrinsic) is supported.
+        // Direct calls carry a `DirectEval` instruction and remain separately guarded by
+        // validation until the native backend can compile them with the caller's lexical cells.
+        kiln_ir::Builtin::Eval => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL)")
+        }
         kiln_ir::Builtin::AggregateError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)")
         }

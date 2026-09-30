@@ -317,6 +317,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::UriError
             | kiln_ir::Builtin::EvalError
+            | kiln_ir::Builtin::Eval
             | kiln_ir::Builtin::AggregateError
             | kiln_ir::Builtin::SuppressedError
             | kiln_ir::Builtin::DisposableStack
