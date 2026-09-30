@@ -1742,14 +1742,16 @@
         case KILN_C99_METHOD_REFLECT_APPLY: {
             /* `Reflect.apply(f, this, args)` is `f.apply(this, args)` without going through the
              * function's own `apply`, which a proxy or an override could have replaced. */
-            if (argc < 3 || args[2].tag != KILN_VALUE_ARRAY) {
-                KILN_C99_REFUSE("Reflect.apply needs a callee, a receiver and an array of "
-                                "arguments");
-            }
-            /* Share argument materialisation with Function.prototype.apply, including holes
-             * and inherited indexed reads; the function's own apply property is never read. */
+            kiln_value callee = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value list = argc > 2 ? args[2] : kiln_c99_undefined();
+            if (!kiln_c99_is_callable(callee))
+                return kiln_c99_throw_not_a(thrown, callee, "function");
+            if (!kiln_c99_is_object(list))
+                return kiln_c99_throw_not_a(thrown, list, "object");
+            /* Share CreateListFromArrayLike with Function.prototype.apply, including holes,
+             * inherited indexed reads and arguments objects. Do not read the callee's apply. */
             return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_FUNCTION_APPLY,
-                                          args[0], args + 1, 2, depth, thrown);
+                                          callee, args + 1, 2, depth, thrown);
         }
         case KILN_C99_METHOD_REFLECT_CONSTRUCT: {
             kiln_array *list;
