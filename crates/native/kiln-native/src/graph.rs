@@ -1004,6 +1004,9 @@ pub(super) fn native_bootstrap_families(
             .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
     };
     let mut selected = 0;
+    if names(&["toLocaleLowerCase", "toLocaleUpperCase"]) {
+        selected |= family::STRING_LOCALE;
+    }
     if builtin(&["Date", "Intl"]) || names(&["getTime", "setTime", "toISOString", "toUTCString"]) {
         selected |= family::DATE;
     }

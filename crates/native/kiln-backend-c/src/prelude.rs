@@ -931,6 +931,7 @@ method_ids! {
     // Private bootstrap bridge. Compiled runtime source captures it and removes the global before
     // user code runs; the method itself exposes only ICU4X boundary records, not Intl policy.
     (KILN_C99_METHOD_INTL_SEGMENT_RAW, 501, Direct; 0, 0),
+    (KILN_C99_METHOD_STRING_LOCALE_CASE_RAW, 547, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH, 388, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_PARSE, 389, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL, 390, Direct; 0, 0),
@@ -3962,6 +3963,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK),
     emit_method_define!(KILN_C99_METHOD_NODE_FFI_CLOSE),
     emit_method_define!(KILN_C99_METHOD_INTL_SEGMENT_RAW),
+    emit_method_define!(KILN_C99_METHOD_STRING_LOCALE_CASE_RAW),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_PARSE),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL),

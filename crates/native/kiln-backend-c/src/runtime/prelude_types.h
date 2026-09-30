@@ -3394,6 +3394,9 @@ double kiln_string_to_number(const char *bytes, size_t len);
 int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind);
 int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
                       const uint32_t **out_records, size_t *out_count);
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
+                          uint64_t locale_len, uint32_t uppercase, uint16_t *out,
+                          uint64_t capacity, uint64_t *out_len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions

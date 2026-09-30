@@ -593,23 +593,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     ));
                 }
                 let text = self.intl_string_argument(Some(receiver), instruction)?;
-                // The locale list is validated even though this build maps case the same way in
-                // every locale: `"x".toLocaleLowerCase("i")` is a `RangeError`, and swallowing a
-                // malformed tag would make a program that mistyped one believe it worked.
-                //
-                // The mapping itself is the locale-independent one. Turkish dotless `i`, Azeri and
-                // the Lithuanian retained dot are conditional mappings that need CLDR's
-                // special-casing data, which this build does not link; producing the default
-                // mapping for those three locales is the specification's own fallback, and it is
-                // the same string `toLowerCase` gives.
-                self.canonicalize_locale_list(arguments.first(), instruction)?;
-                Ok(Value::String(
-                    if matches!(adapter, Adapter::StringToLocaleLowerCase) {
-                        text.to_lowercase().into()
-                    } else {
-                        text.to_uppercase().into()
-                    },
-                ))
+                let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
+                let mapped = kiln_intl::casemap::map_case(
+                    &text,
+                    locales.first().map(String::as_str),
+                    matches!(adapter, Adapter::StringToLocaleUpperCase),
+                )
+                .map_err(failure)?;
+                Ok(Value::String(mapped.into()))
             }
         }
     }

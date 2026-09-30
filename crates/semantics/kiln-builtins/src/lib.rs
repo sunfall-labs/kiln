@@ -205,7 +205,10 @@ declare_ts_builtins! {
         sample_source_check: "export async function run",
         presence_test: process_builtin_source_is_present,
         compilation_test: process_builtin_compiles_cleanly,
-        exports: ["default", "exit", "run"],
+        exports: [
+            "arch", "argv", "cwd", "default", "env", "exit", "pid", "platform", "run",
+            "versions",
+        ],
     },
     Assert {
         variant: Assert,
@@ -411,6 +414,7 @@ declare_ts_builtins! {
             "isUndefined",
             "promisify",
             "styleText",
+            "stripVTControlCharacters",
             "types",
         ],
     },
@@ -1380,6 +1384,9 @@ pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
 /// Annex B HTML and Object.prototype extensions and Array.fromAsync (ADR 0005, ADR 0063 rule 4).
 pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 
+/// Locale aware string case methods, backed by the shared Unicode case mappings.
+pub const STRING_LOCALE_BOOTSTRAP_SOURCE: &str = include_str!("string_locale.ts");
+
 /// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
 pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
 
@@ -1433,7 +1440,8 @@ pub mod native_bootstrap_family {
     pub const MAP_UPSERT: u32 = 1 << 7;
     pub const PROMISE: u32 = 1 << 8;
     pub const OBJECT_REFLECT: u32 = 1 << 9;
-    pub const ALL: u32 = (1 << 10) - 1;
+    pub const STRING_LOCALE: u32 = 1 << 10;
+    pub const ALL: u32 = (1 << 11) - 1;
 }
 
 /// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
@@ -1450,6 +1458,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
+        selected(family::STRING_LOCALE, STRING_LOCALE_BOOTSTRAP_SOURCE),
         ANNEXB_BOOTSTRAP_SOURCE,
         selected(family::DISPOSABLE, DISPOSABLE_BOOTSTRAP_SOURCE),
         REGEXP_BOOTSTRAP_SOURCE,
@@ -1492,7 +1501,11 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
 /// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    common_bootstrap_source_selected(native_bootstrap_family::ALL)
+    // The interpreter already owns spec-complete locale case methods. The native backend adds
+    // them from TypeScript only for programs whose demanded surface reaches those members.
+    common_bootstrap_source_selected(
+        native_bootstrap_family::ALL & !native_bootstrap_family::STRING_LOCALE,
+    )
 }
 
 #[cfg(test)]
@@ -1723,6 +1736,17 @@ mod web_tests {
         let hir = kiln_frontend_oxc::parse("@kiln/annexb-bootstrap.ts", ANNEXB_BOOTSTRAP_SOURCE);
         let program = kiln_ir::compile_module(&hir)
             .expect("annexb bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn string_locale_bootstrap_compiles_cleanly() {
+        let hir = kiln_frontend_oxc::parse(
+            "@kiln/string-locale-bootstrap.ts",
+            STRING_LOCALE_BOOTSTRAP_SOURCE,
+        );
+        let program = kiln_ir::compile_module(&hir)
+            .expect("string locale bootstrap should compile to IR without error");
         assert!(!program.program.code.is_empty());
     }
 

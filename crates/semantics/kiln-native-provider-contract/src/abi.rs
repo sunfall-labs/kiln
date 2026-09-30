@@ -233,6 +233,7 @@ macro_rules! provider_abi_registry {
             (intl, kiln_intl_segment, intl_segment);
             (intl, kiln_string_normalize, string_normalize);
             (intl, kiln_intl_collate, intl_collate);
+            (intl, kiln_intl_string_case, intl_string_case);
             (parallel, kiln_parallel_map, parallel_map);
             (parallel, kiln_parallel_sort, parallel_sort);
             (parallel, kiln_parallel_threads, parallel_threads);

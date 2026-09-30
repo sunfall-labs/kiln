@@ -69,6 +69,14 @@ export function exit(code: number = 0): void {
 }
 
 const process: any = (globalThis as any).process || { run, exit };
+// Named exports are part of `node:process` as well as properties on its default export.
+export const env: Record<string, string> = process.env || {};
+export const argv: string[] = process.argv || [];
+export const versions: Record<string, string> = process.versions || {};
+export const platform: string = process.platform || "unknown";
+export const arch: string = process.arch || "unknown";
+export const pid: number = process.pid || 0;
+export const cwd: (...args: any[]) => string = (...args: any[]) => process.cwd(...args);
 if ((globalThis as any).process) {
   if (!(globalThis as any).process.run) {
     (globalThis as any).process.run = run;

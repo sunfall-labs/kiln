@@ -151,6 +151,15 @@ export function format(...args: any[]): string {
   return formatWithOptions(undefined, ...args);
 }
 
+export function stripVTControlCharacters(value: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError("The \"str\" argument must be of type string");
+  }
+  // CSI sequences and OSC sequences (terminated by BEL or ST) are the control forms used by
+  // terminal styling libraries and command line package help output.
+  return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "");
+}
+
 export function inherits(ctor: any, superCtor: any): void {
   if (typeof ctor !== "function" || typeof superCtor !== "function") {
     throw new TypeError("The constructor and super constructor must be functions");

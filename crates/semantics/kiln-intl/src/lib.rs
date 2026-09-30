@@ -36,6 +36,7 @@
 //! time, timezone and locale data remain explicit inputs".
 
 pub mod collator;
+pub mod casemap;
 pub mod datetime;
 pub mod displaynames;
 pub mod duration;

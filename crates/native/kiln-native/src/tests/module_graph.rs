@@ -268,6 +268,12 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
         0
     );
+    members.names.insert("toLocaleLowerCase".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::STRING_LOCALE
+    );
+    members.names.clear();
     members.builtins.insert("Date".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),

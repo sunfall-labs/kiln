@@ -1,4 +1,5 @@
 use super::INVALID_ARGUMENT;
+use kiln_intl::casemap::map_case_utf16;
 use kiln_intl::segmenter::Segmenter;
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -91,6 +92,43 @@ unsafe fn spill_units(answer: &[u16], out: *mut u16, capacity: u64, out_len: *mu
         unsafe { std::ptr::copy_nonoverlapping(answer.as_ptr(), out, answer.len()) };
     }
     0
+}
+
+/// Locale-sensitive JavaScript string case mapping. Returns -3 for an invalid locale and -2
+/// for a provider panic; the caller owns JavaScript error construction.
+///
+/// # Safety
+/// `units`/`locale` must be readable for their lengths (null only when empty), while `out` and
+/// `out_len` must satisfy the usual spill buffer contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_string_case(
+    units: *const u16,
+    count: u64,
+    locale: *const u8,
+    locale_len: u64,
+    uppercase: u32,
+    out: *mut u16,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    if out_len.is_null() || (units.is_null() && count != 0) || (locale.is_null() && locale_len != 0) || uppercase > 1 {
+        return INVALID_ARGUMENT;
+    }
+    let (Ok(count), Ok(locale_len)) = (usize::try_from(count), usize::try_from(locale_len)) else {
+        return INVALID_ARGUMENT;
+    };
+    let input = if count == 0 { &[] } else { unsafe { core::slice::from_raw_parts(units, count) } };
+    let tag = if locale_len == 0 { &[] } else { unsafe { core::slice::from_raw_parts(locale, locale_len) } };
+    let Ok(tag) = core::str::from_utf8(tag) else { return INVALID_ARGUMENT; };
+    let mapped = catch_unwind(AssertUnwindSafe(|| {
+        map_case_utf16(input, if tag.is_empty() { None } else { Some(tag) }, uppercase != 0)
+    }));
+    match mapped {
+        Ok(Ok(answer)) => unsafe { spill_units(&answer, out, capacity, out_len) },
+        Ok(Err(error)) if error.kind == kiln_intl::ErrorKind::Range => -3,
+        Ok(Err(_)) => INVALID_ARGUMENT,
+        Err(_) => -2,
+    }
 }
 
 /// `String.prototype.normalize`: `form` is 0 `NFC`, 1 `NFD`, 2 `NFKC`, 3 `NFKD`. The tables
@@ -295,6 +333,9 @@ macro_rules! assert_provider_export {
         };
         (intl, kiln_intl_collate, intl_collate) => {
             const _: unsafe extern "C" fn(*const u16, u64, *const u16, u64, *const u8, u64, *mut i32) -> i32 = kiln_intl_collate;
+        };
+        (intl, kiln_intl_string_case, intl_string_case) => {
+            const _: unsafe extern "C" fn(*const u16, u64, *const u8, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_intl_string_case;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }

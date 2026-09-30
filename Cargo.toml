@@ -94,6 +94,7 @@ temporal_rs = { version = "0.2.6", default-features = false, features = ["std", 
 # `icu_locale`, which is the CLDR alias and likely-subtags tables that canonicalization needs.
 icu_locale_core = { version = "2.3", default-features = false, features = ["alloc"] }
 icu_locale = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_decimal = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
 # `unstable` here is not a nightly switch either: it gates `PluralRulesWithRanges`, the CLDR
 # plural *range* table `Intl.PluralRules.prototype.selectRange` answers from. A range's category is

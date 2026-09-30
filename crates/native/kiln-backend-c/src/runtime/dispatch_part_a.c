@@ -1447,6 +1447,51 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     int status;
     if (code == KILN_C99_METHOD_INTL_SEGMENT_RAW)
         return kiln_c99_intl_segment_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_STRING_LOCALE_CASE_RAW) {
+        kiln_value input = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value locale = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value upper = argc > 2 ? args[2] : kiln_c99_undefined();
+        uint16_t *units = NULL, *mapped = NULL;
+        uint8_t *tag = NULL;
+        size_t count = 0, tag_len = 0;
+        uint64_t need = 0, capacity;
+        int rc, status;
+        if (input.tag != KILN_VALUE_STRING || locale.tag != KILN_VALUE_STRING ||
+            upper.tag != KILN_VALUE_BOOLEAN)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Invalid internal string locale case arguments");
+        status = kiln_c99_to_units(input, &units, &count);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_string_to_utf8_lossy(locale, &tag, &tag_len);
+        if (status != KILN_C99_OK) { free(units); return status; }
+        capacity = (uint64_t)count * 3 + 8;
+        mapped = (uint16_t *)malloc((size_t)capacity * sizeof *mapped);
+        if (mapped == NULL) { free(tag); free(units); return KILN_C99_OUT_OF_MEMORY; }
+        rc = kiln_intl_string_case(units, count, tag, tag_len,
+                                  upper.bits != 0 ? 1u : 0u, mapped, capacity, &need);
+        if (rc == -1 && need > capacity) {
+            uint16_t *bigger = (uint16_t *)realloc(mapped, (size_t)need * sizeof *mapped);
+            if (bigger == NULL) { free(mapped); free(tag); free(units); return KILN_C99_OUT_OF_MEMORY; }
+            mapped = bigger;
+            rc = kiln_intl_string_case(units, count, tag, tag_len,
+                                      upper.bits != 0 ? 1u : 0u, mapped, need, &need);
+        }
+        free(tag);
+        free(units);
+        if (rc == -3) {
+            free(mapped);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Incorrect locale information provided");
+        }
+        if (rc != 0) {
+            free(mapped);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                        "Intl string case provider failed");
+        }
+        *result = kiln_c99_from_units(mapped, (size_t)need);
+        free(mapped);
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_UINT8_TO_HEX_RAW)
         return kiln_c99_uint8_to_hex_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_UINT8_TO_BASE64_RAW)

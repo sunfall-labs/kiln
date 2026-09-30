@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 icu_locale_core = { workspace = true }
 icu_locale = { workspace = true }
+icu_casemap = { workspace = true }
 icu_decimal = { workspace = true }
 icu_plurals = { workspace = true }
 icu_list = { workspace = true }
