@@ -6863,8 +6863,6 @@ static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep) {
 /* The empty key: one for the process, in the shared block (see `kiln_c99_process`). */
 #define kiln_c99_key_empty ((const kiln_string *)&kiln_c99_process()->empty_key)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
-static const kiln_symbol *kiln_c99_gc_symbol_for_key(const kiln_gc_heap *heap,
-                                                      const kiln_string *key);
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
