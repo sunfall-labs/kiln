@@ -183,7 +183,8 @@ static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
     case KILN_TYPED_UINT8:
     case KILN_TYPED_UINT8_CLAMPED: return 1;
     case KILN_TYPED_INT16:
-    case KILN_TYPED_UINT16: return 2;
+    case KILN_TYPED_UINT16:
+    case KILN_TYPED_FLOAT16: return 2;
     case KILN_TYPED_INT32:
     case KILN_TYPED_UINT32:
     case KILN_TYPED_FLOAT32: return 4;
@@ -205,6 +206,7 @@ static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return "Uint32Array";
     case KILN_TYPED_FLOAT32: return "Float32Array";
     case KILN_TYPED_FLOAT64: return "Float64Array";
+    case KILN_TYPED_FLOAT16: return "Float16Array";
     case KILN_TYPED_BIG_INT64: return "BigInt64Array";
     case KILN_TYPED_BIG_UINT64: return "BigUint64Array";
     }
@@ -222,6 +224,7 @@ static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) 
     case KILN_C99_BUILTIN_UINT32_ARRAY: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: *kind = KILN_TYPED_FLOAT16; return 1;
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY: *kind = KILN_TYPED_BIG_INT64; return 1;
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
@@ -239,6 +242,7 @@ static uint64_t kiln_c99_typed_constructor(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY;
+    case KILN_TYPED_FLOAT16: return KILN_C99_BUILTIN_FLOAT16_ARRAY;
     case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY;
     case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY;
     }
@@ -256,6 +260,7 @@ static uint64_t kiln_c99_typed_prototype(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE;
+    case KILN_TYPED_FLOAT16: return KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE;
     case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE;
     case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE;
     }
@@ -275,6 +280,7 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT16; return 1;
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_INT64; return 1;
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
@@ -632,7 +638,8 @@ static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t 
     buffer = view->buffer;
     width = kiln_c99_typed_width(view->kind);
     index = (size_t)kiln_c99_as_number(args[2]);
-    if (view->kind == KILN_TYPED_FLOAT32 || view->kind == KILN_TYPED_FLOAT64 ||
+    if (view->kind == KILN_TYPED_FLOAT16 || view->kind == KILN_TYPED_FLOAT32 ||
+        view->kind == KILN_TYPED_FLOAT64 ||
         view->kind == KILN_TYPED_UINT8_CLAMPED)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics: not an integer typed array");
     if (index >= view->length || buffer->detached)
@@ -871,6 +878,9 @@ static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
                  ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
         memcpy(&float32, &bits32, sizeof float32);
         return (double)float32;
+    case KILN_TYPED_FLOAT16:
+        unsigned16 = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+        return kiln_c99_half_to_double(unsigned16);
     case KILN_TYPED_FLOAT64:
         bits64 = (uint64_t)bytes[0] | ((uint64_t)bytes[1] << 8) |
                  ((uint64_t)bytes[2] << 16) | ((uint64_t)bytes[3] << 24) |
@@ -1016,6 +1026,11 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
         bytes[1] = (uint8_t)(bits32 >> 8);
         bytes[2] = (uint8_t)(bits32 >> 16);
         bytes[3] = (uint8_t)(bits32 >> 24);
+        return;
+    case KILN_TYPED_FLOAT16:
+        unsigned16 = kiln_c99_double_to_half(value);
+        bytes[0] = (uint8_t)unsigned16;
+        bytes[1] = (uint8_t)(unsigned16 >> 8);
         return;
     case KILN_TYPED_FLOAT64:
         float64 = value;

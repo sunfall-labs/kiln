@@ -3622,6 +3622,7 @@ enum kiln_value_tag {
  * `%TypedArray%.prototype` method table above: concrete typed-array constructors inherit from
  * this function, while concrete typed-array prototype objects inherit from that table. */
 #define KILN_C99_BUILTIN_TYPED_ARRAY 104
+#define KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE 105
 
 #define KILN_C99_BUILTIN_DATE 7
 

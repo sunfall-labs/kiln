@@ -98,6 +98,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: return "Float64Array";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
     case KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE: return "TypedArray";
     case KILN_C99_BUILTIN_TYPED_ARRAY: return "TypedArray";
     case KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE: return "Int8Array";
@@ -109,6 +110,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: return "Float64Array";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE: return "Float16Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: return "BigUint64Array";
     case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE: return "SharedArrayBuffer";

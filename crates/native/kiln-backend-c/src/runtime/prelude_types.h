@@ -491,6 +491,59 @@ static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
     return kiln_c99_guard_should_exit_in(kiln_c99_speculate_exit_active(), counter);
 }
 
+/* IEEE 754 binary16 conversions shared by emitted reads and the generic view accessors. */
+static inline double kiln_c99_half_to_double(uint16_t bits) {
+    unsigned sign = bits >> 15;
+    unsigned exponent = (bits >> 10) & 31u;
+    unsigned fraction = bits & 1023u;
+    double value;
+    if (exponent == 31u) {
+        if (fraction != 0) return NAN;
+        return sign ? -INFINITY : INFINITY;
+    }
+    if (exponent == 0) value = ldexp((double)fraction, -24);
+    else value = ldexp((double)(1024u + fraction), (int)exponent - 25);
+    return sign ? -value : value;
+}
+
+static inline uint16_t kiln_c99_double_to_half(double value) {
+    uint64_t bits, significand, remainder, halfway;
+    unsigned sign, exponent_bits;
+    int exponent, shift;
+    uint64_t rounded;
+    memcpy(&bits, &value, sizeof bits);
+    sign = (unsigned)(bits >> 63);
+    exponent_bits = (unsigned)((bits >> 52) & 0x7ffu);
+    significand = bits & UINT64_C(0x000fffffffffffff);
+    if (exponent_bits == 0x7ffu) {
+        if (significand == 0) return (uint16_t)((sign << 15) | 0x7c00u);
+        return (uint16_t)((sign << 15) | 0x7e00u);
+    }
+    if (exponent_bits == 0) return (uint16_t)(sign << 15); /* All binary64 subnormals underflow. */
+    exponent = (int)exponent_bits - 1023;
+    significand |= UINT64_C(1) << 52;
+    if (exponent > 15) return (uint16_t)((sign << 15) | 0x7c00u);
+    if (exponent >= -14) {
+        rounded = significand >> 42;
+        remainder = significand & ((UINT64_C(1) << 42) - 1);
+        halfway = UINT64_C(1) << 41;
+        if (remainder > halfway || (remainder == halfway && (rounded & 1u))) ++rounded;
+        if (rounded == 2048u) {
+            rounded = 1024u;
+            if (++exponent > 15) return (uint16_t)((sign << 15) | 0x7c00u);
+        }
+        return (uint16_t)((sign << 15) | ((unsigned)(exponent + 15) << 10) |
+                          ((unsigned)rounded & 1023u));
+    }
+    shift = 28 - exponent;
+    if (shift > 63) return (uint16_t)(sign << 15);
+    rounded = significand >> shift;
+    remainder = significand & ((UINT64_C(1) << shift) - 1);
+    halfway = UINT64_C(1) << (shift - 1);
+    if (remainder > halfway || (remainder == halfway && (rounded & 1u))) ++rounded;
+    return (uint16_t)((sign << 15) | (unsigned)rounded);
+}
+
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
     KILN_TYPED_UINT8,
@@ -499,6 +552,7 @@ typedef enum kiln_typed_kind {
     KILN_TYPED_UINT16,
     KILN_TYPED_INT32,
     KILN_TYPED_UINT32,
+    KILN_TYPED_FLOAT16,
     KILN_TYPED_FLOAT32,
     KILN_TYPED_FLOAT64,
     KILN_TYPED_BIG_INT64,
@@ -571,6 +625,9 @@ static inline double kiln_typed_load(const kiln_typed_array *view, size_t index)
     case KILN_TYPED_INT16:
         bytes += index * 2;
         return (double)(int16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
+    case KILN_TYPED_FLOAT16:
+        bytes += index * 2;
+        return kiln_c99_half_to_double((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
     case KILN_TYPED_UINT16:
         bytes += index * 2;
         return (double)(uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));

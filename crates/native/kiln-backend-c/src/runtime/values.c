@@ -37,6 +37,7 @@ static int kiln_c99_is_callable(kiln_value value) {
         (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
          (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
           value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+         value.bits == KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE ||
          value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
          value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE))
         return 0;
@@ -942,6 +943,7 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
         case KILN_C99_BUILTIN_INT32_ARRAY:
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT16_ARRAY:
         case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "typed array constructor requires 'new'");

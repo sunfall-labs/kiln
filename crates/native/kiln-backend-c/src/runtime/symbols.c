@@ -448,7 +448,8 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE ||
            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
-            builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
+            builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+           builtin == KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE;
 }
 
 /* The method a name resolves to on a given receiver, or 0.  One generated code list means a read

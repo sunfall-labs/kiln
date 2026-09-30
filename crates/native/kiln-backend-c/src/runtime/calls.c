@@ -1058,6 +1058,7 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT64_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT16_ARRAY:
         case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
         case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: {
             kiln_typed_kind kind;
@@ -1273,6 +1274,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         if (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
             (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
              value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+            value.bits == KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE ||
             value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
             value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE) {
             return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
