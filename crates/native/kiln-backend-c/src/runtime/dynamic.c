@@ -826,6 +826,27 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_dyn_lexer_next(lex);
         return KILN_C99_OK;
     }
+    int asynchronous = 0;
+    if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
+        /* `async` is contextual in expression position. It starts an async function only
+         * when followed by `function`; otherwise the keyword is a valid identifier (including
+         * the common `async.method` and Function-constructor parameter cases). Peek with the
+         * normal lexer so comments and whitespace follow the same rules, then restore the
+         * original token when this is an identifier. */
+        kiln_dyn_token async_token = lex->curr;
+        size_t async_end = lex->pos;
+        kiln_dyn_token_kind previous = lex->prev_kind;
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_KW_FUNCTION) {
+            asynchronous = 1;
+        } else {
+            kiln_dyn_token_free(&lex->curr);
+            lex->curr = async_token;
+            lex->curr.kind = KILN_DYN_IDENT;
+            lex->pos = async_end;
+            lex->prev_kind = previous;
+        }
+    }
     if (lex->curr.kind == KILN_DYN_IDENT) {
         const char *name = lex->curr.start;
         size_t name_len = lex->curr.len;
@@ -991,15 +1012,6 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected '}'");
     }
 
-    int asynchronous = 0;
-    if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
-        kiln_dyn_lexer_next(lex);
-        if (lex->curr.kind != KILN_DYN_KW_FUNCTION) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                        "Expected function after async");
-        }
-        asynchronous = 1;
-    }
     if (lex->curr.kind == KILN_DYN_KW_FUNCTION) {
         kiln_dyn_lexer_next(lex);
         const char *fn_name = "anonymous";
