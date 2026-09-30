@@ -153,6 +153,7 @@ pub(crate) fn validate_code(
             // string constant has one.
             Instruction::GetProperty(name)
             | Instruction::SetProperty(name)
+            | Instruction::DefineOwnProperty(name)
             | Instruction::DeleteProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::SetSuperPropertyStrict { name, .. }
@@ -426,11 +427,13 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
         | Instruction::SetPropertyStrict { .. }
+        | Instruction::DefineOwnProperty(_)
         | Instruction::NewArray { .. }
         | Instruction::ToPropertyKey
         | Instruction::GetComputed
         | Instruction::SetComputed
         | Instruction::SetComputedStrict { .. }
+        | Instruction::DefineOwnComputed
         | Instruction::CallMethod { .. }
         | Instruction::LoadThis
         | Instruction::PushHandler(_)
