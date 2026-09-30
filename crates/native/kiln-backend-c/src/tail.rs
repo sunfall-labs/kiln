@@ -230,7 +230,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(&val, kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
+                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(host, &val, kiln_missing_name_{index}, {}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
                 c_string(&text.to_scalar_string().unwrap_or_default()),
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
                 text.len(),
@@ -269,7 +269,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
             )
             .unwrap();
         }
@@ -279,7 +279,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default()))
             )
             .unwrap();
@@ -293,7 +293,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode_key(host, globals, {symbol}_constant_{name}, NULL, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
+                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode_key(host, globals, {symbol}_constant_{name}, NULL, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
             )
             .unwrap();

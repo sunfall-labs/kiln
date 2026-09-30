@@ -192,10 +192,12 @@ static int kiln_c99_kiln_extensions_on(void);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
-static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
+int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
+                            size_t name_len, int *found, int depth, kiln_value *thrown);
 int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
                               size_t name_len, int depth, kiln_value *thrown);
-static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found);
+int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_string *name,
+                                int *found, int depth, kiln_value *thrown);
 static int kiln_c99_declare_global_key(const kiln_string *name, int configurable);
 static kiln_value kiln_c99_temporal_value(void *handle);
 static void *kiln_c99_temporal_of(kiln_value value);
@@ -337,6 +339,8 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
 static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *view,
                             const kiln_string *canonical, kiln_value *out, int depth,
                             kiln_value *thrown);
+static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256],
+                                         const char **bytes, size_t *length);
 static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, kiln_value *out, int depth,
                                  kiln_value *thrown);

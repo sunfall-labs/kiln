@@ -694,44 +694,53 @@ static int kiln_c99_global_object_val(kiln_val *out) {
 /* A global the runtime bootstrap defines in TypeScript -- `structuredClone` -- read the way a
  * program's own global read goes. The bootstrap runs before any module body, so the only way to
  * miss is a program compiled without it, which is refused by name rather than read as undefined. */
-int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
-                              size_t name_len, int depth, kiln_value *thrown) {
+static int kiln_c99_object_prototype_binding(kiln_host *host, kiln_value *out,
+                                             const kiln_string *view, int *found, int depth,
+                                             kiln_value *thrown) {
     kiln_value object_prototype = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
     kiln_value store = kiln_c99_undefined();
-    int found = 0;
-    int status = kiln_c99_global_binding(out, name, name_len, &found);
+    kiln_property property;
+    char scratch[256];
+    const char *name;
+    size_t name_len;
+    int status;
+    *found = 0;
+    if (!kiln_c99_intrinsic_ascii_view(view, scratch, &name, &name_len)) return KILN_C99_OK;
+    status = kiln_c99_callable_store(object_prototype, &store, 0);
     if (status != KILN_C99_OK) return status;
-    if (!found) {
-        kiln_string view;
-        kiln_property property;
-        view.unit_len = (uint32_t)name_len;
-        view.flags = kiln_c99_fixed_key_flags(name, name_len);
-        view.data = name;
-        status = kiln_c99_callable_store(object_prototype, &store, 0);
+    if (store.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_property_read_own(kiln_c99_object_of(store), view, NULL, &property)) {
+        /* The property may be an accessor or a program's replacement for an intrinsic.
+         * Resolve it through [[Get]] so the live descriptor and correct receiver decide. */
+        status = kiln_c99_get_key(host, object_prototype, view, NULL, out, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        if (store.tag == KILN_VALUE_OBJECT &&
-            kiln_c99_property_read_own(kiln_c99_object_of(store), &view, NULL, &property)) {
-            /* The property may be an accessor or a program's replacement for an intrinsic.
-             * Resolve it through [[Get]] so the live descriptor and correct receiver decide. */
-            status = kiln_c99_get_key(host, object_prototype, &view, NULL, out, depth, thrown);
-            if (status != KILN_C99_OK) return status;
-            found = 1;
-        } else {
-            uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
-                                                        name, name_len);
-            if (method != 0) {
-                *out = kiln_c99_method(method);
-                found = 1;
-            }
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    {
+        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                    name, name_len);
+        if (method != 0) {
+            *out = kiln_c99_method(method);
+            *found = 1;
         }
     }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
+                              size_t name_len, int depth, kiln_value *thrown) {
+    int found = 0;
+    int status = kiln_c99_global_binding(host, out, name, name_len, &found, depth, thrown);
+    if (status != KILN_C99_OK) return status;
     if (!found) {
         KILN_C99_REFUSE("a bootstrap-defined global read before the runtime bootstrap defined it");
     }
     return KILN_C99_OK;
 }
 
-static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
+int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
+                            size_t name_len, int *found, int depth, kiln_value *thrown) {
     kiln_value globals;
     kiln_property property;
     kiln_string view;
@@ -749,13 +758,14 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
         *found = 1;
         return KILN_C99_OK;
     }
-    return KILN_C99_OK;
+    return kiln_c99_object_prototype_binding(host, out, &view, found, depth, thrown);
 }
 
 /* The headed form: global names compare as units, so a non-ASCII binding resolves the
  * way the interpreter resolves it rather than missing every name the ASCII-only
  * comparison cannot spell. */
-static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found) {
+int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_string *name,
+                                int *found, int depth, kiln_value *thrown) {
     kiln_value globals;
     kiln_property property;
     int status = kiln_c99_global_object(&globals);
@@ -767,6 +777,39 @@ static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name,
         *out = property.value;
         *found = 1;
         return KILN_C99_OK;
+    }
+    return kiln_c99_object_prototype_binding(host, out, name, found, depth, thrown);
+}
+
+static int kiln_c99_global_own_binding(kiln_value *out, const char *name, size_t name_len,
+                                      int *found) {
+    kiln_value globals;
+    kiln_property property;
+    kiln_string view;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) return status;
+    if (name_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)name_len;
+    view.flags = kiln_c99_fixed_key_flags(name, name_len);
+    view.data = name;
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
+        *out = property.value;
+        *found = 1;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_global_own_binding_key(kiln_value *out, const kiln_string *name,
+                                          int *found) {
+    kiln_value globals;
+    kiln_property property;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) return status;
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
+        *out = property.value;
+        *found = 1;
     }
     return KILN_C99_OK;
 }
@@ -783,7 +826,7 @@ static int kiln_c99_declare_global(const char *name, size_t name_len, int config
     kiln_value existing;
     kiln_property *slot;
     int found = 0;
-    int status = kiln_c99_global_binding(&existing, name, name_len, &found);
+    int status = kiln_c99_global_own_binding(&existing, name, name_len, &found);
     if (status != KILN_C99_OK || found) {
         return status;
     }
@@ -810,7 +853,7 @@ static int kiln_c99_declare_global_key(const kiln_string *name, int configurable
     kiln_value existing;
     kiln_property *slot;
     int found = 0;
-    int status = kiln_c99_global_binding_key(&existing, name, &found);
+    int status = kiln_c99_global_own_binding_key(&existing, name, &found);
     if (status != KILN_C99_OK || found) {
         return status;
     }
