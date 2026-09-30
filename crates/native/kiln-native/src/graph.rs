@@ -3908,7 +3908,18 @@ static int kiln_graph_enter(void *opaque) {
             {
                 if modules[provider_index].1.instantiation.is_some() {
                     writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];").unwrap();
+                } else {
+                    writeln!(output, "        status = kiln_c99_make_cell(&kiln_imports_{index}[{import_index}]); if (status != KILN_C99_OK) return status;").unwrap();
                 }
+            }
+            match graph_import_value(graph, modules, &indices, node, import)? {
+                NativeGraphImport::Binding {
+                    live_cell: false, ..
+                }
+                | NativeGraphImport::CommonJsNamed { .. } => {
+                    writeln!(output, "        status = kiln_c99_make_cell(&kiln_imports_{index}[{import_index}]); if (status != KILN_C99_OK) return status;").unwrap();
+                }
+                _ => {}
             }
         }
     }

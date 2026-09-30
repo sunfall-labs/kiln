@@ -461,6 +461,13 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             if (!existed) {
                 return kiln_c99_throw_module_namespace_define_key(thrown, view);
             }
+            if (current.value.tag == KILN_VALUE_CELL) {
+                kiln_val *cell = kiln_c99_cell_of(current.value);
+                if (cell == NULL) return KILN_C99_CONTROL_ERROR;
+                status = kiln_c99_val_check_tdz(*cell, thrown);
+                if (status != KILN_C99_OK) return status;
+                current.value = kiln_val_to_boundary(*cell);
+            }
             {
                 int refused = (has_getter || has_setter) ||
                               (has_value && !kiln_c99_strict_equal(value, current.value)) ||
@@ -962,6 +969,13 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         kiln_property property;
         const kiln_string *ikey = kiln_c99_interned_key_in(kiln_c99_gc_heap(), view);
         if (kiln_c99_property_read_own(object, view, ikey, &property)) {
+            if (object->module_namespace && property.value.tag == KILN_VALUE_CELL) {
+                kiln_val *cell = kiln_c99_cell_of(property.value);
+                if (cell == NULL) return KILN_C99_CONTROL_ERROR;
+                status = kiln_c99_val_check_tdz(*cell, thrown);
+                if (status != KILN_C99_OK) return status;
+                property.value = kiln_val_to_boundary(*cell);
+            }
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;

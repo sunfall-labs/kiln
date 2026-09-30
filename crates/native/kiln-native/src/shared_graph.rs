@@ -927,7 +927,18 @@ typedef struct {wrapper_symbol}_realm_context {{
                         "    import_arrays[{index}][{import_index}] = namespaces[{provider_index}];"
                     )
                     .unwrap();
+                } else {
+                    writeln!(output, "    status = kiln_c99_make_cell(&import_arrays[{index}][{import_index}]); if (status != KILN_C99_OK) goto cleanup;").unwrap();
                 }
+            }
+            match graph_import_value(graph, modules, &indices, node, import)? {
+                NativeGraphImport::Binding {
+                    live_cell: false, ..
+                }
+                | NativeGraphImport::CommonJsNamed { .. } => {
+                    writeln!(output, "    status = kiln_c99_make_cell(&import_arrays[{index}][{import_index}]); if (status != KILN_C99_OK) goto cleanup;").unwrap();
+                }
+                _ => {}
             }
         }
     }
