@@ -445,6 +445,59 @@ export function createRenderer<T extends Node = Node>(config?: any): {
   return renderer;
 }
 
+const defaultRenderer = createRenderer();
+
+export function createElement(tag: any, props?: any, ...children: any[]): Node {
+  let node: Node;
+  if (typeof tag === "function") {
+    const isClass = tag.prototype && (tag.prototype instanceof Node || tag.prototype.constructor === Node);
+    if (isClass) {
+      node = new tag(props);
+    } else {
+      return tag({ ...(props || {}), children });
+    }
+  } else if (typeof tag === "string") {
+    node = defaultRenderer.createElement(tag);
+  } else {
+    node = new Node("unknown");
+  }
+
+  if (props) {
+    for (const key of Object.keys(props)) {
+      if (key !== "children") {
+        node.setProperty(key, props[key]);
+      }
+    }
+  }
+
+  const allChildren = children.length > 0 ? children : (props && props.children ? (Array.isArray(props.children) ? props.children : [props.children]) : []);
+  for (let i = 0; i < allChildren.length; i++) {
+    const child = allChildren[i];
+    if (child !== null && child !== undefined && child !== false) {
+      if (typeof child === "string" || typeof child === "number") {
+        node.appendChild(new Text(String(child)));
+      } else if (child instanceof Node) {
+        node.appendChild(child);
+      } else if (Array.isArray(child)) {
+        for (let j = 0; j < child.length; j++) {
+          const c = child[j];
+          if (c instanceof Node) {
+            node.appendChild(c);
+          } else if (typeof c === "string" || typeof c === "number") {
+            node.appendChild(new Text(String(c)));
+          }
+        }
+      }
+    }
+  }
+
+  return node;
+}
+
+export const h = createElement;
+export const Fragment = (props: any) => props?.children;
+
+
 // OS Utility Bridges (ADR 0074 §3)
 export interface FileFilter {
   name: string;
@@ -705,6 +758,9 @@ export default {
   Slider,
   Toggle,
   createRenderer,
+  createElement,
+  h,
+  Fragment,
   dialog,
   clipboard,
   systemTheme,
