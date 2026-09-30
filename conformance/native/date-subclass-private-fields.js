@@ -10,10 +10,10 @@ console.log(date.toISOString());
 
 const marker = Symbol('marker');
 const held = { value: 42 };
-const date = new Date(0);
-date.extra = held;
-date[marker] = 'symbol';
-console.log(Object.keys(date).join(','), Object.hasOwn(date, 'extra'),
-  Object.getOwnPropertyDescriptor(date, marker).value);
+const plainDate = new Date(0);
+plainDate.extra = held;
+plainDate[marker] = 'symbol';
+console.log(Object.keys(plainDate).join(','), Object.hasOwn(plainDate, 'extra'),
+  Object.getOwnPropertyDescriptor(plainDate, marker).value);
 for (let i = 0; i < 50; i++) new Date(i);
-console.log(date.extra.value, date.getTime(), delete date.extra, Object.hasOwn(date, 'extra'));
+console.log(plainDate.extra.value, plainDate.getTime(), delete plainDate.extra, Object.hasOwn(plainDate, 'extra'));
