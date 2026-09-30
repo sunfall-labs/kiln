@@ -1767,12 +1767,15 @@ pub(super) enum NativeGraphImport {
     },
 }
 
-/// ESM source modules participating in a dependency cycle need an instantiation entrypoint.
-/// Keep this graph-level decision independent of source order: a self-edge is a cycle too.
-pub(super) fn cycle_module_paths(graph: &ModuleGraph) -> std::collections::HashSet<PathBuf> {
+/// ESM source modules requiring live bindings need an instantiation entrypoint. Keep the cycle
+/// decision independent of source order: a self-edge is a cycle too.
+pub(super) fn preinstantiated_module_paths(
+    graph: &ModuleGraph,
+) -> std::collections::HashSet<PathBuf> {
     // Modules participating in a cycle and their ESM dependencies are instantiated before any
-    // evaluation. The dependency closure supplies live cells for imports captured by closures
-    // created in the cyclic component; unrelated acyclic modules keep their single-entry ABI.
+    // evaluation. Modules whose ESM namespace is observed also need preallocated export cells:
+    // a namespace keeps live views of exports even when its provider is acyclic. The dependency
+    // closure supplies live cells for imports captured by closures created in these modules.
     let nodes = graph
         .modules()
         .filter(|node| node.source == ModuleSource::Source)
@@ -1837,7 +1840,69 @@ pub(super) fn cycle_module_paths(graph: &ModuleGraph) -> std::collections::HashS
             cyclic.extend(members.into_iter().map(|index| nodes[index].path.clone()));
         }
     }
-    let mut pending = cyclic.iter().cloned().collect::<Vec<_>>();
+    // Namespace providers cannot publish snapshots. Namespace imports and CommonJS `require`
+    // of ESM both expose namespace objects; dynamic imports can target any ESM module retained
+    // by the graph, so preserve cells for all of them when one is present.
+    let mut namespace_providers = std::collections::HashSet::new();
+    let has_dynamic_import = graph
+        .modules()
+        .any(|node| node.program.program.has_dynamic_import());
+    if has_dynamic_import {
+        namespace_providers.extend(nodes.iter().map(|node| node.path.clone()));
+    }
+    for node in graph.modules() {
+        for import in &node.program.imports {
+            if import.imported != kiln_ir::NAMESPACE_IMPORT {
+                continue;
+            }
+            if let Some(dependency) = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                && graph
+                    .module(&dependency.target)
+                    .is_some_and(|provider| provider.source == ModuleSource::Source)
+            {
+                namespace_providers.insert(dependency.target.clone());
+            }
+        }
+        // CommonJS `require(esm)` returns the provider's namespace object as well.
+        if node.source == ModuleSource::CommonJs {
+            for dependency in &node.dependencies {
+                if graph
+                    .module(&dependency.target)
+                    .is_some_and(|provider| provider.source == ModuleSource::Source)
+                {
+                    namespace_providers.insert(dependency.target.clone());
+                }
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
+            if graph
+                .module(&dependency.target)
+                .is_some_and(|provider| provider.source == ModuleSource::Source)
+            {
+                namespace_providers.insert(dependency.target.clone());
+            }
+        }
+    }
+    for path in graph.declared_includes() {
+        if graph
+            .module(path)
+            .is_some_and(|provider| provider.source == ModuleSource::Source)
+        {
+            namespace_providers.insert(path.clone());
+        }
+    }
+    let mut pending = cyclic
+        .iter()
+        .chain(namespace_providers.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    cyclic.extend(namespace_providers);
     while let Some(path) = pending.pop() {
         let Some(node) = graph.module(&path) else {
             continue;

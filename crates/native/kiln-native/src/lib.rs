@@ -1850,7 +1850,7 @@ impl NativeBuilder {
             .modules()
             .filter(|node| !native_plan.excluded.contains(&node.path))
             .collect::<Vec<_>>();
-        let cyclic_modules = graph::cycle_module_paths(graph);
+        let cyclic_modules = graph::preinstantiated_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
@@ -2474,7 +2474,7 @@ impl NativeBuilder {
             );
         }
         let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
-        let cyclic_modules = graph::cycle_module_paths(graph);
+        let cyclic_modules = graph::preinstantiated_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let module_started = trace_emit.then(Instant::now);
             let node = nodes[index];

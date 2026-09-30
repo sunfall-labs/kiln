@@ -4150,6 +4150,40 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
 }
 
 #[test]
+fn acyclic_namespace_providers_are_preinstantiated_for_live_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-acyclic-live-namespace");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let provider = project.path.join("provider.mjs");
+    fs::write(
+        &provider,
+        "export let value = 1; export function update(next) { value = next; }",
+    )
+    .expect("write namespace provider");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as ns from './provider.mjs'; export { ns };",
+    )
+    .expect("write namespace importer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build namespace graph");
+
+    let preinstantiated = graph::preinstantiated_module_paths(&graph);
+    let provider = fs::canonicalize(provider).expect("canonical provider path");
+    let entry = fs::canonicalize(entry).expect("canonical entry path");
+    assert!(preinstantiated.contains(&provider));
+    assert!(!preinstantiated.contains(&entry));
+}
+
+#[test]
 fn executable_graph_demands_only_statically_read_namespace_members() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
