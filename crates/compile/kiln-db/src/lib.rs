@@ -426,6 +426,13 @@ pub trait QueryEngine {
     fn module_ir(&mut self, file: FileId) -> CompiledModule {
         kiln_ir::compile_module(&self.parse(file).module)
     }
+    /// Compile module IR using a stable logical identity for private names. The default is
+    /// intentionally uncached; memoizing engines should key this query by both file and identity.
+    fn module_ir_with_identity(&mut self, file: FileId, identity: &str) -> CompiledModule {
+        let mut module = self.parse(file).module;
+        module.module_id = identity.into();
+        kiln_ir::compile_module(&module)
+    }
     /// Per-function summaries supplied by the engine's registered analysis query.
     ///
     /// The default reports no analysis, not that the module declares no functions.

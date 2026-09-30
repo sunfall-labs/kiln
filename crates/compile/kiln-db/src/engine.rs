@@ -91,6 +91,7 @@ struct FileState {
     parse: Option<Memo<Parsed>>,
     ir: Option<Memo<Compiled>>,
     module_ir: Option<Memo<CompiledModule>>,
+    module_ir_by_identity: AHashMap<String, (Revision, CompiledModule)>,
     summaries: Option<Memo<Vec<FunctionSummary>>>,
     interface: Option<Memo<Interface>>,
 }
@@ -624,6 +625,7 @@ impl QueryEngine for MemoEngine {
             parse: None,
             ir: None,
             module_ir: None,
+            module_ir_by_identity: AHashMap::new(),
             summaries: None,
             interface: None,
         });
@@ -724,6 +726,33 @@ impl QueryEngine for MemoEngine {
             .expect(FORCED)
             .value
             .clone()
+    }
+
+    fn module_ir_with_identity(&mut self, file: FileId, identity: &str) -> CompiledModule {
+        self.force(QueryKey::Parse(file));
+        let revision = self.file(file).source_revision;
+        if let Some((cached_revision, program)) =
+            self.file(file).module_ir_by_identity.get(identity)
+            && *cached_revision == revision
+        {
+            self.stats.validated += 1;
+            return program.clone();
+        }
+        let mut module = self
+            .file(file)
+            .parse
+            .as_ref()
+            .expect(FORCED)
+            .value
+            .module
+            .clone();
+        module.module_id = identity.into();
+        let program = kiln_ir::compile_module(&module);
+        self.stats.ir_computed += 1;
+        self.file_mut(file)
+            .module_ir_by_identity
+            .insert(identity.to_owned(), (revision, program.clone()));
+        program
     }
 
     fn function_summaries(&mut self, file: FileId) -> Vec<FunctionSummary> {

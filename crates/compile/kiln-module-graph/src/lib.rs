@@ -29,8 +29,10 @@ pub const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
 /// A cache-stable identity for private names in one project graph. Files retain their absolute
 /// paths everywhere else (resolution, diagnostics, and `import.meta`); only the compiler identity
 /// uses the path relative to the canonical project root.
-fn graph_module_identity(project_root: &Path, path: &Path) -> String {
-    path.strip_prefix(project_root)
+pub fn graph_module_identity(project_root: &Path, path: &Path) -> String {
+    let logical_root =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    path.strip_prefix(&logical_root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")

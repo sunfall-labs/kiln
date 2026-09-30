@@ -1226,7 +1226,7 @@ fn build_graph<E: QueryEngine>(
         })
         .collect::<Vec<_>>();
     let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
-        module_payload(engine, module_path, source_kind)
+        module_payload(engine, module_path, project_root, source_kind)
     };
     let resolver = if node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
@@ -1252,6 +1252,7 @@ fn build_graph<E: QueryEngine>(
 fn module_payload<E: QueryEngine>(
     engine: &mut E,
     module_path: &Path,
+    project_root: &str,
     source_kind: kiln_module_graph::ModuleSource,
 ) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
     if source_kind == kiln_module_graph::ModuleSource::Asset {
@@ -1266,6 +1267,7 @@ fn module_payload<E: QueryEngine>(
                 path: module_path.to_path_buf(),
             })?;
     let module_file = engine.intern(module_path_string);
+    let identity = kiln_module_graph::graph_module_identity(Path::new(project_root), module_path);
     if engine.source(module_file).is_none() {
         return Err(kiln_module_graph::ModuleGraphError::Source {
             path: module_path.to_path_buf(),
@@ -1285,8 +1287,9 @@ fn module_payload<E: QueryEngine>(
     }
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let source = engine.source(module_file).expect("source checked above");
-        let (hir, static_requires) =
+        let (mut hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
+        hir.module_id = identity.clone().into();
         if hir.has_static_module_syntax() {
             return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
                 path: module_path.to_path_buf(),
@@ -1303,7 +1306,7 @@ fn module_payload<E: QueryEngine>(
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
     engine
-        .module_ir(module_file)
+        .module_ir_with_identity(module_file, &identity)
         .map(kiln_module_graph::ModulePayload::Program)
         .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
             path: module_path.to_path_buf(),
