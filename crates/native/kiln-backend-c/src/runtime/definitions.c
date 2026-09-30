@@ -595,13 +595,34 @@ int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value
     kiln_value descriptor;
     kiln_value name;
     const kiln_string *view;
+    /* The allocator may collect inside this helper. Keep every incoming language value
+     * discoverable in this C frame until the definition has published its edge. */
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
     int status = kiln_c99_new_object(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, descriptor, "value", 5, value, 0, NULL);
+    kiln_c99_gc_keep_alive(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, descriptor, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+    kiln_c99_gc_keep_alive(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, descriptor, "enumerable", 10, kiln_c99_boolean(1), 0, NULL);
+    kiln_c99_gc_keep_alive(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, descriptor, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
     if (status != KILN_C99_OK) return status;
@@ -610,7 +631,19 @@ int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value
         KILN_C99_REFUSE("a class field key that is neither a string nor a named symbol slot");
     }
     view = (const kiln_string *)name.ptr;
-    return kiln_c99_define_property_key(host, target, view, NULL, descriptor, depth, thrown);
+    kiln_c99_gc_keep_alive(&name);
+    kiln_c99_gc_keep_alive(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
+    status = kiln_c99_define_property_key(host, target, view, kiln_c99_property_ikey(key),
+                                         descriptor, depth, thrown);
+    kiln_c99_gc_keep_alive(&name);
+    kiln_c99_gc_keep_alive(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(&value);
+    return status;
 }
 
 /* Every own property of `descriptors`, defined onto `target`. The shared half of

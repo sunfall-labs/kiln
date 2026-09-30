@@ -193,7 +193,8 @@ static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
-int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len);
+int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
+                              size_t name_len, int depth, kiln_value *thrown);
 static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found);
 static int kiln_c99_declare_global_key(const kiln_string *name, int configurable);
 static kiln_value kiln_c99_temporal_value(void *handle);

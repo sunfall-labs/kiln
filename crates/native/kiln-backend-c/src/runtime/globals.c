@@ -694,10 +694,37 @@ static int kiln_c99_global_object_val(kiln_val *out) {
 /* A global the runtime bootstrap defines in TypeScript -- `structuredClone` -- read the way a
  * program's own global read goes. The bootstrap runs before any module body, so the only way to
  * miss is a program compiled without it, which is refused by name rather than read as undefined. */
-int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len) {
+int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
+                              size_t name_len, int depth, kiln_value *thrown) {
+    kiln_value object_prototype = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    kiln_value store = kiln_c99_undefined();
     int found = 0;
     int status = kiln_c99_global_binding(out, name, name_len, &found);
     if (status != KILN_C99_OK) return status;
+    if (!found) {
+        kiln_string view;
+        kiln_property property;
+        view.unit_len = (uint32_t)name_len;
+        view.flags = kiln_c99_fixed_key_flags(name, name_len);
+        view.data = name;
+        status = kiln_c99_callable_store(object_prototype, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_property_read_own(kiln_c99_object_of(store), &view, NULL, &property)) {
+            /* The property may be an accessor or a program's replacement for an intrinsic.
+             * Resolve it through [[Get]] so the live descriptor and correct receiver decide. */
+            status = kiln_c99_get_key(host, object_prototype, &view, NULL, out, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            found = 1;
+        } else {
+            uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                        name, name_len);
+            if (method != 0) {
+                *out = kiln_c99_method(method);
+                found = 1;
+            }
+        }
+    }
     if (!found) {
         KILN_C99_REFUSE("a bootstrap-defined global read before the runtime bootstrap defined it");
     }
@@ -722,18 +749,6 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
         *found = 1;
         return KILN_C99_OK;
     }
-    /* GlobalEnvironment's object record uses HasProperty, so inherited Object.prototype
-     * methods are resolvable as bare identifiers in Node (`toString ===
-     * Object.prototype.toString`). Keep the unmodified intrinsic fallback here; own global
-     * bindings above continue to take priority. */
-    {
-        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
-                                                    name, name_len);
-        if (method != 0) {
-            *out = kiln_c99_method(method);
-            *found = 1;
-        }
-    }
     return KILN_C99_OK;
 }
 
@@ -752,27 +767,6 @@ static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name,
         *out = property.value;
         *found = 1;
         return KILN_C99_OK;
-    }
-    {
-        char *ascii = malloc((size_t)name->unit_len + 1);
-        size_t index;
-        if (ascii == NULL) return KILN_C99_OUT_OF_MEMORY;
-        for (index = 0; index < name->unit_len; ++index) {
-            uint32_t unit = kiln_string_unit_at(name, index);
-            if (unit > 0x7f) {
-                free(ascii);
-                return KILN_C99_OK;
-            }
-            ascii[index] = (char)unit;
-        }
-        ascii[name->unit_len] = '\0';
-        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
-                                                    ascii, name->unit_len);
-        free(ascii);
-        if (method != 0) {
-            *out = kiln_c99_method(method);
-            *found = 1;
-        }
     }
     return KILN_C99_OK;
 }

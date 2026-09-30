@@ -537,7 +537,7 @@ pub(super) fn emit_graph_op(
             BuiltinLoad::Global(name) => {
                 writeln!(
                     output,
-                    "    {{ kiln_value obj; int status = kiln_c99_bootstrap_global(&obj, \"{name}\", {}); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(obj); }}",
+                    "    {{ kiln_value obj; int status = kiln_c99_bootstrap_global(host, &obj, \"{name}\", {}, depth, thrown); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(obj); }}",
                     name.len()
                 )
                 .unwrap();
