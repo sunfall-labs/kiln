@@ -3702,13 +3702,21 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         const kiln_string *view = (const kiln_string *)name.ptr;
                         kiln_value descriptor, enumerable, copied;
                         int found;
-                        status = kiln_c99_describe_property_key(host, src_val, view, NULL,
-                            &descriptor, &found, depth, thrown);
-                        if (status != KILN_C99_OK) return status;
+                        if (src_val.tag == KILN_VALUE_TYPED_ARRAY) {
+                            int is_enumerable;
+                            kiln_c99_typed_own_key(src_val, view, &found, &is_enumerable);
+                            enumerable = kiln_c99_boolean(is_enumerable);
+                        } else {
+                            status = kiln_c99_describe_property_key(host, src_val, view, NULL,
+                                &descriptor, &found, depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                            if (found) {
+                                status = kiln_c99_get(host, descriptor, "enumerable", 10,
+                                    &enumerable, depth, thrown);
+                                if (status != KILN_C99_OK) return status;
+                            }
+                        }
                         if (!found) continue;
-                        status = kiln_c99_get(host, descriptor, "enumerable", 10,
-                            &enumerable, depth, thrown);
-                        if (status != KILN_C99_OK) return status;
                         if (!kiln_c99_truthy(enumerable)) continue;
                         status = kiln_c99_get_computed(host, src_val, key, &copied, depth, thrown);
                         if (status == KILN_C99_OK)
