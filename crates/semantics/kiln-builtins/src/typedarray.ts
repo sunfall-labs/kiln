@@ -65,6 +65,127 @@ delete (globalThis as any).__kilnTypedArraySort;
     configurable: true,
   });
 
+  Object.defineProperty(Uint8Array, "fromBase64", {
+    value: function fromBase64(input: any, options?: any): Uint8Array {
+      if (typeof input !== "string") {
+        throw new TypeError("Uint8Array.fromBase64 requires a string argument");
+      }
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        throw new TypeError("options must be an object");
+      }
+      const alphabetOption = options === undefined ? undefined : options.alphabet;
+      const alphabet = alphabetOption === undefined ? "base64" : String(alphabetOption);
+      if (alphabet !== "base64" && alphabet !== "base64url") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      const handlingOption = options === undefined ? undefined : options.lastChunkHandling;
+      const handling = handlingOption === undefined ? "loose" : String(handlingOption);
+      if (handling !== "loose" && handling !== "strict" && handling !== "stop-before-partial") {
+        throw new TypeError('lastChunkHandling must be "loose", "strict", or "stop-before-partial"');
+      }
+      const plus = alphabet === "base64" ? 62 : -1;
+      const slash = alphabet === "base64" ? 63 : -1;
+      const dash = alphabet === "base64url" ? 62 : -1;
+      const under = alphabet === "base64url" ? 63 : -1;
+      const values: number[] = [];
+      let padded = false;
+      let padding = 0;
+      let sourceLength = 0;
+      for (let i = 0; i < input.length; i++) {
+        const code = input.charCodeAt(i);
+        if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) continue;
+        sourceLength++;
+        if (code === 61) {
+          padded = true;
+          padding++;
+          if (padding > 2) throw new SyntaxError("invalid Base64 string");
+          continue;
+        }
+        if (padded) throw new SyntaxError("invalid Base64 string");
+        let value = -1;
+        if (code >= 65 && code <= 90) value = code - 65;
+        else if (code >= 97 && code <= 122) value = code - 71;
+        else if (code >= 48 && code <= 57) value = code + 4;
+        else if (code === 43) value = plus;
+        else if (code === 47) value = slash;
+        else if (code === 45) value = dash;
+        else if (code === 95) value = under;
+        if (value < 0) throw new SyntaxError("invalid Base64 string");
+        values.push(value);
+      }
+      const remainder = values.length % 4;
+      if (padded && (sourceLength % 4 !== 0 ||
+          (padding === 1 && remainder !== 3) || (padding === 2 && remainder !== 2))) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      if (handling === "stop-before-partial" && !padded) {
+        values.length -= remainder;
+      } else if (handling === "strict" && (remainder !== 0 || !padded && values.length % 4 !== 0)) {
+        throw new SyntaxError("invalid Base64 string");
+      } else if (remainder === 1) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      const outputLength = Math.floor(values.length * 6 / 8);
+      const bytes = new Uint8Array(outputLength);
+      let accumulator = 0;
+      let bits = 0;
+      let written = 0;
+      for (const value of values) {
+        accumulator = (accumulator << 6) | value;
+        bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          bytes[written++] = (accumulator >> bits) & 255;
+        }
+      }
+      if (handling === "strict" && bits !== 0 && (accumulator & ((1 << bits) - 1)) !== 0) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      return bytes;
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  Object.defineProperty(Uint8Array.prototype, "toBase64", {
+    value: function toBase64(this: any, options?: any): string {
+      requireTypedArray(this, "toBase64");
+      if (this instanceof DataView || !(this instanceof Uint8Array)) {
+        throw new TypeError("Uint8Array.prototype.toBase64 called on an incompatible receiver");
+      }
+      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        throw new TypeError("options must be an object");
+      }
+      const alphabetOption = options === undefined ? undefined : options.alphabet;
+      const alphabet = alphabetOption === undefined ? "base64" : String(alphabetOption);
+      if (alphabet !== "base64" && alphabet !== "base64url") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      const omitPaddingOption = options === undefined ? undefined : options.omitPadding;
+      const omitPadding = Boolean(omitPaddingOption);
+      const chars = alphabet === "base64"
+        ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      let result = "";
+      for (let i = 0; i < this.length; i += 3) {
+        const remaining = this.length - i;
+        const a = this[i];
+        const b = remaining > 1 ? this[i + 1] : 0;
+        const c = remaining > 2 ? this[i + 2] : 0;
+        const packed = (a << 16) | (b << 8) | c;
+        result += chars[(packed >>> 18) & 63] + chars[(packed >>> 12) & 63];
+        if (remaining > 1) result += chars[(packed >>> 6) & 63];
+        else if (!omitPadding) result += "=";
+        if (remaining > 2) result += chars[packed & 63];
+        else if (!omitPadding) result += "=";
+      }
+      return result;
+    },
+    writable: true,
+    configurable: true,
+  });
+
   Object.defineProperty(Uint8Array.prototype, "toHex", {
     value: function toHex(this: any): string {
       if (!(this instanceof Uint8Array)) {

@@ -1838,10 +1838,6 @@ builtin_backlog! {
      "answered from the receiver's element kind, not from a row"),
     ("Uint8Array", "BYTES_PER_ELEMENT",
      "answered from the receiver's element kind, not from a row"),
-    ("Uint8Array", "fromBase64",
-     "not implemented"),
-    ("Uint8Array", "fromHex",
-     "not implemented"),
     ("Atomics", "add",
      "refused by name: shared memory has no representation here"),
     ("Atomics", "and",
@@ -2153,7 +2149,7 @@ pub struct AbsentAnswer {
 /// `typeof x.member === "function"` walks past. A bundled `postcss` died on `path.dirname` for
 /// weeks that way, and a sweep on 2026-09-02 found thirty more: `Buffer.alloc` off
 /// `require("node:buffer")`, `ArrayBuffer.prototype`, `Symbol.prototype`,
-/// `String.prototype.values`, `Uint8Array.prototype.toBase64`, `Array.length`. Every one was a
+/// `String.prototype.values`, `Array.length`. Every one was a
 /// place where the *membership predicate* behind an `undefined` answer was short, and no build and
 /// no test could see it, because the wrong branch and the right branch look identical from inside.
 ///
@@ -4438,8 +4434,8 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
  * absent and are not implemented either: answering `undefined` for one would be a silent wrong
  * answer, so a read of one refuses instead and lands in the backlog by name. */
 static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t key_len) {
-    /* copyWithin, toLocaleString, toReversed, toSorted, and with are answered by typedarray.ts.
-     * The base64 and hex codecs are Uint8Array's alone and remain unbuilt. */
+    /* copyWithin, toLocaleString, toReversed, toSorted, with, and the Uint8Array codecs are
+     * answered by typedarray.ts. */
     static const char *const byte_members[] = {"setFromBase64", "setFromHex"};
     size_t index;
     if (!byte_view) {

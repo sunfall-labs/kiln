@@ -257,44 +257,10 @@ Segmenter.supportedLocalesOf = function (locales) {
 Intl.Segmenter = Segmenter;
 
 
-const __kilnUint8ToHex = globalThis.__kilnUint8ToHex;
+// The shared typedarray.ts bootstrap owns Uint8Array's public codecs on both engines.
+// Remove the native-only backing hooks after that bootstrap has captured any it needs.
 delete globalThis.__kilnUint8ToHex;
-const __kilnUint8ToBase64 = globalThis.__kilnUint8ToBase64;
 delete globalThis.__kilnUint8ToBase64;
-
-if (typeof Uint8Array !== "undefined" && Uint8Array.prototype) {
-    Uint8Array.prototype.toHex = function toHex() {
-        if (!(this instanceof Uint8Array)) {
-            throw new TypeError("toHex called on incompatible receiver");
-        }
-        return __kilnUint8ToHex(this);
-    };
-
-    Uint8Array.prototype.toBase64 = function toBase64(options) {
-        if (!(this instanceof Uint8Array)) {
-            throw new TypeError("toBase64 called on incompatible receiver");
-        }
-        let url = false;
-        let omitPadding = false;
-        if (options !== undefined) {
-            if (typeof options !== "object" || options === null) {
-                throw new TypeError("options must be an object");
-            }
-            if (options.alphabet !== undefined) {
-                const alphabet = String(options.alphabet);
-                if (alphabet === "base64url") {
-                    url = true;
-                } else if (alphabet === "base64") {
-                    url = false;
-                } else {
-                    throw new TypeError('alphabet must be "base64" or "base64url"');
-                }
-            }
-            omitPadding = Boolean(options.omitPadding);
-        }
-        return __kilnUint8ToBase64(this, url, omitPadding);
-    };
-}
 
 if (typeof JSON !== "undefined") {
     const __kilnOriginalParse = JSON.parse;
