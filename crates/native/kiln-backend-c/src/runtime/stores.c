@@ -644,7 +644,7 @@ kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *mem
     size_t at;
     int modified;
     int untouched;
-    if (heap == NULL || member == NULL) return 0;
+    if (heap == NULL || member == NULL || len >= sizeof heap->member_answers[0].cached_member) return 0;
     if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) {
         modified = (int)((heap->modified_builtins[builtin >> 6] >> (builtin & 63u)) & 1u);
     } else {
@@ -652,7 +652,8 @@ kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *mem
     }
     if (!modified) return 1;
     at = kiln_c99_member_answer_at(builtin, member);
-    if (heap->member_answers[at].member == member &&
+    if (heap->member_answers[at].cached_member_len == len &&
+        memcmp(heap->member_answers[at].cached_member, member, len) == 0 &&
         heap->member_answers[at].builtin == builtin &&
         heap->member_answers[at].serial == heap->builtin_store_serial) {
         return heap->member_answers[at].untouched;
@@ -662,6 +663,8 @@ kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *mem
     heap->member_answers[at].builtin = builtin;
     heap->member_answers[at].serial = heap->builtin_store_serial;
     heap->member_answers[at].untouched = (uint8_t)untouched;
+    memcpy(heap->member_answers[at].cached_member, member, len);
+    heap->member_answers[at].cached_member_len = (uint8_t)len;
     return untouched;
 }
 

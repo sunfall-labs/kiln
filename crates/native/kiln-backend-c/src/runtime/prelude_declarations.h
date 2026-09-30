@@ -364,7 +364,8 @@ static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_ca
 
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
-static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target,
+                                                 const kiln_string *key) {
     if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
     /* Issue 30: a kind's remembered method is its table's, which a member the program wrote onto
@@ -380,9 +381,15 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
-        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
-               (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
-                !kiln_c99_realm_builtin_modified(site->cached_builtin));
+        if (key == NULL || key->unit_len != site->cached_member_len ||
+            site->cached_member_len == UINT8_MAX ||
+            !kiln_c99_realm_cached_builtin_member_untouched(
+                site->cached_builtin, site->cached_member, site->cached_member_len)) return 0;
+        for (size_t index = 0; index < key->unit_len; ++index) {
+            uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
+            if (unit >= 0x80u || (unsigned char)site->cached_member[index] != unit) return 0;
+        }
+        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin;
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {

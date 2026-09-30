@@ -4168,7 +4168,7 @@ pub(super) fn emit_call_method(
                         }} \
                     }} \
                 }} \
-                if (!handled && kiln_c99_cached_method_matches(&site, v{o}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                if (!handled && kiln_c99_cached_method_matches(&site, v{o}, {symbol}_key_{name}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                     {prep_args}int status = kiln_c99_val_invoke_cached_method(host, site.cached_method, v{o}, call_args, (size_t){argc}, depth, thrown, &v{v}); \
                     {check} \
                     handled = 1; \

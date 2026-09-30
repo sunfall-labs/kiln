@@ -4739,7 +4739,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     if has_call_method {
         output.push_str("static __attribute__((unused)) inline int ku_call_method_fast(kiln_host *host, kiln_val ku_recv, const kiln_val *args, size_t argc, const kiln_string *key, kiln_c99_site *ku_s, const char *ku_site, size_t pc, const char *op, int depth, kiln_value *thrown, kiln_val *dst) {\n\
     if (KILN_LIKELY(ku_s != NULL)) {\n\
-        if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
+        if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv, key) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             return kiln_c99_val_invoke_cached_method(host, ku_s->cached_method, ku_recv, args, argc, depth, thrown, dst);\n\
         }\n\
         if (KILN_LIKELY(KILN_VAL_IS_OBJECT(ku_recv) && kiln_c99_site_count(ku_s) > 0)) {\n\

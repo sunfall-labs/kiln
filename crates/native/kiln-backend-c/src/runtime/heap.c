@@ -615,6 +615,8 @@ typedef struct kiln_gc_heap {
         const char *member;
         uint32_t builtin;
         uint8_t untouched;
+        uint8_t cached_member_len;
+        char cached_member[64];
     } member_answers[64];
     /* `kiln_c99_realm_tag_method_pristine`'s answers, by method code and receiver kind, valid
      * while `serial` is the heap's `builtin_store_serial` (parallel issue 30): a cached method

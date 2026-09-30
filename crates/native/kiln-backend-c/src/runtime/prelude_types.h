@@ -1770,10 +1770,9 @@ static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c9
         (member_len == 0 || (member_len < sizeof site->cached_member &&
                              memcmp(site->cached_member, member, member_len) == 0)))
         return;
-    if (seen == 1u && tag == KILN_VALUE_BUILTIN && site->cached_tag == tag &&
-        site->cached_method == method && site->cached_builtin == builtin &&
-        site->cached_member_len == UINT8_MAX && member_len >= sizeof site->cached_member)
-        return;
+    /* Published sites are immutable. A call site can be shared by realm threads; replacing its
+     * key buffer after publication would race readers and invalidate realm member-answer caches. */
+    if (seen == 1u) return;
     if (seen == KILN_C99_SITE_METHOD_WRITING ||
         !__atomic_compare_exchange_n(&site->has_cached_method, &seen,
                                      (uint8_t)KILN_C99_SITE_METHOD_WRITING, 0, __ATOMIC_SEQ_CST,
