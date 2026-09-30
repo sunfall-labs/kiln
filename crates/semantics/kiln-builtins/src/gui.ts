@@ -1016,6 +1016,17 @@ export interface SaveFileOptions {
   filters?: FileFilter[];
 }
 
+export interface PickFolderOptions {
+  title?: string;
+  defaultPath?: string;
+}
+
+export interface NotificationOptions {
+  title: string;
+  body?: string;
+  appName?: string;
+}
+
 export interface MessageOptions {
   title?: string;
   message: string;
@@ -1065,12 +1076,17 @@ export class HostGuiBridge {
 
       this.lib = this.ffi.dlopen(targetLib, {
         kiln_gui_dialog_open_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
+        kiln_gui_dialog_pick_folder: { arguments: ["pointer", "pointer", "pointer", "u64"], return: "i32" },
         kiln_gui_dialog_save_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
         kiln_gui_dialog_message: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
         kiln_gui_clipboard_read: { arguments: ["pointer", "u64"], return: "i32" },
         kiln_gui_clipboard_write: { arguments: ["pointer"], return: "i32" },
+        kiln_gui_clipboard_clear: { arguments: [], return: "i32" },
         kiln_gui_get_theme: { arguments: [], return: "i32" },
+        kiln_gui_notification_show: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
         kiln_gui_tray_create: { arguments: ["pointer"], return: "u32" },
+        kiln_gui_tray_set_tooltip: { arguments: ["u32", "pointer"], return: "i32" },
+        kiln_gui_tray_destroy: { arguments: ["u32"], return: "i32" },
         kiln_gui_tray_clear: { arguments: [], return: "i32" },
       });
       return this.lib !== null;
@@ -1101,11 +1117,28 @@ export class HostGuiBridge {
     }
   }
 
+  pickFolder(options?: PickFolderOptions): string | null {
+    if (!this.init() || !this.lib) return null;
+    try {
+      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
+      const defaultPathPtr = options?.defaultPath ? toCStr(this.ffi, options.defaultPath) : 0n;
+      const buf = new Uint8Array(4096);
+      const bufPtr = this.ffi.getRawPointer(buf.buffer);
+      const len = this.lib.kiln_gui_dialog_pick_folder(titlePtr, defaultPathPtr, bufPtr, BigInt(buf.length));
+      if (len > 0) {
+        return new TextDecoder().decode(buf.subarray(0, len));
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   saveFile(options?: SaveFileOptions): string | null {
     if (!this.init() || !this.lib) return null;
     try {
       const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
-      const defaultPathPtr = options?.default_path ? toCStr(this.ffi, options.default_path) : 0n;
+      const defaultPathPtr = options?.defaultPath ? toCStr(this.ffi, options.defaultPath) : 0n;
       let filterNamePtr = 0n;
       let filterExtsPtr = 0n;
       if (options?.filters && options.filters.length > 0) {
@@ -1160,6 +1193,15 @@ export class HostGuiBridge {
     }
   }
 
+  clipboardClear(): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      return this.lib.kiln_gui_clipboard_clear() === 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
   getTheme(): "dark" | "light" | null {
     if (!this.init() || !this.lib) return null;
     try {
@@ -1167,6 +1209,18 @@ export class HostGuiBridge {
       return code === 0 ? "dark" : "light";
     } catch (_) {
       return null;
+    }
+  }
+
+  showNotification(options: NotificationOptions): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      const titlePtr = toCStr(this.ffi, options.title);
+      const bodyPtr = options.body ? toCStr(this.ffi, options.body) : 0n;
+      const appNamePtr = options.appName ? toCStr(this.ffi, options.appName) : 0n;
+      return this.lib.kiln_gui_notification_show(titlePtr, bodyPtr, appNamePtr) === 0;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -1178,6 +1232,25 @@ export class HostGuiBridge {
       return id > 0 ? id : null;
     } catch (_) {
       return null;
+    }
+  }
+
+  setTrayTooltip(id: number, tooltip: string): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      const tipPtr = toCStr(this.ffi, tooltip);
+      return this.lib.kiln_gui_tray_set_tooltip(id, tipPtr) === 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  destroyTray(id: number): boolean {
+    if (!this.init() || !this.lib) return false;
+    try {
+      return this.lib.kiln_gui_tray_destroy(id) === 0;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -1201,6 +1274,25 @@ export const dialog = {
       return nativeMod.openFile(options);
     }
     const hostPath = hostGuiBridge.openFile(options);
+    if (hostPath !== null) return hostPath;
+    return null;
+  },
+  async openFiles(options?: OpenFileOptions): Promise<string[]> {
+    if (typeof G.__kilnGuiOpenFiles === "function") {
+      return G.__kilnGuiOpenFiles(options);
+    }
+    const single = await this.openFile(options);
+    return single ? [single] : [];
+  },
+  async pickFolder(options?: PickFolderOptions): Promise<string | null> {
+    if (typeof G.__kilnGuiPickFolder === "function") {
+      return G.__kilnGuiPickFolder(options);
+    }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.pickFolder === "function") {
+      return nativeMod.pickFolder(options);
+    }
+    const hostPath = hostGuiBridge.pickFolder(options);
     if (hostPath !== null) return hostPath;
     return null;
   },
@@ -1254,6 +1346,17 @@ export const clipboard = {
       virtualClipboard = String(text);
     }
   },
+  async clear(): Promise<void> {
+    if (typeof G.__kilnGuiClipboardClear === "function") {
+      return G.__kilnGuiClipboardClear();
+    }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.clear === "function") {
+      return nativeMod.clear();
+    }
+    hostGuiBridge.clipboardClear();
+    virtualClipboard = "";
+  },
 };
 
 let currentTheme: "dark" | "light" = "light";
@@ -1286,6 +1389,19 @@ export const systemTheme = {
   },
 };
 
+export const notification = {
+  async show(options: NotificationOptions): Promise<void> {
+    if (typeof G.__kilnGuiShowNotification === "function") {
+      return G.__kilnGuiShowNotification(options);
+    }
+    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
+    if (typeof nativeMod?.showNotification === "function") {
+      return nativeMod.showNotification(options);
+    }
+    hostGuiBridge.showNotification(options);
+  },
+};
+
 export interface MenuItemOptions {
   id?: string;
   label: string;
@@ -1312,14 +1428,37 @@ export class MenuItem {
 
 export class Menu {
   readonly id: number = nextNodeId++;
-  private items: MenuItem[] = [];
+  private items: (MenuItem | Submenu | MenuSeparator)[] = [];
 
-  append(item: MenuItem): void {
+  append(item: MenuItem | Submenu | MenuSeparator): void {
     this.items.push(item);
   }
 
-  getItems(): MenuItem[] {
+  appendSeparator(): void {
+    this.items.push(new MenuSeparator());
+  }
+
+  appendSubmenu(submenu: Submenu): void {
+    this.items.push(submenu);
+  }
+
+  getItems(): (MenuItem | Submenu | MenuSeparator)[] {
     return [...this.items];
+  }
+}
+
+export class MenuSeparator extends MenuItem {
+  constructor() {
+    super({ label: "-" });
+  }
+}
+
+export class Submenu extends Menu {
+  label: string;
+
+  constructor(label: string) {
+    super();
+    this.label = label;
   }
 }
 
@@ -1347,6 +1486,7 @@ export class TrayIcon {
 
   set tooltip(value: string) {
     this._tooltip = value;
+    hostGuiBridge.setTrayTooltip(this.id, value);
   }
 
   get menu(): Menu | null {
@@ -1358,7 +1498,7 @@ export class TrayIcon {
   }
 
   dispose(): void {
-    // Clean up tray icon
+    hostGuiBridge.destroyTray(this.id);
   }
 }
 
@@ -1574,6 +1714,8 @@ export default {
   TrayIcon,
   Menu,
   MenuItem,
+  MenuSeparator,
+  Submenu,
   createRenderer,
   createElement,
   h,
@@ -1581,6 +1723,7 @@ export default {
   dialog,
   clipboard,
   systemTheme,
+  notification,
   turnMailbox,
   nodeRegistry,
   createSignal,

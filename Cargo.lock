@@ -1963,6 +1963,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tray-icon",
+ "zbus 5.19.0",
 ]
 
 [[package]]

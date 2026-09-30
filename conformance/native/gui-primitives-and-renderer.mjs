@@ -10,10 +10,13 @@ import {
   TrayIcon,
   Menu,
   MenuItem,
+  MenuSeparator,
+  Submenu,
   createRenderer,
   dialog,
   clipboard,
   systemTheme,
+  notification,
   turnMailbox,
   nodeRegistry,
   createSignal,
@@ -160,19 +163,35 @@ systemTheme.setTheme('light');
 await clipboard.writeText('kiln-gui-clipboard');
 const readBack = await clipboard.readText();
 console.log('clipboard readback:', readBack);
+await clipboard.clear();
+const clearedBack = await clipboard.readText();
+console.log('clipboard after clear:', clearedBack);
 
 // 9. Native Menu & Tray Icon (ADR 0074)
 const menu = new Menu();
 const item1 = new MenuItem({ label: 'Open', onClick: () => console.log('menu open') });
 const item2 = new MenuItem({ label: 'Quit', onClick: () => console.log('menu quit') });
 menu.append(item1);
+menu.appendSeparator();
+const submenu = new Submenu('More Options');
+const subItem = new MenuItem({ label: 'Preferences' });
+submenu.append(subItem);
+menu.appendSubmenu(submenu);
 menu.append(item2);
 console.log('menu items count:', menu.getItems().length);
 console.log('item1 label:', item1.label, 'enabled:', item1.enabled);
+console.log('submenu label:', submenu.label, 'items:', submenu.getItems().length);
 
 const tray = new TrayIcon({ tooltip: 'Kiln App Tray', menu });
 console.log('tray tooltip:', tray.tooltip);
+tray.tooltip = 'Updated Kiln Tray';
+console.log('tray updated tooltip:', tray.tooltip);
 console.log('tray menu items:', tray.menu?.getItems().length);
 tray.dispose();
+
+// 10. Additional GUI OS APIs
+console.log('dialog pickFolder defined:', typeof dialog.pickFolder === 'function');
+console.log('dialog openFiles defined:', typeof dialog.openFiles === 'function');
+console.log('notification show defined:', typeof notification.show === 'function');
 
 console.log('gui conformance passed');

@@ -1,7 +1,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::{
-    FileFilter, MessageOptions, OpenFileOptions, SaveFileOptions, clipboard, dialog, theme, tray,
+    FileFilter, MessageOptions, NotificationOptions, OpenFileOptions, PickFolderOptions,
+    SaveFileOptions, clipboard, dialog, notification, theme, tray,
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -161,6 +162,69 @@ pub extern "C" fn kiln_gui_get_theme() -> i32 {
 pub unsafe extern "C" fn kiln_gui_tray_create(tooltip: *const c_char) -> u32 {
     let tooltip = unsafe { c_str_to_opt_string(tooltip) }.unwrap_or_default();
     tray::create_tray_icon(&tooltip).unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_dialog_pick_folder(
+    title: *const c_char,
+    default_path: *const c_char,
+    out_buf: *mut c_char,
+    out_len: usize,
+) -> i32 {
+    let title = unsafe { c_str_to_opt_string(title) };
+    let default_path = unsafe { c_str_to_opt_string(default_path) };
+    let opts = PickFolderOptions {
+        title,
+        default_path,
+    };
+    let res = block_on(dialog::pick_folder(Some(opts)));
+    match res {
+        Some(path) => unsafe { copy_to_c_buf(&path, out_buf, out_len) },
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_clipboard_clear() -> i32 {
+    match clipboard::clear() {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_notification_show(
+    title: *const c_char,
+    body: *const c_char,
+    app_name: *const c_char,
+) -> i32 {
+    let title = unsafe { c_str_to_opt_string(title) }.unwrap_or_default();
+    let body = unsafe { c_str_to_opt_string(body) };
+    let app_name = unsafe { c_str_to_opt_string(app_name) };
+    let opts = NotificationOptions {
+        title,
+        body,
+        app_name,
+    };
+    match block_on(notification::show(opts)) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_tray_set_tooltip(id: u32, tooltip: *const c_char) -> i32 {
+    let tooltip = unsafe { c_str_to_opt_string(tooltip) }.unwrap_or_default();
+    match tray::set_tooltip(id, &tooltip) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_tray_destroy(id: u32) -> i32 {
+    tray::destroy_tray_icon(id);
+    0
 }
 
 #[unsafe(no_mangle)]
