@@ -8084,7 +8084,6 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_BYTES:
     case KILN_GC_DATE:
     case KILN_GC_TYPED_BUFFER:
-    case KILN_GC_COMMONJS_REQUIRE:
     default:
         break;
     }
