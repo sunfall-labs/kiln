@@ -7,7 +7,6 @@ pub(crate) struct MethodId {
     pub(crate) groups: u32,
     pub(crate) numeric_arguments: u32,
     pub(crate) textual_arguments: u32,
-    pub(crate) declared_length: u32,
 }
 
 const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
@@ -38,7 +37,7 @@ const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-const fn method_declared_length(method: &str) -> u32 {
+fn method_declared_length(method: &str) -> u32 {
     let mut length = None;
     let mut index = 0;
     while index < BUILTIN_SURFACE.len() {
@@ -150,15 +149,22 @@ pub(crate) fn render_native_constructor_table() -> String {
 }
 
 fn render_native_method_length_rows() -> String {
+    static ROWS: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(compute_native_method_length_rows);
+    ROWS.clone()
+}
+
+fn compute_native_method_length_rows() -> String {
     use std::fmt::Write as _;
     let mut rows = String::new();
     for method in METHOD_IDS {
-        if method.declared_length != METHOD_LENGTH_UNSPECIFIED {
+        let length = method_declared_length(method.name);
+        if length != METHOD_LENGTH_UNSPECIFIED {
             writeln!(
                 rows,
                 "    case UINT64_C({}): return UINT32_C({});",
                 method.value,
-                method.declared_length
+                length
             )
             .expect("writing to a String cannot fail");
         }
@@ -357,7 +363,6 @@ macro_rules! method_ids {
                 groups: method_group_bits!($first_group $(, $group)*),
                 numeric_arguments: $numeric,
                 textual_arguments: $textual,
-                declared_length: method_declared_length(stringify!($name)),
             }),*
         ];
 
