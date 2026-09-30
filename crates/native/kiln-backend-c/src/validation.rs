@@ -398,18 +398,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         Instruction::LoadIntrinsicBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the intrinsic `{builtin:?}` builtin in the native backend"),
         }),
-        // A direct `eval` needs the compiler at run time: it reads the caller's bindings and
-        // compiles source that does not exist until the call happens. The native backend ships
-        // without a compiler, so this is refused rather than approximated -- an indirect `eval`
-        // is a different instruction and is unaffected.
-        Instruction::DirectEval(_) => Err(EmitError::Unsupported {
-            feature: "a direct `eval` call in the native backend".to_owned(),
-        }),
-        // `import(specifier)` resolves and loads a module while the program runs. A generated
-        // unit is a closed object file: the module graph was settled when it was emitted, and
-        // there is nothing at run time to resolve a specifier against or to compile what it
-        // names. Refused rather than answered with a rejected promise, which would be a wrong
-        // answer wearing the right shape.
+        // Source admission is checked by the dynamic expression seam at execution time.
+        Instruction::DirectEval(_) => Ok(()),
         Instruction::ToObject | Instruction::WithHas(_) => Err(EmitError::Unsupported {
             feature: "a `with` statement in the native backend".to_owned(),
         }),

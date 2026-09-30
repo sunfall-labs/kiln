@@ -127,10 +127,10 @@ pub enum Instruction {
     MakeFunction(u32),
     /// `eval(...)` written as that exact name, with nothing shadowing it.
     ///
-    /// Its own instruction rather than a call to a value, because the eval'd source is compiled
-    /// against the *caller's* scope and no value can carry that: the site's [`EvalSite`] is the
-    /// only record of which names are visible here and where they live. Boxed so that the one
-    /// instruction that needs a whole scope description does not widen every other one.
+    /// Reads the callee before its arguments, as an ordinary call does. The intrinsic eval
+    /// compiles source against the caller's scope using [`EvalSite`]; replacements are called
+    /// normally with the captured callee. Consumes the callee and arguments, leaving one result.
+    /// Boxed so the scope description does not widen every other instruction.
     DirectEval(Box<EvalSite>),
     /// Call the value `argc` slots below the top of the stack, consuming it and its arguments
     /// and leaving the result.

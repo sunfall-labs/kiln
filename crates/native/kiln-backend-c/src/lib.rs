@@ -5321,61 +5321,8 @@ fn render_module_positioned(
             }
         }
     }
-    let has_live_direct_eval = pruned
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
-        || match &liveness {
-            Some((reachable, _, _)) => reachable.iter().any(|&index| {
-                pruned.functions[index]
-                    .code
-                    .iter()
-                    .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
-            }),
-            None => pruned.functions.iter().any(|function| {
-                function
-                    .code
-                    .iter()
-                    .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
-            }),
-        };
-    if has_live_direct_eval {
-        // Keep the source identity and the surviving IR location in the refusal. A module graph
-        // may contain hundreds of independently emitted files, and the graph worker otherwise
-        // reports only this generic feature name when one translation unit cannot be lowered.
-        let direct_eval_site = pruned
-            .code
-            .iter()
-            .enumerate()
-            .find_map(|(pc, instruction)| {
-                matches!(instruction, Instruction::DirectEval(_))
-                    .then_some(format!("entry instruction {pc}"))
-            })
-            .or_else(|| {
-                (0..pruned.functions.len()).find_map(|function_index| {
-                    if liveness
-                        .as_ref()
-                        .is_some_and(|(reachable, _, _)| !reachable.contains(&function_index))
-                    {
-                        return None;
-                    }
-                    pruned.functions[function_index]
-                        .code
-                        .iter()
-                        .enumerate()
-                        .find_map(|(pc, instruction)| {
-                            matches!(instruction, Instruction::DirectEval(_))
-                                .then_some(format!("function {function_index} instruction {pc}"))
-                        })
-                })
-            })
-            .unwrap_or_else(|| "unknown instruction".to_owned());
-        return Err(EmitError::Unsupported {
-            feature: format!(
-                "a direct `eval` call in reachable native code at {diagnostic_site} ({direct_eval_site})"
-            ),
-        });
-    }
+    // Direct eval is admitted to the shared dynamic expression seam. Unsupported runtime source
+    // refuses at the actual instruction, while supported factories close over caller cells.
     if policy.compact || policy.omit_source {
         compact_closure_source(
             &mut pruned,
