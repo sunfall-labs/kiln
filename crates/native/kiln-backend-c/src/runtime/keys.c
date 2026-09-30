@@ -197,6 +197,25 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_WEAK_MAP ||
+        builtin == KILN_C99_BUILTIN_WEAK_SET ||
+        builtin == KILN_C99_BUILTIN_WEAK_REF ||
+        builtin == KILN_C99_BUILTIN_FINALIZATION_REGISTRY) {
+        /* Weak collection/reference constructors have no computed static methods. Their own
+         * keys are the ordinary callable slots; enumerate those explicitly so intrinsic
+         * inspectors can test for `prototype` without treating this constructor family as an
+         * unmodeled computed-static surface. */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (builtin >= KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE &&
         builtin <= KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME) {
         static const char *const names[] = {"length", "name", "prototype", "from", "compare"};

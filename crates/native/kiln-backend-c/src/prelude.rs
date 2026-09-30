@@ -16,6 +16,11 @@ const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 /// connects the C dispatch ID to that public identity.
 const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
     (
+        "KILN_C99_METHOD_REGEXP_TEST",
+        "RegExp.prototype",
+        "test",
+    ),
+    (
         "KILN_C99_METHOD_STRING_INDEX_OF",
         "String.prototype",
         "indexOf",
