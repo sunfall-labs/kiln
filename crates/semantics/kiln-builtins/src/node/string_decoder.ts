@@ -25,19 +25,29 @@ export class StringDecoder {
   encoding: string;
   private pending: Uint8Array;
   private decoder: TextDecoder;
+  private streaming: boolean;
+  private textEncoding: string;
 
   static StringDecoder: typeof StringDecoder;
   static default: typeof StringDecoder;
 
   constructor(encoding = 'utf8') {
     const norm = String(encoding).toLowerCase().replace(/[-_]/g, '');
-    if (norm === 'utf8' || norm === 'utf-8') {
+    if (norm === 'utf8') {
       this.encoding = 'utf8';
+      this.textEncoding = 'utf-8';
+      this.streaming = false;
+    } else if (norm === 'utf16le' || norm === 'ucs2' || norm === 'ucs2le') {
+      this.encoding = 'utf16le';
+      this.textEncoding = 'utf-16le';
+      this.streaming = true;
     } else {
       this.encoding = norm;
+      this.textEncoding = norm;
+      this.streaming = true;
     }
     this.pending = new Uint8Array(0);
-    this.decoder = new TextDecoder('utf-8');
+    this.decoder = new TextDecoder(this.textEncoding);
   }
 
   write(buffer: any): string {
@@ -45,6 +55,9 @@ export class StringDecoder {
     const chunk = typeof buffer === 'string'
       ? new TextEncoder().encode(buffer)
       : (buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer));
+    if (this.streaming) {
+      return this.decoder.decode(chunk, { stream: true });
+    }
     let bytes = chunk;
     if (this.pending.length > 0) {
       const combined = new Uint8Array(this.pending.length + chunk.length);
@@ -67,6 +80,11 @@ export class StringDecoder {
     let res = '';
     if (buffer) {
       res = this.write(buffer);
+    }
+    if (this.streaming) {
+      res += this.decoder.decode();
+      this.decoder = new TextDecoder(this.textEncoding);
+      return res;
     }
     if (this.pending.length > 0) {
       res += '\uFFFD';
