@@ -156,6 +156,29 @@ static int kiln_c99_prototype_store_read_with_receiver(
     return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
 }
 
+/* A builtin's intrinsic members are resolved by the readers below, but a program may relink the
+ * callable object itself. Before reporting an intrinsic absence, consult that explicit parent
+ * with the builtin as receiver, so accessors and inherited members observe the real [[Get]]. */
+static int kiln_c99_builtin_custom_prototype_read(
+    kiln_host *host, kiln_value target, const kiln_string *key, const kiln_string *ikey,
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_value prototype;
+    int present = 0;
+    int status = kiln_c99_callable_store(target, &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    prototype = kiln_c99_object_prototype_read(store);
+    if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL) {
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_has_property_key(host, prototype, key, ikey, &present, depth, thrown);
+    if (status != KILN_C99_OK || !present) return status;
+    *found = 1;
+    return kiln_c99_get_with_receiver(host, prototype, kiln_c99_key_value(key, NULL), target,
+                                      out, depth, thrown);
+}
+
 /* Issue 30: a receiver whose members come from a method table -- a string's `trim`, an array's
  * `join`, a number's `toFixed` -- inherits them from a prototype built-in, and a member the program
  * wrote onto that built-in (`String.prototype.trim = f`) shadows the table's, exactly as it does
@@ -2150,6 +2173,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             /* Set's constructor has no ordinary string-named statics beyond name, length and
              * prototype (handled above). In particular, feature tests such as kind-of's
              * `Set.isBuffer` must receive undefined instead of a backend refusal. */
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             KILN_C99_ABSENT("Set constructor has no other string-named statics", out);
         }
         if (target.bits == KILN_C99_BUILTIN_BIGINT &&
@@ -2157,6 +2184,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             /* BigInt's only ordinary string statics are asIntN and asUintN, handled through the
              * shared surface above. Other names such as the feature probe BigInt.isBuffer are
              * absent by the complete constructor definition. */
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             KILN_C99_ABSENT("BigInt constructor has no other string-named statics", out);
         }
         {
@@ -2173,6 +2204,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
             if ((owned || kiln_c99_has_surface(target.bits)) &&
                 !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
+                int found = 0;
+                int status = kiln_c99_builtin_custom_prototype_read(
+                    host, target, key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
                                 out);
@@ -2301,6 +2336,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 KILN_C99_ABSENT("not an Iterator.prototype member: absent from the shared helper table and installed store", out);
             }
+        }
+        {
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
         }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                         "built");

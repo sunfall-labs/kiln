@@ -767,6 +767,29 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        kiln_typed_kind typed_kind;
+        if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
+            kiln_c99_same_name_key(view, "BYTES_PER_ELEMENT")) {
+            /* Concrete typed-array constructors own this immutable data property. The ordinary
+             * builtin surface table owns methods and named values; the element width is supplied
+             * by the same typed-kind authority used by reads and ownKeys. */
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "value", 5,
+                                      kiln_c99_number((double)kiln_c99_typed_width(typed_kind)),
+                                      0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) {
+                *found = 1;
+                *out = built;
+            }
+            return status;
+        }
         if (target.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE &&
             (kiln_c99_same_name_key(view, "name") || kiln_c99_same_name_key(view, "length"))) {
             /* Function.prototype is itself callable and owns the same two intrinsic data
