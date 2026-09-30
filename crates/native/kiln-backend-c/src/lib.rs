@@ -653,6 +653,31 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         );
         region = Some(std::rc::Rc::new(plan));
     }
+    let mut linked_cells = module
+        .exports
+        .iter()
+        .map(|export| export.local_slot)
+        .collect::<HashSet<_>>();
+    if instantiate {
+        linked_cells.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
+        linked_cells.extend(
+            module
+                .program
+                .code
+                .iter()
+                .take(module.link_facts.module_instantiation_end as usize)
+                .filter_map(|instruction| match instruction {
+                    Instruction::NewCell(slot) => Some(*slot),
+                    _ => None,
+                }),
+        );
+    }
     let (module, instantiation) = if instantiate {
         let mut module = module.clone();
         let mut binding_slots = module
@@ -800,11 +825,6 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
     } else {
         (module.clone(), None)
     };
-    let linked_cells = module
-        .exports
-        .iter()
-        .map(|export| export.local_slot)
-        .collect();
     let rendered = module_cells::with_linked_cells(linked_cells, || {
         module_cells::with_plan(region, || {
             render_module_with_unit(
