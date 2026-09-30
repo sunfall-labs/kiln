@@ -1522,7 +1522,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (rc != 0 || (length != 0 && bytes == NULL))
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "Intl.DateTimeFormat provider failed");
-        *result = kiln_c99_val_from_text((const char *)bytes, (size_t)length);
+        *result = kiln_val_to_boundary(kiln_c99_val_from_text((const char *)bytes, (size_t)length));
         if (result->tag == KILN_VALUE_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
         return KILN_C99_OK;
     }
