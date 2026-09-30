@@ -188,7 +188,23 @@ Object.defineProperty(Stream.prototype, "constructor", {
   value: Stream, writable: true, configurable: true,
 });
 
-export class Readable extends Stream {
+// Node's stream constructors predate ES classes and remain callable with `.call(this, options)`.
+// Keep the implementation classes for `extends`, but expose callable constructor functions that
+// initialize an existing receiver as well as a newly allocated one.
+function legacyStreamConstructor(Implementation: any): any {
+  const Constructor: any = function (this: any, ...args: any[]): void {
+    Object.assign(this, new Implementation(...args));
+  };
+  Object.defineProperty(Constructor, "name", { value: Implementation.name, configurable: true });
+  Object.setPrototypeOf(Constructor, Implementation);
+  Constructor.prototype = Implementation.prototype;
+  Object.defineProperty(Constructor.prototype, "constructor", {
+    value: Constructor, writable: true, configurable: true,
+  });
+  return Constructor;
+}
+
+class ReadableImplementation extends Stream {
   _readableState: {
     buffer: any[];
     length: number;
@@ -479,7 +495,10 @@ export class Readable extends Stream {
   }
 }
 
-export class Writable extends Stream {
+export interface Readable extends ReadableImplementation {}
+export const Readable: any = legacyStreamConstructor(ReadableImplementation);
+
+class WritableImplementation extends Stream {
   _writableState: {
     ended: boolean;
     finished: boolean;
@@ -568,6 +587,9 @@ export class Writable extends Stream {
     return this;
   }
 }
+
+export interface Writable extends WritableImplementation {}
+export const Writable: any = legacyStreamConstructor(WritableImplementation);
 
 export class Duplex extends Readable {
   _writableState: any;

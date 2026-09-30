@@ -347,6 +347,35 @@ export class Hash {
   }
 }
 
+/** Node's opaque key handle used by APIs such as jsonwebtoken. The current backend supports
+ * symmetric key material here; asymmetric key import remains owned by the crypto provider. */
+export class KeyObject {
+  readonly type: string;
+  readonly symmetricKeySize: number | undefined;
+  private _key: Uint8Array;
+
+  constructor(key: any, type: string = 'secret') {
+    this.type = type;
+    this._key = toUint8Array(key);
+    this.symmetricKeySize = type === 'secret' ? this._key.length : undefined;
+  }
+
+  export(): any {
+    return Buffer.from(this._key);
+  }
+}
+
+export function createSecretKey(key: any): KeyObject {
+  if (key === undefined || key === null || typeof key !== 'object') {
+    throw new TypeError('The "key" argument must be of type string or an instance of Buffer or TypedArray');
+  }
+  return new KeyObject(key, 'secret');
+}
+
+export function createPrivateKey(_key: any): KeyObject {
+  throw new TypeError('Private key import is not supported by this crypto provider');
+}
+
 export class Hmac {
   private _algorithm: string;
   private _key: Uint8Array;
@@ -361,7 +390,7 @@ export class Hmac {
       throw new TypeError(`Digest method not supported: ${algorithm}`);
     }
     this._algorithm = norm;
-    this._key = toUint8Array(key);
+    this._key = toUint8Array(key instanceof KeyObject ? key.export() : key);
   }
 
   update(data: any, encoding?: string): this {
@@ -491,6 +520,9 @@ export function timingSafeEqual(a: any, b: any): boolean {
 const cryptoDefault = {
   Hash,
   Hmac,
+  KeyObject,
+  createSecretKey,
+  createPrivateKey,
   createHash,
   createHmac,
   getHashes,
