@@ -663,6 +663,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 &instantiation_policy,
                 false,
                 logical_path,
+                true,
             )
         })?;
         render_prepare_module_cells(
@@ -693,6 +694,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
             &policy,
             false,
             logical_path,
+            instantiate,
         )
     })?;
     Ok(CModule {
@@ -2933,7 +2935,7 @@ fn render_entry(
     } else {
         unit_symbol.to_owned()
     };
-    let module_scope = uses_module_scope(program);
+    let module_scope = uses_module_scope(program) || (preserve_export_cells && module.is_some());
     let linkage = if callables { "static " } else { "" };
     match module {
         None => writeln!(
@@ -4832,6 +4834,7 @@ fn render_module(
         policy,
         commonjs,
         diagnostic_site,
+        false,
     )
 }
 
@@ -4845,6 +4848,7 @@ fn render_module_with_unit(
     policy: &EmissionPolicy,
     commonjs: bool,
     diagnostic_site: &str,
+    force_module_scope: bool,
 ) -> Result<RenderedModule, EmitError> {
     // `parallelMap` site records name positions in the module as written; emission packs the
     // source below. See `parallel::SiteRecord`.
@@ -4859,6 +4863,7 @@ fn render_module_with_unit(
             shared_unit_symbol,
             external_unit,
             export_cells,
+            force_module_scope,
         )
     })
 }
@@ -4873,6 +4878,7 @@ fn render_module_positioned(
     shared_unit_symbol: Option<&str>,
     external_unit: bool,
     export_cells: bool,
+    force_module_scope: bool,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk =
@@ -4966,7 +4972,11 @@ fn render_module_positioned(
     render_unit_state(
         &mut output,
         unit_symbol,
-        unit_global_count(program),
+        unit_global_count(program).max(if force_module_scope {
+            usize::try_from(program.local_count).unwrap().max(1)
+        } else {
+            0
+        }),
         program.template_sites.len(),
         module_cells::compact_cell_count(),
         should_chunk,
@@ -5025,17 +5035,18 @@ fn render_module_positioned(
     } else {
         program
     };
-    let extra_entry_slots: HashSet<u32> = if uses_module_scope(emitted_program) {
-        (0..emitted_program.local_count).collect()
-    } else {
-        let mut slots = HashSet::new();
-        slots.extend(module.imports.iter().map(|binding| binding.local_slot));
-        slots.extend(module.exports.iter().map(|binding| binding.local_slot));
-        if commonjs {
-            slots.insert(2);
-        }
-        slots
-    };
+    let extra_entry_slots: HashSet<u32> =
+        if force_module_scope || uses_module_scope(emitted_program) {
+            (0..emitted_program.local_count).collect()
+        } else {
+            let mut slots = HashSet::new();
+            slots.extend(module.imports.iter().map(|binding| binding.local_slot));
+            slots.extend(module.exports.iter().map(|binding| binding.local_slot));
+            if commonjs {
+                slots.insert(2);
+            }
+            slots
+        };
     let (graphs, body, entry_graph, mut direct) = plan_unit(
         emitted_program,
         diagnostic_site,
