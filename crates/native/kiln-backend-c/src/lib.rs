@@ -640,6 +640,17 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
             .unwrap_or_default();
         plan.cell_globals
             .extend(module.exports.iter().map(|binding| binding.local_slot));
+        // Link-time ESM binding imports arrive as cells when the provider is in an instantiated
+        // cycle, and as values written into an importer-owned cell otherwise. The module body
+        // must dereference either representation before using an imported binding. Namespace
+        // imports remain ordinary object values and must not be interpreted as cells.
+        plan.cell_globals.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
         region = Some(std::rc::Rc::new(plan));
     }
     let (module, instantiation) = if instantiate {
