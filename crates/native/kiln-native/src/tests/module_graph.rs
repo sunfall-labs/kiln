@@ -934,6 +934,17 @@ fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
             },
         )
         .expect("native cyclic ESM graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"a:a\nchanged:changed\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "native ESM cycle must exit successfully"
+    );
     assert_eq!(report.stdout, b"a:a\nchanged:changed\n");
 }
 
@@ -992,6 +1003,20 @@ fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
             },
         )
         .expect("native cyclic namespace graph builds and runs");
+    if report.exit_code != Some(0)
+        || report.stdout
+            != b"tdz:true:true\nitem.txt:first\nitem.txt:second\ndescriptor:second:string:true\n"
+    {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "native namespace cycle must exit successfully"
+    );
     assert_eq!(
         report.stdout,
         b"tdz:true:true\nitem.txt:first\nitem.txt:second\ndescriptor:second:string:true\n"
