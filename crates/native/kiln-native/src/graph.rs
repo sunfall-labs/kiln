@@ -729,7 +729,7 @@ pub(super) fn cached_graph_module(
     // type profiles and closed-world liveness. This is a versioned internal cache encoding,
     // not a public serialization format. Representation changes can only cause cache misses.
     let (input, effective_policy) = source_module_input_id(node, logical_path, policy, profile);
-    let input = Digest::hash([input.as_bytes(), &[u8::from(instantiate)]].concat());
+    let input = Digest::hash([input.as_bytes().as_slice(), &[u8::from(instantiate)]].concat());
     cached_emitted_module(
         cache,
         target,
@@ -3159,7 +3159,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
     // names the rest of this launcher always used, through macros that read the `graph` in scope.
     let mut linkage_fields = String::new();
     let mut linkage_names = String::new();
-    for (index, (node, _)) in modules.iter().enumerate() {
+    for (index, (node, module)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
         if export_count != 0 {
             writeln!(

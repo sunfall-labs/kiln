@@ -1756,7 +1756,6 @@ impl NativeBuilder {
             (reduced, demand)
         };
         let graph = &reduced;
-        let cyclic_modules = graph::cycle_module_paths(graph);
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
         if emission.compile_regex.is_none() {
