@@ -706,6 +706,49 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         let mut instantiation_policy = policy.clone();
         instantiation_policy.compact = false;
         instantiation_policy.parallel_workers_unit = false;
+        // Liveness is normally computed independently for each emitted entrypoint. Splitting a
+        // cycle module separates the declaration's `MakeFunction` from the evaluation code that
+        // calls it, however, so the instantiation pass can otherwise prune a closure that the
+        // evaluation pass still loads from its binding cell. Retain only top-level function
+        // bindings whose slots are read by the post-instantiation body; this preserves DCE for
+        // unrelated declarations and keeps the two phase views consistent.
+        if let Some(demanded) = &policy.live_module_slots {
+            let boundary = module.link_facts.module_instantiation_end as usize;
+            let evaluation_reads = module
+                .program
+                .code
+                .iter()
+                .skip(boundary)
+                .filter_map(|instruction| match instruction {
+                    Instruction::LoadLocal(slot)
+                    | Instruction::LoadCell(slot)
+                    | Instruction::LoadGlobal(slot) => Some(*slot),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let mut retained = (**demanded).clone();
+            for (pc, instruction) in module.program.code[..boundary.min(module.program.code.len())]
+                .iter()
+                .enumerate()
+            {
+                if !matches!(instruction, Instruction::MakeFunction(_)) {
+                    continue;
+                }
+                let Some(store) = module.program.code.get(pc + 1) else {
+                    continue;
+                };
+                let slot = match store {
+                    Instruction::StoreLocal(slot)
+                    | Instruction::StoreCell(slot)
+                    | Instruction::StoreGlobal(slot) => *slot,
+                    _ => continue,
+                };
+                if evaluation_reads.contains(&slot) {
+                    retained.insert(slot);
+                }
+            }
+            instantiation_policy.live_module_slots = Some(Arc::new(retained));
+        }
         let mut source = module_cells::with_plan(region.clone(), || {
             render_module_with_unit(
                 &instantiation,
