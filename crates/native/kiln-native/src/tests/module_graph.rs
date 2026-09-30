@@ -1024,6 +1024,66 @@ fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
 }
 
 #[test]
+fn native_graph_cycle_supports_mutually_reexported_namespaces() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-namespace-reexports");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { peer as a } from './b.mjs';\n\
+         export let label = 'A';\n\
+         export * as peer from './b.mjs';\n\
+         console.log(`${a.label}:${a.peer.label}`);\n\
+         label = 'A2';\n\
+         console.log(`${a.label}:${a.peer.label}`);\n",
+    )
+    .expect("write namespace cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "export const label = 'B';\n\
+         export * as peer from './a.mjs';\n",
+    )
+    .expect("write namespace cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build mutually re-exported namespace graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace-re-export cycle execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native mutually re-exported namespace graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"A:B\nA2:B\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "namespace re-export cycle exits successfully"
+    );
+    assert_eq!(report.stdout, b"A:B\nA2:B\n");
+}
+
+#[test]
 fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

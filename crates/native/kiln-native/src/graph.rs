@@ -800,6 +800,7 @@ fn cached_emitted_module(
     }
 }
 
+#[cfg(test)]
 pub(super) fn emit_native_graph_module_with_policy(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
@@ -3882,7 +3883,15 @@ static int kiln_graph_enter_inner(void *opaque) {
         };
         writeln!(output, "        status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.prepare_symbol).unwrap();
     }
-    for (index, (node, module)) in modules.iter().enumerate() {
+    for (index, (_, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            if namespace_plans[index].is_some() {
+                write_graph_namespace_build(&mut output, index, &module.symbol, &[], false);
+                writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+            }
+        }
+    }
+    for (index, (_, module)) in modules.iter().enumerate() {
         if module.instantiation.is_some() {
             if let Some(plan) = &namespace_plans[index] {
                 write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
@@ -4324,8 +4333,10 @@ static int kiln_graph_enter_inner(void *opaque) {
                 index = index
             ));
         }
-        if let Some(plan) = &namespace_plans[index] {
-            write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
+        if module.instantiation.is_none() {
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
+            }
         }
         helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n            if (state->completion_resolve.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_resolve, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }}\n", index = index));
         if node.path == graph.entry() {

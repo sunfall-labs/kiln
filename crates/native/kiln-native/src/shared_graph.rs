@@ -894,7 +894,15 @@ typedef struct {wrapper_symbol}_realm_context {{
         };
         writeln!(output, "    status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.prepare_symbol).unwrap();
     }
-    for (index, (node, module)) in modules.iter().enumerate() {
+    for (index, (_, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            if namespace_plans[index].is_some() {
+                write_graph_namespace_build(&mut output, index, &module.symbol, &[], true);
+                writeln!(output, "    if (status != KILN_C99_OK) goto cleanup;").unwrap();
+            }
+        }
+    }
+    for (index, (_, module)) in modules.iter().enumerate() {
         if module.instantiation.is_some() {
             if let Some(plan) = &namespace_plans[index] {
                 write_graph_namespace_build(&mut output, index, &module.symbol, plan, true);

@@ -613,7 +613,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         .then(|| module_cells::plan(&module.program))
         .flatten();
     let rewritten;
-    let (module, region) = match region {
+    let (module, mut region) = match region {
         Some((program, mut plan)) => {
             // A module import/export can pass a cell pointer through the boundary ABI to a
             // different unit. Compact unit-owned cells have no GC block header, so retain the
@@ -630,6 +630,18 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         }
         None => (module, None),
     };
+    if instantiate {
+        // Export cells are allocated before graph-wide instantiation. Every module-level read or
+        // write of an exported binding must therefore go through that preallocated cell, even
+        // when no closure in this source happened to require the compiler's ordinary cell flag.
+        let mut plan = region
+            .take()
+            .map(|plan| plan.as_ref().clone())
+            .unwrap_or_default();
+        plan.cell_globals
+            .extend(module.exports.iter().map(|binding| binding.local_slot));
+        region = Some(std::rc::Rc::new(plan));
+    }
     let (module, instantiation) = if instantiate {
         let instantiation_symbol = format!("{symbol}_instantiate");
         let mut evaluation = module.clone();
@@ -4081,7 +4093,9 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
     kiln_object *data = NULL;
     size_t *order = NULL;
     size_t index;
+    size_t insert_at;
     int status;
+    int extending = 0;
     if (result == NULL || (count != 0 && (names == NULL || name_lengths == NULL || values == NULL)))
         return KILN_C99_INVALID_ARGUMENT;
     for (index = 0; index < count; ++index) {{
@@ -4129,14 +4143,21 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             }}
         }}
     }}
-    status = kiln_c99_new_object(&object);
-    if (status != KILN_C99_OK) {{
-        free(order);
-        return status;
+    if (result->tag == KILN_VALUE_OBJECT &&
+        kiln_c99_object_of(*result)->module_namespace) {{
+        object = *result;
+        data = kiln_c99_object_of(object);
+        extending = 1;
+    }} else {{
+        status = kiln_c99_new_object(&object);
+        if (status != KILN_C99_OK) {{
+            free(order);
+            return status;
+        }}
+        data = kiln_c99_object_of(object);
+        data->shape = NULL;
+        kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     }}
-    data = kiln_c99_object_of(object);
-    data->shape = NULL;
-    kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     for (index = 0; index < count; ++index) {{
         size_t source = order[index];
         kiln_property *slot;
@@ -4149,7 +4170,15 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         /* Namespace export keys stay in the linker's lexical order. Ordinary object insertion
          * would move integer-looking names to numeric order, which is not the namespace exotic
          * object's [[OwnPropertyKeys]] rule. */
-        slot = &data->properties[data->count];
+        insert_at = data->count;
+        if (extending && data->count != 0 &&
+            kiln_string_equals_ascii(data->properties[data->count - 1].key,
+                                     "@@toStringTag", 13)) {{
+            insert_at = data->count - 1;
+            memmove(&data->properties[insert_at + 1], &data->properties[insert_at],
+                    (data->count - insert_at) * sizeof *data->properties);
+        }}
+        slot = &data->properties[insert_at];
         /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
          * the launcher's names are its own, and this seam promises nothing about their life. */
         slot->key = kiln_c99_intern(names[source], name_lengths[source]);
@@ -4166,7 +4195,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot->accessor = 0;
         slot->refused = 0;
     }}
-    {{
+    if (!extending) {{
         kiln_property *tag;
         status = kiln_c99_own_slot(object, "@@toStringTag", 13, &tag);
         if (status == KILN_C99_OK) {{
@@ -4188,7 +4217,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
 namespace_failure:
     free(order);
 namespace_failure_without_order:
-    if (data != NULL) {{
+    if (data != NULL && !extending) {{
         for (index = 0; index < data->count; ++index) {{
             if (data->properties[index].key != NULL &&
                 kiln_string_equals_ascii(data->properties[index].key, "@@toStringTag", 13) &&
