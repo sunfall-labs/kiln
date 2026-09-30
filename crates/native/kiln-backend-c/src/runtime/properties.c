@@ -629,9 +629,9 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             /* The slot's undefined means "not created yet" (`kiln_c99_prototype_object`), so an
              * assigned undefined is kept as a hole, which that function reads back as the
              * undefined the program wrote rather than as a request to make one. */
-            *slot = value.tag == KILN_VALUE_UNDEFINED
-                        ? kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0)
-                        : value;
+            kiln_c99_heap_store_value(closure->region ? NULL : closure, slot,
+                value.tag == KILN_VALUE_UNDEFINED
+                    ? kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0) : value);
             return KILN_C99_OK;
         }
         {
@@ -1125,9 +1125,9 @@ static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string
     canonical = slot->key;
     if (slot->accessor && !desired->accessor) object->accessor_count -= 1;
     if (!slot->accessor && desired->accessor) object->accessor_count += 1;
-    *slot = *desired;
-    slot->key = canonical;
-    kiln_c99_candidate_record_property(object, slot);
+    kiln_property committed = *desired;
+    committed.key = canonical;
+    kiln_c99_heap_store_property(object, slot, committed);
     if (!slot->accessor && !slot->writable) object->read_only_seen = 1;
     kiln_c99_prototype_touched(object);
     return KILN_C99_OK;

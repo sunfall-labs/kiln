@@ -454,3 +454,100 @@ fn weak_resource_guard_finds_new_payload_seams_and_ignores_comments() {
         vec!["heap,handle,hidden,drop"]
     );
 }
+
+// These accessors return either a GC owner's field or a separately enumerated realm root.
+// Direct writes through their named result would evade a field-name guard. This checks the
+// immediate alias within its function; aliases copied again and output parameters remain a
+// separate inventory obligation.
+fn callable_slot_alias_writes(source: &str) -> Vec<usize> {
+    let words = tokens(source);
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    let mut body_start = None;
+    for (index, word) in words.iter().enumerate() {
+        match word.0 {
+            "{" => {
+                if depth == 0 && index > 0 && words[index - 1].0 == ")" {
+                    body_start = Some(index + 1);
+                }
+                depth += 1;
+            }
+            "}" => {
+                depth = depth.saturating_sub(1);
+                if depth != 0 {
+                    continue;
+                }
+                let Some(start) = body_start.take() else {
+                    continue;
+                };
+                let body = &words[start..index];
+                let mut aliases = Vec::new();
+                for window in body.windows(4) {
+                    if window[1].0 == "="
+                        && matches!(
+                            window[2].0,
+                            "kiln_c99_closure_prototype_slot"
+                                | "kiln_c99_closure_store_slot"
+                                | "kiln_c99_exotic_store"
+                        )
+                        && window[3].0 == "("
+                    {
+                        aliases.push(window[0].0);
+                    }
+                }
+                for (at, window) in body.windows(3).enumerate() {
+                    if window[0].0 == "*"
+                        && (at == 0 || body[at - 1].0 != "kiln_value")
+                        && aliases.contains(&window[1].0)
+                        && window[2].0 == "="
+                    {
+                        found.push(window[0].1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+#[test]
+fn callable_reference_slots_use_store_authorities() {
+    let mut failures = Vec::new();
+    for (path, source) in reference_sources() {
+        for offset in callable_slot_alias_writes(source) {
+            let line = source[..offset]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            failures.push(format!("{path}:{line}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "callable slot aliases bypass reference-store authorities:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn callable_slot_guard_checks_aliases_within_their_function() {
+    let source = r#"
+        int write_function(void) {
+            kiln_value *held = kiln_c99_closure_prototype_slot(closure);
+            *held = candidate;
+        }
+        int write_exotic(void) {
+            slot = kiln_c99_exotic_store(value);
+            *slot = candidate;
+        }
+        int safe(void) {
+            slot = kiln_c99_closure_store_slot(closure);
+            kiln_c99_heap_store_value(closure, slot, candidate);
+            result = *slot;
+        }
+        int unrelated(void) { *slot = number; }
+    "#;
+    assert_eq!(callable_slot_alias_writes(source).len(), 2);
+}

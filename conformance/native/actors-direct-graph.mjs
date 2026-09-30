@@ -117,6 +117,28 @@ try {
   const privateRetry = await owner.ref.call('echo', [privateTicket]);
   if (privateRetry.answer !== 29) throw new Error('private-field alias retry failed');
 
+  // Callable prototype assignment writes through a returned storage slot. Keep the
+  // function outside the factory and release the original escape before certification.
+  function prototypeHolder() { return privateHolder.read(); }
+  let prototypeAlias;
+  const prototypeTicket = transfer(isolate(() => {
+    prototypeAlias = { answer: 37 };
+    return prototypeAlias;
+  }));
+  prototypeHolder.prototype = prototypeAlias;
+  prototypeAlias = undefined;
+  let prototypeRefused = false;
+  try { await owner.ref.call('echo', [prototypeTicket]); }
+  catch (error) { prototypeRefused = error.name === 'DataCloneError'; }
+  if (!prototypeRefused || prototypeHolder.prototype.answer !== 37) {
+    throw new Error('callable prototype alias moved');
+  }
+  prototypeHolder.prototype = undefined;
+  const prototypeRetry = await owner.ref.call('echo', [prototypeTicket]);
+  if (prototypeRetry.answer !== 37 || prototypeHolder.prototype !== undefined) {
+    throw new Error('callable prototype alias retry failed');
+  }
+
   let retainedChild;
   const childAlias = transfer(isolate(() => ({ child: retainedChild = { value: 21 } })));
   let childRefused = false;

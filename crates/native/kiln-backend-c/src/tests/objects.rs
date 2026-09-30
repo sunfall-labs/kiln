@@ -3310,6 +3310,62 @@ int main(void) {
 }
 
 #[test]
+fn executable_candidate_ledger_covers_callable_prototype_slot_aliases() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int prototype_ledger_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value function, root;
+    kiln_closure *closure;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 0;
+    if (kiln_c99_make_closure(&function, NULL, NULL, NULL, 0, NULL, 0, 0,
+                              0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
+                              0, 0, 0, 0, NULL, 0) != KILN_C99_OK) return 1;
+    closure = kiln_c99_closure_of(function);
+    if (closure->region || !kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&root) != KILN_C99_OK) return 2;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 3;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 4;
+    /* The property write obtains an alias to own_prototype rather than naming the field. */
+    if (kiln_c99_put(NULL, function, "prototype", 9, root, 0, NULL) != KILN_C99_OK ||
+        closure->own_prototype.bits != root.bits || group->incoming_owners.count != 1 ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 5;
+    if (kiln_c99_put(NULL, function, "prototype", 9, kiln_c99_undefined(), 0, NULL) !=
+            KILN_C99_OK || closure->own_prototype.tag != KILN_VALUE_HOLE ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 6;
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 7;
+    status = kiln_realm_enter(realm, prototype_ledger_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 8;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-callable-prototype-ledger");
+    assert!(
+        run.status.success(),
+        "callable prototype ledger failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("candidate ledger disagrees"));
+}
+
+#[test]
 fn executable_candidate_ledger_audit_detects_an_unrecorded_store_and_allows_retry() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
