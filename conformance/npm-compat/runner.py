@@ -30,6 +30,20 @@ def command(argv, prefix, timeout):
             except ProcessLookupError:
                 pass
             code = process.wait()
+        except BaseException:
+            # Cancellation also owns the compiler/runtime children in this process group.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            except ProcessLookupError:
+                process.wait()
+            raise
     return {'argv': list(map(str, argv)), 'exit': code, 'timeout': timed_out,
             'seconds': round(time.perf_counter() - started, 6)}
 
@@ -81,47 +95,53 @@ def main():
     evidence['git_head'] = subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=HERE, text=True).strip()
     evidence['node_version'] = subprocess.check_output(['node', '--version'], text=True).strip()
-    for name, version, porffor, _, stem in selected:
-        test = str(tests[name])
-        # with_suffix replaces the last suffix, so use an additional terminal suffix.
-        node = args.raw / f'{stem}.node.log'
-        build = args.raw / f'{stem}.build.log'
-        native = args.raw / f'{stem}.kiln.log'
-        binary = args.raw / f'{stem}.bin'
-        result = {'name': name, 'version': version, 'porffor_status': porffor,
-                  'test_sha256': hashlib.sha256(tests[name].read_bytes()).hexdigest(), 'phases': {}}
-        phases = result['phases']
-        phases['node'] = command(['node', test], node, 60)
-        if phases['node']['exit'] != 0 or phases['node']['timeout']:
-            status = 'node-baseline-failed'
-        else:
-            phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--output', str(binary)], build, args.timeout)
-            summary = build.with_suffix('.stdout').read_text(errors='replace')
-            timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
-            if timing:
-                phases['build']['native_timing_ms'] = dict(zip(('emit', 'compile', 'link'), map(int, timing.groups())))
-            if phases['build']['timeout']:
-                status = 'compile-timeout'
-            elif phases['build']['exit'] != 0 or not binary.is_file():
-                status = 'compile-error'
+    try:
+        for name, version, porffor, _, stem in selected:
+            test = str(tests[name])
+            # with_suffix replaces the last suffix, so use an additional terminal suffix.
+            node = args.raw / f'{stem}.node.log'
+            build = args.raw / f'{stem}.build.log'
+            native = args.raw / f'{stem}.kiln.log'
+            binary = args.raw / f'{stem}.bin'
+            result = {'name': name, 'version': version, 'porffor_status': porffor,
+                      'test_sha256': hashlib.sha256(tests[name].read_bytes()).hexdigest(), 'phases': {}}
+            phases = result['phases']
+            phases['node'] = command(['node', test], node, 60)
+            if phases['node']['exit'] != 0 or phases['node']['timeout']:
+                status = 'node-baseline-failed'
             else:
-                result['binary_bytes'] = binary.stat().st_size
-                phases['native'] = command([str(binary)], native, args.timeout)
-                if phases['native']['timeout']:
-                    status = 'runtime-timeout'
-                elif phases['native']['exit'] != 0:
-                    status = 'runtime-error'
-                elif node.with_suffix('.stdout').read_bytes() == native.with_suffix('.stdout').read_bytes():
-                    status = 'pass'
+                phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--output', str(binary)], build, args.timeout)
+                summary = build.with_suffix('.stdout').read_text(errors='replace')
+                timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
+                if timing:
+                    phases['build']['native_timing_ms'] = dict(zip(('emit', 'compile', 'link'), map(int, timing.groups())))
+                if phases['build']['timeout']:
+                    status = 'compile-timeout'
+                elif phases['build']['exit'] != 0 or not binary.is_file():
+                    status = 'compile-error'
                 else:
-                    status = 'wrong-output'
-        result['status'] = status
-        evidence['results'].append(result)
-        evidence['completed'] = len(evidence['results'])
-        # Persist after every package so interruption does not lose completed evidence.
+                    result['binary_bytes'] = binary.stat().st_size
+                    phases['native'] = command([str(binary)], native, args.timeout)
+                    if phases['native']['timeout']:
+                        status = 'runtime-timeout'
+                    elif phases['native']['exit'] != 0:
+                        status = 'runtime-error'
+                    elif node.with_suffix('.stdout').read_bytes() == native.with_suffix('.stdout').read_bytes():
+                        status = 'pass'
+                    else:
+                        status = 'wrong-output'
+            result['status'] = status
+            evidence['results'].append(result)
+            evidence['completed'] = len(evidence['results'])
+            # Persist after every package so interruption does not lose completed evidence.
+            (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
+            timing = ', '.join(f'{phase}={data["seconds"]:.3f}s' for phase, data in phases.items())
+            print(f'{name}@{version} -> {status} ({timing})', flush=True)
+    except KeyboardInterrupt:
+        evidence['state'] = 'interrupted'
         (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
-        timing = ', '.join(f'{phase}={data["seconds"]:.3f}s' for phase, data in phases.items())
-        print(f'{name}@{version} -> {status} ({timing})', flush=True)
+        print(f'Interrupted after {evidence["completed"]}/{len(selected)} packages; evidence: {args.raw}', flush=True)
+        raise
     counts = {}
     tsv = args.raw / 'results.tsv'
     with tsv.open('w') as f:
@@ -141,4 +161,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)
