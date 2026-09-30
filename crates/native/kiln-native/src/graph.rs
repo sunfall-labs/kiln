@@ -201,7 +201,6 @@ const __kilnModuleRequireResolve = globalThis.__kilnHostModuleRequireResolve;
 delete globalThis.__kilnHostModuleRequireResolve;
 
 function __kilnDecorateCommonJsRequire(require) {
-    if (typeof require.resolve === "function") return require;
     const resolve = function resolve(specifier, options) {
         if (typeof specifier !== "string") {
             throw new TypeError("The module specifier must be a string");
@@ -3316,6 +3315,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 extern void kiln_c99_gc_enter_job(void);
 extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_OK 0
+#define KILN_C99_OUT_OF_MEMORY (-4)
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 #define KILN_C99_METHOD_PROMISE_WITH_RESOLVERS 411

@@ -232,7 +232,7 @@ static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
      * which is what a library installing a symbol hook on `Map.prototype` hit, and what the
      * runtime bootstrap hits defining `Error.prototype.name` non-enumerable. */
     if (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
-        target.tag == KILN_VALUE_BOUND) {
+        target.tag == KILN_VALUE_BOUND || target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         return kiln_c99_callable_store(target, out, 1);
     }
     {

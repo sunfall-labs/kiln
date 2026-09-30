@@ -439,6 +439,7 @@ extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 #define KILN_C99_OK 0
+#define KILN_C99_OUT_OF_MEMORY (-4)
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 #define KILN_C99_METHOD_PROMISE_WITH_RESOLVERS 411
