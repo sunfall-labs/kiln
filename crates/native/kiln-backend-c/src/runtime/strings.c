@@ -1445,6 +1445,7 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
                                  size_t count, const int64_t *ranges, size_t groups, int depth,
                                  kiln_value *thrown, kiln_regexp *regexp) {
     kiln_value built;
+    kiln_value input;
     size_t group;
     int status = kiln_c99_new_array(&built);
     for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
@@ -1459,10 +1460,12 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
                               thrown);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count), depth,
-                              thrown);
+        input = kiln_c99_from_units(units, count);
+        status = kiln_c99_put(host, built, "input", 5, input, depth, thrown);
     }
     if (status == KILN_C99_OK && regexp != NULL) {
+        kiln_c99_heap_store_value(kiln_c99_array_of(built),
+                                  &kiln_c99_array_of(built)->match_input, input);
         status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built));
     }
     if (status == KILN_C99_OK) {

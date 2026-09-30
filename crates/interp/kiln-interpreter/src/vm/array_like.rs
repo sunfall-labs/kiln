@@ -295,22 +295,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ArrayJoin => {
                 let length = self.array_like_length(receiver, instruction)?;
                 let separator = match arguments.first() {
-                    None | Some(Value::Undefined) => ",".to_owned(),
-                    Some(value) => self.as_text(value, instruction)?,
+                    None | Some(Value::Undefined) => StringUnits::from(","),
+                    Some(value) => self.as_text_units(value, instruction)?,
                 };
-                let mut out = String::new();
+                let mut out = StringUnitsBuilder::new();
                 for index in 0..length {
                     Self::walk_step(&mut steps)?;
                     if index > 0 {
-                        push_bounded(&mut out, &separator)?;
+                        out.push_units(&separator)?;
                     }
                     let element = self.element_get(receiver, index, instruction)?;
                     if !matches!(element, Value::Undefined | Value::Null) {
-                        let text = self.as_text(&element, instruction)?;
-                        push_bounded(&mut out, &text)?;
+                        let text = self.as_text_units(&element, instruction)?;
+                        out.push_units(&text)?;
                     }
                 }
-                Ok(Value::String(out.into()))
+                Ok(Value::String(out.finish()))
             }
             // `Array.prototype.toString` is defined as *calling* the receiver's own `join`, and
             // falling back to `Object.prototype.toString` when that is not callable. Joining

@@ -260,10 +260,12 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                     for (group = 0; group < kiln_regexp_named_group_count(regexp->handle); ++group) {
                         unsigned char name[256];
                         int64_t named_from = -1, named_to = -1;
+                        size_t named_capture = 0;
                         int32_t len = kiln_regexp_named_group_at(regexp->handle, group, name,
                                                                  sizeof name, &named_from,
-                                                                 &named_to);
+                                                                 &named_to, &named_capture);
                         size_t k;
+                        (void)named_capture;
                         if (len <= 0) continue;
                         any_named = 1;
                         if ((size_t)len != name_len) continue;

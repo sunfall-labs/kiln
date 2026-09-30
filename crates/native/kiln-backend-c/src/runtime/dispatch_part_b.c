@@ -2405,17 +2405,15 @@
         *result = kiln_val_to_boundary(array->elements[array->count]);
         return KILN_C99_OK;
     case KILN_C99_METHOD_JOIN: {
-        kiln_text joined = {NULL, 0, 0};
+        uint16_t *joined = NULL;
+        size_t joined_length = 0, joined_capacity = 0;
         size_t length;
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
-        int has_separator = 0;
+        kiln_value shown_separator = kiln_c99_static_text(",", 1);
         if (separator.tag != KILN_VALUE_UNDEFINED) {
-            kiln_value shown = kiln_c99_text(separator);
-            if (shown.tag != KILN_VALUE_STRING) {
-                KILN_C99_REFUSE("join given a separator with no text form");
-            }
-            separator = shown;
-            has_separator = 1;
+            int shown_status = kiln_c99_to_text_argument(host, separator, &shown_separator,
+                                                         depth, thrown);
+            if (shown_status != KILN_C99_OK) return shown_status;
         }
         /* The length is read once, as `LengthOfArrayLike` does: an element's `toString` can
          * push or pop, and the walk goes on to the length it started with, reading a vanished
@@ -2423,37 +2421,15 @@
         length = array->count;
         for (index = 0; index < length; ++index) {
             kiln_val element = index < array->count ? array->elements[index] : KILN_VAL_UNDEFINED;
-            if (index != 0 &&
-                (has_separator ? kiln_c99_text_append_string(&joined, separator)
-                               : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
-                free(joined.bytes);
+            if (index != 0 && kiln_c99_join_units_append(&joined, &joined_length,
+                    &joined_capacity, shown_separator) != KILN_C99_OK) {
+                free(joined);
                 return KILN_C99_OUT_OF_MEMORY;
             }
             /* A nullish element, and a hole, contribute nothing -- which is what makes
              * `[1, , 3].join()` produce "1,,3" rather than "1,undefined,3". */
             if (element == KILN_VAL_UNDEFINED || element == KILN_VAL_NULL ||
                 element == KILN_VAL_HOLE) {
-                continue;
-            }
-            if (KILN_VAL_IS_STRING(element)) {
-                const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(element);
-                if (s != NULL && s->unit_len > 0) {
-                    /* The builder holds UTF-8, so only ASCII bytes can be copied as they are:
-                     * a Latin-1 `é` is one byte 0xE9 here and two in UTF-8, and copying it raw
-                     * put U+FFFD in every `["é"].join("")` until 2026-09-19. */
-                    if (kiln_string_is_utf16(s) ||
-                        !kiln_c99_string_is_ascii(kiln_val_to_boundary(element))) {
-                        kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
-                        if (shown.tag != KILN_VALUE_STRING ||
-                            kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
-                            free(joined.bytes);
-                            return KILN_C99_OUT_OF_MEMORY;
-                        }
-                    } else if (kiln_c99_text_append(&joined, (const char *)kiln_string_latin1(s), s->unit_len) != KILN_C99_OK) {
-                        free(joined.bytes);
-                        return KILN_C99_OUT_OF_MEMORY;
-                    }
-                }
                 continue;
             }
             {
@@ -2467,16 +2443,18 @@
                  * element is the `TypeError` `ToString` gives it. */
                 int shown_status = kiln_c99_to_text_argument(host, boundary, &shown, depth, thrown);
                 if (shown_status != KILN_C99_OK) {
-                    free(joined.bytes);
+                    free(joined);
                     return shown_status;
                 }
-                if (kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
-                    free(joined.bytes);
+                if (kiln_c99_join_units_append(&joined, &joined_length,
+                                               &joined_capacity, shown) != KILN_C99_OK) {
+                    free(joined);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
         }
-        *result = kiln_c99_text_value(&joined);
+        *result = kiln_c99_from_units(joined, joined_length);
+        free(joined);
         return KILN_C99_OK;
     }
     case KILN_C99_METHOD_INDEX_OF:

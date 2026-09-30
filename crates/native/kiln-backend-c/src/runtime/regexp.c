@@ -112,8 +112,9 @@ static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr) {
     if (regexp->named_groups == 1 || regexp->handle == NULL) return KILN_C99_OK;
     for (g = 0; g < kiln_regexp_named_group_count(regexp->handle); ++g) {
         int64_t from = -1, to = -1;
+        size_t capture = 0;
         int32_t len = kiln_regexp_named_group_at(regexp->handle, g, name, sizeof name,
-                                                 &from, &to);
+                                                 &from, &to, &capture);
         if (len <= 0) continue;
         if (!found) {
             int status = kiln_c99_new_object_for_owner(&arr->match_groups, arr);
@@ -123,35 +124,9 @@ static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr) {
             found = 1;
         }
         {
-            kiln_value element = kiln_c99_undefined();
-            if (from >= 0 && to >= from && arr->match_input.tag == KILN_VALUE_STRING &&
-                arr->match_input.ptr != NULL) {
-                const kiln_string *subject = (const kiln_string *)arr->match_input.ptr;
-                size_t length = (size_t)(to - from);
-                size_t candidate;
-                /* Reuse the already rooted capture string. Equal ranges can have equal text, and
-                 * either value is the same observable string. This avoids allocating an
-                 * unrooted temporary between the provider read and the property store. */
-                for (candidate = 1; candidate < arr->count; ++candidate) {
-                    kiln_value captured = kiln_val_to_boundary(arr->elements[candidate]);
-                    const kiln_string *text;
-                    size_t unit;
-                    if (captured.tag != KILN_VALUE_STRING || captured.ptr == NULL) continue;
-                    text = (const kiln_string *)captured.ptr;
-                    if (text->unit_len != length) continue;
-                    for (unit = 0; unit < length; ++unit) {
-                        if (kiln_string_unit_at(text, unit) !=
-                            kiln_string_unit_at(subject, (size_t)from + unit)) break;
-                    }
-                    if (unit == length) {
-                        element = captured;
-                        break;
-                    }
-                }
-                if (length == 0 && element.tag == KILN_VALUE_UNDEFINED) {
-                    element = kiln_c99_static_text("", 0);
-                }
-            }
+            kiln_value element = from >= 0 && capture > 0 && capture < arr->count
+                                     ? kiln_val_to_boundary(arr->elements[capture])
+                                     : kiln_c99_undefined();
             int status = kiln_c99_put_mode(NULL, arr->match_groups, (const char *)name, (size_t)len, element, 0, 0, NULL);
             if (status != KILN_C99_OK) return status;
         }

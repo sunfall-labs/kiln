@@ -78,7 +78,7 @@ int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *
                                size_t capacity);
 size_t kiln_regexp_named_group_count(const void *handle);
 int32_t kiln_regexp_named_group_at(const void *handle, size_t index, unsigned char *buffer,
-                                   size_t capacity, int64_t *from, int64_t *to);
+                                   size_t capacity, int64_t *from, int64_t *to, size_t *capture);
 /* Arbitrary-precision integers. The handles are opaque: everything that knows what one contains
  * is on the other side of this boundary, which is the point (ADR 0025). */
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out);
@@ -440,6 +440,8 @@ static int kiln_c99_install_writable_methods(kiln_value target);
 static int kiln_c99_install_server_response_methods(kiln_value target);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
+static int kiln_c99_join_units_append(uint16_t **units, size_t *length, size_t *capacity,
+                                      kiln_value value);
 static const char *kiln_c99_method_name(uint64_t code);
 /* One past the highest method code the unit declares, from the generated code list: the bound
  * an own-keys walk over a prototype table uses, so a member numbered on the append-only tail is

@@ -46,6 +46,7 @@ pub unsafe extern "C" fn kiln_regexp_named_group_at(
     _capacity: usize,
     _from: *mut i64,
     _to: *mut i64,
+    _capture: *mut usize,
 ) -> i32 {
     INVALID_ARGUMENT
 }

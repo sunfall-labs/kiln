@@ -1009,6 +1009,40 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)joined, total);
 }
 
+/* Grow an Array.join buffer in UTF-16 code units. Using `kiln_text` here would route through
+ * UTF-8 and replace lone surrogates, even though JavaScript strings retain those units. */
+static int kiln_c99_join_units_append(uint16_t **units, size_t *length, size_t *capacity,
+                                      kiln_value value) {
+    const kiln_string *text;
+    size_t needed;
+    if (units == NULL || length == NULL || capacity == NULL || value.tag != KILN_VALUE_STRING ||
+        value.ptr == NULL) return KILN_C99_INVALID_ARGUMENT;
+    text = (const kiln_string *)value.ptr;
+    if (text->unit_len > UINT32_MAX - *length) return KILN_C99_OUT_OF_MEMORY;
+    needed = *length + text->unit_len;
+    if (needed > *capacity) {
+        size_t next = *capacity == 0 ? 16 : *capacity;
+        uint16_t *grown;
+        while (next < needed) {
+            if (next > SIZE_MAX / 2) {
+                next = needed;
+                break;
+            }
+            next *= 2;
+        }
+        if (next > SIZE_MAX / sizeof **units) return KILN_C99_OUT_OF_MEMORY;
+        grown = realloc(*units, next * sizeof **units);
+        if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+        *units = grown;
+        *capacity = next;
+    }
+    for (size_t at = 0; at < text->unit_len; ++at) {
+        (*units)[*length + at] = kiln_string_unit_at(text, at);
+    }
+    *length = needed;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
     if (left.tag != right.tag) {
         return 0;

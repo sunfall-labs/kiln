@@ -61,8 +61,8 @@ int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *
 }
 size_t kiln_regexp_named_group_count(const void *handle) { (void)handle; return 0; }
 int32_t kiln_regexp_named_group_at(const void *handle, size_t index, unsigned char *buffer,
-                                   size_t capacity, int64_t *from, int64_t *to) {
-    (void)handle; (void)index; (void)buffer; (void)capacity; (void)from; (void)to;
+                                   size_t capacity, int64_t *from, int64_t *to, size_t *capture) {
+    (void)handle; (void)index; (void)buffer; (void)capacity; (void)from; (void)to; (void)capture;
     return -1;
 }
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out) {

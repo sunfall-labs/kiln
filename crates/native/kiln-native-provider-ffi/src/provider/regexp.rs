@@ -250,8 +250,8 @@ pub unsafe extern "C" fn kiln_regexp_named_group_count(handle: *const KilnRegex)
 ///
 /// # Safety
 ///
-/// `handle` must be live; `buffer` must be writable for `capacity` bytes; `from` and `to` must be
-/// writable slots.
+/// `handle` must be live; `buffer` must be writable for `capacity` bytes; `from`, `to` and
+/// `capture` must be writable slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_regexp_named_group_at(
     handle: *const KilnRegex,
@@ -260,8 +260,9 @@ pub unsafe extern "C" fn kiln_regexp_named_group_at(
     capacity: usize,
     from: *mut i64,
     to: *mut i64,
+    capture: *mut usize,
 ) -> i32 {
-    if handle.is_null() || buffer.is_null() || from.is_null() || to.is_null() {
+    if handle.is_null() || buffer.is_null() || from.is_null() || to.is_null() || capture.is_null() {
         return INVALID_ARGUMENT;
     }
     // SAFETY: the caller contract guarantees the handle is live.
@@ -287,10 +288,20 @@ pub unsafe extern "C" fn kiln_regexp_named_group_at(
             Some(range) => {
                 from.write(as_offset(range.start));
                 to.write(as_offset(range.end));
+                let capture_index = found
+                    .captures
+                    .iter()
+                    .position(|candidate| candidate.as_ref() == Some(&range))
+                    .and_then(|index| index.checked_add(1));
+                let Some(capture_index) = capture_index else {
+                    return INVALID_ARGUMENT;
+                };
+                capture.write(capture_index);
             }
             None => {
                 from.write(-1);
                 to.write(-1);
+                capture.write(0);
             }
         }
     }
@@ -372,7 +383,7 @@ macro_rules! assert_provider_export {
             const _: unsafe extern "C" fn(*const KilnRegex) -> usize = kiln_regexp_named_group_count;
         };
         (regexp, kiln_regexp_named_group_at, regexp_named_group_at) => {
-            const _: unsafe extern "C" fn(*const KilnRegex, usize, *mut u8, usize, *mut i64, *mut i64) -> i32 = kiln_regexp_named_group_at;
+            const _: unsafe extern "C" fn(*const KilnRegex, usize, *mut u8, usize, *mut i64, *mut i64, *mut usize) -> i32 = kiln_regexp_named_group_at;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }
