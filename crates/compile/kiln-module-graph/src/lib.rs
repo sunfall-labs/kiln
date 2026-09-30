@@ -1167,12 +1167,10 @@ impl ModuleGraph {
          -> Result<ModuleNode, ModuleGraphError> {
             let mut node = node.clone();
             let original_imports = std::mem::take(&mut node.program.imports);
+            let original_program_dependencies = std::mem::take(&mut node.program.dependencies);
             let original_dependencies = std::mem::take(&mut node.dependencies);
-            node.dependencies = original_dependencies
-                .iter()
-                .filter(|dependency| demand.live.contains(&dependency.target))
-                .cloned()
-                .collect();
+            let mut rewritten_requests = BTreeMap::<String, Vec<String>>::new();
+            let mut rewritten_dependencies = BTreeMap::<String, Vec<Dependency>>::new();
             node.runtime_dependencies = node
                 .runtime_dependencies
                 .iter()
@@ -1279,7 +1277,14 @@ impl ModuleGraph {
                         let specifier = format!("{}#kiln-live-{index}", import.source);
                         import.source = specifier.clone();
                         import.imported = imported;
-                        node.dependencies.push(Dependency { specifier, target });
+                        rewritten_requests
+                            .entry(original_import.source.clone())
+                            .or_default()
+                            .push(specifier.clone());
+                        rewritten_dependencies
+                            .entry(original_import.source.clone())
+                            .or_default()
+                            .push(Dependency { specifier, target });
                     }
                 }
 
@@ -1290,6 +1295,56 @@ impl ModuleGraph {
                 imports.push(import);
             }
             node.program.imports = imports;
+            if node.source == ModuleSource::CommonJs {
+                // CommonJS's dependency list also retains unresolved require literals so the
+                // runtime loader can throw at the original call site. Keep its source request
+                // inventory untouched; only ESM import requests are retargeted below.
+                node.dependencies = original_dependencies
+                    .iter()
+                    .filter(|dependency| demand.live.contains(&dependency.target))
+                    .cloned()
+                    .collect();
+                node.program.dependencies = original_program_dependencies;
+            } else {
+                // Retain dependency evaluation order from the original request list, replacing a
+                // dropped barrel in place with its live export providers. Multiple bindings from a
+                // barrel expand in import order.
+                for dependency in &original_dependencies {
+                    if demand.live.contains(&dependency.target) {
+                        node.dependencies.push(dependency.clone());
+                    } else if let Some(rewritten) =
+                        rewritten_dependencies.remove(&dependency.specifier)
+                    {
+                        node.dependencies.extend(rewritten);
+                    }
+                }
+                for remaining in rewritten_dependencies.into_values() {
+                    node.dependencies.extend(remaining);
+                }
+                // Preserve source request order while retargeting requests whose barrel was
+                // removed. Native async evaluation uses this list to await static dependencies;
+                // leaving the original specifier here makes it disagree with the synthetic edge
+                // in `node.dependencies`, so the provider can be read before it has finished.
+                let retained_requests = node
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.specifier.as_str())
+                    .collect::<BTreeSet<_>>();
+                for request in original_program_dependencies {
+                    if let Some(rewritten) = rewritten_requests.remove(&request) {
+                        node.program.dependencies.extend(rewritten);
+                    } else if retained_requests.contains(request.as_str()) {
+                        node.program.dependencies.push(request);
+                    }
+                }
+                // Include any edge without an original source request while retaining the ordered
+                // source-derived prefix above.
+                for dependency in &node.dependencies {
+                    if !node.program.dependencies.contains(&dependency.specifier) {
+                        node.program.dependencies.push(dependency.specifier.clone());
+                    }
+                }
+            }
             Ok(node)
         };
         for path in &order {

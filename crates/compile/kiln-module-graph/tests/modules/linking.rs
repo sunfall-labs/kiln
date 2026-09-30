@@ -1304,6 +1304,11 @@ fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
     assert_eq!(entry_node.program.imports[0].imported, "answer");
     assert_eq!(entry_node.dependencies.len(), 1);
     assert_eq!(entry_node.dependencies[0].target, origin);
+    assert_eq!(
+        entry_node.program.dependencies,
+        vec![entry_node.program.imports[0].source.clone()],
+        "rewritten synthetic import remains a static request in the reduced program"
+    );
     assert_eq!(remapped.live_imports, BTreeSet::from([(entry, 0)]));
 }
 
