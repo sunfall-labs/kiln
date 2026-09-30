@@ -139,13 +139,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-        if !matches!(target, Value::Object(_) | Value::Function(_)) {
+        if !is_object_type(&target) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "invalid argument to Error.captureStackTrace".to_owned(),
             });
         }
         if let Some(constructor) = arguments.get(1)
-            && !matches!(constructor, Value::Undefined | Value::Function(_))
+            && !matches!(constructor, Value::Undefined)
+            && !is_callable(constructor)
         {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
