@@ -1663,6 +1663,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_undefined();
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR) {
+        KILN_C99_REFUSE("dynamic AsyncFunction, GeneratorFunction, and "
+                        "AsyncGeneratorFunction construction is not implemented");
+    }
     if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
         if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
             kiln_c99_collection_of(args[0])->is_weak || argc < 2 ||

@@ -514,6 +514,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnJsonUnbox", KILN_C99_METHOD_JSON_UNBOX_RAW},
                      {"__kilnRegExpLegacyCapture", KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW},
                      {"__kilnFunctionKindPrototype", KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE},
+                     {"__kilnFunctionKindConstructor", KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR},
                      /* `%TypedArray%.prototype`'s element-storage primitives, captured the same
                       * way by `kiln-builtins/src/typedarray.ts`. */
                      {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},

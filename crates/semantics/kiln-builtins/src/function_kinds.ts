@@ -1,26 +1,39 @@
 /* Callable constructors and their prototype identities are semantic builtins. The private
  * bridge only associates these TypeScript-created objects with native closure kinds. */
 const installFunctionKindPrototype = (globalThis as any).__kilnFunctionKindPrototype;
+const constructFunctionKind = (globalThis as any).__kilnFunctionKindConstructor;
 delete (globalThis as any).__kilnFunctionKindPrototype;
+delete (globalThis as any).__kilnFunctionKindConstructor;
 
 if (typeof installFunctionKindPrototype === "function") {
-  function AsyncFunction(): never {
-    throw new TypeError("AsyncFunction constructor is not implemented");
+  function AsyncFunction(...args: any[]): any {
+    return constructFunctionKind(0, ...args);
   }
-  function GeneratorFunction(): never {
-    throw new TypeError("GeneratorFunction constructor is not implemented");
+  function GeneratorFunction(...args: any[]): any {
+    return constructFunctionKind(1, ...args);
   }
-  function AsyncGeneratorFunction(): never {
-    throw new TypeError("AsyncGeneratorFunction constructor is not implemented");
+  function AsyncGeneratorFunction(...args: any[]): any {
+    return constructFunctionKind(2, ...args);
   }
 
   const constructors = [AsyncFunction, GeneratorFunction, AsyncGeneratorFunction];
+  const prototypes = [
+    (async function () {}),
+    (function* () {}),
+    (async function* () {}),
+  ];
+  const tags = ["AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction"];
   for (let kind = 0; kind < constructors.length; kind += 1) {
     const constructor = constructors[kind];
-    const prototype = Object.create(Function.prototype);
+    const prototype = prototypes[kind];
+    Object.setPrototypeOf(prototype, Function.prototype);
     Object.defineProperty(prototype, "constructor", {
       value: constructor,
       writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(prototype, Symbol.toStringTag, {
+      value: tags[kind],
       configurable: true,
     });
     Object.defineProperty(constructor, "prototype", {

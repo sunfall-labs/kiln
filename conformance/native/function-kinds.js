@@ -15,6 +15,14 @@ console.log(
   GeneratorFunction !== AsyncGeneratorFunction,
 );
 console.log(
+  typeof AsyncFunction.prototype,
+  typeof GeneratorFunction.prototype,
+  typeof AsyncGeneratorFunction.prototype,
+  Object.prototype.toString.call(asynchronous),
+  Object.prototype.toString.call(generator),
+  Object.prototype.toString.call(asyncGenerator),
+);
+console.log(
   asynchronous instanceof AsyncFunction,
   asynchronous instanceof GeneratorFunction,
   generator instanceof GeneratorFunction,
