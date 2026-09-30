@@ -1079,6 +1079,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
+        double element_index = kiln_c99_key_index_key(key);
+        kiln_array *elements = kiln_c99_array_of(target);
+        /* Fixed names and numeric destructuring keys use ordinary Get too. Holes continue
+         * through the prototype lookup below instead of hiding inherited index properties. */
+        if (element_index >= 0.0 && element_index < (double)elements->count &&
+            elements->elements[(size_t)element_index] != KILN_VAL_HOLE) {
+            *out = kiln_val_to_boundary(elements->elements[(size_t)element_index]);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;

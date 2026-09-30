@@ -236,10 +236,15 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                                           depth, thrown)
                        : KILN_C99_INVALID_ARGUMENT;
         }
-        *out = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE
-                   ? kiln_val_to_boundary(array->elements[(size_t)index])
-                   : kiln_c99_undefined();
-        return KILN_C99_OK;
+        if ((size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE) {
+            *out = kiln_val_to_boundary(array->elements[(size_t)index]);
+            return KILN_C99_OK;
+        }
+        /* Missing elements must still observe subclass and Array.prototype indices. */
+        kiln_value name = kiln_c99_property_key(key);
+        if (name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr, NULL,
+                                out, depth, thrown);
     }
     if (target.tag == KILN_VALUE_STRING && index >= 0.0) {
         kiln_c99_utf16_iter iterator = {target.ptr, target.len, 0, 0, 0};
