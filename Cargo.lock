@@ -2081,7 +2081,9 @@ dependencies = [
 name = "kiln-liveness"
 version = "0.1.0"
 dependencies = [
+ "kiln-frontend-oxc",
  "kiln-graph",
+ "kiln-hir",
  "kiln-ir",
  "kiln-module-graph",
  "kiln-module-resolver",

@@ -717,6 +717,92 @@ pub fn retained_method_groups(
     mask
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_module_graph::{CommonJsParse, Frontend};
+
+    struct OxcFrontend;
+
+    impl Frontend for OxcFrontend {
+        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            kiln_frontend_oxc::parse(path, source)
+        }
+
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse {
+            let (module, static_requires) =
+                kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
+            CommonJsParse {
+                module,
+                static_requires,
+            }
+        }
+    }
+
+    struct TempProject(PathBuf);
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn commonjs_require_demands_complete_target_exports_for_wildcard_interop() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-cjs-demand-{stamp}"));
+        fs::create_dir_all(&root).expect("create project fixture");
+        let _cleanup = TempProject(root.clone());
+        fs::write(root.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write package format");
+        fs::write(
+            root.join("Schema.js"),
+            r#"
+function _interopRequireWildcard(obj) {
+  if (obj && obj.__esModule) return obj;
+  const namespace = {};
+  if (obj != null) for (const key in obj) if (Object.prototype.hasOwnProperty.call(obj, key)) namespace[key] = obj[key];
+  namespace.default = obj;
+  return namespace;
+}
+const AST = _interopRequireWildcard(require("./SchemaAST.js"));
+exports.useAnnotations = AST.annotations;
+"#,
+        )
+        .expect("write CJS importer");
+        fs::write(
+            root.join("SchemaAST.js"),
+            r#"
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.annotations = function (ast, values) { return values; };
+"#,
+        )
+        .expect("write CJS export provider");
+
+        let entry = root.join("Schema.js");
+        let graph = kiln_module_graph::ModuleGraph::build(
+            &entry,
+            &root,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS graph");
+        let child = fs::canonicalize(root.join("SchemaAST.js")).expect("canonical child path");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("select executable modules");
+        assert!(selection.modules.iter().any(|module| module.path == child));
+        assert!(selection
+            .live_export_slots
+            .get(&child)
+            .is_some_and(|slots| slots.contains(&0)));
+    }
+}
+
 /// Conservative capabilities required by a single module program.
 pub fn program_provider_capabilities(
     module: &kiln_ir::ModuleProgram,
