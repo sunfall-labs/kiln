@@ -15,3 +15,17 @@ try {
 } catch (error) {
   console.log(error instanceof TypeError);
 }
+
+const intrinsicEval = eval;
+const order = [];
+Object.defineProperty(globalThis, 'eval', {
+  configurable: true,
+  get() {
+    order.push('callee');
+    return intrinsicEval;
+  },
+});
+function ordered() {
+  return eval((order.push('argument'), '(function () { return 7; })'))();
+}
+console.log(ordered(), order.join(','));
