@@ -161,8 +161,8 @@ int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
     if (resolve != NULL) {
         kiln_value decorator;
         kiln_value decorated;
-        int status = kiln_c99_bootstrap_global(&decorator,
-            "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1);
+        int status = kiln_c99_bootstrap_global(NULL, &decorator,
+            "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1, 0, NULL);
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_call(NULL, &decorated, decorator, kiln_c99_undefined(), out, 1, 0, NULL);
         if (status != KILN_C99_OK) return status;

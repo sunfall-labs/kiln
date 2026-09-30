@@ -12,7 +12,6 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_WEAK_REF: return "WeakRef";
     case KILN_C99_BUILTIN_FINALIZATION_REGISTRY: return "FinalizationRegistry";
     case KILN_C99_BUILTIN_SHADOW_REALM: return "ShadowRealm";
-    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: return "BigUint64Array";
     case KILN_C99_BUILTIN_DISPOSABLE_STACK: return "DisposableStack";
