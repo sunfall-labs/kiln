@@ -107,21 +107,50 @@ Per ADR 0062, provider requirements are derived strictly from the retained graph
    cachable C99 emitter ([`kiln-backend-c`](file://~/Work/kiln/crates/native/kiln-backend-c)).
 3. **SWC Compiler Core:** Rejected. Kiln retains its incremental query database ([`kiln-db`](file://~/Work/kiln/crates/compile/kiln-db)).
 
-### 4. Main-Thread OS Runloop Integration
+### 4. Main-Thread OS Runloop Integration: The Turn Mailbox & Wakeup Seam
 
-Native GUI frameworks require that the process's main thread own the OS event loop. This inverts
-Kiln's standard Tokio/uring execution model:
+Native GUI frameworks strictly require that the process's main thread (thread 0) own the OS event
+loop. Synchronizing an asynchronous runtime with a native OS runloop often introduces deadlocks,
+reentrancy bugs, or battery-draining spin loops. Kiln avoids these failure modes by making the OS
+runloop the authoritative host, treating Kiln's execution as discrete turn quanta (ADR 0070), and
+connecting them via an **Asynchronous Turn Mailbox**.
 
-* **The Inversion Seam:** When the `gui` capability is active, the host entry point initializes the
-  platform application (`NSApplicationMain`, `g_application_run`, or Win32 message pump) on the
-  main thread.
-* **Turn Quantum Pumping (ADR 0070):** Kiln's microtask queue, asynchronous I/O completion callbacks,
-  and timer events are scheduled onto the native runloop using platform-native idle/dispatch hooks:
-  - macOS/iOS: `CFRunLoopPerformBlock` and `dispatch_async(dispatch_get_main_queue(), ...)`.
-  - Linux: GLib's `g_idle_add` and `g_timeout_add`.
-  - Windows: Custom window message posting (`PostMessage(hwnd, WM_KILN_TURN, ...)`).
-* Worker threads (such as `kiln:actors` or background I/O tasks) communicate with the UI thread
-  exclusively via message queues that wake the main runloop.
+#### The Three Structural Invariants:
+1. **The UI Realm is Pinned to the Main Thread (No UI Mutexes):**
+   Because operating systems mandate that UI widgets must only be created and mutated on thread 0,
+   the JavaScript realm that owns the UI is pinned to the main thread. It never locks UI widgets
+   behind mutexes. All widget mutations occur synchronously during a turn on the main thread,
+   rendering cross-thread UI deadlocks structurally impossible.
+2. **Pure Asynchronous Mailbox (Zero Synchronous Cross-Thread Waits):**
+   Deadlocks in GUI runtimes occur when the main thread blocks waiting for a background thread while
+   the background thread blocks waiting for the main thread. Kiln enforces a strict unidirectional
+   rule:
+   - The main thread **never** synchronously waits on background workers or I/O. All operations
+     settle as asynchronous Promises.
+   - Background threads (Tokio I/O, `kiln:actors` under ADR 0072) **never** synchronously block
+     waiting for the main thread. When background work settles, it enqueues a completion message into
+     the main thread's lock-free Turn Mailbox and signals the OS runloop.
+3. **Reentrancy Guard (Preserving Run-to-Completion):**
+   If a native widget mutation (e.g. `win.setTitle(...)`) causes the OS to fire an immediate synchronous
+   native notification (e.g. window resize/repaint) while JavaScript is still on the stack, executing
+   the JS event handler immediately would violate ECMAScript's run-to-completion invariant and risk
+   stack overflow. Kiln intercepts synchronous native callbacks during an active turn and enqueues
+   them into the Turn Mailbox to be executed as subsequent, clean turns after the current stack unwinds.
+
+#### Platform-Native Zero-CPU Wakeup Primitives:
+When no turns or UI events are active, the main thread idles inside the kernel wait primitive at 0%
+CPU. When background actors or I/O completions arrive, they awaken the main thread immediately
+without polling:
+
+| Platform | Native Runloop Host | Zero-CPU Idle Wait | Cross-Thread Wakeup Primitive |
+| :--- | :--- | :--- | :--- |
+| **macOS / iOS** | `CFRunLoop` / `NSApplication` | `mach_msg` | `CFRunLoopSourceSignal(source)` + `CFRunLoopWakeUp(mainLoop)` |
+| **Linux** | `GMainContext` (GTK4) | `poll()` / `epoll()` on display fd | `g_main_context_wakeup(context)` or 8-byte write to `eventfd` |
+| **Windows** | Win32 Message Pump | `GetMessage()` / `MsgWaitForMultipleObjects` | `PostMessage(hwnd, WM_KILN_TURN, 0, 0)` |
+
+Each tick of the runloop drains the pending mailbox messages, executes one turn quantum (ADR 0070),
+flushes the microtask queue, updates native widget properties via HostOps, and returns control to the
+OS runloop to sleep.
 
 ### 5. Headless Virtual Mock & Differential Parity
 
