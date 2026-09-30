@@ -404,6 +404,11 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
                                  kiln_value *thrown);
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
+                                              kiln_value callee, const kiln_value *args,
+                                              size_t argc, kiln_value new_target, int depth,
+                                              kiln_value *thrown);
+static int kiln_c99_is_constructor(kiln_value value);
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
                              kiln_val receiver, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown);
