@@ -1674,6 +1674,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_number((double)length);
                 return KILN_C99_OK;
             }
+            KILN_C99_REFUSE("the declared length of this native method is not in the arity authority");
         }
         /* The own slots above are synthetic (name/length and supported prototype); whatever the
          * program added to Function.prototype is inherited by every native function as well. */

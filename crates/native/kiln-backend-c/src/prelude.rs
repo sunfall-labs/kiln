@@ -12,36 +12,43 @@ pub(crate) struct MethodId {
 
 const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 
+const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.len() == 0 || needle.len() > haystack.len() {
+        return false;
+    }
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        if bytes_match_at(haystack, start, needle) {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
 const fn method_declared_length(method: &str) -> u32 {
-    let identities = [
-        ("KILN_C99_METHOD_OBJECT_KEYS", "Object", "keys"),
-        ("KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR", "Object", "getOwnPropertyDescriptor"),
-        ("KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS", "Object", "getOwnPropertyDescriptors"),
-        ("KILN_C99_METHOD_FUNCTION_CALL", "Function.prototype", "call"),
-        ("KILN_C99_METHOD_FUNCTION_APPLY", "Function.prototype", "apply"),
-        ("KILN_C99_METHOD_FUNCTION_BIND", "Function.prototype", "bind"),
-        ("KILN_C99_METHOD_REGEXP_TEST", "RegExp.prototype", "test"),
-        ("KILN_C99_METHOD_REGEXP_EXEC", "RegExp.prototype", "exec"),
-        ("KILN_C99_METHOD_REGEXP_TO_STRING", "RegExp.prototype", "toString"),
-    ];
-    let mut identity = None;
+    let mut length = None;
     let mut index = 0;
-    while index < identities.len() {
-        let (candidate, owner, member) = identities[index];
-        if method.len() == candidate.len() &&
-            bytes_match_at(method.as_bytes(), 0, candidate.as_bytes()) {
-            identity = Some((owner, member));
-            break;
+    while index < BUILTIN_SURFACE.len() {
+        let member = BUILTIN_SURFACE[index];
+        if bytes_contain(member.answers.as_bytes(), method.as_bytes()) {
+            if let Some(candidate) = kiln_builtin_surface::native_function_length(
+                member.owner,
+                member.name,
+            ) {
+                if let Some(previous) = length {
+                    if previous != candidate {
+                        return METHOD_LENGTH_UNSPECIFIED;
+                    }
+                } else {
+                    length = Some(candidate);
+                }
+            }
         }
         index += 1;
     }
-    match identity {
-        Some((owner, member)) => {
-            match kiln_builtin_surface::native_function_length(owner, member) {
-                Some(length) => length as u32,
-                None => METHOD_LENGTH_UNSPECIFIED,
-            }
-        }
+    match length {
+        Some(length) => length as u32,
         None => METHOD_LENGTH_UNSPECIFIED,
     }
 }

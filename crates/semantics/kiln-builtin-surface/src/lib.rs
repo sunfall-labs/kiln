@@ -127,6 +127,24 @@ pub const fn native_function_length(owner: &str, member: &str) -> Option<usize> 
         }
         index += 1;
     }
+    /* Prototype callables share the same public arity authority as static callables. Keeping
+     * these rows here lets the interpreter and emitted native facades query one specification
+     * table instead of growing separate backend method-length switches. */
+    index = 0;
+    while index < PROTOTYPE_SURFACE.len() {
+        let row = PROTOTYPE_SURFACE[index];
+        if same(row.prototype.name(), owner) {
+            if let MemberKey::Named(name) = row.key {
+                if same(name, member) {
+                    if let MemberKind::Method { length } = row.kind {
+                        return Some(length);
+                    }
+                    return None;
+                }
+            }
+        }
+        index += 1;
+    }
     None
 }
 
