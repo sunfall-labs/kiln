@@ -2394,7 +2394,9 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
     }
     {
         const kiln_object *object = kiln_c99_object_of(target);
-        if (object->sealed != NULL)
+        /* Namespace slots hold live binding cells. Ordinary dictionary hits return a slot's
+         * raw payload; the namespace read must unwrap it and enforce the temporal dead zone. */
+        if (object->sealed != NULL || object->module_namespace)
             return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
         if (object->shape != NULL) {
             const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
