@@ -20,7 +20,7 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
 }
 
 /* The bridge for `DefineNamedProperty` (tail.rs, the only caller): `{ ...base, f: i, g: i * 2 }`
- * defines `f` and `g` straight onto the literal's own accumulator, which the generic path (a
+ * defines names straight onto the literal's own accumulator, which the generic path (a
  * boundary round trip through `kiln_value` for both the key and the value, `kiln_c99_property_key`,
  * `kiln_c99_set_function_name`, then `kiln_c99_put` interning the key again and walking the whole
  * target-kind ladder -- proxy, function, method, array, collection, promise -- before it even
@@ -29,11 +29,10 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
  * Returns 1 when it fully handled the definition (`*status` says whether that succeeded), 0 to
  * fall back to the generic path unchanged. A miss is the common shape of "this write needs the
  * generic path's care" -- a dictionary-mode or non-extensible or frozen or accessor-bearing
- * object, a key the shape tree refuses (the fast-property limit), `__proto__` (which the generic
- * path relinks the prototype for instead of defining, and only when the key is *this* literal
- * spelling of it -- computed and symbol keys never reach here to begin with), or a value that is
- * a function and so needs `kiln_c99_set_function_name`'s attention -- and is never a correctness
- * problem: every one of them is a plain `return 0` before anything is mutated.
+ * object, a key the shape tree refuses (the fast-property limit), `__proto__` (which stays on the
+ * generic path because its semantics depend on whether the literal key was computed), or a value
+ * that is a function and so needs `kiln_c99_set_function_name`'s attention. Every miss returns
+ * before mutation, so falling back remains safe.
  *
  * `target` is trusted to be the literal's own fresh object without asking `kiln_c99_gc_kind_of_ptr`
  * -- the compiler emits `DefineNamedProperty` nowhere but here (`kiln_ir::compile::object_literal`),
@@ -42,17 +41,15 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
  * than trusted blindly, because a wrong guess here would read a `kiln_promise` or `kiln_collection`
  * payload as a `kiln_object` and corrupt it: cheap enough not to be worth skipping, unlike the
  * slab-table lookup `kiln_c99_gc_kind_of_ptr` would otherwise cost on every key. */
-/* The site remembers the one thing this operation computes: which shape the target arrived
- * with, and which shape and slot the key sends it to. The transition tree is append-only and
- * its shapes are never freed, so `(shape, key) -> (next shape, slot)` is a pure function and
- * the memo holds for as long as the program runs; the key itself need not be compared, because
- * a site's key is a literal that never changes. A miss -- another shape at the same site --
- * takes the general path below and re-teaches the site. */
+/* DefineNamedProperty is shared by fixed names and computed names after a spread. A given site can
+ * see the same incoming shape under several keys, so its PIC must be keyed by both shape and
+ * canonical property name. */
 static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val value,
+                                               const kiln_string *key,
                                                const kiln_c99_site *site) {
     const kiln_c99_pic_entry *entry;
-    if (site == NULL || object->shape == NULL) return 0;
-    entry = kiln_c99_site_entry(site, object->shape);
+    if (site == NULL || object->shape == NULL || key == NULL) return 0;
+    entry = kiln_c99_site_entry_keyed(site, object->shape, key);
     if (entry == NULL) return 0;
     if (entry->transition_to == NULL) {
         if (entry->slot >= object->slot_capacity) return 0;
@@ -69,9 +66,17 @@ static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val val
 }
 
 static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_shape *from,
-                                               const kiln_shape *to, uint32_t slot) {
-    if (site == NULL) return;
-    kiln_c99_site_remember_transition(site, from, to, slot);
+                                               const kiln_shape *to, uint32_t slot,
+                                               const kiln_string *key) {
+    kiln_c99_pic_entry entry;
+    if (site == NULL || key == NULL) return;
+    memset(&entry, 0, sizeof entry);
+    entry.shape = from;
+    entry.transition_to = to;
+    entry.slot = slot;
+    entry.keyed = 1;
+    entry.key = key;
+    kiln_c99_site_remember(site, &entry);
 }
 
 static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
@@ -92,11 +97,6 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
     if (object->shape == NULL || object->properties != NULL || object->frozen ||
         object->not_extensible || object->accessor_count != 0) {
         return 0;
-    }
-    kiln_c99_prototype_touched(object);
-    if (kiln_c99_define_named_cached(object, value, site)) {
-        *status = KILN_C99_OK;
-        return 1;
     }
     keystr = (const kiln_string *)KILN_VAL_PTR(key);
     if (keystr == NULL || keystr->unit_len == 0) {
@@ -119,12 +119,17 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         *status = KILN_C99_OUT_OF_MEMORY;
         return 1;
     }
+    kiln_c99_prototype_touched(object);
+    if (kiln_c99_define_named_cached(object, value, ikey, site)) {
+        *status = KILN_C99_OK;
+        return 1;
+    }
     if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
         /* Redefining an attribute-bearing slot changes its attributes: the generic path's. */
         if (slot >= object->slot_capacity || (object->shape->special_mask & (1u << slot)) != 0) {
             return 0;
         }
-        kiln_c99_define_named_teach(site, object->shape, NULL, slot);
+        kiln_c99_define_named_teach(site, object->shape, NULL, slot, ikey);
         kiln_c99_heap_store_val(object, &object->slots[slot], value);
         *status = KILN_C99_OK;
         return 1;
@@ -138,7 +143,7 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
                 return 1;
             }
         }
-        kiln_c99_define_named_teach(site, object->shape, next, next->slot_index);
+        kiln_c99_define_named_teach(site, object->shape, next, next->slot_index, ikey);
         kiln_c99_heap_store_val(object, &object->slots[next->slot_index], value);
         object->shape = next;
         *status = KILN_C99_OK;

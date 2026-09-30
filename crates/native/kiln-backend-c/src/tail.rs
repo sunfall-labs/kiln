@@ -386,8 +386,8 @@ pub(crate) fn emit_tail_instruction(
         // `SetProperty` an object literal's methods lower to.
         // The enumerated sibling of `DefineMethod`: an object literal's members are listed,
         // a class's methods are not.
-        // The shape fast path below is a pure optimisation of the same operation the `else`
-        // branch already implements: `kiln_c99_define_named_fast` only ever reports success
+        // The shape fast path in `spread.c` is a pure optimisation of the same operation the
+        // `else` branch already implements: `kiln_c99_define_named_fast` only ever reports success
         // after actually storing `value`, and every miss (a dictionary-mode, frozen,
         // non-extensible or accessor-bearing target; a non-string key; a function value that
         // still needs `kiln_c99_set_function_name`; `__proto__`; a shape the transition tree
@@ -405,7 +405,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site kiln_dnp_site = {{0}}; kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; kiln_object *kiln_dnp_obj = KILN_VAL_IS_OBJECT(stack[sp - 1]) ? (kiln_object *)KILN_VAL_PTR(stack[sp - 1]) : NULL; if (kiln_dnp_obj != NULL && kiln_dnp_obj->shape != NULL && kiln_dnp_obj->shape == kiln_c99_slot_key(&kiln_dnp_site.entries[0].shape) && kiln_dnp_site.entries[0].transition_to != NULL && kiln_dnp_site.entries[0].slot < kiln_dnp_obj->slot_capacity && KILN_VAL_IS_STRING(kiln_dnp_key) && !KILN_VAL_IS_CLOSURE(kiln_dnp_value) && !kiln_dnp_obj->frozen && !kiln_dnp_obj->not_extensible && kiln_dnp_obj->accessor_count == 0 && kiln_c99_gc_kind_of_ptr(kiln_dnp_obj) == KILN_GC_OBJECT) {{ kiln_c99_prototype_touched(kiln_dnp_obj); kiln_dnp_obj->slots[kiln_dnp_site.entries[0].slot] = kiln_dnp_value; kiln_dnp_obj->shape = (kiln_shape *)kiln_dnp_site.entries[0].transition_to; }} else if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status, &kiln_dnp_site)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} {name_function}if (kiln_c99_define_computed(kiln_val_to_boundary(stack[sp - 1]), name, method) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
+                "    {{ static kiln_c99_site kiln_dnp_site = {{0}}; kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status, &kiln_dnp_site)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} {name_function}if (kiln_c99_define_computed(kiln_val_to_boundary(stack[sp - 1]), name, method) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
             )
             .unwrap();
         }
