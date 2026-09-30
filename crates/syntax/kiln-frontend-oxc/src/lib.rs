@@ -304,12 +304,6 @@ fn discover_node_runtime_requests_from_semantic(
     semantic: &oxc_semantic::Semantic<'_>,
 ) -> Vec<NodeRuntimeRequest> {
     let scoping = semantic.scoping();
-    if semantic
-        .nodes()
-        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
-    {
-        return HashSet::new();
-    }
     let mut create_symbols = HashSet::<SymbolId>::new();
     let mut module_symbols = HashMap::<SymbolId, String>::new();
     for statement in &program.body {
@@ -1840,8 +1834,16 @@ fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> Hash
         .build(&parsed.program)
         .semantic;
     let scoping = semantic.scoping();
+    if semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
+    {
+        return HashSet::new();
+    }
     semantic
         .nodes()
+        .iter()
         .filter_map(|node| {
             let AstKind::CallExpression(call) = node.kind() else {
                 return None;
