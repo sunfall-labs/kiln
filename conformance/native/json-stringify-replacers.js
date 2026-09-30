@@ -21,3 +21,9 @@ const revived = JSON.parse('{"a":1,"gone":2,"items":[3,4]}', function (key, valu
 });
 console.log(JSON.stringify(revived));
 console.log(JSON.parse('4', (_key, value) => value * 3));
+const tokens = [];
+JSON.parse('{"n":1e2,"s":"\\u0061","a":[true,null]}', (_key, value, context) => {
+  if (context.source !== undefined) tokens.push(context.source);
+  return value;
+});
+console.log(tokens.join('|'));

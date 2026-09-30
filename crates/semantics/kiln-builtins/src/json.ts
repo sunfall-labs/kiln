@@ -85,9 +85,66 @@
   });
   const parseWithReviver = {
     parse(text: any, reviver?: any): any {
-      const value = parse(text);
+      if (typeof text === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+      const input = String(text);
+      const value = parse(input);
       if (typeof reviver !== "function") return value;
-      function visit(holder: any, key: string): any {
+      // Keep original primitive token text for the reviver context. The validated document is
+      // scanned before callbacks run, so subsequent property mutations cannot change its proof.
+      let position = 0;
+      function whitespace(): void {
+        while (position < input.length && (input[position] === ' ' || input[position] === '\n' ||
+          input[position] === '\r' || input[position] === '\t')) position++;
+      }
+      function stringEnd(): void {
+        position++;
+        while (position < input.length) {
+          const character = input[position++];
+          if (character === '\\') position++;
+          else if (character === '"') return;
+        }
+      }
+      function sourceRecord(value: any): any {
+        whitespace();
+        const start = position;
+        const record: any = { value, source: undefined, children: undefined };
+        if (input[position] === '{' || input[position] === '[') {
+          const array = input[position] === '[';
+          const end = array ? ']' : '}';
+          record.children = Object.create(null);
+          position++;
+          whitespace();
+          let index = 0;
+          while (input[position] !== end) {
+            let key: string;
+            if (array) key = String(index++);
+            else {
+              const keyStart = position;
+              stringEnd();
+              key = parse(input.slice(keyStart, position));
+              whitespace();
+              position++; // colon: the primitive parser has already validated it
+            }
+            record.children[key] = sourceRecord(value[key]);
+            whitespace();
+            if (input[position] !== ',') break;
+            position++;
+            whitespace();
+          }
+          position++;
+        } else {
+          if (input[position] === '"') stringEnd();
+          else {
+            while (position < input.length && input[position] !== ',' && input[position] !== '}' &&
+              input[position] !== ']' && input[position] !== ' ' && input[position] !== '\n' &&
+              input[position] !== '\r' && input[position] !== '\t') position++;
+          }
+          record.source = input.slice(start, position);
+        }
+        return record;
+      }
+      const source = sourceRecord(value);
+      function visit(holder: any, key: string, record: any): any {
         const value = holder[key];
         if (value !== null && typeof value === "object") {
           const keys: string[] = [];
@@ -100,16 +157,20 @@
           }
           for (let i = 0; i < keys.length; i++) {
             const childKey = keys[i];
-            const child = visit(value, childKey);
+            const child = visit(value, childKey,
+              record !== undefined && record.children !== undefined ? record.children[childKey] : undefined);
             if (child === undefined) delete value[childKey];
             else Object.defineProperty(value, childKey, {
               value: child, writable: true, enumerable: true, configurable: true,
             });
           }
         }
-        return reviver.call(holder, key, value);
+        const context: any = {};
+        if (record !== undefined && record.source !== undefined && Object.is(record.value, value))
+          context.source = record.source;
+        return reviver.call(holder, key, value, context);
       }
-      return visit({ "": value }, "");
+      return visit({ "": value }, "", source);
     },
   }.parse;
   Object.defineProperty(G.JSON, "parse", {
