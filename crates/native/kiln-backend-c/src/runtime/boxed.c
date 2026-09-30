@@ -1055,6 +1055,15 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
     if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
+    /* Error.captureStackTrace is replaced by the TypeScript public facade during bootstrap.
+     * Bootstrap stores deliberately do not count as program mutations, so the usual builtin
+     * epoch guard cannot invalidate a cached intrinsic method at these call sites. Resolve this
+     * one through its own property store each time, which also preserves user overrides. */
+    if (ctag == KILN_VALUE_BUILTIN &&
+        site->cached_method == KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE &&
+        kiln_c99_error_name(site->cached_builtin) != NULL) {
+        return 0;
+    }
     /* Issue 30: a kind's remembered method is its table's, which a member the program wrote onto
      * the kind's prototype shadows. One compare while no realm has written onto a built-in. */
     if (ctag != KILN_VALUE_BUILTIN && KILN_UNLIKELY(!kiln_c99_tag_method_pristine(ctag, site->cached_method))) return 0;
