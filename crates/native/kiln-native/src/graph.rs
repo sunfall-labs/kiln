@@ -3206,7 +3206,7 @@ extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *mess
 extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 static int kiln_graph_async_require_error(kiln_host *host, kiln_value *out, kiln_value *thrown) {
     int status = kiln_c99_new_type_error(out, "require() cannot load an ES module with top-level await");
-    if (status != KILN_C99_OK) return status;
+    if (status != 0) return status;
     return kiln_c99_put(host, *out, "code", 4, kiln_c99_copy_text("ERR_REQUIRE_ASYNC_MODULE", 24), 0, thrown);
 }
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
