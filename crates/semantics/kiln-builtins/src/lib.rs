@@ -894,6 +894,7 @@ declare_ts_builtins! {
             "readFile",
             "readFileSync",
             "readSync",
+            "readdir",
             "readdirSync",
             "readlinkSync",
             "realpath",
