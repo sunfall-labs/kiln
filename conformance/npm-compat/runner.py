@@ -70,6 +70,7 @@ def main():
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
                 'timezone': os.environ.get('TZ'),
+                'kiln_jobs': os.environ.get('KILN_JOBS'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
     evidence['git_head'] = subprocess.check_output(

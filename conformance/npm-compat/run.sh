@@ -49,6 +49,8 @@ export TMPDIR="${KILN_NPM_TMPDIR:-$HOME/.cache/kiln/npm-tmp}"
 mkdir -p "$RAW" "$TMPDIR"
 # Match the declared UTC realm timezone rather than the launcher's local timezone.
 export TZ=UTC
+# Bound native C emission/compilation pools across large package graphs.
+export KILN_JOBS="${KILN_JOBS:-4}"
 export CARGO="${CARGO:-$(command -v cargo)}"
 export RUSTC="${RUSTC:-$(command -v rustc)}"
 
