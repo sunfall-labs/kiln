@@ -451,10 +451,13 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
 static int kiln_c99_array_buffer_byte_length_raw(kiln_value *out, const kiln_value *args,
                                                   size_t argc, kiln_value *thrown) {
     kiln_typed_buffer *buffer;
+    int shared = argc > 1 && kiln_c99_truthy(args[1]);
     if (argc == 0 || args[0].tag != KILN_VALUE_ARRAY_BUFFER ||
-        (buffer = kiln_c99_typed_buffer_of(args[0])) == NULL || buffer->shared != NULL) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver");
+        (buffer = kiln_c99_typed_buffer_of(args[0])) == NULL ||
+        (buffer->shared != NULL) != shared) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, shared
+            ? "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
+            : "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver");
     }
     *out = kiln_c99_number((double)buffer->byte_length);
     return KILN_C99_OK;

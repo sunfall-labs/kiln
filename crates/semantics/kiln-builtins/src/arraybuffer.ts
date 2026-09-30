@@ -14,7 +14,7 @@ delete (globalThis as any).__kilnArrayBufferDetach;
 // The ordinary property read knows the ArrayBuffer internal slot, but intrinsic inspection also
 // needs the actual getter function (for example, call-bound's lookup of
 // `ArrayBuffer.prototype.byteLength`). Keep its slot read behind the same private engine seam.
-const __kilnArrayBufferByteLength: (buffer: any) => number =
+const __kilnArrayBufferByteLength: (buffer: any, shared?: boolean) => number =
   (globalThis as any).__kilnArrayBufferByteLength;
 delete (globalThis as any).__kilnArrayBufferByteLength;
 
@@ -173,6 +173,16 @@ delete (globalThis as any).__kilnSharedBuffer;
 
   if (typeof SharedArrayBuffer !== "undefined" && SharedArrayBuffer.prototype) {
     const SProto = SharedArrayBuffer.prototype as any;
+    const sharedByteLengthGetter = function (this: any): number {
+      return __kilnArrayBufferByteLength(this, true);
+    };
+    Object.defineProperty(sharedByteLengthGetter, "name", { value: "get byteLength", configurable: true });
+    Object.defineProperty(SProto, "byteLength", {
+      get: sharedByteLengthGetter,
+      set: undefined,
+      enumerable: false,
+      configurable: true,
+    });
 
     function toIntegerOrInfinity(val: any): number {
       const n = Number(val);

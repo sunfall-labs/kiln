@@ -901,7 +901,8 @@ pub(crate) fn call_native(
             let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
                 return Err(ExecutionError::NotABuffer);
             };
-            if buffer.shared {
+            let shared = arguments.get(1).is_some_and(Value::is_truthy);
+            if buffer.shared != shared {
                 return Err(ExecutionError::NotABuffer);
             }
             Value::Number(buffer.byte_length() as f64)

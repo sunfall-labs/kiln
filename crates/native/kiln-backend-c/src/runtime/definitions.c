@@ -922,7 +922,8 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                                       depth, thrown);
             return KILN_C99_OK;
         }
-        if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE &&
+        if ((target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE ||
+             target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE) &&
             kiln_c99_same_name_key(view, "byteLength")) {
             /* The getter is a shared TypeScript accessor. Read its descriptor from the prototype
              * store without invoking it against the prototype object. */

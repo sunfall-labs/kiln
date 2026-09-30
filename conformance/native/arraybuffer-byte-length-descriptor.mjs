@@ -7,3 +7,11 @@ try {
 } catch (error) {
   console.log(error instanceof TypeError);
 }
+const sharedDescriptor = Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength");
+console.log(typeof sharedDescriptor.get, sharedDescriptor.get.name, sharedDescriptor.enumerable, sharedDescriptor.configurable);
+console.log(sharedDescriptor.get.call(new SharedArrayBuffer(9)));
+try {
+  sharedDescriptor.get.call(buffer);
+} catch (error) {
+  console.log(error instanceof TypeError);
+}
