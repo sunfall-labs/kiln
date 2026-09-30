@@ -418,7 +418,9 @@ impl GraphOp {
                     | Effects::WRITES_HEAP
             }
 
-            Self::SetProperty { .. } | Self::SetPropertyStrict { .. } => {
+            Self::SetProperty { .. }
+            | Self::SetPropertyStrict { .. }
+            | Self::DefineOwnProperty { .. } => {
                 Effects::WRITES_HEAP
                     | Effects::MAY_THROW
                     | Effects::CALLS_USER_CODE
@@ -434,7 +436,9 @@ impl GraphOp {
                     | Effects::WRITES_HEAP
             }
 
-            Self::SetComputed { .. } | Self::SetComputedStrict { .. } => {
+            Self::SetComputed { .. }
+            | Self::SetComputedStrict { .. }
+            | Self::DefineOwnComputed { .. } => {
                 Effects::WRITES_HEAP
                     | Effects::MAY_THROW
                     | Effects::CALLS_USER_CODE
