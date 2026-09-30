@@ -3612,6 +3612,36 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 .unwrap();
             }
         }
+        // Bounded direct eval can contain literal `require()` calls which are not ordinary
+        // syntax-tree dependencies. They remain lazy runtime edges on the owning module, but
+        // the wrapper's lexical `require` still needs to dispatch them when eval reaches them.
+        for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only || dependency.importer != node.path {
+                continue;
+            }
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            let specifier = native_c_string(&dependency.specifier);
+            let specifier_len = dependency.specifier.len();
+            if modules[provider_index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
+                )
+                .unwrap();
+            } else if modules[provider_index].0.source == ModuleSource::Source {
+                if synchronous_require_async[provider_index] {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                } else {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                }
+            } else if let Some(projection) =
+                native_commonjs_projection_index(modules[provider_index].0)
+            {
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+            }
+        }
         output.push_str("    { int matched = 0; int status = kiln_graph_declared_require(graph, specifier, result, thrown, &matched); if (matched) return status; }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n");
         if node.source == ModuleSource::CommonJs {
             writeln!(output, "\nstatic int kiln_commonjs_resolve_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;").unwrap();
