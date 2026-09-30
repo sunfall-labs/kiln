@@ -1,4 +1,117 @@
 use super::INVALID_ARGUMENT;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+// Repeated native literals (notably emoji-regex inside string-width) need fresh observable
+// RegExp state, but not fresh parsing. Weak entries retain no compiled allocation after the
+// last live handle goes away, even for Unicode classes and large counted repetitions. Bound
+// both key bytes and entry count so unique application patterns cannot grow this cache forever.
+const COMPILED_CACHE_ENTRIES: usize = 64;
+const COMPILED_CACHE_KEY_BYTES: usize = 256 * 1024;
+
+struct CompiledEntry {
+    pattern: Box<[u32]>,
+    flags: Box<str>,
+    compiled: Weak<regress::Regex>,
+}
+
+impl CompiledEntry {
+    fn key_bytes(&self) -> usize {
+        self.pattern
+            .len()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(self.flags.len())
+    }
+}
+
+#[derive(Default)]
+struct CompiledCache {
+    entries: VecDeque<CompiledEntry>,
+    key_bytes: usize,
+}
+
+impl CompiledCache {
+    fn get(&mut self, pattern: &[u32], flags: &str) -> Option<Arc<regress::Regex>> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.pattern.as_ref() == pattern && entry.flags.as_ref() == flags)?;
+        let entry = self.entries.remove(index)?;
+        let compiled = entry.compiled.upgrade();
+        if compiled.is_some() {
+            self.entries.push_back(entry);
+        } else {
+            self.key_bytes = self.key_bytes.saturating_sub(entry.key_bytes());
+        }
+        compiled
+    }
+
+    fn insert(
+        &mut self,
+        pattern: &[u32],
+        flags: &str,
+        compiled: Arc<regress::Regex>,
+    ) -> Arc<regress::Regex> {
+        if let Some(existing) = self.get(pattern, flags) {
+            return existing;
+        }
+        let key_bytes = pattern
+            .len()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(flags.len());
+        if key_bytes > COMPILED_CACHE_KEY_BYTES {
+            return compiled;
+        }
+        while self.entries.len() >= COMPILED_CACHE_ENTRIES
+            || self.key_bytes.saturating_add(key_bytes) > COMPILED_CACHE_KEY_BYTES
+        {
+            let Some(old) = self.entries.pop_front() else {
+                break;
+            };
+            self.key_bytes = self.key_bytes.saturating_sub(old.key_bytes());
+        }
+        self.entries.push_back(CompiledEntry {
+            pattern: pattern.into(),
+            flags: flags.into(),
+            compiled: Arc::downgrade(&compiled),
+        });
+        self.key_bytes = self.key_bytes.saturating_add(key_bytes);
+        compiled
+    }
+}
+
+fn compiled_cache() -> &'static Mutex<CompiledCache> {
+    static CACHE: OnceLock<Mutex<CompiledCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CompiledCache::default()))
+}
+
+fn compile_pattern(pattern: Vec<u32>, flags: &str) -> Option<Arc<regress::Regex>> {
+    let cacheable = pattern
+        .len()
+        .saturating_mul(std::mem::size_of::<u32>())
+        .saturating_add(flags.len())
+        <= COMPILED_CACHE_KEY_BYTES;
+    if cacheable {
+        if let Some(compiled) = compiled_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&pattern, flags)
+        {
+            return Some(compiled);
+        }
+    }
+    // Parsing stays outside the lock. On a concurrent miss, insert selects the already published
+    // immutable program; no mutable last-match or subject buffer is shared between handles.
+    let compiled = Arc::new(regress::Regex::from_unicode(pattern.iter().copied(), flags).ok()?);
+    Some(if cacheable {
+        compiled_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(&pattern, flags, compiled)
+    } else {
+        compiled
+    })
+}
 
 /// A compiled pattern, and the last match it produced.
 ///
@@ -7,7 +120,7 @@ use super::INVALID_ARGUMENT;
 /// means the C side reads a result with two calls instead of marshalling a variable-length
 /// structure across the boundary.
 pub struct KilnRegex {
-    compiled: regress::Regex,
+    compiled: Arc<regress::Regex>,
     /// The `u`/`v` flag: code-point matching rather than code-unit matching.
     unicode: bool,
     last: Option<regress::Match>,
@@ -67,7 +180,7 @@ pub unsafe extern "C" fn kiln_regexp_compile(
     } else {
         pattern
     };
-    let Ok(compiled) = regress::Regex::from_unicode(pattern.into_iter(), flags.as_str()) else {
+    let Some(compiled) = compile_pattern(pattern, flags.as_str()) else {
         return INVALID_ARGUMENT;
     };
     let handle = alloc::boxed::Box::new(KilnRegex {
@@ -374,6 +487,48 @@ fn as_offset(value: usize) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_cache_shares_code_without_retaining_it() {
+        let Ok(regex) = regress::Regex::new("cache-control") else {
+            assert!(false, "valid regex");
+            return;
+        };
+        let regex = Arc::new(regex);
+        let pattern = [1, 2, 3];
+        let mut cache = CompiledCache::default();
+        cache.insert(&pattern, "g", Arc::clone(&regex));
+        let Some(hit) = cache.get(&pattern, "g") else {
+            assert!(false, "live compiled pattern");
+            return;
+        };
+        assert!(Arc::ptr_eq(&regex, &hit));
+        assert!(cache.get(&pattern, "y").is_none());
+        drop(hit);
+        drop(regex);
+        assert!(cache.get(&pattern, "g").is_none());
+        assert_eq!(cache.key_bytes, 0);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn compiled_cache_bounds_keys_and_entry_count() {
+        let Ok(regex) = regress::Regex::new("x") else {
+            assert!(false, "valid regex");
+            return;
+        };
+        let regex = Arc::new(regex);
+        let mut cache = CompiledCache::default();
+        for i in 0..100u32 {
+            cache.insert(&[i], "", Arc::clone(&regex));
+        }
+        assert_eq!(cache.entries.len(), COMPILED_CACHE_ENTRIES);
+        assert!(cache.key_bytes <= COMPILED_CACHE_KEY_BYTES);
+        let too_large = vec![0; COMPILED_CACHE_KEY_BYTES];
+        cache.insert(&too_large, "", Arc::clone(&regex));
+        assert_eq!(cache.entries.len(), COMPILED_CACHE_ENTRIES);
+        assert!(cache.key_bytes <= COMPILED_CACHE_KEY_BYTES);
+    }
 
     #[test]
     fn unicode_sets_literal_punctuation_class_compiles_through_provider() {
