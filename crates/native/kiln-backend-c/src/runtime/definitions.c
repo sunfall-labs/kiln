@@ -842,7 +842,31 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         *out = built;
         return status;
     }
-    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND) {
+    if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(view, "name")) {
+        /* Runtime supplied methods are function objects too. Their names come from the shared
+         * method registry, just as reads do; keep the descriptor non-writable and non-enumerable
+         * like Function.prototype's own name/length properties. */
+        const char *method_name = kiln_c99_method_name(target.bits);
+        kiln_value value = kiln_c99_copy_text(method_name == NULL ? "" : method_name,
+                                              method_name == NULL ? 0 : strlen(method_name));
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
+                                  NULL);
+        if (status == KILN_C99_OK) {
+            *found = 1;
+            *out = built;
+        }
+        return status;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
+        target.tag == KILN_VALUE_BOUND) {
         /* A function's own properties are `name`, `length`, `prototype`, and whatever a program
          * assigned beside them. The first three are read from the closure rather than from a
          * slot list, so they are described from the closure too -- all three non-enumerable,
