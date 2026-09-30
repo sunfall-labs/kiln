@@ -253,10 +253,18 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
         kiln_value primitive;
         /* String(symbol) is permitted, but `new String(symbol)` cannot erase the Symbol's type
          * and still be a String wrapper. Number and Boolean use their call conversion unchanged. */
-        if (callee.bits == KILN_C99_BUILTIN_STRING && argc > 0 &&
-            args[0].tag == KILN_VALUE_SYMBOL) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                        "Cannot convert a Symbol value to a string");
+        if (callee.bits == KILN_C99_BUILTIN_STRING && argc > 0) {
+            /* The call form String(symbol) is exceptional and returns a descriptive string;
+             * construction uses ordinary ToString after ToPrimitive, so both a primitive Symbol
+             * and a boxed Symbol must throw. Reusing the call result lost that distinction. */
+            int status = kiln_c99_to_primitive(host, args[0], 1, &primitive, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (primitive.tag == KILN_VALUE_SYMBOL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a string");
+            }
+            primitive = kiln_c99_text(primitive);
+            return kiln_c99_new_primitive_wrapper(result, primitive);
         }
         status = kiln_c99_call(host, &primitive, callee, kiln_c99_undefined(), args, argc,
                                depth, thrown);
