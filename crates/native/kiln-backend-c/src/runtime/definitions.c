@@ -532,6 +532,14 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
         memset(&next, 0, sizeof next);
         next.key = view;
         next.value = kiln_c99_undefined();
+        /* Symbol properties keep their language-visible enumerable bit in `symbol_hidden`,
+         * because string-key walks always skip the reserved slot. A fresh descriptor defaults
+         * enumerable to false just like any other Object.defineProperty descriptor, so seed the
+         * hidden flag before an explicit enumerable field has a chance to override it. */
+        {
+            kiln_value symbol_key;
+            if (kiln_c99_symbol_of_key_view(view, &symbol_key)) next.symbol_hidden = 1;
+        }
     }
     if (has_getter || has_setter) {
         if (!next.accessor) {
