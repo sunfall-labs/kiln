@@ -7,7 +7,7 @@ use super::{NativeError, NativeProfile};
 use kiln_artifact_cache::Digest;
 use kiln_backend_c::{
     EmissionPolicy, emit_commonjs_module_with_logical_path_and_policy,
-    emit_module_with_logical_path_and_policy,
+    emit_module_with_logical_path_and_policy_and_instantiation,
 };
 use kiln_ir::ModuleProgram;
 use kiln_module_graph::ModuleSource;
@@ -69,12 +69,14 @@ pub(super) fn emit(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
     policy: &EmissionPolicy,
+    instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
-        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
+        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy_and_instantiation(
             &node.program,
             logical_path,
             policy.clone(),
+            instantiate,
         )?),
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
             &node.program,

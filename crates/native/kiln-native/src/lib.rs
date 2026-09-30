@@ -528,12 +528,18 @@ fn emit_graph_module_for_profile(
     logical_path: &str,
     policy: &EmissionPolicy,
     profile: NativeProfile,
+    instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     let policy = graph_source_emitter::effective_policy(node, policy, profile);
     if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
-        graph_source_emitter::emit(node, logical_path, &policy)
+        graph_source_emitter::emit(node, logical_path, &policy, instantiate)
     } else {
-        emit_native_graph_module_with_policy(node, logical_path, &policy)
+        graph::emit_native_graph_module_with_policy_and_instantiation(
+            node,
+            logical_path,
+            &policy,
+            instantiate,
+        )
     }
 }
 
@@ -1750,6 +1756,7 @@ impl NativeBuilder {
             (reduced, demand)
         };
         let graph = &reduced;
+        let cyclic_modules = graph::cycle_module_paths(graph);
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
         if emission.compile_regex.is_none() {
@@ -1777,6 +1784,7 @@ impl NativeBuilder {
             .modules()
             .filter(|node| !native_plan.excluded.contains(&node.path))
             .collect::<Vec<_>>();
+        let cyclic_modules = graph::cycle_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
@@ -1793,12 +1801,14 @@ impl NativeBuilder {
                 &logical_path,
                 &module_emission,
                 options.profile,
+                cyclic_modules.contains(&node.path),
                 || {
                     emit_graph_module_for_profile(
                         node,
                         &logical_path,
                         &module_emission,
                         options.profile,
+                        cyclic_modules.contains(&node.path),
                     )
                 },
             )
@@ -1836,6 +1846,7 @@ impl NativeBuilder {
             graph,
             &modules,
             &wrapper_symbol,
+            Some(&demand.live_imports),
             &native_plan.failures,
             &native_plan.runtime_failures,
         )?;
@@ -1893,6 +1904,15 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+            }
+            if let Some(instantiation) = &module.instantiation {
+                symbol_list.push(instantiation.symbol.clone());
+                module_sources.push((
+                    instantiation.source.as_bytes().to_vec(),
+                    Digest::hash(instantiation.source.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(module.generic_only);
             }
         }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
@@ -2387,6 +2407,7 @@ impl NativeBuilder {
             );
         }
         let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
+        let cyclic_modules = graph::cycle_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
             let module_started = trace_emit.then(Instant::now);
             let node = nodes[index];
@@ -2404,12 +2425,14 @@ impl NativeBuilder {
                 &logical_path,
                 &module_emission,
                 options.profile,
+                cyclic_modules.contains(&node.path),
                 || {
                     emit_graph_module_for_profile(
                         node,
                         &logical_path,
                         &module_emission,
                         options.profile,
+                        cyclic_modules.contains(&node.path),
                     )
                 },
             )?;
@@ -2536,6 +2559,15 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+            }
+            if let Some(instantiation) = &module.instantiation {
+                symbol_list.push(instantiation.symbol.clone());
+                module_sources.push((
+                    instantiation.source.as_bytes().to_vec(),
+                    Digest::hash(instantiation.source.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(module.generic_only);
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }

@@ -6,7 +6,7 @@
 //! otherwise bakes CLI policy into an object file).
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt::Write as _,
     sync::Arc,
 };
@@ -457,6 +457,18 @@ pub struct CModule {
     /// clones and chunk workers, which [`Self::source`] (or a chunk) declares and calls. It is
     /// to be compiled at the profile's optimising level and linked with the module.
     pub parallel_workers: Option<String>,
+    /// C entrypoint source that runs only ModuleDeclarationInstantiation. Native graph launchers
+    /// call it for every ESM module before starting evaluation.
+    pub instantiation: Option<CModuleUnit>,
+}
+
+/// An auxiliary source unit exported with the same native artifact as its evaluation module.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CModuleUnit {
+    pub symbol: String,
+    /// Helper that allocates and publishes this module's export cells before instantiation.
+    pub prepare_symbol: String,
+    pub source: String,
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -509,6 +521,7 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         generic_only: policy.generic_only,
         chunks: Vec::new(),
         parallel_workers: None,
+        instantiation: None,
     })
 }
 
@@ -550,6 +563,7 @@ pub fn emit_module_with_policy(
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
         parallel_workers: rendered.parallel_workers,
+        instantiation: None,
     })
 }
 
@@ -572,6 +586,17 @@ pub fn emit_module_with_logical_path_and_policy(
     module: &ModuleProgram,
     logical_path: &str,
     policy: EmissionPolicy,
+) -> Result<CModule, EmitError> {
+    emit_module_with_logical_path_and_policy_and_instantiation(module, logical_path, policy, false)
+}
+
+/// Emit a graph module, optionally splitting ModuleDeclarationInstantiation from evaluation.
+/// The split is used for modules in a cycle; ordinary modules retain their single-entry ABI.
+pub fn emit_module_with_logical_path_and_policy_and_instantiation(
+    module: &ModuleProgram,
+    logical_path: &str,
+    policy: EmissionPolicy,
+    instantiate: bool,
 ) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
@@ -599,8 +624,63 @@ pub fn emit_module_with_logical_path_and_policy(
         }
         None => (module, None),
     };
+    let (module, instantiation) = if instantiate {
+        let instantiation_symbol = format!("{symbol}_instantiate");
+        let mut evaluation = module.clone();
+        for instruction in evaluation
+            .program
+            .code
+            .iter_mut()
+            .take(module.link_facts.module_instantiation_end as usize)
+        {
+            *instruction = Instruction::Nop;
+        }
+        let mut instantiation = module.clone();
+        instantiation
+            .program
+            .code
+            .truncate(module.link_facts.module_instantiation_end as usize);
+        instantiation.program.code.push(Instruction::Return);
+        let mut source = module_cells::with_plan(region.clone(), || {
+            render_module_with_unit(
+                &instantiation,
+                program_hash,
+                &instantiation_symbol,
+                &symbol,
+                true,
+                true,
+                &policy,
+                logical_path,
+            )
+        })?;
+        render_prepare_module_cells(
+            &mut source.source,
+            &format!("{instantiation_symbol}_prepare_cells"),
+            &symbol,
+            &instantiation,
+        );
+        (
+            evaluation,
+            Some(CModuleUnit {
+                symbol: instantiation_symbol.clone(),
+                prepare_symbol: format!("{instantiation_symbol}_prepare_cells"),
+                source: source.source,
+            }),
+        )
+    } else {
+        (module.clone(), None)
+    };
     let rendered = module_cells::with_plan(region, || {
-        render_module(module, program_hash, &symbol, &policy, false, logical_path)
+        render_module_with_unit(
+            &module,
+            program_hash,
+            &symbol,
+            instantiate.then_some(symbol.as_str()),
+            instantiate,
+            false,
+            &policy,
+            logical_path,
+        )
     })?;
     Ok(CModule {
         symbol,
@@ -609,7 +689,72 @@ pub fn emit_module_with_logical_path_and_policy(
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
         parallel_workers: rendered.parallel_workers,
+        instantiation,
     })
+}
+
+fn render_prepare_module_cells(
+    output: &mut String,
+    prepare_symbol: &str,
+    unit_symbol: &str,
+    module: &ModuleProgram,
+) {
+    let imports = module
+        .imports
+        .iter()
+        .map(|binding| binding.local_slot)
+        .collect::<HashSet<_>>();
+    let tdz = module
+        .program
+        .code
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::MarkUninitialized(slot) => Some(*slot),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let slots = module
+        .exports
+        .iter()
+        .filter_map(|binding| {
+            let slot = binding.local_slot;
+            (!imports.contains(&slot)).then_some((slot, tdz.contains(&slot)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    writeln!(
+        output,
+        "int {prepare_symbol}(kiln_value *cells, size_t count) {{"
+    )
+    .unwrap();
+    writeln!(output, "    if (count != (size_t){} || (count != 0 && cells == NULL)) return KILN_C99_INVALID_ARGUMENT;", module.exports.len()).unwrap();
+    writeln!(output, "    if (kiln_realm_is_active()) {{ int status = kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0); if (status != KILN_C99_OK) return status; }}").unwrap();
+    writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
+    for (slot, uninitialized) in &slots {
+        writeln!(
+            output,
+            "    locals[{slot}] = {};",
+            if *uninitialized {
+                "KILN_VAL_UNINITIALIZED"
+            } else {
+                "KILN_VAL_UNDEFINED"
+            }
+        )
+        .unwrap();
+        writeln!(output, "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}").unwrap();
+    }
+    for (index, binding) in module.exports.iter().enumerate() {
+        if slots.contains_key(&binding.local_slot) {
+            writeln!(
+                output,
+                "    cells[{index}] = kiln_val_binding_to_boundary(locals[{}]);",
+                binding.local_slot
+            )
+            .unwrap();
+        } else {
+            writeln!(output, "    cells[{index}] = kiln_c99_undefined();").unwrap();
+        }
+    }
+    output.push_str("    return KILN_C99_OK;\n}\n");
 }
 
 /// Compute the stable symbol and both program hashes without rendering the C body.
@@ -661,6 +806,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
         parallel_workers: rendered.parallel_workers,
+        instantiation: None,
     })
 }
 
@@ -708,6 +854,7 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         generic_only: policy.generic_only,
         chunks: Vec::new(),
         parallel_workers: None,
+        instantiation: None,
     })
 }
 
@@ -2543,6 +2690,50 @@ fn plan_unit(
 /// The unit's entry point: opened with the embedding signature, its locals declared and the
 /// imports bound into them, then the body from its graph.
 ///
+fn render_module_local_reset(
+    output: &mut String,
+    unit_symbol: &str,
+    locals: usize,
+    module: Option<(&ModuleProgram, bool)>,
+    preserve_export_cells: bool,
+) {
+    if preserve_export_cells {
+        return;
+    }
+    let exports = module
+        .filter(|(_, commonjs)| !commonjs && preserve_export_cells)
+        .map(|(module, _)| {
+            module
+                .exports
+                .iter()
+                .map(|binding| binding.local_slot)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    if exports.is_empty() {
+        writeln!(
+            output,
+            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
+        )
+        .unwrap();
+        return;
+    }
+    writeln!(
+        output,
+        "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) {{ switch (slot) {{"
+    )
+    .unwrap();
+    for slot in exports {
+        writeln!(
+            output,
+            "        case {slot}: if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) locals[{slot}] = KILN_VAL_UNDEFINED; break;"
+        )
+        .unwrap();
+    }
+    output.push_str("        default: locals[slot] = KILN_VAL_UNDEFINED; break;\n    } }\n");
+    let _ = unit_symbol;
+}
+
 /// The locals are the unit's globals -- named rather than automatic -- whenever a function reads
 /// module scope, because an exported closure reads it after the entry point has returned, and a
 /// frame that has returned is not somewhere to read from. Every slot then lives in the array.
@@ -2563,6 +2754,7 @@ fn render_entry(
     graph: &FunctionGraph,
     calls: &direct::CallPlan,
     policy: &EmissionPolicy,
+    preserve_export_cells: bool,
     site_offset: usize,
 ) -> Result<usize, EmitError> {
     if body.asynchronous {
@@ -2643,11 +2835,7 @@ fn render_entry(
             .unwrap();
         }
 
-        writeln!(
-            output,
-            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-        )
-        .unwrap();
+        render_module_local_reset(output, unit_symbol, locals, module, preserve_export_cells);
 
         if let Some((module_prog, _)) = module {
             let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
@@ -2655,7 +2843,7 @@ fn render_entry(
                 let slot = binding.local_slot;
                 writeln!(
                     output,
-                    "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+                    "    {{ kiln_val imported = kiln_val_from_boundary(imports[{index}]); if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX && (imported & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), imported); else locals[{slot}] = imported; }}"
                 )
                 .unwrap();
                 if boxed_imports.contains(&slot) {
@@ -2823,11 +3011,7 @@ fn render_entry(
         }
     }
     if module_scope || !array_slots.is_empty() {
-        writeln!(
-            output,
-            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-        )
-        .unwrap();
+        render_module_local_reset(output, unit_symbol, locals, module, preserve_export_cells);
     }
     if let Some((module, _)) = module {
         let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
@@ -2835,7 +3019,7 @@ fn render_entry(
             let slot = binding.local_slot;
             writeln!(
                 output,
-                "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+                "    {{ kiln_val imported = kiln_val_from_boundary(imports[{index}]); if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX && (imported & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), imported); else locals[{slot}] = imported; }}"
             )
             .unwrap();
             // The exporter boxes only what can change, so an immutable export arrives as a plain
@@ -3653,6 +3837,7 @@ fn render_unit_state(
     compact_cells: usize,
     should_chunk: bool,
     extern_only: bool,
+    external: bool,
 ) {
     if globals + template_sites + compact_cells == 0 {
         return;
@@ -3660,7 +3845,11 @@ fn render_unit_state(
     if extern_only {
         writeln!(output, "extern kiln_c99_unit {symbol}_unit;").unwrap();
     } else {
-        let linkage = if should_chunk { "" } else { "static " };
+        let linkage = if should_chunk || external {
+            ""
+        } else {
+            "static "
+        };
         writeln!(
             output,
             "{linkage}kiln_c99_unit {symbol}_unit = {{ 0, {} }};",
@@ -4452,6 +4641,7 @@ fn render_positioned(
         module_cells::compact_cell_count(),
         false,
         false,
+        false,
     );
     render_template_sites(&mut output, program, symbol, false);
     render_unit_roots(&mut output, symbol, !keys.is_empty());
@@ -4526,6 +4716,7 @@ fn render_positioned(
         &entry_graph,
         &direct.entry,
         policy,
+        false,
         func_sites,
     )?;
     let total_sites = func_sites + entry_sites;
@@ -4625,6 +4816,28 @@ fn render_module(
     commonjs: bool,
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
+    render_module_with_unit(
+        module,
+        program_hash,
+        symbol,
+        None,
+        false,
+        false,
+        policy,
+        diagnostic_site,
+    )
+}
+
+fn render_module_with_unit(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    shared_unit_symbol: Option<&str>,
+    external_unit: bool,
+    export_cells: bool,
+    policy: &EmissionPolicy,
+    diagnostic_site: &str,
+) -> Result<RenderedModule, EmitError> {
     // `parallelMap` site records name positions in the module as written; emission packs the
     // source below. See `parallel::SiteRecord`.
     parallel::with_original_source(&module.program, || {
@@ -4635,6 +4848,9 @@ fn render_module(
             policy,
             commonjs,
             diagnostic_site,
+            shared_unit_symbol,
+            external_unit,
+            export_cells,
         )
     })
 }
@@ -4646,6 +4862,9 @@ fn render_module_positioned(
     policy: &EmissionPolicy,
     commonjs: bool,
     diagnostic_site: &str,
+    shared_unit_symbol: Option<&str>,
+    external_unit: bool,
+    export_cells: bool,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk =
@@ -4654,11 +4873,12 @@ fn render_module_positioned(
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
     // do not collide with other chunked modules in the same binary.
-    let unit_symbol = if policy.compact && !should_chunk {
+    let default_unit_symbol = if policy.compact && !should_chunk {
         "ku"
     } else {
         symbol
     };
+    let unit_symbol = shared_unit_symbol.unwrap_or(default_unit_symbol);
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
@@ -4742,7 +4962,8 @@ fn render_module_positioned(
         program.template_sites.len(),
         module_cells::compact_cell_count(),
         should_chunk,
-        false,
+        shared_unit_symbol.is_some_and(|shared| shared != symbol),
+        external_unit && shared_unit_symbol.is_some_and(|shared| shared == symbol),
     );
     render_template_sites(&mut output, program, unit_symbol, should_chunk);
     render_unit_roots(&mut output, unit_symbol, !keys.is_empty());
@@ -4887,6 +5108,7 @@ fn render_module_positioned(
         &entry_graph,
         &direct.entry,
         policy,
+        external_unit || export_cells,
         func_sites,
     )?;
     let total_sites = func_sites + entry_sites;
@@ -5008,6 +5230,7 @@ fn render_module_positioned(
             module_cells::compact_cell_count(),
             true,
             true,
+            false,
         );
         if total_sites > 0 {
             writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();

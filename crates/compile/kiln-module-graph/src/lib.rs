@@ -173,8 +173,8 @@ pub enum ModulePayload {
     AssetPath(PathBuf),
 }
 
-/// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
-/// cycles are retained so execution can expose their cache's partially initialized exports.
+/// An entry-rooted module graph. ESM and CommonJS cycles are retained for their respective
+/// link-and-instantiate and partially initialized `require` semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraph {
     entry: PathBuf,
@@ -2227,6 +2227,7 @@ fn json_module_program() -> ModuleProgram {
             new_function: false,
             dynamic_imports: vec![],
             removable_declarations: vec![],
+            module_instantiation_end: 0,
         },
     }
 }

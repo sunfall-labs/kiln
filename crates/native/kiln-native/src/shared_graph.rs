@@ -315,6 +315,7 @@ pub(super) fn graph_shared_wrapper_source(
         graph,
         modules,
         wrapper_symbol,
+        None,
         &BTreeMap::new(),
         &BTreeMap::new(),
     )
@@ -324,6 +325,7 @@ pub(super) fn graph_shared_wrapper_source_with_failures(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     wrapper_symbol: &str,
+    live_imports: Option<&BTreeSet<(PathBuf, usize)>>,
     native_failures: &BTreeMap<(PathBuf, String), String>,
     native_runtime_failures: &BTreeMap<(PathBuf, PathBuf, String), String>,
 ) -> Result<String, NativeError> {
@@ -339,7 +341,7 @@ pub(super) fn graph_shared_wrapper_source_with_failures(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
-    let namespace_plans = graph_namespace_plans(graph, modules, &indices, None, None)?;
+    let namespace_plans = graph_namespace_plans(graph, modules, &indices, live_imports, None)?;
     let entry_index = modules
         .iter()
         .position(|(node, _)| node.path == graph.entry())
@@ -453,6 +455,9 @@ static __thread kiln_commonjs_context *kiln_shared_commonjs = NULL;
             module.symbol
         )
         .unwrap();
+        if let Some(instantiation) = &module.instantiation {
+            writeln!(output, "extern int {}(kiln_value *cells, size_t count);\nextern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);", instantiation.prepare_symbol, instantiation.symbol).unwrap();
+        }
         writeln!(
             output,
             "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
@@ -507,8 +512,11 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         return KILN_C99_INVALID_ARGUMENT;
     }
     if (context->state != 0) {
-        *result = context->exports[0];
-        return KILN_C99_OK;
+        /* A circular require must see a prior `module.exports = value` even while its body is
+         * still executing; the exports array is published only when this call completes. */
+        if (context->imports == NULL || context->import_count < (size_t)3)
+            return KILN_C99_INVALID_ARGUMENT;
+        return kiln_c99_get(context->host, context->imports[2], "exports", 7, result, 0, thrown);
     }
     context->state = 1;
     status = context->module(context->host, result, context->imports, context->import_count,
@@ -872,13 +880,59 @@ typedef struct {wrapper_symbol}_realm_context {{
             &paths.dirname,
         );
     }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let export_count = native_graph_export_count(node);
+        let cells = if export_count == 0 {
+            "NULL".to_owned()
+        } else {
+            format!("export_arrays[{index}]")
+        };
+        writeln!(output, "    status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.prepare_symbol).unwrap();
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_none() {
+            continue;
+        }
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            if live_imports
+                .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
+            {
+                continue;
+            }
+            if let NativeGraphImport::Binding {
+                provider_index,
+                export_index,
+                live_cell: true,
+            } = graph_import_value(graph, modules, &indices, node, import)?
+            {
+                writeln!(output, "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];").unwrap();
+            }
+        }
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let import_count = node.program.imports.len();
+        let export_count = native_graph_export_count(node);
+        writeln!(output, "    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.symbol).unwrap();
+    }
     for (index, (node, _)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
+            if live_imports
+                .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
+            {
+                continue;
+            }
             match graph_import_value(graph, modules, &indices, node, import)? {
                 NativeGraphImport::Internal => {}
                 NativeGraphImport::Binding {
                     provider_index,
                     export_index,
+                    live_cell: _,
                 } => {
                     writeln!(
                         output,

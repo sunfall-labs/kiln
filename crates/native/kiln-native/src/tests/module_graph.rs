@@ -52,7 +52,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
     let cache_path = project.path.join("emission-cache");
     let cache = ArtifactCache::new(&cache_path);
     let (_, effective_policy) = source_module_input_id(node, "main.js", &policy, profile);
-    let expected = graph_source_emitter::emit(node, "main.js", &effective_policy).unwrap();
+    let expected = graph_source_emitter::emit(node, "main.js", &effective_policy, false).unwrap();
     let (first, first_hit) = cached_graph_module(
         &cache,
         "test-target",
@@ -60,6 +60,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("eligible Source emission must use the fingerprinted emitter"),
     )
     .unwrap();
@@ -74,6 +75,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("unchanged module was emitted again"),
     )
     .unwrap();
@@ -86,6 +88,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("target-distinct cold cache entry must emit"),
     )
     .unwrap();
@@ -837,6 +840,100 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
             },
         )
         .expect("native shared star graph links");
+}
+
+#[test]
+fn native_commonjs_cycle_observes_current_module_exports_assignment() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-cycle-module-exports");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("range.js"),
+        "class Range {} module.exports = Range; const Comparator = require('./comparator.js'); Range.Comparator = Comparator;",
+    )
+    .expect("write Range module");
+    fs::write(
+        root.path.join("comparator.js"),
+        "const Range = require('./range.js'); class Comparator {} Comparator.Range = Range; module.exports = Comparator;",
+    )
+    .expect("write Comparator module");
+    let entry = root.path.join("main.js");
+    fs::write(
+        &entry,
+        "const Range = require('./range.js'); console.log(Range.Comparator.Range === Range);",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic CommonJS graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS-cycle execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic CommonJS graph builds and runs");
+    assert_eq!(report.stdout, b"true\n");
+}
+
+#[test]
+fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-live-cell");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { readB } from './b.mjs'; export let value = 'a'; export function readA() { return value; } export function change() { value = 'changed'; } console.log(readB()); change(); console.log(readB());",
+    )
+    .expect("write cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "import { readA, value } from './a.mjs'; export function readB() { return readA() + ':' + value; }",
+    )
+    .expect("write cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native ESM-cycle execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic ESM graph builds and runs");
+    assert_eq!(report.stdout, b"a:a\nchanged:changed\n");
 }
 
 #[test]

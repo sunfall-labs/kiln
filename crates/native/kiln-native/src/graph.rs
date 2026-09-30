@@ -715,6 +715,7 @@ pub(super) fn cached_graph_module(
     logical_path: &str,
     policy: &EmissionPolicy,
     profile: NativeProfile,
+    instantiate: bool,
     emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     if !policy.decoupled_prelude
@@ -728,12 +729,13 @@ pub(super) fn cached_graph_module(
     // type profiles and closed-world liveness. This is a versioned internal cache encoding,
     // not a public serialization format. Representation changes can only cause cache misses.
     let (input, effective_policy) = source_module_input_id(node, logical_path, policy, profile);
+    let input = Digest::hash([input.as_bytes(), &[u8::from(instantiate)]].concat());
     cached_emitted_module(
         cache,
         target,
         input,
         *graph_source_emitter::SOURCE_EMITTER_ID,
-        || graph_source_emitter::emit(node, logical_path, &effective_policy),
+        || graph_source_emitter::emit(node, logical_path, &effective_policy, instantiate),
     )
 }
 
@@ -781,13 +783,22 @@ fn cached_emitted_module(
     );
     match cache.lookup(&cache_key)? {
         Lookup::Hit(artifact) => {
-            let (program_hash, symbol, source, generic_only, chunks, parallel_workers): (
+            let (
+                program_hash,
+                symbol,
+                source,
+                generic_only,
+                chunks,
+                parallel_workers,
+                instantiation,
+            ): (
                 u64,
                 String,
                 String,
                 bool,
                 Vec<String>,
                 Option<String>,
+                Option<kiln_backend_c::CModuleUnit>,
             ) = serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
                 path: artifact.path,
                 reason: format!("invalid cached C module: {error}"),
@@ -800,6 +811,7 @@ fn cached_emitted_module(
                     generic_only,
                     chunks,
                     parallel_workers,
+                    instantiation,
                 },
                 true,
             ))
@@ -813,6 +825,7 @@ fn cached_emitted_module(
                 module.generic_only,
                 &module.chunks,
                 &module.parallel_workers,
+                &module.instantiation,
             ))
             .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;
@@ -825,6 +838,15 @@ pub(super) fn emit_native_graph_module_with_policy(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
     policy: &EmissionPolicy,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    emit_native_graph_module_with_policy_and_instantiation(node, logical_path, policy, false)
+}
+
+pub(super) fn emit_native_graph_module_with_policy_and_instantiation(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+    instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
         ModuleSource::NodeBuiltin(_builtin) => Ok(emit_module_with_logical_path_and_policy(
@@ -909,11 +931,14 @@ pub(super) fn emit_native_graph_module_with_policy(
                 policy.clone(),
             )?)
         }
-        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
-            &node.program,
-            logical_path,
-            policy.clone(),
-        )?),
+        ModuleSource::Source => Ok(
+            kiln_backend_c::emit_module_with_logical_path_and_policy_and_instantiation(
+                &node.program,
+                logical_path,
+                policy.clone(),
+                instantiate,
+            )?,
+        ),
     }
 }
 
@@ -1418,7 +1443,7 @@ pub(super) fn append_runtime_digest(
     native_runtime_failures: Option<&BTreeMap<(PathBuf, PathBuf, String), String>>,
 ) {
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
-    for (index, (node, _)) in modules.iter().enumerate() {
+    for (index, (node, module)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
     for (node, _) in modules {
@@ -1666,6 +1691,7 @@ pub(super) enum NativeGraphImport {
     Binding {
         provider_index: usize,
         export_index: usize,
+        live_cell: bool,
     },
     Namespace {
         provider_index: usize,
@@ -1674,6 +1700,54 @@ pub(super) enum NativeGraphImport {
         provider_index: usize,
         property: String,
     },
+}
+
+/// ESM source modules participating in a dependency cycle need an instantiation entrypoint.
+/// Keep this graph-level decision independent of source order: a self-edge is a cycle too.
+pub(super) fn cycle_module_paths(graph: &ModuleGraph) -> std::collections::HashSet<PathBuf> {
+    // Modules participating in a cycle and their ESM dependencies are instantiated before any
+    // evaluation. The dependency closure supplies live cells for imports captured by closures
+    // created in the cyclic component; unrelated acyclic modules keep their single-entry ABI.
+    let mut cyclic = std::collections::HashSet::new();
+    for node in graph
+        .modules()
+        .filter(|node| node.source == ModuleSource::Source)
+    {
+        let mut pending = node
+            .dependencies
+            .iter()
+            .map(|edge| edge.target.clone())
+            .collect::<Vec<_>>();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(path) = pending.pop() {
+            if path == node.path {
+                cyclic.insert(node.path.clone());
+                break;
+            }
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            if let Some(next) = graph.module(&path) {
+                pending.extend(next.dependencies.iter().map(|edge| edge.target.clone()));
+            }
+        }
+    }
+    let mut pending = cyclic.iter().cloned().collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        let Some(node) = graph.module(&path) else {
+            continue;
+        };
+        for dependency in &node.dependencies {
+            if graph
+                .module(&dependency.target)
+                .is_some_and(|target| target.source == ModuleSource::Source)
+                && cyclic.insert(dependency.target.clone())
+            {
+                pending.push(dependency.target.clone());
+            }
+        }
+    }
+    cyclic
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1859,19 +1933,15 @@ pub(super) fn graph_import_value(
         local_slot,
         &import.imported,
     )?;
-    /* The launcher is straight-line C: it calls each module in order and takes an importer's
-     * values out of the export array the provider already returned. A cycle can make the origin
-     * of a name come *after* the module that imports it, and there is no array to read then --
-     * the generated code would read one that has not been filled. The interpreter answers that
-     * with a binding cell it fills in later; this backend has no such thing, so it refuses by
-     * name. A cyclic graph whose back edges carry no binding still compiles, because nothing in
-     * it reads forward. */
+    /* A forward binding is available only when its source module participates in the graph's
+     * instantiation phase, which preallocates export cells before any body runs. */
     let importer_index = *indices.get(&node.path).ok_or_else(|| {
         NativeError::Graph(ModuleGraphError::InternalMissingModule {
             path: node.path.clone(),
         })
     })?;
-    if provider_index >= importer_index {
+    let live_cell = modules[provider_index].1.instantiation.is_some();
+    if provider_index >= importer_index && !live_cell {
         return Err(NativeError::Emit(EmitError::Unsupported {
             feature: format!(
                 "`{}`, imported across a module cycle before `{}` has run, in native module \
@@ -1884,6 +1954,7 @@ pub(super) fn graph_import_value(
     Ok(NativeGraphImport::Binding {
         provider_index,
         export_index,
+        live_cell,
     })
 }
 
@@ -2673,6 +2744,9 @@ pub(super) fn render_graph_roots(
         let export_count = native_graph_export_count(node);
         if export_count != 0 {
             writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_exports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            if modules[index].1.instantiation.is_some() {
+                writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_cells_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            }
         }
         if !node.program.imports.is_empty() {
             writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_imports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", node.program.imports.len()).unwrap();
@@ -3031,6 +3105,15 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             module.symbol
         )
         .unwrap();
+        if let Some(instantiation) = &module.instantiation {
+            writeln!(
+                output,
+                "extern int {}(kiln_value *cells, size_t count);\nextern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+                instantiation.prepare_symbol,
+                instantiation.symbol,
+            )
+            .unwrap();
+        }
         writeln!(
             output,
             "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
@@ -3089,6 +3172,18 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
                 "#define kiln_exports_{index} (graph->exports_{index})"
             )
             .unwrap();
+            if module.instantiation.is_some() {
+                writeln!(
+                    linkage_fields,
+                    "    kiln_value cells_{index}[{export_count}];"
+                )
+                .unwrap();
+                writeln!(
+                    linkage_names,
+                    "#define kiln_cells_{index} (graph->cells_{index})"
+                )
+                .unwrap();
+            }
         }
         if !node.program.imports.is_empty() {
             writeln!(
@@ -3188,8 +3283,12 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     int status;
     if (context == NULL || result == NULL || context->exports == NULL) return -1;
     if (context->state != 0) {
-        *result = context->exports[0];
-        return 0;
+        /* `module.exports = value` may have happened before this back-edge, while the module is
+         * still evaluating. Read the wrapper's current property so circular `require()` observes
+         * that assignment, just as it observes mutations to the initial exports object. */
+        if (context->imports == NULL || context->import_count < (size_t)3)
+            return KILN_C99_CONTROL_ERROR;
+        return kiln_c99_get(context->host, context->imports[2], "exports", 7, result, 0, thrown);
     }
     context->state = 1;
     status = context->module(context->host, result, context->imports, context->import_count,
@@ -3735,6 +3834,59 @@ static int kiln_graph_enter(void *opaque) {
             );
         }
     }
+    // ModuleDeclarationInstantiation is a graph phase: allocate every binding cell first, then
+    // wire imports to those cells, and only then create any function closures. No module body is
+    // evaluated in this block.
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let export_count = native_graph_export_count(node);
+        let cells = if export_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_cells_{index}")
+        };
+        writeln!(output, "        status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.prepare_symbol).unwrap();
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if !modules[index].1.instantiation.is_some() {
+            continue;
+        }
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            if live_imports
+                .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
+            {
+                continue;
+            }
+            if let NativeGraphImport::Binding {
+                provider_index,
+                export_index,
+                live_cell: true,
+            } = graph_import_value(graph, modules, &indices, node, import)?
+            {
+                writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_cells_{provider_index}[{export_index}];").unwrap();
+            }
+        }
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let import_count = node.program.imports.len();
+        let imports = if import_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_imports_{index}")
+        };
+        let export_count = native_graph_export_count(node);
+        let exports = if export_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_exports_{index}")
+        };
+        writeln!(output, "        status = {}(host, result, {imports}, (size_t){import_count}, {exports}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.symbol).unwrap();
+    }
     output.push_str("    }\n");
     // A worker's realm (`node:worker_threads`, realms issue 06) runs one module of the program as
     // its entry -- with what that module imports, first -- rather than the program's startup list.
@@ -3891,6 +4043,7 @@ static int kiln_graph_enter(void *opaque) {
                 NativeGraphImport::Binding {
                     provider_index,
                     export_index,
+                    live_cell,
                 } => {
                     if modules[provider_index].0.source == ModuleSource::CommonJs {
                         writeln!(
@@ -3901,7 +4054,12 @@ static int kiln_graph_enter(void *opaque) {
                     }
                     writeln!(
                         evaluation,
-                        "            kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
+                        "            kiln_imports_{index}[{import_index}] = {}[{export_index}];",
+                        if live_cell {
+                            format!("kiln_cells_{provider_index}")
+                        } else {
+                            format!("kiln_exports_{provider_index}")
+                        }
                     )
                     .unwrap();
                 }

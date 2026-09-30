@@ -50,6 +50,7 @@ impl super::Compiler {
             template_sites: Vec::new(),
             strict_functions: Vec::new(),
             removable_declarations: Vec::new(),
+            module_instantiation_end: 0,
             enclosing: Vec::new(),
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
@@ -142,6 +143,10 @@ impl super::Compiler {
                 self.emit_function_declaration(function, statement.span);
             }
         }
+        // Everything above this boundary is part of ModuleDeclarationInstantiation: all
+        // module bindings have been created and every hoisted function declaration has its
+        // closure. Evaluation begins with the first ordinary statement below.
+        self.module_instantiation_end = self.code.len() as u32;
         for statement in list {
             if matches!(statement.kind, StatementKind::Function(_)) {
                 continue;

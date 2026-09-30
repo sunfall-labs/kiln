@@ -1097,8 +1097,8 @@ pub struct EvalSite {
     pub blocked_var_names: Vec<String>,
 }
 
-/// A runtime import lowered to a local slot. The graph linker initializes the slot from the
-/// provider module before evaluation; cyclic graphs are rejected by this first implementation.
+/// A runtime import lowered to a local slot. The graph linker initializes the slot during module
+/// instantiation, before any module body starts evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBinding {
     pub source: String,
@@ -1164,6 +1164,10 @@ pub struct ModuleLinkFacts {
     /// HIR still preserves declaration boundaries; a closed-world backend may then omit a row
     /// whose slots are not demanded without guessing those boundaries from flattened bytecode.
     pub removable_declarations: Vec<RemovableDeclaration>,
+    /// Exclusive bytecode end of ECMAScript module instantiation work: declaration setup and
+    /// hoisted function values, before the first top-level statement is evaluated.
+    /// Native graph execution runs this prefix for every module before evaluating any body.
+    pub module_instantiation_end: u32,
 }
 
 /// One side-effect-free top-level declaration owned by a module.

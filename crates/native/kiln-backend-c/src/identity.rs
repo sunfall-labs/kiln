@@ -745,5 +745,10 @@ pub(super) fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
             ),
         );
     }
+    byte(&mut hash, 0x44);
+    word(
+        &mut hash,
+        u64::from(module.link_facts.module_instantiation_end),
+    );
     hash
 }

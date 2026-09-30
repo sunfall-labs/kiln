@@ -209,7 +209,7 @@ pub fn compile_eval_with_strictness(
 /// Compile one module while preserving the scalar linkage needed by a graph linker.
 ///
 /// Named and default value imports are supported. Namespace imports, star/namespace re-exports,
-/// indirect re-exports, default expression exports, and cycles remain explicit unsupported forms.
+/// indirect re-exports and default expression exports remain explicit unsupported forms.
 pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
     // A module is strict whatever its text says, so nothing has to pass it in.
@@ -289,17 +289,21 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         });
     }
 
-    // An exported binding that can *change* is boxed, so the importer holds this module's cell
-    // rather than a copy of the value it had when the module finished. One that cannot change --
-    // a `const`, a function declaration, a class -- is left as a plain slot: a snapshot and a
-    // live view of it are indistinguishable, and boxing it would cost the native backend, which
-    // has no cells, a module it can otherwise compile.
-    let mutable = mutable_module_bindings(&module.body);
+    // Every ESM import is a live binding. A native graph may need to expose this module's
+    // binding while the module is still in its instantiation phase, before its body initializes
+    // a const or function declaration. Exported locals therefore use the same cell representation
+    // as mutable exports, so importers retain a live view through cyclic evaluation.
     for export in &module.exports {
-        if let ExportOrigin::Local { local } = &export.origin
-            && mutable.contains(local)
-        {
-            compiler.captured.insert(local.clone());
+        match &export.origin {
+            ExportOrigin::Local { local } => {
+                compiler.captured.insert(local.clone());
+            }
+            ExportOrigin::DefaultExpression => {
+                compiler
+                    .captured
+                    .insert(kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
+            }
+            _ => {}
         }
     }
     compiler.compile_body(module);
@@ -370,6 +374,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
         removable_declarations: compiler.removable_declarations.clone(),
+        module_instantiation_end: compiler.module_instantiation_end,
     };
 
     compiler
@@ -500,6 +505,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
         removable_declarations: Vec::new(),
+        module_instantiation_end: 0,
     };
     compiler
         .finish_with_strictness()
@@ -729,6 +735,7 @@ struct Compiler {
     /// or is discarded. See [`Strictness`].
     strict_functions: Vec<bool>,
     removable_declarations: Vec<RemovableDeclaration>,
+    module_instantiation_end: u32,
     /// Enclosing function states, module body first. Empty while compiling the module body.
     enclosing: Vec<FunctionState>,
     upvalues: Vec<Upvalue>,

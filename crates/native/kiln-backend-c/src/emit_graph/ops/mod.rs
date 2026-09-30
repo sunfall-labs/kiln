@@ -666,13 +666,13 @@ pub(super) fn emit_graph_op(
             if let Some(index) = crate::module_cells::compact_cell_slot(self_index, *slot) {
                 writeln!(
                     output,
-                    "    kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
                 )
                 .unwrap();
             } else {
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
