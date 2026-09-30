@@ -4642,7 +4642,10 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             if (KILN_UNLIKELY(!plain->arrow && !plain->strict)) (void)kiln_c99_global_object_val(&recv);\n\
             kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
             kiln_val res = KILN_VAL_UNDEFINED;\n\
+            kiln_js_frame call_frame;\n\
+            kiln_c99_js_frame_enter(&call_frame, plain);\n\
             int status = plain->body(&ctx_call, &res, plain->upvalues, &recv, args, argc);\n\
+            kiln_c99_js_frame_leave(&call_frame);\n\
             if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
                 *dst = res;\n\
                 return KILN_C99_OK;\n\
@@ -4698,7 +4701,10 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                     }\n\
                     kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
                     kiln_val res = KILN_VAL_UNDEFINED;\n\
+                    kiln_js_frame call_frame;\n\
+                    kiln_c99_js_frame_enter(&call_frame, plain);\n\
                     int status = plain->body(&ctx_call, &res, plain->upvalues, &vreceiver, args, argc);\n\
+                    kiln_c99_js_frame_leave(&call_frame);\n\
                     if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
                         *dst = res;\n\
                         return KILN_C99_OK;\n\
