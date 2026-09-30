@@ -16,6 +16,9 @@ console.log(
 
 const array = Reflect.construct(Array, [1, 2], Derived);
 console.log(Array.isArray(array), array.length, array[1], Object.getPrototypeOf(array) === Derived.prototype);
+const original = { untouched: true };
+const object = Reflect.construct(Object, [original], Derived);
+console.log(object !== original, object.untouched, Object.getPrototypeOf(object) === Derived.prototype);
 
 let argumentRead = false;
 try {

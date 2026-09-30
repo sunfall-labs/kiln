@@ -70,12 +70,18 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
         callee.tag != KILN_VALUE_FUNCTION && callee.tag != KILN_VALUE_PROXY &&
         callee.tag != KILN_VALUE_BOUND) {
         kiln_value target_prototype;
+        if (callee.tag == KILN_VALUE_BUILTIN &&
+            callee.bits == KILN_C99_BUILTIN_OBJECT) {
+            status = kiln_c99_get_prototype_from_constructor(
+                host, new_target, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                &target_prototype, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_new_object(result);
+            if (status != KILN_C99_OK) return status;
+            return kiln_c99_set_prototype(*result, target_prototype);
+        }
         status = kiln_c99_construct(host, result, callee, args, argc, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_OBJECT &&
-            argc > 0 && kiln_c99_is_object_value(args[0])) {
-            return KILN_C99_OK;
-        }
         kiln_value default_prototype;
         status = kiln_c99_get_prototype_from_constructor(
             host, callee, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),

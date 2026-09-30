@@ -208,10 +208,15 @@ typedef enum {
     KILN_DYN_PLUS_PLUS,
     KILN_DYN_MINUS_MINUS,
     KILN_DYN_PLUS,
+    KILN_DYN_PLUS_ASSIGN,
     KILN_DYN_MINUS,
+    KILN_DYN_MINUS_ASSIGN,
     KILN_DYN_STAR,
+    KILN_DYN_STAR_ASSIGN,
     KILN_DYN_SLASH,
+    KILN_DYN_SLASH_ASSIGN,
     KILN_DYN_PERCENT,
+    KILN_DYN_PERCENT_ASSIGN,
     KILN_DYN_ASSIGN,
     KILN_DYN_EQ,
     KILN_DYN_STRICT_EQ,
@@ -572,6 +577,12 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             lex->curr.kind = KILN_DYN_PLUS_PLUS;
             return;
         }
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_PLUS_ASSIGN;
+            return;
+        }
         lex->curr.kind = KILN_DYN_PLUS;
         return;
     case '-':
@@ -581,11 +592,41 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             lex->curr.kind = KILN_DYN_MINUS_MINUS;
             return;
         }
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_MINUS_ASSIGN;
+            return;
+        }
         lex->curr.kind = KILN_DYN_MINUS;
         return;
-    case '*': lex->curr.kind = KILN_DYN_STAR; return;
-    case '/': lex->curr.kind = KILN_DYN_SLASH; return;
-    case '%': lex->curr.kind = KILN_DYN_PERCENT; return;
+    case '*':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_STAR_ASSIGN;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_STAR;
+        return;
+    case '/':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_SLASH_ASSIGN;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_SLASH;
+        return;
+    case '%':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_PERCENT_ASSIGN;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_PERCENT;
+        return;
     case '.': lex->curr.kind = KILN_DYN_DOT; return;
     case ',': lex->curr.kind = KILN_DYN_COMMA; return;
     case ':': lex->curr.kind = KILN_DYN_COLON; return;
@@ -1222,11 +1263,37 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
             }
             *out = kiln_c99_number(n);
             return KILN_C99_OK;
-        } else if (lex->curr.kind == KILN_DYN_ASSIGN) {
+        } else if (lex->curr.kind == KILN_DYN_ASSIGN ||
+                   lex->curr.kind == KILN_DYN_PLUS_ASSIGN ||
+                   lex->curr.kind == KILN_DYN_MINUS_ASSIGN ||
+                   lex->curr.kind == KILN_DYN_STAR_ASSIGN ||
+                   lex->curr.kind == KILN_DYN_SLASH_ASSIGN ||
+                   lex->curr.kind == KILN_DYN_PERCENT_ASSIGN) {
+            kiln_dyn_token_kind assignment = lex->curr.kind;
             kiln_dyn_lexer_next(lex);
             kiln_value rhs;
             int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
             if (status != KILN_C99_OK) return status;
+            if (assignment != KILN_DYN_ASSIGN) {
+                kiln_value current;
+                if (!kiln_dyn_scope_get(scope, name, name_len, &current)) {
+                    kiln_value globals = kiln_c99_undefined();
+                    status = kiln_c99_global_object(&globals);
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_get(host, globals, name, name_len, &current, depth,
+                                              thrown);
+                    }
+                    if (status != KILN_C99_OK) return status;
+                }
+                switch (assignment) {
+                case KILN_DYN_PLUS_ASSIGN: rhs = kiln_c99_binary(1, current, rhs); break;
+                case KILN_DYN_MINUS_ASSIGN: rhs = kiln_c99_binary(2, current, rhs); break;
+                case KILN_DYN_STAR_ASSIGN: rhs = kiln_c99_binary(3, current, rhs); break;
+                case KILN_DYN_SLASH_ASSIGN: rhs = kiln_c99_binary(4, current, rhs); break;
+                case KILN_DYN_PERCENT_ASSIGN: rhs = kiln_c99_binary(5, current, rhs); break;
+                default: break;
+                }
+            }
             if (!kiln_dyn_scope_update(scope, name, name_len, rhs)) {
                 kiln_value globals = kiln_c99_undefined();
                 status = kiln_c99_global_object(&globals);

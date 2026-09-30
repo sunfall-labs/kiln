@@ -8,6 +8,11 @@ console.log("typeof", new Function("s", "const a = s.func[0]; return typeof a;")
 console.log("const", new Function("s", "const a = s.func[0]; return function (d) { return a(d); };")(s)(41));
 console.log("let", new Function("let a = 5; return function () { return a; };")()());
 console.log("var", new Function("var a = 6; return function () { return a; };")()());
+console.log("compound", new Function("value", "value += 1; return value;")(2));
+console.log(
+  "loop compound",
+  new Function("return function () { let sum = 0; for (let i = 0; i < 3; i++) sum += i; return sum; };")()(),
+);
 const make = new Function("scope",
   'const schema0 = scope.schema[0]; const f = scope.func[0];' +
   'return function validate(data, {instancePath = "", rootData = data} = {}) {' +
