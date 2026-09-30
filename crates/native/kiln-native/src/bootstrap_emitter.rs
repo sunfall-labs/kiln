@@ -5,8 +5,16 @@ use kiln_artifact_cache::Digest;
 use kiln_backend_c::{EmissionPolicy, emit_module_with_logical_path_and_policy};
 use kiln_ir::ModuleProgram;
 
-pub(super) static EMITTER_ID: std::sync::LazyLock<Digest> =
-    std::sync::LazyLock::new(|| Digest::hash(include_str!("bootstrap_emitter.rs").as_bytes()));
+pub(super) static EMITTER_ID: std::sync::LazyLock<Digest> = std::sync::LazyLock::new(|| {
+    Digest::hash(
+        [
+            include_str!("bootstrap_emitter.rs").as_bytes(),
+            kiln_backend_c::C_MODULE_EMITTER_BUILD_ID.as_bytes(),
+        ]
+        .concat()
+        .as_slice(),
+    )
+});
 
 pub(super) fn emit(
     program: &ModuleProgram,
