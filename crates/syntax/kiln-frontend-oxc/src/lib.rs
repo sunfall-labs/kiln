@@ -620,11 +620,93 @@ fn discover_node_runtime_requests_from_semantic(
         }
     }
 
+    fn resolve_importer(
+        expression: &Expression<'_>,
+        scoping: &oxc_semantic::Scoping,
+        require_symbols: &HashMap<SymbolId, String>,
+        resolve_symbols: &HashMap<SymbolId, String>,
+        path: &str,
+    ) -> Option<String> {
+        match expression {
+            Expression::Identifier(identifier) => {
+                let symbol = identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+                resolve_symbols.get(&symbol).cloned()
+            }
+            Expression::StaticMemberExpression(member) if member.property.name == "resolve" => {
+                let Expression::Identifier(identifier) = &member.object else {
+                    return None;
+                };
+                if identifier.name == "require" && identifier.is_global_reference(scoping) {
+                    return Some(path.to_owned());
+                }
+                let symbol = identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+                require_symbols.get(&symbol).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    let mut resolve_symbols = HashMap::<SymbolId, String>::new();
+    loop {
+        let mut aliases = Vec::new();
+        for node in semantic.nodes() {
+            let AstKind::VariableDeclarator(declarator) = node.kind() else {
+                continue;
+            };
+            let Some(symbol) = declarator
+                .id
+                .get_binding_identifier()
+                .and_then(|identifier| identifier.symbol_id.get())
+            else {
+                continue;
+            };
+            if resolve_symbols.contains_key(&symbol) || scoping.symbol_is_mutated(symbol) {
+                continue;
+            }
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            if let Some(importer) =
+                resolve_importer(init, scoping, &require_symbols, &resolve_symbols, path)
+            {
+                aliases.push((symbol, importer));
+            }
+        }
+        if aliases.is_empty() {
+            break;
+        }
+        for (symbol, importer) in aliases {
+            resolve_symbols.insert(symbol, importer);
+        }
+    }
+
     let mut requests = Vec::new();
     for node in semantic.nodes() {
         let AstKind::CallExpression(call) = node.kind() else {
             continue;
         };
+        if let Some(importer) = resolve_importer(
+            &call.callee,
+            scoping,
+            &require_symbols,
+            &resolve_symbols,
+            path,
+        ) {
+            if let Some(specifier) = literal_argument(call) {
+                requests.push(NodeRuntimeRequest {
+                    specifier,
+                    importer,
+                    resolve_only: true,
+                });
+            }
+            continue;
+        }
         if let Expression::Identifier(identifier) = &call.callee {
             let Some(reference) = identifier.reference_id.get() else {
                 continue;
@@ -4359,17 +4441,25 @@ mod tests {
             r#"
                 require.resolve("./local.js");
                 const read = require.resolve;
-                read("./detached.js");
+                const readAgain = read;
+                readAgain("./detached.js");
                 function shadow(require) { require.resolve("./not-loader.js"); }
             "#,
         );
         assert_eq!(
             requests,
-            [NodeRuntimeRequest {
-                specifier: "./local.js".to_owned(),
-                importer: "fixture.cjs".to_owned(),
-                resolve_only: true,
-            }]
+            [
+                NodeRuntimeRequest {
+                    specifier: "./detached.js".to_owned(),
+                    importer: "fixture.cjs".to_owned(),
+                    resolve_only: true,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./local.js".to_owned(),
+                    importer: "fixture.cjs".to_owned(),
+                    resolve_only: true,
+                },
+            ]
         );
     }
 
