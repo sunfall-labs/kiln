@@ -9,4 +9,8 @@ for (const [name, constructor] of [
   const abstractConstructor = Object.getPrototypeOf(constructor);
   const prototypeLink = Object.getPrototypeOf(constructor.prototype) === abstractConstructor.prototype;
   console.log(name, keys.join(","), symbols.length, ownSpecies === undefined, inheritedSpecies, prototypeLink);
+  const customPrototype = Object.create(null);
+  Object.setPrototypeOf(constructor, customPrototype);
+  console.log(name, Object.getPrototypeOf(constructor) === customPrototype);
+  Object.setPrototypeOf(constructor, abstractConstructor);
 }
