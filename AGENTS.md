@@ -60,6 +60,17 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
 | `mise run native-stress` | the native corpus again with the collector stressed on every allocation |
 | `mise run native-realms` | each native probe as 1, 2 and core-count realms at once in one process |
+| `mise run native` | the native backend against node, probe by probe |
+| `mise run thirdparty` | real library bundles, both engines |
+| `mise run bench` | every microbenchmark under `bench/`, under kiln, node and bun |
+| `mise run realworld` | real-world TypeScript programs under kiln, node, bun, porffor and Hermes |
+| `mise run wpt` | the committed Web Platform Tests baseline through both engines |
+| `mise run wpt-update` | regenerate the WPT baseline; deliberate, and the diff is the record |
+| `mise run wpt-fetch` | fetch the pinned WPT directories into `~/.cache/kiln`, once per machine |
+| `mise run http-close` | the Node HTTP close contract, across all four seams |
+| `mise run silent-undefined` | the expensive native-`undefined` class; several hundred compiles, not per-commit |
+| `mise run facts` | check the committed whole-program facts baseline for benchmarks and bundles |
+| `mise run facts-update` | regenerate the facts baseline; deliberate, and the diff is the record |
 
 `mise trust` once per checkout, or the tasks are invisible.
 
@@ -72,7 +83,7 @@ that caused it, exactly as `update-baseline.sh` intends for the performance base
 Two things the gate does that a hand-rolled one keeps getting wrong. It asserts on the *summary
 line* of the crate tests rather than on an exit code, because a broken test build leaves a working
 release binary and a suite that never ran. It prints one total for the workspace (`crate tests: N suites,
-M passed, F failed`) and refuses below `KILN_GATE_MIN_PASSED` (500; the workspace runs about 1,440),
+M passed, F failed`) and refuses below `KILN_GATE_MIN_PASSED` (500; about 1,860 as of the 2026-09-16 Phase 6 verification -- the gate's printed total is authoritative, not this number),
 because the last three summary lines it used to print are empty doc-test targets and read as a
 suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
 ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` and its cleanup trap

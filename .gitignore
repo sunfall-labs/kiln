@@ -53,5 +53,23 @@ node_modules/
 # stray files in everyone's `git status`.
 .scratch/bench-io-test.tmp
 .kiln-shape-keys-probe.tmp
+# Ad-hoc compiled probes beside the tracked filings under `.scratch/<feature>/`. These are
+# extensionless binaries (and their checkouts and tmpdirs), never sources: the tracked
+# `probe_*.mjs` filings keep their extensions, so these patterns cannot match them. Untracked
+# by default so `git add -A` cannot sweep a binary into a commit (same logic as *.snap.new).
+.scratch/*_bin
+.scratch/*_release
+.scratch/*_stripped
+.scratch/*_prof
+.scratch/*_dev
+.scratch/*_rel
+.scratch/*_opt
+.scratch/probe_indexof
+.scratch/test_gtk
+.scratch/compio-http*/
+.scratch/hono/
+.scratch/surface-*/
+# Slice runs of the native surface inventory; only the whole inventory is recorded.
+.scratch/native-real-libraries/*.partial.*
 gmon.out
 __pycache__/

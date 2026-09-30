@@ -1,13 +1,15 @@
 # JavaScript conformance corpus
 
-**The corpus runs, and its remaining failures are intentional work items.**
-`kiln test conformance/guard` executes all twenty probes and reports each per-test result,
-exiting non-zero when any probe fails. Read this directory as a specification of behaviour kiln
-will have to get right, not as a suite whose current pass count is the whole story.
+**The corpus runs: guard is 20/20 green, and remaining failures elsewhere are intentional
+work items.** `kiln test conformance/guard` executes all twenty probes and reports each
+per-test result, exiting non-zero when any probe fails. Remeasured 2026-09-30, all twenty
+pass and the reason distribution below is empty. Read this directory as a specification of
+behaviour kiln has to get right, not as a suite whose current pass count is the whole story.
 
-The pass count is the least interesting thing it produces. The valuable output is the **reason
-distribution** printed after the results — every probe's blocker, grouped and ranked, which is
-the implementation backlog ordered by how many tests each entry unblocks:
+The pass count is the least interesting thing it produces. When probes do fail, the valuable
+output is the **reason distribution** printed after the results — every probe's blocker,
+grouped and ranked, which is the implementation backlog ordered by how many tests each entry
+unblocks. The August 2026 shape, kept to show what that looks like on a red run:
 
 ```
   4  compile: unsupported statement: class declaration
@@ -19,9 +21,9 @@ the implementation backlog ordered by how many tests each entry unblocks:
   1  each: unresolved identifier `Array`, array expression, arrow function expression, `in`
 ```
 
-`docs/language-coverage.md` turns that into a ten-step ladder with a predicted pass count per
-step. Worth knowing: `--parse-only` passes all twenty, so the frontend accepts every probe and
-lowering is what refuses them.
+`docs/language-coverage.md` turned that into a ten-step ladder with a predicted pass count per
+step; §8 records the remeasurement that closed it at 20/20. Worth knowing: `--parse-only`
+passes all twenty, so the frontend accepts every probe and lowering is what used to refuse them.
 
 ## Where this came from
 

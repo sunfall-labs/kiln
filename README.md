@@ -14,11 +14,7 @@ immediately, so the edit-run loop never waits for a native build.
 kiln is at v0 and under active development, with a strong focus on high ECMAScript conformance, real-world library compatibility, and native performance:
 
 - **ECMAScript Conformance**: Tracks the official Test262 suite, passing the vast majority of tests across standard built-ins, syntax, and runtime semantics (tracked chunk-by-chunk in `conformance/test262-baseline.json`).
-- **Real-World Library Compatibility**: Executes unmodified third-party libraries and application bundles, producing output byte-identical to Node under both the interpreter and the native C backend (`conformance/thirdparty`):
-  - *Tooling & Compilers*: `@babel/parser` + `@babel/traverse` + `@babel/generator` (`babel`), `acorn`.
-  - *Reactive & State Systems*: `vue-reactivity` (Vue 3 reactive proxy system), `mobx`, `rxjs`.
-  - *Validation & Runtime Generation*: `ajv` (JSON Schema compiler with runtime code generation).
-  - *Standard Utilities*: `lodash`, `date-fns`, `dayjs`, `semver`, `marked`, `mustache`, `uuid`, `chalk`, `ms`, `immer`.
+- **Real-World Library Compatibility**: Executes unmodified third-party libraries and application bundles, producing output byte-identical to Node under both the interpreter and the native C backend (`conformance/thirdparty`, run with `scripts/thirdparty.sh`): tooling and compilers, reactive and state systems, validation and runtime generation, and standard utilities. The bundle set itself is whatever that directory holds -- it is not enumerated here, because bundles arrive over time and the largest ones stay reproducible-from-`build.sh` rather than committed (see `.gitignore`).
 - **Targeted Corpora**: Held to clean runs across dedicated suites for language edge cases (`conformance/guard`), Node compatibility (`conformance/node`), regression tests (`conformance/regress`), Effect runtime semantics (`conformance/effect`), and HTTP server workloads (`conformance/server`).
 - **Engine Parity**: The compiled native C backend is held to byte-identical output and matching exit codes with the bytecode interpreter across the entire native corpus (`conformance/native`), ensuring zero divergence between execution modes.
 
