@@ -202,7 +202,7 @@ delete globalThis.__kilnHostModuleRequireResolve;
 
 function __kilnDecorateCommonJsRequire(require) {
     if (typeof require.resolve === "function") return require;
-    const resolve = function (specifier) {
+    const resolve = function resolve(specifier, options) {
         if (typeof specifier !== "string") {
             throw new TypeError("The module specifier must be a string");
         }
