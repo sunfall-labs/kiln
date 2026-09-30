@@ -667,8 +667,7 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     kiln_value prototype;
     kiln_value *slot;
     /* A parent that produced nothing -- every JavaScript constructor -- leaves `this` alone. */
-    if (produced.tag != KILN_VALUE_OBJECT && produced.tag != KILN_VALUE_ARRAY &&
-        produced.tag != KILN_VALUE_COLLECTION) {
+    if (!kiln_c99_is_object_value(produced)) {
         return KILN_C99_OK;
     }
     if (receiver->tag != KILN_VALUE_OBJECT ||
@@ -683,6 +682,12 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
         return KILN_C99_OK;
     }
     slot = kiln_c99_exotic_store(produced);
+    if (slot == NULL) {
+        /* An explicitly returned callable/host object retains its own prototype. */
+        *receiver = produced;
+        kiln_c99_adopted_this = produced;
+        return KILN_C99_OK;
+    }
     if (slot->tag != KILN_VALUE_OBJECT) {
         int status = kiln_c99_new_object_for_owner(slot, (const void *)(uintptr_t)produced.bits);
         if (status != KILN_C99_OK) {
