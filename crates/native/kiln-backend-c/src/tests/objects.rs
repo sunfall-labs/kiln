@@ -6184,6 +6184,57 @@ int main(void) {
 }
 
 #[test]
+fn executable_gc_nursery_lookup_cache_forgets_removed_regions() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_nursery_chunk *chunk;
+    char *region;
+    char *base;
+    char *limit;
+    uint64_t *bitmap;
+    size_t words;
+
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+    chunk = kiln_c99_nursery_new_region(&heap.nursery);
+    if (chunk == NULL) return 1;
+    chunk->limit = chunk->base + 16;
+    region = (char *)chunk;
+    if (!kiln_c99_nursery_locate(&heap, chunk->base, &base, &limit, &bitmap, &words)) return 2;
+    if (heap.nursery.lookup_region != region || base != chunk->base || limit != chunk->limit ||
+        bitmap != chunk->bitmap || words != chunk->bitmap_words) return 3;
+
+    /* A positive hit still checks the chunk's current range and returns its live metadata. */
+    chunk->limit = chunk->base + 32;
+    if (!kiln_c99_nursery_locate(&heap, chunk->base + 16, &base, &limit, &bitmap, &words) ||
+        limit != chunk->limit) return 4;
+
+    /* Removal invalidates the positive cache before freeing the chunk. A stale candidate address
+     * then misses in the owner set without reading the former header. */
+    kiln_c99_nursery_free_region(&heap.nursery, chunk);
+    if (heap.nursery.lookup_region == region ||
+        kiln_c99_nursery_locate(&heap, region + KILN_NURSERY_HEADER, &base, &limit, &bitmap,
+                                &words)) return 5;
+
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-nursery-lookup-cache-invalidation");
+    assert!(
+        run.status.success(),
+        "nursery lookup cache invalidation failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_gc_inactive_nursery_still_finds_filled_chunk_roots() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");

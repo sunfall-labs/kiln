@@ -387,6 +387,11 @@ typedef struct kiln_gc_nursery {
      * the number of chunks: walking the two lists per lookup made a 2.2 MB `JSON.parse` fifty
      * times slower once it had filled a few hundred of them. `region` is the current chunk's. */
     char *region;
+    /* The marker tends to follow many edges within the same nursery chunk. This one-entry,
+     * heap-local positive cache skips repeated region-set probes while preserving the range and
+     * bitmap validation below. Cleared before a region leaves `regions`; never populated by a
+     * no-write parallel reader. */
+    char *lookup_region;
     kiln_gc_ptrset regions;
 } kiln_gc_nursery;
 
@@ -969,6 +974,7 @@ static void kiln_c99_candidate_chunk_clear(kiln_nursery_chunk *chunk) {
 
 static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
     kiln_c99_candidate_group_remove(chunk);
+    if (nursery->lookup_region == (char *)chunk) nursery->lookup_region = NULL;
     kiln_c99_gc_ptrset_remove(&nursery->regions, chunk);
     kiln_c99_gc_aligned_free(chunk);
 }
@@ -1280,6 +1286,7 @@ static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
     nursery->regions.table = NULL;
     nursery->regions.capacity = 0;
     nursery->regions.count = 0;
+    nursery->lookup_region = NULL;
 }
 
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
@@ -2856,8 +2863,13 @@ static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, ch
      * once the set says this nursery made it. The current region past its bump holds nothing. */
     region = (const char *)((uintptr_t)ptr & ~(uintptr_t)(nursery->capacity - 1));
     if (region == nursery->region) return 0;
-    if (!kiln_c99_gc_ptrset_contains(&nursery->regions, region)) return 0;
-    chunk = (const kiln_nursery_chunk *)region;
+    if (region == nursery->lookup_region) {
+        chunk = (const kiln_nursery_chunk *)region;
+    } else {
+        if (!kiln_c99_gc_ptrset_contains(&nursery->regions, region)) return 0;
+        chunk = (const kiln_nursery_chunk *)region;
+        if (!kiln_c99_no_write()) ((kiln_gc_nursery *)nursery)->lookup_region = (char *)region;
+    }
     if (ptr < chunk->base || ptr >= chunk->limit) return 0;
     *base = chunk->base;
     *limit = chunk->limit;
@@ -6307,6 +6319,10 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
             from->nursery.held_bytes -= filled;
         }
         from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
+        if (from->nursery.lookup_region == (char *)chunk)
+            from->nursery.lookup_region = NULL;
+        if (to->nursery.lookup_region == (char *)chunk)
+            to->nursery.lookup_region = NULL;
         kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
         (void)kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk);
         if (to->nursery.lo == NULL || (char *)chunk < to->nursery.lo)
