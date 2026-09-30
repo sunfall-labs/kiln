@@ -448,6 +448,7 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
  * accessor function exposed as `ArrayBuffer.prototype.byteLength`. Keeping this private lets the
  * public accessor and its reflected descriptor have one TypeScript owner while preserving the
  * engine's brand check and avoiding a recursive property read. */
+static size_t kiln_c99_shared_length(kiln_typed_buffer *buffer);
 static int kiln_c99_array_buffer_byte_length_raw(kiln_value *out, const kiln_value *args,
                                                   size_t argc, kiln_value *thrown) {
     kiln_typed_buffer *buffer;
@@ -459,7 +460,7 @@ static int kiln_c99_array_buffer_byte_length_raw(kiln_value *out, const kiln_val
             ? "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
             : "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver");
     }
-    *out = kiln_c99_number((double)buffer->byte_length);
+    *out = kiln_c99_number((double)(shared ? kiln_c99_shared_length(buffer) : buffer->byte_length));
     return KILN_C99_OK;
 }
 
