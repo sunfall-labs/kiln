@@ -755,7 +755,15 @@ int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
     view.flags = kiln_c99_fixed_key_flags(name, name_len);
     view.data = name;
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
-        *out = property.value;
+        if (property.accessor) {
+            kiln_val value = KILN_VAL_UNDEFINED;
+            status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(globals),
+                                                    &view, depth, thrown, NULL, &value);
+            if (status != KILN_C99_OK) return status;
+            *out = kiln_val_to_boundary(value);
+        } else {
+            *out = property.value;
+        }
         *found = 1;
         return KILN_C99_OK;
     }
@@ -775,7 +783,15 @@ int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_str
         return status;
     }
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
-        *out = property.value;
+        if (property.accessor) {
+            kiln_val value = KILN_VAL_UNDEFINED;
+            status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(globals),
+                                                    name, depth, thrown, NULL, &value);
+            if (status != KILN_C99_OK) return status;
+            *out = kiln_val_to_boundary(value);
+        } else {
+            *out = property.value;
+        }
         *found = 1;
         return KILN_C99_OK;
     }
