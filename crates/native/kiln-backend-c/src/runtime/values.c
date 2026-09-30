@@ -33,6 +33,13 @@ static int kiln_c99_is_callable(kiln_value value) {
     /* A proxy answers for what it stands in front of: `new Proxy(f, {})` is a function and
      * `new Proxy({}, {})` is not, and `typeof` has to say so before any trap is consulted. */
     value = kiln_c99_proxy_inner(value);
+    if (value.tag == KILN_VALUE_BUILTIN &&
+        (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
+         (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
+          value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+         value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
+         value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE))
+        return 0;
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
            value.tag == KILN_VALUE_METHOD || value.tag == KILN_VALUE_SETTLER ||
            value.tag == KILN_VALUE_BOUND || value.tag == KILN_VALUE_COMMONJS_REQUIRE;
@@ -772,6 +779,18 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
     if (callee.tag == KILN_VALUE_BUILTIN) {
         static const char empty[] = "";
         switch (callee.bits) {
+#if KILN_RETAIN_GROUP_BUFFER
+        case KILN_C99_BUILTIN_BUFFER: {
+            kiln_value first = argc > 0 ? args[0] : kiln_c99_number(0.0);
+            if (first.tag == KILN_VALUE_NUMBER)
+                return kiln_c99_buffer_method(result, KILN_C99_METHOD_BUFFER_ALLOC,
+                                              kiln_c99_undefined(), args, argc, thrown);
+            return kiln_c99_buffer_from(result, first, args, argc, thrown);
+        }
+#endif
+        case KILN_C99_BUILTIN_TYPED_ARRAY:
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Abstract class TypedArray cannot be called directly");
         case KILN_C99_BUILTIN_STRING: {
             /* `String()` with no argument is the empty string, not `"undefined"`. */
             kiln_value subject;

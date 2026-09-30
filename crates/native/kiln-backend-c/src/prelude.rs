@@ -3582,6 +3582,10 @@ enum kiln_value_tag {
  * backend builds links to. A method table rather than a constructor, so it reports `typeof
  * "object"` through `kiln_c99_is_namespace` exactly as `Array.prototype` does. */
 #define KILN_C99_BUILTIN_ITERATOR_PROTOTYPE 95
+/* The abstract `%TypedArray%` constructor. Kept distinct from the shared
+ * `%TypedArray%.prototype` method table above: concrete typed-array constructors inherit from
+ * this function, while concrete typed-array prototype objects inherit from that table. */
+#define KILN_C99_BUILTIN_TYPED_ARRAY 104
 
 #define KILN_C99_BUILTIN_DATE 7
 

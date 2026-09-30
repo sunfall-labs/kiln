@@ -66,6 +66,10 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     kiln_value saved_adopted;
     kiln_value adopted;
     int status;
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Abstract class TypedArray not directly constructable");
+    }
     if ((new_target.tag != callee.tag || new_target.bits != callee.bits) &&
         callee.tag != KILN_VALUE_FUNCTION && callee.tag != KILN_VALUE_PROXY &&
         callee.tag != KILN_VALUE_BOUND) {
@@ -939,7 +943,9 @@ static int kiln_c99_heritage_constructs(kiln_value value) {
                  closure->is_method);
     }
     if (value.tag == KILN_VALUE_BUILTIN)
-        return !kiln_c99_is_namespace(value.bits) && value.bits != KILN_C99_BUILTIN_SYMBOL && value.bits != KILN_C99_BUILTIN_BIGINT;
+        return !kiln_c99_is_namespace(value.bits) && value.bits != KILN_C99_BUILTIN_SYMBOL &&
+               value.bits != KILN_C99_BUILTIN_BIGINT &&
+               value.bits != KILN_C99_BUILTIN_TYPED_ARRAY;
     if (value.tag == KILN_VALUE_METHOD) {
         for (size_t i = 0; i < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors; ++i)
             if (kiln_c99_native_constructors[i].method == value.bits) return 1;
@@ -1009,6 +1015,11 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         return kiln_c99_instance_of(host, value, ((kiln_bound *)(uintptr_t)constructor.bits)->target, answer, depth, thrown);
     if (value.tag == KILN_VALUE_PROXY) value = kiln_c99_proxy_inner(value);
     if (constructor.tag == KILN_VALUE_PROXY) constructor = kiln_c99_proxy_inner(constructor);
+    /* OrdinaryHasInstance returns false for every primitive before reading the constructor's
+     * `prototype` property. In particular, `"x" instanceof Function.prototype` is false even
+     * though Function.prototype has no object-valued `prototype`. */
+    if (!kiln_c99_is_reference(value) && value.tag != KILN_VALUE_DATE)
+        return KILN_C99_OK;
     /* A builtin constructor has no prototype object here; the question it answers is about the
      * tag instead, which is the same question and a shorter walk. */
     if (constructor.tag == KILN_VALUE_BUILTIN) {
@@ -1030,12 +1041,14 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_DATA_VIEW:
             *answer = value.tag == KILN_VALUE_DATA_VIEW;
             return KILN_C99_OK;
-        case KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE:
-            /* `Object.getPrototypeOf(Uint8Array)` is the abstract `%TypedArray%` constructor.
-             * Its `@@hasInstance` follows the inherited Function implementation and accepts
-             * every typed-array view, which packages such as axios use to recognize views. */
+        case KILN_C99_BUILTIN_TYPED_ARRAY:
+            /* The abstract `%TypedArray%` constructor is the shared parent of the concrete
+             * numeric constructors. Its ordinary instance check accepts every typed view. */
             *answer = value.tag == KILN_VALUE_TYPED_ARRAY;
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Function has non-object prototype 'undefined' in instanceof check");
         case KILN_C99_BUILTIN_INT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:
@@ -1256,6 +1269,13 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
          * exist. */
         if (value.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
             return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
+        }
+        if (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
+            (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
+             value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+            value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
+            value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE) {
+            return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
         }
         if (kiln_c99_is_namespace(value.bits)) {
             return kiln_c99_static_text(object_text, sizeof(object_text) - 1);

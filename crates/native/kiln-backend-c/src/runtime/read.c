@@ -1914,6 +1914,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * way a program asks what kind of error it caught. A namespace is not a constructor and
          * has no name to give. */
         if (kiln_c99_same_name_key(key, "constructor")) {
+            if (target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY);
+                return KILN_C99_OK;
+            }
             /* A prototype table names its own constructor, which is how `[].constructor` and
              * `Array.prototype.constructor` reach the same value. */
             static const struct {
@@ -2011,6 +2015,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
         }
         if (kiln_c99_same_name_key(key, "prototype")) {
+            if (target.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+                return KILN_C99_OK;
+            }
             kiln_value store;
             if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
                 kiln_c99_store_has(store, key, ikey))

@@ -1421,6 +1421,18 @@
             if (subject.tag == KILN_VALUE_BUILTIN) {
                 kiln_typed_kind typed_kind;
                 kiln_value store;
+                /* The numeric typed-array constructors share the abstract `%TypedArray%`
+                 * constructor as their [[Prototype]]. This is distinct from the shared
+                 * `%TypedArray%.prototype` method table (id 39), which is the parent of each
+                 * concrete typed-array prototype object. */
+                if (kiln_c99_builtin_typed_kind(subject.bits, &typed_kind)) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY);
+                    return KILN_C99_OK;
+                }
+                if (subject.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+                    return KILN_C99_OK;
+                }
                 int stored = kiln_c99_callable_store(subject, &store, 0);
                 if (stored != KILN_C99_OK) return stored;
                 if (store.tag == KILN_VALUE_OBJECT &&

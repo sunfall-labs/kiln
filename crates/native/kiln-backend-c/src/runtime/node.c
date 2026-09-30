@@ -3677,12 +3677,12 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (get_status != KILN_C99_OK) return get_status;
             get_status = kiln_c99_get(host, options, "host", 4, &host_value, depth, thrown);
             if (get_status != KILN_C99_OK) return get_status;
-            if (host_value.tag == KILN_VALUE_UNDEFINED) {
+            if (host_value.tag == KILN_VALUE_UNDEFINED || host_value.tag == KILN_VALUE_NULL) {
                 get_status = kiln_c99_get(host, options, "hostname", 8, &host_value,
                                           depth, thrown);
                 if (get_status != KILN_C99_OK) return get_status;
             }
-            if (host_value.tag == KILN_VALUE_UNDEFINED)
+            if (host_value.tag == KILN_VALUE_UNDEFINED || host_value.tag == KILN_VALUE_NULL)
                 host_value = kiln_c99_copy_text("localhost", 9);
             callback_index = 1;
         }
@@ -3823,7 +3823,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
             kiln_value host_value = callback_index == 1
                                         ? kiln_c99_copy_text("0.0.0.0", 7)
-                                        : argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
+                                        : argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED &&
+                                                  args[1].tag != KILN_VALUE_NULL
                                               ? kiln_c99_text(args[1])
                                               : kiln_c99_copy_text("0.0.0.0", 7);
             double port = kiln_c99_as_number(port_value);

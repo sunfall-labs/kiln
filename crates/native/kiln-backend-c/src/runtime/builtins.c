@@ -99,6 +99,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: return "Float64Array";
     case KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE: return "TypedArray";
+    case KILN_C99_BUILTIN_TYPED_ARRAY: return "TypedArray";
     case KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE: return "Int8Array";
     case KILN_C99_BUILTIN_UINT8_ARRAY_PROTOTYPE: return "Uint8Array";
     case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY_PROTOTYPE: return "Uint8ClampedArray";
@@ -139,6 +140,7 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME:
     case KILN_C99_BUILTIN_TEMPORAL_DURATION:
     case KILN_C99_BUILTIN_ITERATOR:
+    case KILN_C99_BUILTIN_TYPED_ARRAY:
         *out = 0.0;
         return 1;
 
