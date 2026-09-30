@@ -48,3 +48,4 @@ console.log(
   "dynamic arrow expression",
   JSON.stringify(new Function("return [1, 2, 3].map(x => x * 2);")()),
 );
+console.log("dynamic multi-parameter arrow", new Function("return ((a, b) => a + b)(2, 3);")());

@@ -735,6 +735,12 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len);
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
                                        size_t *body_len);
+static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
+                                         kiln_dyn_scope *scope, const char *params,
+                                         size_t params_len, kiln_value receiver, int asynchronous,
+                                         int depth, kiln_value *out, kiln_value *thrown);
+static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char **params,
+                                               size_t *params_len, size_t *after_close);
 
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
                                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
@@ -860,6 +866,18 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "Variable is not defined");
     }
     if (lex->curr.kind == KILN_DYN_LPAREN) {
+        const char *params;
+        size_t params_len, after_close;
+        if (kiln_dyn_parenthesized_arrow_params(lex, &params, &params_len, &after_close)) {
+            lex->pos = after_close;
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind != KILN_DYN_ARROW)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                            "Expected arrow token");
+            kiln_dyn_lexer_next(lex);
+            return kiln_dyn_make_arrow_from_tail(host, lex, scope, params, params_len,
+                                                 receiver, 0, depth, out, thrown);
+        }
         kiln_dyn_lexer_next(lex);
         int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, out, thrown);
         if (status != KILN_C99_OK) return status;
@@ -1690,6 +1708,66 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                  "", 0, "eval", 0, 0, 0, asynchronous, 0, 0, arrow, 0,
                                  arrow ? kiln_val_from_boundary(receiver) : KILN_VAL_UNDEFINED,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0, val_upvals, 3);
+}
+
+static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
+                                         kiln_dyn_scope *scope, const char *params,
+                                         size_t params_len, kiln_value receiver, int asynchronous,
+                                         int depth, kiln_value *out, kiln_value *thrown) {
+    const char *body;
+    size_t body_len;
+    if (lex->curr.kind == KILN_DYN_LBRACE) {
+        if (!kiln_dyn_capture_block(lex, &body, &body_len))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                        "Unterminated arrow function body");
+        return kiln_dyn_make_closure(host, scope, params, params_len, body, body_len,
+                                     receiver, asynchronous, 1, out, thrown);
+    }
+    if (!kiln_dyn_capture_expression(lex, &body, &body_len))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Expected arrow function body");
+    char *return_body = (char *)malloc(body_len + sizeof "return ;");
+    if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
+    memcpy(return_body, "return ", 7);
+    memcpy(return_body + 7, body, body_len);
+    return_body[7 + body_len] = ';';
+    int status = kiln_dyn_make_closure(host, scope, params, params_len, return_body,
+                                       body_len + 8, receiver, asynchronous, 1, out, thrown);
+    free(return_body);
+    (void)depth;
+    return status;
+}
+
+static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char **params,
+                                               size_t *params_len, size_t *after_close) {
+    size_t start = lex->pos;
+    size_t pos = start;
+    int nesting = 1;
+    while (pos < lex->len && nesting > 0) {
+        char c = lex->src[pos++];
+        if (c == '\'' || c == '"' || c == '`') {
+            char quote = c;
+            while (pos < lex->len) {
+                c = lex->src[pos++];
+                if (c == '\\' && pos < lex->len) pos++;
+                else if (c == quote) break;
+            }
+        } else if (c == '(') {
+            nesting++;
+        } else if (c == ')') {
+            nesting--;
+        }
+    }
+    if (nesting != 0) return 0;
+    size_t close = pos - 1;
+    size_t next = pos;
+    while (next < lex->len && (lex->src[next] == ' ' || lex->src[next] == '\t' ||
+                               lex->src[next] == '\r' || lex->src[next] == '\n')) next++;
+    if (next + 1 >= lex->len || lex->src[next] != '=' || lex->src[next + 1] != '>') return 0;
+    *params = &lex->src[start];
+    *params_len = close - start;
+    *after_close = pos;
+    return 1;
 }
 
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
