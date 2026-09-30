@@ -898,6 +898,54 @@ fn node_executes_commonjs_require_and_esm_default_interop() {
 }
 
 #[test]
+fn typeless_nested_package_keeps_commonjs_default_interop_under_module_project() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"module"}"#);
+    fs::create_dir_all(project.root.join("node_modules/form-data/lib")).unwrap();
+    project.write(
+        "node_modules/form-data/package.json",
+        r#"{"name":"form-data","main":"./lib/form_data"}"#,
+    );
+    project.write(
+        "node_modules/form-data/lib/form_data.js",
+        "module.exports = function FormData() {};",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import FormData from 'form-data'; console.log(typeof FormData);",
+    );
+    let form_data = fs::canonicalize(project.root.join("node_modules/form-data/lib/form_data.js"))
+        .expect("canonical CommonJS main");
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("typeless package is CommonJS despite the parent module package");
+    let node = graph.module(&form_data).expect("form-data module");
+    assert_eq!(node.source, ModuleSource::CommonJs);
+    assert!(matches!(
+        graph.resolved_export(&form_data, "default"),
+        Some(kiln_module_graph::ResolvedExport::Local {
+            module,
+            local_slot: 0,
+        }) if module == &form_data
+    ));
+
+    let mut host = kiln_runtime::CaptureHost::new();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute default import from CommonJS");
+    assert_eq!(host.into_stdout(), "function\n");
+}
+
+#[test]
 fn node_executes_commonjs_named_export_and_reexport_interop() {
     let project = TempProject::new();
     project.write("package.json", r#"{"type":"module"}"#);
