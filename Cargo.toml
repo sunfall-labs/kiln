@@ -64,6 +64,7 @@ oxc_ast = { version = "0.147.0", default-features = false }
 oxc_parser = { version = "0.147.0", default-features = false }
 oxc_resolver = { version = "11.24.3", default-features = false }
 oxc_span = { version = "0.147.0", default-features = false }
+oxc_str = { version = "0.147.0", default-features = false }
 oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }

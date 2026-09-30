@@ -44,6 +44,7 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SymbolId;
 use oxc_semantic::{IsGlobalReference, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
+use oxc_str::Ident;
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
     ImportImportName,
@@ -411,7 +412,7 @@ fn discover_node_runtime_requests_from_semantic(
     let mut require_symbols = HashMap::new();
     // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
     // pass because semantic node order is an AST walk detail, not a source-order contract.
-    for node in semantic.nodes() {
+    for node in semantic.nodes().iter() {
         let AstKind::VariableDeclarator(declarator) = node.kind() else {
             continue;
         };
@@ -875,6 +876,136 @@ fn discover_node_runtime_requests_from_semantic(
         }
     });
     requests
+}
+
+/// Find CommonJS `require("...")` calls hidden inside the narrowly-supported direct-eval
+/// expression. The eval source is parsed independently, while `find_binding` against the
+/// caller's eval-site scope proves that `require` is the CommonJS wrapper binding rather than
+/// a shadowing lexical variable. This keeps the lazy module edge attached to the original file.
+fn discover_literal_eval_requires(
+    path: &str,
+    source_type: SourceType,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<NodeRuntimeRequest> {
+    if !source_type.is_commonjs() {
+        return Vec::new();
+    }
+    let caller_scoping = semantic.scoping();
+    if semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
+    {
+        return Vec::new();
+    }
+    let mut requests = Vec::new();
+    for node in semantic.nodes() {
+        let AstKind::CallExpression(eval_call) = node.kind() else {
+            continue;
+        };
+        if eval_call.optional || eval_call.arguments.len() != 1 {
+            continue;
+        }
+        let Expression::Identifier(eval_id) = &eval_call.callee else {
+            continue;
+        };
+        if eval_id.name != "eval" || !eval_id.is_global_reference(caller_scoping) {
+            continue;
+        }
+        let Some(Argument::StringLiteral(source)) = eval_call.arguments.first() else {
+            continue;
+        };
+        if source.lone_surrogates {
+            continue;
+        }
+        if caller_scoping
+            .find_binding(node.scope_id(), Ident::from("require"))
+            .is_some()
+        {
+            continue;
+        }
+        let allocator = Allocator::default();
+        let parsed = Parser::new(
+            &allocator,
+            source.value.as_str(),
+            SourceType::default().with_script(true),
+        )
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+        if parsed.panicked
+            || !parsed.diagnostics.is_empty()
+            || !parsed.program.directives.is_empty()
+            || parsed.program.body.len() != 1
+        {
+            continue;
+        }
+        let Statement::ExpressionStatement(expression_statement) = &parsed.program.body[0] else {
+            continue;
+        };
+        if !inline_eval_oxc_syntax(&expression_statement.expression) {
+            continue;
+        }
+        let inner_semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        let inner_scoping = inner_semantic.scoping();
+        for inner_node in inner_semantic.nodes().iter() {
+            let AstKind::CallExpression(require_call) = inner_node.kind() else {
+                continue;
+            };
+            let Expression::Identifier(require) = &require_call.callee else {
+                continue;
+            };
+            if require.name != "require" || !require.is_global_reference(inner_scoping) {
+                continue;
+            }
+            if let Some(Argument::StringLiteral(literal)) = require_call.arguments.first()
+                && require_call.arguments.len() == 1
+            {
+                requests.push(NodeRuntimeRequest {
+                    specifier: literal.value.to_string(),
+                    importer: path.to_owned(),
+                    resolve_only: false,
+                });
+            }
+        }
+    }
+    requests
+}
+
+fn inline_eval_oxc_syntax(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::ThisExpression(_) => true,
+        Expression::Identifier(identifier) => {
+            !matches!(identifier.name.as_str(), "eval" | "await" | "yield")
+        }
+        Expression::StaticMemberExpression(member) => {
+            !member.optional && inline_eval_oxc_syntax(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            !member.optional
+                && inline_eval_oxc_syntax(&member.object)
+                && inline_eval_oxc_syntax(&member.expression)
+        }
+        Expression::CallExpression(call) => {
+            !call.optional
+                && inline_eval_oxc_syntax(&call.callee)
+                && call
+                    .arguments
+                    .iter()
+                    .all(|argument| argument.as_expression().is_some_and(inline_eval_oxc_syntax))
+        }
+        _ => false,
+    }
 }
 
 /// Every module a `new Worker(argument)` can name: through a `const` binding (`const script =
@@ -1361,16 +1492,35 @@ fn parse_source_with_commonjs_requires(
             .collect::<Vec<_>>();
         requires.sort_by_key(|(start, _)| *start);
         let mut seen = HashSet::new();
+        let mut node_runtime_requests = discover_node_runtime_requests_from_semantic(
+            path.unwrap_or("inline.cjs"),
+            &parsed.program,
+            &semantic,
+        );
+        node_runtime_requests.extend(discover_literal_eval_requires(
+            path.unwrap_or("inline.cjs"),
+            source_type,
+            &semantic,
+        ));
+        node_runtime_requests.sort_by(|left, right| {
+            left.specifier
+                .cmp(&right.specifier)
+                .then_with(|| left.importer.cmp(&right.importer))
+        });
+        node_runtime_requests.dedup_by(|left, right| {
+            if left.specifier == right.specifier && left.importer == right.importer {
+                left.resolve_only &= right.resolve_only;
+                true
+            } else {
+                false
+            }
+        });
         (
             requires
                 .into_iter()
                 .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
                 .collect(),
-            discover_node_runtime_requests_from_semantic(
-                path.unwrap_or("inline.cjs"),
-                &parsed.program,
-                &semantic,
-            ),
+            node_runtime_requests,
         )
     };
     let mut module = lower_parsed(path, &parsed, source, source_type);
@@ -1520,11 +1670,30 @@ fn parse_source_in_context(
             .with_build_nodes(true)
             .build(&parsed.program)
             .semantic;
-        discover_node_runtime_requests_from_semantic(
+        let mut requests = discover_node_runtime_requests_from_semantic(
             path.unwrap_or("inline.js"),
             &parsed.program,
             &semantic,
-        )
+        );
+        requests.extend(discover_literal_eval_requires(
+            path.unwrap_or("inline.js"),
+            source_type,
+            &semantic,
+        ));
+        requests.sort_by(|left, right| {
+            left.specifier
+                .cmp(&right.specifier)
+                .then_with(|| left.importer.cmp(&right.importer))
+        });
+        requests.dedup_by(|left, right| {
+            if left.specifier == right.specifier && left.importer == right.importer {
+                left.resolve_only &= right.resolve_only;
+                true
+            } else {
+                false
+            }
+        });
+        requests
     };
     let mut module = lower_parsed_in_context(
         path,
@@ -4596,6 +4765,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn commonjs_literal_eval_require_is_a_runtime_edge_only_when_unshadowed() {
+        let module = parse_commonjs(
+            "fixture.cjs",
+            r#"const captured = 1; eval("require('util').inspect");"#,
+        );
+        assert!(module.node_runtime_requests.iter().any(|request| {
+            request.specifier == "util"
+                && request.importer == "fixture.cjs"
+                && !request.resolve_only
+        }));
+
+        let shadowed = parse_commonjs(
+            "fixture.cjs",
+            r#"const require = (name) => name; eval("require('not-a-module')");"#,
+        );
+        assert!(shadowed.node_runtime_requests.is_empty());
     }
 
     fn node_runtime_discovery_tracks_esbuild_require_helper_literals() {

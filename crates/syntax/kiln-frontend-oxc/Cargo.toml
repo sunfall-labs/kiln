@@ -25,6 +25,7 @@ oxc_ecmascript = { version = "0.147.0", default-features = false }
 oxc_minifier = { version = "0.147.0", default-features = false }
 oxc_semantic = { version = "0.147.0", default-features = false }
 oxc_span = { workspace = true }
+oxc_str = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_transformer = { version = "0.147.0", default-features = false }
 serde_json = { workspace = true }
