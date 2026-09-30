@@ -3782,23 +3782,18 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_OBJECT_ASSIGN: {
             kiln_value target;
             size_t argument;
-            /* A function is a legal target, and attaching statics to an exported one --
-             * `Object.assign(postcss, { parse, stringify })` -- is among the most common shapes in
-             * a bundle. Only the target check rejected it: `kiln_c99_put` already writes to a
-             * function, which is why `f.parse = parse` has always worked. An array is a target for
-             * the same reason and by the same path.
-             *
-             * Everything else still refuses. The specification would send a primitive through
-             * ToObject and copy onto the wrapper, which is observable only through the return
-             * value; refusing by name says so, where answering would be a guess. */
-            if (argc == 0 ||
-                (args[0].tag != KILN_VALUE_OBJECT && args[0].tag != KILN_VALUE_ARRAY &&
-                 args[0].tag != KILN_VALUE_FUNCTION && args[0].tag != KILN_VALUE_BUILTIN &&
-                 args[0].tag != KILN_VALUE_METHOD && args[0].tag != KILN_VALUE_BOUND &&
-                 args[0].tag != KILN_VALUE_GENERATOR && args[0].tag != KILN_VALUE_REGEXP)) {
-                KILN_C99_REFUSE("Object.assign target must be an object, an array or a function");
+            target = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            if (target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_NUMBER ||
+                target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_SYMBOL ||
+                target.tag == KILN_VALUE_BIGINT) {
+                status = kiln_c99_new_primitive_wrapper(&target, target);
+                if (status != KILN_C99_OK) return status;
             }
-            target = args[0];
+            /* Reference targets use their ordinary Set path, including Promise statics used by
+             * async-thunk consumers. The target's tag need not be an ordinary-object tag. */
             for (argument = 1; argument < argc; ++argument) {
                 kiln_object *source;
                 if (args[argument].tag == KILN_VALUE_UNDEFINED ||
@@ -3808,7 +3803,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_value src_val = args[argument];
                 if (src_val.tag == KILN_VALUE_ARRAY || src_val.tag == KILN_VALUE_TYPED_ARRAY ||
                     src_val.tag == KILN_VALUE_PROXY || src_val.tag == KILN_VALUE_SHARED ||
-                    src_val.tag == KILN_VALUE_GENERATOR || src_val.tag == KILN_VALUE_REGEXP) {
+                    src_val.tag == KILN_VALUE_GENERATOR || src_val.tag == KILN_VALUE_REGEXP ||
+                    kiln_c99_exotic_store(src_val) != NULL) {
                     kiln_value keys;
                     status = kiln_c99_all_own_keys(host, src_val, &keys, depth, thrown);
                     if (status != KILN_C99_OK) return status;
