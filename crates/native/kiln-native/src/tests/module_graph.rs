@@ -1053,6 +1053,59 @@ fn native_graph_sync_require_rejects_transitive_top_level_await_with_node_code()
 }
 
 #[test]
+fn native_graph_commonjs_loop_reassigns_a_local_function_binding() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-loop-current-binding");
+    fs::write(
+        root.path.join("main.cjs"),
+        r#"
+function series(onDone, count) {
+  let current = onDone;
+  for (let j = count - 1; j >= 0; j--) {
+    const done = current;
+    current = () => done();
+  }
+  return current();
+}
+console.log(series(() => 'done', 2));
+"#,
+    )
+    .expect("write CommonJS local-binding regression");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS local-binding graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS local-binding check: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("CommonJS local-binding graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"done\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"done\n");
+}
+
+#[test]
 fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
