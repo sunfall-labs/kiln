@@ -670,6 +670,77 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
 }
 
 #[test]
+fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions() {
+    let function = FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("cached".into()),
+        parameter_count: 0,
+        local_count: 0,
+        code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        is_class: false,
+        mapped_arguments: false,
+        upvalues: vec![Upvalue::ParentLocal(1)],
+        type_annotations: None,
+    };
+    let mut module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::NewCell(1),
+                Instruction::MarkUninitialized(1),
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(0),
+                Instruction::StoreCell(1),
+                Instruction::LoadLocal(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![function],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "cached".into(),
+            local_slot: 0,
+        }],
+    );
+    module.program.link_facts.module_instantiation_end = 4;
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+        true,
+    )
+    .expect("split module emits");
+
+    let instantiation = emitted
+        .instantiation
+        .expect("split module has an instantiation entrypoint");
+    assert!(
+        instantiation
+            .source
+            .contains("kiln_c99_val_make_cell(&locals[1])")
+    );
+    assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
+}
+
+#[test]
 fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
     let function = |local_count, code| FunctionProto {
         inferred_name: None,

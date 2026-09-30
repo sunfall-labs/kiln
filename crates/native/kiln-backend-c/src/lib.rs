@@ -731,9 +731,9 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 .iter()
                 .enumerate()
             {
-                if !matches!(instruction, Instruction::MakeFunction(_)) {
+                let Instruction::MakeFunction(function_index) = instruction else {
                     continue;
-                }
+                };
                 let Some(store) = module.program.code.get(pc + 1) else {
                     continue;
                 };
@@ -745,6 +745,22 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 };
                 if evaluation_reads.contains(&slot) {
                     retained.insert(slot);
+                    // The closure is itself loaded by evaluation, but the module locals its
+                    // upvalues point at must also survive instantiation DCE. Otherwise the
+                    // closure is retained while its captured lexical cell is pruned, so a class
+                    // or let declaration reached later can leave it permanently in TDZ.
+                    if let Some(function) = module.program.functions.get(*function_index as usize) {
+                        for upvalue in &function.upvalues {
+                            match upvalue {
+                                kiln_ir::Upvalue::ParentLocal(captured)
+                                | kiln_ir::Upvalue::NamedParentLocal { slot: captured, .. } => {
+                                    retained.insert(*captured);
+                                }
+                                kiln_ir::Upvalue::ParentUpvalue(_)
+                                | kiln_ir::Upvalue::NamedParentUpvalue { .. } => {}
+                            }
+                        }
+                    }
                 }
             }
             instantiation_policy.live_module_slots = Some(Arc::new(retained));
