@@ -800,19 +800,26 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
     } else {
         (module.clone(), None)
     };
-    let rendered = module_cells::with_plan(region, || {
-        render_module_with_unit(
-            &module,
-            program_hash,
-            &symbol,
-            instantiate.then_some(symbol.as_str()),
-            instantiate,
-            false,
-            &policy,
-            false,
-            logical_path,
-            instantiate,
-        )
+    let linked_cells = module
+        .exports
+        .iter()
+        .map(|export| export.local_slot)
+        .collect();
+    let rendered = module_cells::with_linked_cells(linked_cells, || {
+        module_cells::with_plan(region, || {
+            render_module_with_unit(
+                &module,
+                program_hash,
+                &symbol,
+                instantiate.then_some(symbol.as_str()),
+                instantiate,
+                false,
+                &policy,
+                false,
+                logical_path,
+                instantiate,
+            )
+        })
     })?;
     Ok(CModule {
         symbol,
@@ -1282,9 +1289,7 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         // Reading `eval` as a value (for example through `%eval%` in get-intrinsic) is supported.
         // Direct calls carry a `DirectEval` instruction and remain separately guarded by
         // validation until the native backend can compile them with the caller's lexical cells.
-        kiln_ir::Builtin::Eval => {
-            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL)")
-        }
+        kiln_ir::Builtin::Eval => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL)"),
         kiln_ir::Builtin::AggregateError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)")
         }

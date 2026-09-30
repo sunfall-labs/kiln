@@ -669,10 +669,20 @@ pub(super) fn emit_graph_op(
                     "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
                 )
                 .unwrap();
-            } else {
+            } else if self_index.is_none() && crate::module_cells::is_linked_cell(*slot) {
+                /* The ESM graph linker seeds exported module locals with their live cells before
+                 * evaluation. Preserve those particular cells when their declaration executes;
+                 * every ordinary captured lexical binding needs a fresh cell each time control
+                 * enters its block (notably on each loop pass). */
                 writeln!(
                     output,
                     "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
