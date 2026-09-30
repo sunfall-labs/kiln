@@ -2268,7 +2268,7 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
     if (status == KILN_C99_OK && target.tag == KILN_VALUE_OBJECT &&
         kiln_c99_object_of(target)->module_namespace && out->tag == KILN_VALUE_CELL) {
         kiln_val *cell = kiln_c99_cell_of(*out);
-        if (cell == NULL) return KILN_C99_CONTROL_ERROR;
+        if (cell == NULL) KILN_C99_REFUSE_INTERNAL("namespace export cell has no storage");
         status = kiln_c99_val_check_tdz(*cell, thrown);
         if (status != KILN_C99_OK) return status;
         *out = kiln_val_to_boundary(*cell);
