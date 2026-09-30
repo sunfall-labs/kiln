@@ -3055,6 +3055,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         name: &StringUnits,
         reviver: &Value,
         instruction: usize,
+        sources: &[JsonSourceEntry],
     ) -> Result<Value, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -3090,7 +3091,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             for key in keys {
                 self.native_depth += 1;
-                let revived = self.internalize_json_property(&value, &key, reviver, instruction);
+                let revived =
+                    self.internalize_json_property(&value, &key, reviver, instruction, sources);
                 self.native_depth -= 1;
                 let revived = revived?;
                 if matches!(revived, Value::Undefined) {
@@ -3119,10 +3121,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
         }
+        let holder_identity = match holder {
+            Value::Object(object) => Rc::as_ptr(object) as usize,
+            Value::Array(array) => Rc::as_ptr(array) as usize,
+            _ => 0,
+        };
+        let mut context = ObjectData::default();
+        if let Some((_, _, expected, raw)) = sources
+            .iter()
+            .find(|(identity, key, _, _)| *identity == holder_identity && key == name)
+            && same_value(&value, expected)
+        {
+            context.set("source", Value::String(raw.clone()));
+        }
         self.call_value(
             reviver,
             holder.clone(),
-            vec![Value::String(name.clone()), value],
+            vec![
+                Value::String(name.clone()),
+                value,
+                Value::Object(Rc::new(RefCell::new(context))),
+            ],
             instruction,
         )
     }

@@ -1205,6 +1205,15 @@ pub(super) fn parse_json_text(text: &StringUnits) -> Result<Value, ExecutionErro
     kiln_json::parse_units(text, json_value_from_tape).map_err(|_| ExecutionError::InvalidJson)?
 }
 
+pub(super) type JsonSourceEntry = (usize, StringUnits, Value, StringUnits);
+
+pub(super) fn parse_json_text_with_sources(
+    text: &StringUnits,
+) -> Result<(Value, Vec<JsonSourceEntry>, Option<StringUnits>), ExecutionError> {
+    kiln_json::parse_units_with_source_spans(text, json_value_and_sources_from_tape)
+        .map_err(|_| ExecutionError::InvalidJson)
+}
+
 pub(super) fn is_json_whitespace(unit: u16) -> bool {
     matches!(unit, 0x20 | 0x09 | 0x0a | 0x0d)
 }
@@ -1895,20 +1904,30 @@ pub(super) fn relative_index(argument: Option<&Value>, length: usize, default: u
 pub(super) fn json_value_from_tape(
     document: &kiln_json::Tape<'_>,
 ) -> Result<Value, ExecutionError> {
+    json_value_and_sources_from_tape(document).map(|(value, _, _)| value)
+}
+
+pub(super) fn json_value_and_sources_from_tape(
+    document: &kiln_json::Tape<'_>,
+) -> Result<(Value, Vec<JsonSourceEntry>, Option<StringUnits>), ExecutionError> {
     enum Frame {
         Array {
             items: Vec<Value>,
             remaining: usize,
+            sources: Vec<(StringUnits, Value, StringUnits)>,
         },
         Object {
             data: ObjectData,
             remaining: usize,
             key: Option<StringUnits>,
+            sources: Vec<(StringUnits, Value, StringUnits)>,
         },
     }
     let mut stack: Vec<Frame> = Vec::new();
     let mut root = None;
-    for node in document.nodes() {
+    let mut entries = Vec::new();
+    let mut root_source = None;
+    for (node_index, node) in document.nodes().iter().enumerate() {
         if root.is_some() {
             return Err(ExecutionError::InvalidJson);
         }
@@ -1928,6 +1947,7 @@ pub(super) fn json_value_from_tape(
                     stack.push(Frame::Array {
                         items: Vec::with_capacity(count),
                         remaining: count,
+                        sources: Vec::new(),
                     });
                     continue;
                 }
@@ -1939,6 +1959,7 @@ pub(super) fn json_value_from_tape(
                         data: ObjectData::default(),
                         remaining: count,
                         key: None,
+                        sources: Vec::new(),
                     });
                     continue;
                 }
@@ -1946,6 +1967,19 @@ pub(super) fn json_value_from_tape(
             }
             _ => return Err(ExecutionError::InvalidJson),
         };
+        let source = matches!(
+            node.tag,
+            kiln_json::TAG_NULL
+                | kiln_json::TAG_FALSE
+                | kiln_json::TAG_TRUE
+                | kiln_json::TAG_NUMBER
+                | kiln_json::TAG_STRING
+        )
+        .then(|| document.source_units(node_index))
+        .flatten();
+        if node_index == 0 && stack.is_empty() {
+            root_source = source.clone();
+        }
         // Deliver the value to the container it belongs to, and every container that completes
         // with it to the one above.
         loop {
@@ -1954,7 +1988,18 @@ pub(super) fn json_value_from_tape(
                 break;
             };
             match frame {
-                Frame::Array { items, remaining } => {
+                Frame::Array {
+                    items,
+                    remaining,
+                    sources,
+                } => {
+                    if let Some(raw) = source.clone() {
+                        sources.push((
+                            StringUnits::from(items.len().to_string()),
+                            value.clone(),
+                            raw,
+                        ));
+                    }
                     items.push(value);
                     *remaining -= 1;
                     if *remaining != 0 {
@@ -1965,6 +2010,7 @@ pub(super) fn json_value_from_tape(
                     data,
                     remaining,
                     key,
+                    sources,
                 } => match key.take() {
                     None => {
                         let Value::String(name) = value else {
@@ -1974,6 +2020,10 @@ pub(super) fn json_value_from_tape(
                         break;
                     }
                     Some(name) => {
+                        sources.retain(|(existing, _, _)| existing != &name);
+                        if let Some(raw) = source.clone() {
+                            sources.push((name.clone(), value.clone(), raw));
+                        }
                         data.set_units(&name, value);
                         *remaining -= 1;
                         if *remaining != 0 {
@@ -1983,13 +2033,35 @@ pub(super) fn json_value_from_tape(
                 },
             }
             value = match stack.pop() {
-                Some(Frame::Array { items, .. }) => Value::Array(ArrayData::new(items)),
-                Some(Frame::Object { data, .. }) => Value::Object(Rc::new(RefCell::new(data))),
+                Some(Frame::Array { items, sources, .. }) => {
+                    let array = ArrayData::new(items);
+                    let identity = Rc::as_ptr(&array) as usize;
+                    entries.extend(
+                        sources
+                            .into_iter()
+                            .map(|(key, value, raw)| (identity, key, value, raw)),
+                    );
+                    Value::Array(array)
+                }
+                Some(Frame::Object { data, sources, .. }) => {
+                    let object = Rc::new(RefCell::new(data));
+                    let identity = Rc::as_ptr(&object) as usize;
+                    entries.extend(
+                        sources
+                            .into_iter()
+                            .map(|(key, value, raw)| (identity, key, value, raw)),
+                    );
+                    Value::Object(object)
+                }
                 None => return Err(ExecutionError::InvalidJson),
             };
         }
     }
-    root.ok_or(ExecutionError::InvalidJson)
+    Ok((
+        root.ok_or(ExecutionError::InvalidJson)?,
+        entries,
+        root_source,
+    ))
 }
 
 /// Render a value the way a console does.

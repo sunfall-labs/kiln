@@ -191,6 +191,8 @@ pub type TextSlice<'a> = StringView<'a>;
 pub struct Tape<'a> {
     nodes: &'a [Node],
     text: &'a TextArena,
+    spans: &'a [Option<(usize, usize)>],
+    source: &'a dyn UnitSource,
 }
 impl<'a> Tape<'a> {
     pub fn nodes(&self) -> &'a [Node] {
@@ -210,6 +212,13 @@ impl<'a> Tape<'a> {
     }
     pub fn string_units(&self, node: &Node) -> Option<StringUnits> {
         self.string(node).map(StringUnits::from_view)
+    }
+    pub fn source_units(&self, index: usize) -> Option<StringUnits> {
+        let (start, end) = self.spans.get(index).copied().flatten()?;
+        let units: Vec<u16> = (start..end)
+            .map(|at| self.source.unit_at(at))
+            .collect::<Option<_>>()?;
+        Some(StringUnits::from_units(&units))
     }
 }
 
@@ -251,12 +260,21 @@ struct Scratch {
     nodes: Vec<Node>,
     stack: Vec<scalar::Frame>,
     token: Vec<u8>,
+    spans: Vec<Option<(usize, usize)>>,
 }
 thread_local! { static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::default()); }
 thread_local! { static UTF8_UNITS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) }; }
 
 pub fn parse_source<S: UnitSource, R>(
     source: &S,
+    walk: impl FnOnce(&Tape<'_>) -> R,
+) -> Result<R, ParseError> {
+    parse_source_with_spans(source, false, walk)
+}
+
+fn parse_source_with_spans<S: UnitSource, R>(
+    source: &S,
+    retain_source_spans: bool,
     walk: impl FnOnce(&Tape<'_>) -> R,
 ) -> Result<R, ParseError> {
     if source.unit_len() > u32::MAX as usize {
@@ -275,9 +293,23 @@ pub fn parse_source<S: UnitSource, R>(
             nodes,
             stack,
             token,
+            spans,
         } = &mut *scratch;
-        scalar::scan(source, nodes, text, stack, token)?;
-        Ok(walk(&Tape { nodes, text }))
+        scalar::scan(
+            source,
+            nodes,
+            text,
+            stack,
+            token,
+            spans,
+            retain_source_spans,
+        )?;
+        Ok(walk(&Tape {
+            nodes,
+            text,
+            spans,
+            source,
+        }))
     })
 }
 
@@ -288,6 +320,18 @@ pub fn parse_units<R>(
     match source.as_view() {
         StringView::Latin1(bytes) => parse_source(&bytes, walk),
         StringView::Utf16(units) => parse_source(&units, walk),
+    }
+}
+
+/// Parse while retaining lexical spans for primitive values. Intended for JSON.parse revivers;
+/// ordinary parser users keep the allocation-free path above.
+pub fn parse_units_with_source_spans<R>(
+    source: &StringUnits,
+    walk: impl FnOnce(&Tape<'_>) -> R,
+) -> Result<R, ParseError> {
+    match source.as_view() {
+        StringView::Latin1(bytes) => parse_source_with_spans(&bytes, true, walk),
+        StringView::Utf16(units) => parse_source_with_spans(&units, true, walk),
     }
 }
 pub fn parse_utf8<R>(source: &[u8], walk: impl FnOnce(&Tape<'_>) -> R) -> Result<R, ParseError> {

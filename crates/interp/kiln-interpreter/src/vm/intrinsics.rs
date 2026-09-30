@@ -1682,22 +1682,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::JsonParse => {
                 let text = self
                     .as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
-                let parsed = parse_json_text(&text)?;
                 let reviver = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&reviver) {
-                    return Ok(parsed);
+                    return parse_json_text(&text);
                 }
+                let (parsed, mut sources, root_source) = parse_json_text_with_sources(&text)?;
                 // The specification's root holder: an ordinary object whose one property is
                 // named by the empty string. The reviver is called for it too, last of all,
                 // which is what lets a reviver replace the whole document.
                 let mut holder = ObjectData::default();
-                holder.set("", parsed);
-                let root = Value::Object(Rc::new(RefCell::new(holder)));
+                holder.set("", parsed.clone());
+                let root_object = Rc::new(RefCell::new(holder));
+                let root_identity = Rc::as_ptr(&root_object) as usize;
+                let root = Value::Object(root_object);
+                if let Some(raw) = root_source {
+                    sources.push((root_identity, StringUnits::default(), parsed, raw));
+                }
                 self.internalize_json_property(
                     &root,
                     &StringUnits::default(),
                     &reviver,
                     instruction,
+                    &sources,
                 )
             }
             Native::JsonStringify => {

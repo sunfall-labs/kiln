@@ -279,11 +279,17 @@ fn member_key<S: UnitSource>(
     at: usize,
     nodes: &mut Vec<Node>,
     arena: &mut TextArena,
+    spans: &mut Vec<Option<(usize, usize)>>,
+    retain_spans: bool,
 ) -> Result<usize, ParseError> {
     if source.unit_or_end(at) != 0x22 {
         return Err(ParseError::Syntax { offset: at });
     }
     let after_key = string_node(source, at, nodes, arena)?;
+    // Object member names are tape nodes too, but are not reviver values.
+    if retain_spans {
+        spans.push(None);
+    }
     let colon = skip_whitespace(source, after_key);
     if source.unit_or_end(colon) != u32::from(b':') {
         return Err(ParseError::Syntax { offset: colon });
@@ -318,8 +324,11 @@ pub(crate) fn scan<S: UnitSource>(
     arena: &mut TextArena,
     stack: &mut Vec<Frame>,
     token: &mut Vec<u8>,
+    spans: &mut Vec<Option<(usize, usize)>>,
+    retain_spans: bool,
 ) -> Result<(), ParseError> {
     nodes.clear();
+    spans.clear();
     stack.clear();
     arena.clear();
     if source.utf16_slice(0, 0).is_some() {
@@ -332,7 +341,13 @@ pub(crate) fn scan<S: UnitSource>(
             return Err(ParseError::Syntax { offset: at });
         }
         match unit {
-            0x22 => at = string_node(source, at, nodes, arena)?,
+            0x22 => {
+                let start = at;
+                at = string_node(source, at, nodes, arena)?;
+                if retain_spans {
+                    spans.push(Some((start, at)));
+                }
+            }
             0x7b | 0x5b => {
                 let is_object = unit == 0x7b;
                 let node = nodes.len();
@@ -341,10 +356,17 @@ pub(crate) fn scan<S: UnitSource>(
                     len: 0,
                     value: 0,
                 });
+                let start = at;
+                if retain_spans {
+                    spans.push(Some((start, start)));
+                }
                 at = skip_whitespace(source, at + 1);
                 let close = if is_object { 0x7d } else { 0x5d };
                 if source.unit_or_end(at) == close {
                     at += 1;
+                    if retain_spans {
+                        spans[node] = Some((start, at));
+                    }
                 } else {
                     stack.push(Frame {
                         node,
@@ -352,21 +374,43 @@ pub(crate) fn scan<S: UnitSource>(
                         is_object,
                     });
                     if is_object {
-                        at = member_key(source, at, nodes, arena)?;
+                        at = member_key(source, at, nodes, arena, spans, retain_spans)?;
                     }
                     continue 'value;
                 }
             }
-            0x74 => at = literal(source, at, b"true", TAG_TRUE, nodes)?,
-            0x66 => at = literal(source, at, b"false", TAG_FALSE, nodes)?,
-            0x6e => at = literal(source, at, b"null", TAG_NULL, nodes)?,
+            0x74 => {
+                let start = at;
+                at = literal(source, at, b"true", TAG_TRUE, nodes)?;
+                if retain_spans {
+                    spans.push(Some((start, at)));
+                }
+            }
+            0x66 => {
+                let start = at;
+                at = literal(source, at, b"false", TAG_FALSE, nodes)?;
+                if retain_spans {
+                    spans.push(Some((start, at)));
+                }
+            }
+            0x6e => {
+                let start = at;
+                at = literal(source, at, b"null", TAG_NULL, nodes)?;
+                if retain_spans {
+                    spans.push(Some((start, at)));
+                }
+            }
             0x2d | 0x30..=0x39 => {
+                let start = at;
                 let (end, value) = scan_number(source, at, token)?;
                 nodes.push(Node {
                     tag: TAG_NUMBER,
                     len: 0,
                     value: value.to_bits(),
                 });
+                if retain_spans {
+                    spans.push(Some((start, end)));
+                }
                 at = end;
             }
             _ => return Err(ParseError::Syntax { offset: at }),
@@ -389,7 +433,7 @@ pub(crate) fn scan<S: UnitSource>(
             if next == 0x2c {
                 at = skip_whitespace(source, at + 1);
                 if frame.is_object {
-                    at = member_key(source, at, nodes, arena)?;
+                    at = member_key(source, at, nodes, arena, spans, retain_spans)?;
                 }
                 continue 'value;
             }
@@ -398,6 +442,10 @@ pub(crate) fn scan<S: UnitSource>(
                 return Err(ParseError::Syntax { offset: at });
             }
             nodes[frame.node].len = frame.children;
+            if retain_spans {
+                let container_start = spans[frame.node].map_or(0, |span| span.0);
+                spans[frame.node] = Some((container_start, at + 1));
+            }
             stack.pop();
             at += 1;
         }
