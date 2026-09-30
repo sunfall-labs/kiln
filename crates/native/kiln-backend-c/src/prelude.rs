@@ -3775,6 +3775,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_SHARE_RAW),
     emit_method_define!(KILN_C99_METHOD_SHARED_IS_RAW),
     emit_method_define!(KILN_C99_METHOD_SHARED_WEAK_RAW),
+    emit_method_define!(KILN_C99_METHOD_BOOLEAN_VALUE_OF),
+    emit_method_define!(KILN_C99_METHOD_SYMBOL_VALUE_OF),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
