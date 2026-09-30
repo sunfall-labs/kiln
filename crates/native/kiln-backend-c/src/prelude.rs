@@ -2262,7 +2262,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 32,
+        sites: 33,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2273,7 +2273,8 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
                     kiln_c99_is_typed_array_member, RegExp instance slots followed by the complete \
                     RegExp.prototype and Object.prototype stores/tables, and native callable own \
-                    slots, the callable stores and prototype tables, then BUILTIN_SURFACE plus \
+                    slots, the callable stores and prototype tables, Set constructor string statics (name, \
+                    length and prototype), then BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
                     a synchronous generator has no `@@asyncIterator` member (only async \
                     generators define it); and a bound function's `prototype` is decided by \
