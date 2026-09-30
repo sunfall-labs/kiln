@@ -908,6 +908,51 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if self.settle_async_waits()? {
                 continue;
             }
+            // Pump the runtime's I/O completions (e.g., fetch responses). The HTTP transport
+            // is part of the RealmRuntime in both modes; only Node.js API surface remains
+            // gated. If there's no referenced I/O, this returns None and we fall through to
+            // timers, preserving deterministic behavior for pure-computation programs.
+            if let Some(turn) = self.with_realm_mut(|realm| runtime.next_referenced_turn(realm)) {
+                match turn {
+                    RuntimeTurn::Completion(completion) => {
+                        runtime.enter(|| self.settle_host_completion(completion))?;
+                        while let Some(next) = runtime.take_next_ready_completion() {
+                            runtime.enter(|| self.settle_host_completion(next))?;
+                        }
+                        continue;
+                    }
+                    RuntimeTurn::Protocol => {
+                        // The HTTP engines queued events; they'll be delivered as completions.
+                        continue;
+                    }
+                    RuntimeTurn::Failure(failure) => {
+                        return Err(ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: failure.to_string(),
+                        });
+                    }
+                    RuntimeTurn::Timer(work_item) => {
+                        match work_item {
+                            WorkItem::Timer { work: timer, .. } => {
+                                // The Realm Runtime has already rearmed an interval under the same id,
+                                // so clearing it inside this callback cancels the next occurrence.
+                                runtime.enter(|| {
+                                    self.call_value(
+                                        &timer.callback,
+                                        Value::Undefined,
+                                        timer.arguments,
+                                        self.instruction,
+                                    )
+                                })?;
+                            }
+                            WorkItem::Microtask(_) => {
+                                // Microtasks are drained at the top of the loop.
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
             let Some(WorkItem::Timer { work: timer, .. }) =
                 self.with_realm_mut(|realm| runtime.next_timer(realm))
             else {

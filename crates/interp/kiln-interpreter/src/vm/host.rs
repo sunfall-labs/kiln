@@ -1101,10 +1101,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let state = state.borrow();
             (state.host.clone(), state.port)
         };
-        let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
-            instruction,
-            message: "node:http client requires the Node execution Adapter".into(),
-        })?;
+        // The HTTP client (used by global fetch) can work without the full Node Adapter.
+        // Prefer async_host (Node mode), fall back to http_client_host (global fetch mode).
+        // Node.js API surface (fs, net, etc.) remains gated behind the adapter.
+        let host_ops = if let Some(ops) = self.async_host {
+            ops
+        } else if let Some(ops) = self.http_client_host {
+            ops
+        } else {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "node:http client requires the Node execution Adapter".into(),
+            });
+        };
         let request = unsafe {
             ActiveAsyncHostOps::start(&mut *host_ops, AsyncHostOp::TcpConnect { host, port }, true)
         };

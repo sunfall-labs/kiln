@@ -33,17 +33,15 @@ pub fn realm_bootstrap(node: bool) -> RealmBootstrap {
 
 fn source(node: bool) -> String {
     let common = kiln_builtins::common_bootstrap_source();
+    // WHATWG web standards (fetch, Headers, Request, Response, etc.) are global,
+    // not gated behind the node adapter: the HTTP host capability
+    // (process.__kilnNativeModules.http.request) exists in both modes.
+    let web = kiln_builtins::WEB_BOOTSTRAP_SOURCE;
+    let url = kiln_builtins::URL_BOOTSTRAP_SOURCE;
     if node {
-        format!(
-            "{common}\n{}\n{}",
-            kiln_builtins::URL_BOOTSTRAP_SOURCE,
-            kiln_builtins::WEB_BOOTSTRAP_SOURCE
-        )
+        format!("{common}\n{url}\n{web}")
     } else {
-        format!(
-            "{common}\n{}\ndelete globalThis.__kilnBufferToString;\n",
-            kiln_builtins::URL_BOOTSTRAP_SOURCE
-        )
+        format!("{common}\n{url}\n{web}\ndelete globalThis.__kilnBufferToString;\n")
     }
 }
 
