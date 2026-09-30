@@ -1696,7 +1696,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let root_identity = Rc::as_ptr(&root_object) as usize;
                 let root = Value::Object(root_object);
                 if let Some(raw) = root_source {
-                    sources.push((root_identity, StringUnits::default(), parsed, raw));
+                    sources.insert((root_identity, StringUnits::default()), (parsed, raw));
                 }
                 self.internalize_json_property(
                     &root,

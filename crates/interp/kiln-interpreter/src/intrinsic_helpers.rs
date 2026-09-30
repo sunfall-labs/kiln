@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 // A short, fixed admission limit keeps the process-wide cache small even when
@@ -1205,11 +1205,11 @@ pub(super) fn parse_json_text(text: &StringUnits) -> Result<Value, ExecutionErro
     kiln_json::parse_units(text, json_value_from_tape).map_err(|_| ExecutionError::InvalidJson)?
 }
 
-pub(super) type JsonSourceEntry = (usize, StringUnits, Value, StringUnits);
+pub(super) type JsonSourceMap = HashMap<(usize, StringUnits), (Value, StringUnits)>;
 
 pub(super) fn parse_json_text_with_sources(
     text: &StringUnits,
-) -> Result<(Value, Vec<JsonSourceEntry>, Option<StringUnits>), ExecutionError> {
+) -> Result<(Value, JsonSourceMap, Option<StringUnits>), ExecutionError> {
     kiln_json::parse_units_with_source_spans(text, json_value_and_sources_from_tape)
         .map_err(|_| ExecutionError::InvalidJson)
 }
@@ -1909,23 +1909,23 @@ pub(super) fn json_value_from_tape(
 
 pub(super) fn json_value_and_sources_from_tape(
     document: &kiln_json::Tape<'_>,
-) -> Result<(Value, Vec<JsonSourceEntry>, Option<StringUnits>), ExecutionError> {
+) -> Result<(Value, JsonSourceMap, Option<StringUnits>), ExecutionError> {
     enum Frame {
         Array {
             items: Vec<Value>,
             remaining: usize,
-            sources: Vec<(StringUnits, Value, StringUnits)>,
+            sources: HashMap<StringUnits, (Value, StringUnits)>,
         },
         Object {
             data: ObjectData,
             remaining: usize,
             key: Option<StringUnits>,
-            sources: Vec<(StringUnits, Value, StringUnits)>,
+            sources: HashMap<StringUnits, (Value, StringUnits)>,
         },
     }
     let mut stack: Vec<Frame> = Vec::new();
     let mut root = None;
-    let mut entries = Vec::new();
+    let mut entries = HashMap::new();
     let mut root_source = None;
     for (node_index, node) in document.nodes().iter().enumerate() {
         if root.is_some() {
@@ -1947,7 +1947,7 @@ pub(super) fn json_value_and_sources_from_tape(
                     stack.push(Frame::Array {
                         items: Vec::with_capacity(count),
                         remaining: count,
-                        sources: Vec::new(),
+                        sources: HashMap::new(),
                     });
                     continue;
                 }
@@ -1959,7 +1959,7 @@ pub(super) fn json_value_and_sources_from_tape(
                         data: ObjectData::default(),
                         remaining: count,
                         key: None,
-                        sources: Vec::new(),
+                        sources: HashMap::new(),
                     });
                     continue;
                 }
@@ -1994,11 +1994,10 @@ pub(super) fn json_value_and_sources_from_tape(
                     sources,
                 } => {
                     if let Some(raw) = source.clone() {
-                        sources.push((
+                        sources.insert(
                             StringUnits::from(items.len().to_string()),
-                            value.clone(),
-                            raw,
-                        ));
+                            (value.clone(), raw),
+                        );
                     }
                     items.push(value);
                     *remaining -= 1;
@@ -2020,9 +2019,8 @@ pub(super) fn json_value_and_sources_from_tape(
                         break;
                     }
                     Some(name) => {
-                        sources.retain(|(existing, _, _)| existing != &name);
                         if let Some(raw) = source.clone() {
-                            sources.push((name.clone(), value.clone(), raw));
+                            sources.insert(name.clone(), (value.clone(), raw));
                         }
                         data.set_units(&name, value);
                         *remaining -= 1;
@@ -2039,7 +2037,7 @@ pub(super) fn json_value_and_sources_from_tape(
                     entries.extend(
                         sources
                             .into_iter()
-                            .map(|(key, value, raw)| (identity, key, value, raw)),
+                            .map(|(key, (value, raw))| ((identity, key), (value, raw))),
                     );
                     Value::Array(array)
                 }
@@ -2049,7 +2047,7 @@ pub(super) fn json_value_and_sources_from_tape(
                     entries.extend(
                         sources
                             .into_iter()
-                            .map(|(key, value, raw)| (identity, key, value, raw)),
+                            .map(|(key, (value, raw))| ((identity, key), (value, raw))),
                     );
                     Value::Object(object)
                 }

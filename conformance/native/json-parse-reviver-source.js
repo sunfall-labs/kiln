@@ -7,13 +7,21 @@ const parsed = JSON.parse('{"n":1e+03,"s":"\\u0061","a":[-0,true,null],"o":{"x":
   });
 console.log(JSON.stringify(seen));
 
-// A value changed by an earlier callback no longer carries source text; duplicate names use
-// the final token, and the root primitive has an empty-string holder key.
+// A value changed by an earlier callback no longer carries source text, and duplicate names use
+// the final token even when both tokens parse to the same number.
 const changed = JSON.parse('{"a":1,"b":2,"b":3}', function (key, value, context) {
   if (key === 'a') this.b = 9;
   return [key, value, context.source];
 });
 console.log(JSON.stringify(changed));
+console.log(JSON.stringify(JSON.parse('{"b":1,"b":1e0}', function (key, value, context) {
+  return [key, value, context.source];
+})));
+console.log(JSON.stringify(JSON.parse('{"a":0,"child":{"x":4}}', function (key, value, context) {
+  if (key === 'a') this.child = { x: 4 };
+  return [key, value, context.source];
+})));
+// The root primitive has an empty-string holder key.
 console.log(JSON.stringify(JSON.parse('-0', function (key, value, context) {
   return [key, Object.is(value, -0), context.source];
 })));

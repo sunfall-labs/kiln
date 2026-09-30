@@ -3055,7 +3055,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         name: &StringUnits,
         reviver: &Value,
         instruction: usize,
-        sources: &[JsonSourceEntry],
+        sources: &JsonSourceMap,
     ) -> Result<Value, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -3127,9 +3127,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => 0,
         };
         let mut context = ObjectData::default();
-        if let Some((_, _, expected, raw)) = sources
-            .iter()
-            .find(|(identity, key, _, _)| *identity == holder_identity && key == name)
+        if let Some((expected, raw)) = sources.get(&(holder_identity, name.clone()))
             && same_value(&value, expected)
         {
             context.set("source", Value::String(raw.clone()));
