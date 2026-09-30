@@ -1652,6 +1652,17 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE) {
+        kiln_c99_realm_state *realm = kiln_c99_realm();
+        double kind = argc > 0 && args[0].tag == KILN_VALUE_NUMBER
+                          ? kiln_c99_as_number(args[0]) : -1.0;
+        if (realm == NULL || argc < 2 || !isfinite(kind) || floor(kind) != kind ||
+            kind < 0.0 || kind >= 3.0 || args[1].tag != KILN_VALUE_OBJECT)
+            KILN_C99_REFUSE("the private function-kind bootstrap received invalid metadata");
+        realm->function_kind_prototypes[(size_t)kind] = args[1];
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
         if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
             kiln_c99_collection_of(args[0])->is_weak || argc < 2 ||

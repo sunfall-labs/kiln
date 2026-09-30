@@ -1217,6 +1217,24 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         }
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        if (current.tag == KILN_VALUE_FUNCTION || current.tag == KILN_VALUE_METHOD ||
+            current.tag == KILN_VALUE_BOUND) {
+            kiln_value store;
+            kiln_value next = kiln_c99_undefined();
+            status = kiln_c99_callable_store(current, &store, 0);
+            if (status != KILN_C99_OK) return status;
+            if (store.tag == KILN_VALUE_OBJECT) next = kiln_c99_object_prototype_read(store);
+            if (next.tag == KILN_VALUE_UNDEFINED)
+                next = current.tag == KILN_VALUE_FUNCTION
+                           ? kiln_c99_function_kind_prototype(kiln_c99_closure_of(current))
+                           : kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+            current = next;
+            if (current.tag == prototype.tag && current.bits == prototype.bits) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+            continue;
+        }
         if (current.tag != KILN_VALUE_OBJECT) {
             return KILN_C99_OK;
         }

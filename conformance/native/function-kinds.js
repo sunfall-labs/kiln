@@ -1,0 +1,34 @@
+function ordinary() {}
+async function asynchronous() {}
+function* generator() {}
+async function* asyncGenerator() {}
+
+const AsyncFunction = asynchronous.constructor;
+const GeneratorFunction = generator.constructor;
+const AsyncGeneratorFunction = asyncGenerator.constructor;
+
+console.log(
+  AsyncFunction !== Function,
+  GeneratorFunction !== Function,
+  AsyncGeneratorFunction !== Function,
+  AsyncFunction !== GeneratorFunction,
+  GeneratorFunction !== AsyncGeneratorFunction,
+);
+console.log(
+  asynchronous instanceof AsyncFunction,
+  asynchronous instanceof GeneratorFunction,
+  generator instanceof GeneratorFunction,
+  asyncGenerator instanceof AsyncGeneratorFunction,
+  ordinary instanceof AsyncFunction,
+);
+console.log(
+  Object.getPrototypeOf(asynchronous) === AsyncFunction.prototype,
+  Object.getPrototypeOf(generator) === GeneratorFunction.prototype,
+  Object.getPrototypeOf(asyncGenerator) === AsyncGeneratorFunction.prototype,
+  Object.getPrototypeOf(ordinary) === Function.prototype,
+);
+
+asynchronous.constructor = ordinary;
+console.log(asynchronous.constructor === ordinary);
+Object.setPrototypeOf(asynchronous, Function.prototype);
+console.log(asynchronous.constructor === Function, asynchronous instanceof AsyncFunction);

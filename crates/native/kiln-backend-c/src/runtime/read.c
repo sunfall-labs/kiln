@@ -701,6 +701,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
                                     depth, thrown);
         }
+        if (kiln_c99_same_name_key(key, "constructor")) {
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value parent = store.tag == KILN_VALUE_OBJECT
+                                    ? kiln_c99_object_prototype_read(store)
+                                    : kiln_c99_undefined();
+            if (parent.tag == KILN_VALUE_UNDEFINED)
+                parent = kiln_c99_function_kind_prototype(closure);
+            if (parent.tag == KILN_VALUE_NULL) {
+                *out = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
+        }
         KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
         {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
@@ -710,12 +723,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_method(callable);
                 return KILN_C99_OK;
             }
-        }
-        /* `f.constructor === Function`, which is how a program asks what it is holding. The
-         * bound and method paths already answered this; a plain function did not. */
-        if (kiln_c99_same_name_key(key, "constructor")) {
-            *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
-            return KILN_C99_OK;
         }
         /* ...and the `Object.prototype` members a program borrows, which the builtin path below
          * already answers and this one never did.

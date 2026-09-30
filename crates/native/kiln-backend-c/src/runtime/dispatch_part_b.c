@@ -1402,7 +1402,9 @@
                 kiln_value linked = store.tag == KILN_VALUE_OBJECT
                     ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
                 *result = linked.tag == KILN_VALUE_UNDEFINED
-                              ? kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)
+                              ? (subject.tag == KILN_VALUE_FUNCTION
+                                     ? kiln_c99_function_kind_prototype(kiln_c99_closure_of(subject))
+                                     : kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE))
                               : linked;
                 return KILN_C99_OK;
             }

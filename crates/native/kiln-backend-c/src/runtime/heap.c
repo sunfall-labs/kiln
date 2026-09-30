@@ -5158,6 +5158,9 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
     KILN_VISIT_REALM_VALUE(&realm->typed_array_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->map_iterator_prototype);
     KILN_VISIT_REALM_VALUE(&realm->set_iterator_prototype);
+    for (index = 0; index < sizeof realm->function_kind_prototypes / sizeof *realm->function_kind_prototypes;
+         ++index)
+        KILN_VISIT_REALM_VALUE(&realm->function_kind_prototypes[index]);
     for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
          ++index)
         KILN_VISIT_REALM_VALUE(&realm->native_prototypes[index]);

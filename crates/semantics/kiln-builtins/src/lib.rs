@@ -1408,6 +1408,7 @@ pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
 pub const PARALLEL_BOOTSTRAP_SOURCE: &str = include_str!("parallel.ts");
 /// Whether the realm installs kiln's own members (ADR 0068); first in the common bootstrap.
 pub const EXTENSIONS_BOOTSTRAP_SOURCE: &str = include_str!("extensions.ts");
+pub const FUNCTION_KINDS_BOOTSTRAP_SOURCE: &str = include_str!("function_kinds.ts");
 
 /// Error subclass prototypes and `SuppressedError` (ADR 0005, ADR 0063 rule 4).
 pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
@@ -1495,6 +1496,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
     };
     let mut source = [
         EXTENSIONS_BOOTSTRAP_SOURCE,
+        FUNCTION_KINDS_BOOTSTRAP_SOURCE,
         selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,

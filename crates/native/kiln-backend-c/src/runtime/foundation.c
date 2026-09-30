@@ -1045,6 +1045,9 @@ typedef struct kiln_c99_realm_state {
     kiln_value typed_array_iterator_prototype;
     kiln_value map_iterator_prototype;
     kiln_value set_iterator_prototype;
+    /* Async/generator functions have distinct internal [[Prototype]] objects, installed by the
+     * TypeScript-owned builtin bootstrap. These are per realm and strong roots. */
+    kiln_value function_kind_prototypes[3];
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
     kiln_c99_unit_block **units;
     size_t unit_capacity;
@@ -1070,6 +1073,23 @@ typedef struct kiln_c99_region_own {
 
 /* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
 static kiln_c99_realm_state *kiln_c99_realm(void);
+
+static size_t kiln_c99_function_kind_index(const kiln_closure *closure) {
+    if (closure->async_generator) return 2;
+    if (closure->asynchronous) return 0;
+    if (closure->generator) return 1;
+    return 3;
+}
+
+static kiln_value kiln_c99_function_kind_prototype(const kiln_closure *closure) {
+    size_t kind = kiln_c99_function_kind_index(closure);
+    kiln_value prototype;
+    if (kind < 3) {
+        prototype = kiln_c99_realm()->function_kind_prototypes[kind];
+        if (prototype.tag == KILN_VALUE_OBJECT) return prototype;
+    }
+    return kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+}
 
 /* The launcher installs these before any module runs. A NULL error stream shares stdout, as
  * the multi-realm parity harness does; a worker may supply two distinct streams. */
