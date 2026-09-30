@@ -1818,7 +1818,11 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                             (dependency.importer == path).then(|| {
                                 (
                                     dependency.specifier.clone(),
-                                    dependency.target.to_string_lossy().into_owned(),
+                                    if matches!(&dependency.source, ModuleSource::NodeBuiltin(_)) {
+                                        dependency.specifier.clone()
+                                    } else {
+                                        dependency.target.to_string_lossy().into_owned()
+                                    },
                                 )
                             })
                         }),
@@ -1998,7 +2002,11 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
             .map(|dependency| {
                 (
                     dependency.specifier.clone(),
-                    dependency.target.to_string_lossy().into_owned(),
+                    if matches!(&dependency.source, ModuleSource::NodeBuiltin(_)) {
+                        dependency.specifier.clone()
+                    } else {
+                        dependency.target.to_string_lossy().into_owned()
+                    },
                 )
             })
             .collect::<Vec<_>>();

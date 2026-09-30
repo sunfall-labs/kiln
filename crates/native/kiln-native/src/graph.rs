@@ -64,6 +64,7 @@ pub(super) fn native_graph_plan_with_validator(
             let runtime = graph.module(path).into_iter().flat_map(move |node| {
                 node.runtime_dependencies
                     .iter()
+                    .filter(|dependency| !dependency.resolve_only)
                     .map(move |dependency| LazyEdge {
                         owner: path.clone(),
                         specifier: dependency.specifier.clone(),
@@ -127,6 +128,9 @@ pub(super) fn native_graph_plan_with_validator(
             }
             if let Some(node) = graph.module(path) {
                 for nested in &node.runtime_dependencies {
+                    if nested.resolve_only {
+                        continue;
+                    }
                     pending.push(LazyEdge {
                         owner: path.clone(),
                         specifier: nested.specifier.clone(),
@@ -1513,6 +1517,7 @@ pub(super) fn append_runtime_digest(
             bytes.push(0);
             bytes.extend_from_slice(dependency.specifier.as_bytes());
             bytes.push(0);
+            bytes.push(u8::from(dependency.resolve_only));
             bytes.extend_from_slice(digest_graph_path(graph, &dependency.target).as_bytes());
             bytes.push(0);
             bytes.extend_from_slice(
