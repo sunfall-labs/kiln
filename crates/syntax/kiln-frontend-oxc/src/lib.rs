@@ -479,6 +479,10 @@ fn discover_node_runtime_requests_from_semantic(
         scoping: &oxc_semantic::Scoping,
         loaders: &HashMap<SymbolId, String>,
     ) -> Option<String> {
+        let mut expression = expression;
+        while let Expression::ParenthesizedExpression(parenthesized) = expression {
+            expression = &parenthesized.expression;
+        }
         let mut parameter_symbols = HashSet::new();
         let mut returns = Vec::new();
         match expression {
@@ -4274,6 +4278,21 @@ mod tests {
                 importer: "prettier/index.mjs".to_owned(),
             }]
         );
+
+        // Prettier's ESM bundle wraps the createRequire loader in a parenthesized esbuild
+        // conditional helper before `__commonJS` modules call it. Preserve its builtin request
+        // edge, just as for the minimal forwarding helper above.
+        let bundled_source = r#"
+            import { createRequire as __prettierCreateRequire } from "module";
+            const require = __prettierCreateRequire(import.meta.url);
+            var __require = ((x) => typeof require !== "undefined" ? require :
+              typeof Proxy !== "undefined" ? new Proxy(x, { get: (a, b) => require[b] }) : x)
+              (function(x) { throw Error("Dynamic require of " + x + " is not supported"); });
+            const require_path = __commonJS((exports) => { const os = __require("os"); });
+        "#;
+        assert!(discover_node_runtime_requests("prettier/index.mjs", bundled_source).iter().any(
+            |request| request.specifier == "os" && request.importer == "prettier/index.mjs"
+        ));
 
         let unrelated = discover_node_runtime_requests(
             "fixture.mjs",
