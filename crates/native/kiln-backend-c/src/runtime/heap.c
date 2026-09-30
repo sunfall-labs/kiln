@@ -5190,6 +5190,31 @@ static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
                                                    &realm->isolated_escrow_value);
 }
 
+typedef struct kiln_c99_graph_root_visit {
+    const kiln_gc_heap *heap;
+    kiln_nursery_chunk *const *chunks;
+    size_t count;
+    int alias;
+    int invalid;
+} kiln_c99_graph_root_visit;
+
+static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
+                                               uint32_t kind) {
+    kiln_c99_graph_root_visit *visit = (kiln_c99_graph_root_visit *)opaque;
+    if (kind == KILN_GC_VISIT_BLOCK) {
+        visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count, pointer);
+    } else if (kind == KILN_GC_VISIT_VALUE && pointer != NULL) {
+        visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count, pointer);
+        visit->alias |= kiln_c99_graph_value_in_batch(visit->heap, visit->chunks, visit->count,
+                                                      (const kiln_value *)pointer);
+    } else {
+        visit->invalid = 1;
+        return 1;
+    }
+    return 0;
+}
+
+
 /* A separate, read-only walk for edges *into* the candidate. The collector's tracer is not
  * suitable here: it mutates mark epochs and deliberately ignores non-heap pointers. Until each
  * kind's complete pointer layout is audited, an unhandled kind means "unknown", never "clear". */
@@ -5415,6 +5440,24 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 #undef KILN_C99_HOST_INCOMING_ARRAY
 #undef KILN_C99_HOST_INCOMING_POINTER
 #undef KILN_C99_HOST_INCOMING_VALUE
+    case KILN_GC_COMMONJS_REQUIRE: {
+        const kiln_commonjs_require *require = (const kiln_commonjs_require *)(block + 1);
+        if (block->size < sizeof *require || require->call == NULL)
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, require->context) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, require->root_context))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        if (require->visit_context == NULL)
+            return require->context == NULL && require->root_context == NULL
+                ? KILN_C99_GRAPH_ROOTS_UNENUMERATED : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (require->root_context == NULL) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        /* The context's values belong to the independently enumerated registered roots,
+         * not to this GC block. Validate the live authority here; the final provider-root
+         * pass then visits it once, alongside all other registered and provider roots. */
+        return kiln_realm_gc_has_root_visitor((void *)heap, require->visit_context,
+                                              require->root_context) == 1
+            ? KILN_C99_GRAPH_ROOTS_UNENUMERATED : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    }
     case KILN_GC_METHOD_STORE: {
         const kiln_method_store *store = (const kiln_method_store *)(block + 1);
         if (block->size < sizeof *store) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -5851,26 +5894,6 @@ static int kiln_c99_graph_ledger_audit_enabled(void) {
     return enabled;
 }
 
-typedef struct kiln_c99_graph_provider_visit {
-    const kiln_gc_heap *heap;
-    kiln_nursery_chunk *const *chunks;
-    size_t count;
-    int alias;
-} kiln_c99_graph_provider_visit;
-
-static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
-                                               uint32_t kind) {
-    kiln_c99_graph_provider_visit *visit = (kiln_c99_graph_provider_visit *)opaque;
-    if (kind == KILN_GC_VISIT_BLOCK) {
-        visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count, pointer);
-    } else if (kind == KILN_GC_VISIT_VALUE) {
-        visit->alias |= kiln_c99_graph_value_in_batch(visit->heap, visit->chunks, visit->count,
-                                                      (const kiln_value *)pointer);
-    } else {
-        return 1;
-    }
-    return 0;
-}
 
 /* A future actor transaction may call this at its sender turn safepoint, after its consuming
  * handle has been detached. Today even a candidate with no enumerated alias is refused:
@@ -5889,16 +5912,16 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
         if (outside != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return outside;
     }
     {
-        kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };
+        kiln_c99_graph_root_visit visit = { heap, chunks, count, 0, 0 };
         int status = kiln_realm_gc_visit_provider_roots((void *)heap,
-                                                        kiln_c99_graph_visit_provider_root,
+                                                        kiln_c99_graph_visit_root,
                                                         &visit);
         /* A visitor may report both an alias and incomplete coverage. Preserve the positive
          * alias witness, then refuse any legacy callback, invalid realm or visitor failure.
          * In particular, a future safepoint must never mistake a failed provider walk for a
          * fully enumerated sender. */
         if (visit.alias) return KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
-        if (status != KILN_C99_OK) return KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
+        if (status != KILN_C99_OK || visit.invalid) return KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
     }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
@@ -5984,12 +6007,12 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
                                                        kiln_c99_graph_ledger_audit_enabled());
     if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) goto done;
     {
-        kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };
+        kiln_c99_graph_root_visit visit = { heap, chunks, count, 0, 0 };
         int status = kiln_realm_gc_visit_provider_roots((void *)heap,
-                                                        kiln_c99_graph_visit_provider_root,
+                                                        kiln_c99_graph_visit_root,
                                                         &visit);
         if (visit.alias) result = KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
-        else if (status != KILN_C99_OK) result = KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
+        else if (status != KILN_C99_OK || visit.invalid) result = KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
         else result = KILN_C99_GRAPH_CLEAR;
     }
     if (result == KILN_C99_GRAPH_CLEAR && retain_clear_escrow && accept != NULL) {

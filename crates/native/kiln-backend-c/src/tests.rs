@@ -715,6 +715,16 @@ int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
     kiln_test_registered_contexts[kiln_test_registered_count++] = context;
     return KILN_C99_OK;
 }
+int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
+                                   void *context) {
+    size_t index;
+    if (heap == NULL || !kiln_test_realm_active || visit_roots == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    for (index = 0; index < kiln_test_registered_count; ++index)
+        if (kiln_test_registered_visitors[index] == visit_roots &&
+            kiln_test_registered_contexts[index] == context) return 1;
+    return 0;
+}
 static kiln_value kiln_test_gc_root;
 int kiln_realm_gc_mark_roots(void *heap) {
     kiln_c99_gc_mark_value((kiln_gc_heap *)heap, &kiln_test_gc_root);

@@ -133,20 +133,33 @@ static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
 
-static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
-                                           void *context) {
+/* Internal context ownership contract: every language value reachable through the call
+ * context belongs to this anchor's complete registered root inventory. The launcher supplies
+ * the same visitor it registers for collection. Context and anchor outlive the callable;
+ * this constructor neither registers roots nor creates a second module-root field list. */
+static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
+    kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context,
+    void *root_context) {
     kiln_commonjs_require *require;
-    if (out == NULL || call == NULL) return KILN_C99_INVALID_ARGUMENT;
-    /* KILN_GC_COMMONJS_REQUIRE is pointer-free (kiln_c99_gc_trace's default case) and both its
-     * fields are written below before anything else can run, so it never observes the zeroing
-     * kiln_c99_gc_alloc would otherwise do first. */
+    if (out == NULL || call == NULL || (visit_context != NULL && root_context == NULL))
+        return KILN_C99_INVALID_ARGUMENT;
+    /* Context storage is owned by the launcher and traced by its registered root inventory.
+     * These fields are initialized before publication; no GC heap edge is hidden from transfer. */
     require = (kiln_commonjs_require *)kiln_c99_gc_alloc_pointer_free(KILN_GC_COMMONJS_REQUIRE,
                                                                       sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
-    require->context = context;
+    kiln_c99_heap_store_pointer(require, &require->context, context);
+    require->visit_context = visit_context;
+    kiln_c99_heap_store_pointer(require, &require->root_context, root_context);
+    kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
+                                           void *context) {
+    return kiln_c99_commonjs_require_value_with_roots(out, call, context, NULL, NULL);
 }
 
 /* The name a console shows, which is the JavaScript name rather than the implementation's --

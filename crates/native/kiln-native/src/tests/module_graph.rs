@@ -895,6 +895,9 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
+        "kiln_commonjs_require_{commonjs_index}, graph, kiln_graph_gc_visit_roots, graph)"
+    )));
+    assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
             modules[commonjs_index].1.symbol,
             native_c_string(&commonjs_path),
@@ -921,6 +924,12 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     assert!(context < loader, "context must precede its first use");
     assert!(wrapper.contains(&native_c_string(&commonjs_path)));
     assert!(wrapper.contains(&native_c_string(&commonjs_dir)));
+    assert!(wrapper.contains("commonjs_graph->visit_roots = kiln_commonjs_graph_gc_visit_roots;"));
+    assert!(wrapper.contains("commonjs_graph->root_context = gc_context;"));
+    assert!(
+        wrapper
+            .contains("commonjs_graph, commonjs_graph->visit_roots, commonjs_graph->root_context)")
+    );
 
     let Some(toolchain) = Toolchain::discover().ok() else {
         eprintln!("skipping native CommonJS execution: no C compiler found");

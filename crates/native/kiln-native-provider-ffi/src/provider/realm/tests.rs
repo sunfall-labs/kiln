@@ -1437,6 +1437,10 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         assert_eq!(MARKS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(ROOT_CALLS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(
+            unsafe { kiln_realm_gc_has_root_visitor(heap, Some(paired_visit), context) },
+            0
+        );
+        assert_eq!(
             unsafe {
                 kiln_realm_gc_register_roots_with_visitor(
                     Some(paired_roots),
@@ -1453,8 +1457,29 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         );
         assert!(probe.seen_paired);
         assert_eq!(
+            unsafe { kiln_realm_gc_has_root_visitor(heap, Some(paired_visit), context) },
+            1
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_has_root_visitor(heap, Some(paired_visit), slot) },
+            0
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_has_root_visitor(ptr::null_mut(), Some(paired_visit), context) },
+            INVALID_ARGUMENT
+        );
+
+        assert_eq!(
             unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(reject_paired), context) },
             RUNTIME_ERROR
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_unregister_roots(Some(paired_roots), context) },
+            0
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_has_root_visitor(heap, Some(paired_visit), context) },
+            0
         );
         assert_eq!(
             unsafe { kiln_realm_gc_register_roots(Some(registered_roots), context, 0) },

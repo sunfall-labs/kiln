@@ -3618,6 +3618,38 @@ pub unsafe extern "C" fn kiln_realm_gc_mark_roots(heap: *mut c_void) -> i32 {
     })
 }
 
+/// Checks whether this heap's active realm still owns the exact paired root visitor.
+/// Returns one for a live registration, zero when absent, and an error for invalid input.
+/// It does not call either callback or allocate a snapshot of the root table.
+///
+/// # Safety
+///
+/// `heap` must be attached to the active realm. The visitor and context identify a root
+/// owner whose complete inventory covers any opaque context a caller delegates to it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_gc_has_root_visitor(
+    heap: *mut c_void,
+    visit_roots: Option<GcRootsVisitFn>,
+    context: *mut c_void,
+) -> i32 {
+    ffi(|| {
+        let Some(visit_roots) = visit_roots else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let gc = realm.gc.borrow();
+        if heap.is_null() || gc.heap != heap || gc.hooks.is_none() {
+            return INVALID_ARGUMENT;
+        }
+        i32::from(gc.roots.iter().any(|root| {
+            root.context == context
+                && root.visit.map(|visit| visit as usize) == Some(visit_roots as usize)
+        }))
+    })
+}
+
 /// Visits the provider's own GC roots without marking or allocating in the sender heap.
 /// The callback receives a live `kiln_value` slot (`GC_VISIT_VALUE`) or a block payload pointer
 /// (`GC_VISIT_BLOCK`). Paired registered callbacks then enumerate their roots through the same
@@ -6440,6 +6472,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_gc_mark_roots, realm_gc_mark_roots) => {
             const _: unsafe extern "C" fn(*mut c_void) -> i32 = kiln_realm_gc_mark_roots;
+        };
+        (realm, kiln_realm_gc_has_root_visitor, realm_gc_has_root_visitor) => {
+            const _: unsafe extern "C" fn(*mut c_void, Option<GcRootsVisitFn>, *mut c_void) -> i32 = kiln_realm_gc_has_root_visitor;
         };
         (realm, kiln_realm_gc_visit_provider_roots, realm_gc_visit_provider_roots) => {
             const _: unsafe extern "C" fn(*mut c_void, Option<GcVisitRoot>, *mut c_void) -> i32 = kiln_realm_gc_visit_provider_roots;

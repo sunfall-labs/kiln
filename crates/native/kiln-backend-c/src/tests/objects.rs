@@ -3310,6 +3310,104 @@ int main(void) {
 }
 
 #[test]
+fn executable_commonjs_context_requires_a_live_root_inventory() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+typedef struct require_root_state { kiln_value value; int visits; } require_root_state;
+static int require_call(void *context, kiln_host *host, kiln_value specifier,
+                        kiln_value *result, kiln_value *thrown) {
+    (void)context; (void)host; (void)specifier; (void)thrown;
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+}
+static void require_mark(void *heap, void *context, int phase) {
+    require_root_state *state = (require_root_state *)context;
+    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_value(heap, &state->value);
+}
+static int require_visit(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    require_root_state *state = (require_root_state *)context;
+    ++state->visits;
+    return visit(visit_context, &state->value, KILN_GC_VISIT_VALUE);
+}
+static int require_context_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    require_root_state state = {0};
+    kiln_value plain, opaque, rooted, root;
+    kiln_commonjs_require *require;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    kiln_c99_graph_root_visit roots;
+    (void)context;
+    heap->fallback = 0; heap->enabled = 0;
+    state.value = kiln_c99_undefined();
+    if (kiln_c99_commonjs_require_value(&plain, require_call, NULL) != KILN_C99_OK ||
+        kiln_c99_commonjs_require_value(&opaque, require_call, &state) != KILN_C99_OK ||
+        kiln_c99_commonjs_require_value_with_roots(&rooted, require_call, &state,
+                                                  require_visit, &state) != KILN_C99_OK)
+        return 1;
+    require = (kiln_commonjs_require *)(uintptr_t)rooted.bits;
+    if (!kiln_c99_actor_candidate_begin(heap) || kiln_c99_new_object(&root) != KILN_C99_OK)
+        return 2;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 3;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 4;
+#define REQUIRE_RESULT(value) kiln_c99_graph_outside_block(heap, batch, count, \
+    ((kiln_gc_block *)(uintptr_t)(value).bits) - 1)
+    if (REQUIRE_RESULT(plain) != KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        REQUIRE_RESULT(opaque) != KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED ||
+        REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 5;
+    if (kiln_realm_gc_register_roots_with_visitor(require_mark, require_visit, &state, 0) !=
+        KILN_C99_OK || REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        state.visits != 0) return 6;
+    /* A context retains a candidate through its registered root inventory, not as a
+     * field of each require object. Heap inspection must not execute it redundantly. */
+    state.value = root;
+    if (REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_ROOTS_UNENUMERATED || state.visits != 0)
+        return 7;
+    roots = (kiln_c99_graph_root_visit){ heap, batch, count, 0, 0 };
+    if (kiln_realm_gc_visit_provider_roots(heap, kiln_c99_graph_visit_root, &roots) !=
+        KILN_C99_OK || !roots.alias || roots.invalid || state.visits != 1) return 8;
+    state.value = kiln_c99_undefined();
+    roots = (kiln_c99_graph_root_visit){ heap, batch, count, 0, 0 };
+    if (kiln_realm_gc_visit_provider_roots(heap, kiln_c99_graph_visit_root, &roots) !=
+        KILN_C99_OK || roots.alias || roots.invalid || state.visits != 2) return 9;
+    /* A direct borrowed context/anchor pointer is independently an alias. */
+    kiln_c99_heap_store_pointer(require, &require->context, (void *)(uintptr_t)root.bits);
+    if (REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 10;
+    kiln_c99_heap_store_pointer(require, &require->context, &state);
+    kiln_c99_heap_store_pointer(require, &require->root_context, (void *)(uintptr_t)root.bits);
+    if (REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 11;
+    kiln_c99_heap_store_pointer(require, &require->root_context, &state);
+    /* The fixture shim's registration inventory is removed before its local anchor dies. */
+    kiln_test_registered_count = 0;
+    if (REQUIRE_RESULT(rooted) != KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED || state.visits != 2)
+        return 12;
+    free(batch);
+    return 0;
+#undef REQUIRE_RESULT
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 13;
+    status = kiln_realm_enter(realm, require_context_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 14;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "commonjs-context-root-inventory");
+    assert!(
+        run.status.success(),
+        "require root inventory failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_candidate_ledger_covers_callable_prototype_slot_aliases() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

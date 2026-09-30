@@ -2566,7 +2566,7 @@ pub(super) fn write_graph_commonjs_realm_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, graph);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, graph, kiln_graph_gc_visit_roots, graph);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -2585,7 +2585,7 @@ pub(super) fn write_graph_commonjs_shared_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, commonjs_graph, commonjs_graph->visit_roots, commonjs_graph->root_context);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -2656,46 +2656,6 @@ pub(super) fn render_graph_roots(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) {
     output.push_str(
-        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL) return;\n",
-    );
-    for (index, (node, _)) in modules.iter().enumerate() {
-        let export_count = native_graph_export_count(node);
-        if export_count != 0 {
-            writeln!(
-                output,
-                "    for (index = 0; index < (size_t){export_count}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_exports_{index}[index]);"
-            )
-            .unwrap();
-        }
-        if !node.program.imports.is_empty() {
-            writeln!(
-                output,
-                "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_imports_{index}[index]);",
-                node.program.imports.len()
-            )
-            .unwrap();
-        }
-    }
-    writeln!(
-        output,
-        "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_namespaces[index]);",
-        modules.len()
-    )
-    .unwrap();
-    if modules
-        .iter()
-        .any(|(node, _)| node.program.program.has_dynamic_import())
-    {
-        output.push_str("    (void)kiln_realm_gc_mark_value(heap, &kiln_opentui_namespace);\n");
-        output.push_str("    (void)kiln_realm_gc_mark_value(heap, &kiln_node_ffi_namespace);\n");
-    }
-    writeln!(
-        output,
-        "    {{\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        for (index = 0; index < (size_t){}; ++index) {{\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].result);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].active_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_resolve);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_reject);\n        }}\n    }}\n}}\n",
-        modules.len()
-    )
-    .unwrap();
-    output.push_str(
         "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (graph == NULL) return 0;\n",
     );
     for (index, (node, _)) in modules.iter().enumerate() {
@@ -2715,6 +2675,8 @@ pub(super) fn render_graph_roots(
         output.push_str("    if (visit(visit_context, &kiln_opentui_namespace, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &kiln_node_ffi_namespace, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
     }
     writeln!(output, "    if (visit(visit_context, &graph->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if (visit(visit_context, &graph->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
+    // Collection and ownership inspection enumerate precisely the same root slots.
+    output.push_str("\nstatic int kiln_graph_gc_mark_root(void *heap, const void *pointer, uint32_t kind) {\n    if (kind != KILN_GC_VISIT_VALUE) return KILN_C99_INVALID_ARGUMENT;\n    (void)kiln_realm_gc_mark_value(heap, pointer);\n    return KILN_C99_OK;\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || context == NULL) return;\n    (void)kiln_graph_gc_visit_roots(context, kiln_graph_gc_mark_root, heap);\n}\n");
 }
 
 #[cfg(test)]
@@ -3023,6 +2985,7 @@ extern int kiln_c99_process_object(kiln_value *result);
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 #define KILN_C99_HINT_STRING 1
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
+extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
 extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);
 extern int kiln_c99_new_object(kiln_value *result);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -3090,7 +3053,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 output,
-                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context);",
+                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context);",
                 module.symbol
             )
             .unwrap();
@@ -3361,7 +3324,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         ),
     );
     output.push_str(
-        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
+        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
     );
     output.push_str("static int kiln_graph_runtime_require(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_require_context *context = (kiln_graph_require_context *)opaque;\n    kiln_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
@@ -3475,14 +3438,14 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
             .map(|url| url.to_string());
         writeln!(
             output,
-            "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value(result, kiln_graph_runtime_require, &graph->require_contexts[{base_index}]); }}",
+            "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_runtime_require, &graph->require_contexts[{base_index}], kiln_graph_gc_visit_roots, graph); }}",
             native_c_string(importer.as_ref()),
             importer.len(),
             file_url.as_ref().map(|url| format!(" || kiln_c99_filename_matches(arguments[0], {}, (size_t){})", native_c_string(url), url.len())).unwrap_or_default(),
         ).unwrap();
     }
     output.push_str(
-        "    return kiln_c99_commonjs_require_value(result, kiln_graph_require_builtin, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
+        "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_roots, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
     );
     // The module a worker names by its path (`new Worker(path)`, realms issue 06), or -1: every
     // module of the program a realm can run as its entry. Matched by its project-relative path at

@@ -976,6 +976,7 @@ typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
+extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
 extern int kiln_realm_is_active(void);
 struct kiln_closure;
@@ -2332,6 +2333,8 @@ static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
 static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
+typedef struct kiln_c99_graph_root_visit {
+static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
 #define KILN_C99_HOST_SERVER_FIELDS(V, P, A) \
 #define KILN_C99_HOST_SOCKET_FIELDS(V, P, A) \
 #define KILN_C99_HOST_REQUEST_FIELDS(V, P, A) \
@@ -2361,8 +2364,6 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
 static int kiln_c99_graph_ledger_audit_enabled(void) {
-typedef struct kiln_c99_graph_provider_visit {
-static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id);
@@ -2757,6 +2758,7 @@ static void kiln_c99_typed_own_key(kiln_value target, const kiln_string *key, in
 static int kiln_c99_typed_prototype_own_key(kiln_value target, const kiln_string *key,
 static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len) {
 static kiln_value kiln_c99_method(uint64_t code) {
+static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
 static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
 static const char *kiln_c99_method_name(uint64_t code) {
 #if KILN_RETAIN_GROUP_TEMPORAL

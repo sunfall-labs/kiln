@@ -117,7 +117,10 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
         let bound_reference = index > 0
             && words[index - 1].0 == "bound"
             && matches!(field, "target" | "receiver" | "arguments");
-        if !protected && !collection_entry && !bound_reference {
+        let require_reference = index > 0
+            && words[index - 1].0 == "require"
+            && matches!(field, "context" | "root_context");
+        if !protected && !collection_entry && !bound_reference && !require_reference {
             continue;
         }
         let mut next = index + 2;

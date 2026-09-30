@@ -1097,7 +1097,9 @@ fn runtime_prelude_size() {
     // The bulk-store audit initially measured 66,469 lines. Its ownership-aware follow-ups
     // remain within 66,500; helpers are emitted once and descriptors share their field walk.
     // Sharing wide boundary-value copies adds one helper; measured total: 66,511 lines.
-    const CEILING_LINES: usize = 66_540;
+    // Registered CommonJS context authority and root-slot address checks add 49 lines
+    // (66,560 measured before this comment). Constructors and inventories are emitted once.
+    const CEILING_LINES: usize = 66_590;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

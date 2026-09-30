@@ -131,6 +131,7 @@ extern int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_property **out);
 extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
+extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
 extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
                                     kiln_value *result, kiln_value *thrown);
 extern const char *kiln_c99_method_name(uint64_t code);

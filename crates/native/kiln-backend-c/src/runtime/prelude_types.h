@@ -774,6 +774,8 @@ extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn 
                                               void *context);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
                                       void *visit_context);
+extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
+                                         void *context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
                                                       kiln_gc_visit_roots_fn visit_roots,
                                                       void *context, uint32_t flags);
@@ -3044,6 +3046,10 @@ typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_val
 typedef struct kiln_commonjs_require {
     kiln_commonjs_require_fn call;
     void *context;
+    /* The launcher's registered module-root inventory, with its stable realm-owned anchor.
+     * Opaque contexts without this authority remain unproven for graph transfer. */
+    kiln_gc_visit_roots_fn visit_context;
+    void *root_context;
 } kiln_commonjs_require;
 
 /* One job of the promise lane: run `handler` against `argument` and settle `derived` with what
