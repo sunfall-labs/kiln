@@ -16,3 +16,5 @@ console.log(JSON.stringify(copied));
 const read = [5];
 Object.defineProperty(read, 'extra', { enumerable: true, get() { return this[0] + 1; } });
 console.log(JSON.stringify(Object.assign({}, read)));
+const frozen = Object.freeze({ value: 1 });
+try { Object.assign(frozen, { value: 2 }); } catch (error) { console.log(error instanceof TypeError); }

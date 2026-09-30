@@ -797,6 +797,8 @@ _Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
 _Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
 _Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
 #endif
+struct kiln_gc_heap;
+void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *heap, const kiln_string *key);
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
 static inline int kiln_c99_key_is_symbol(const kiln_string *key) {
 static inline uint32_t kiln_c99_key_domain(const kiln_string *key) {

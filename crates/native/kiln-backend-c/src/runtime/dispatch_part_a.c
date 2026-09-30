@@ -3721,7 +3721,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         status = kiln_c99_get_computed(host, src_val, key, &copied, depth, thrown);
                         if (status == KILN_C99_OK)
                             status = kiln_c99_put_mode_key(host, target, view, NULL,
-                                copied, 0, depth, thrown);
+                                copied, 1, depth, thrown);
                         if (status != KILN_C99_OK) return status;
                     }
                     continue;
@@ -3741,7 +3741,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         status = kiln_c99_get_computed(host, src_val, key, &copied, depth, thrown);
                         if (status == KILN_C99_OK)
                             status = kiln_c99_put_mode_key(host, target, (const kiln_string *)key.ptr,
-                                NULL, copied, 0, depth, thrown);
+                                NULL, copied, 1, depth, thrown);
                         if (status != KILN_C99_OK) return status;
                     }
                     continue;
@@ -3777,7 +3777,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         } else {
                             copied = property.value;
                         }
-                        status = kiln_c99_put_mode_key(host, target, name, name, copied, 0,
+                        status = kiln_c99_put_mode_key(host, target, name, name, copied, 1,
                                                        depth, thrown);
                         if (status != KILN_C99_OK) return status;
                     }
@@ -3790,7 +3790,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             if (source->elements[index] == KILN_VAL_HOLE) continue;
                             char num_buf[32];
                             size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
-                            status = kiln_c99_put(host, target, num_buf, nlen, kiln_val_to_boundary(source->elements[index]), depth, thrown);
+                            status = kiln_c99_put_mode(host, target, num_buf, nlen, kiln_val_to_boundary(source->elements[index]), 1, depth, thrown);
                             if (status != KILN_C99_OK) return status;
                         }
                     }
@@ -3806,7 +3806,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         sval = (source->slots != NULL && index < source->slot_capacity)
                                    ? kiln_val_to_boundary(source->slots[index])
                                    : kiln_c99_undefined();
-                        status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 0, depth,
+                        status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 1, depth,
                                                        thrown);
                         if (status != KILN_C99_OK) {
                             return status;
@@ -3836,7 +3836,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         }
                         status = kiln_c99_put_mode_key(host, target, source->properties[index].key,
                                                        source->properties[index].key,
-                                                       copied, 0, depth, thrown);
+                                                       copied, 1, depth, thrown);
                         if (status != KILN_C99_OK) {
                             return status;
                         }
