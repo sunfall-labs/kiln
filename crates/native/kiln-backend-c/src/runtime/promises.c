@@ -75,7 +75,7 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
         (kiln_next_tick *)kiln_c99_gc_alloc(KILN_GC_NEXT_TICK, sizeof *task);
     int status;
     if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
-    task->callback = callback;
+    kiln_c99_heap_store_value(task, &task->callback, callback);
     task->argc = argc;
     task->args = NULL;
     if (argc != 0) {
@@ -88,7 +88,8 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
             kiln_c99_gc_release(task);
             return KILN_C99_OUT_OF_MEMORY;
         }
-        memcpy(task->args, args, argc * sizeof *task->args);
+        for (size_t index = 0; index < argc; ++index)
+            kiln_c99_heap_store_value(task, &task->args[index], args[index]);
     }
     /* Counted before the hand-off: a refused hand-off disposes of the task, which uncounts it. */
     task->counted = 0;

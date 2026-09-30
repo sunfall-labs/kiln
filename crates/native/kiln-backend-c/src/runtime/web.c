@@ -285,8 +285,12 @@ static int kiln_c99_url_fast_raw(kiln_value *out, const kiln_value *args, size_t
     if (resp->url_object.tag != KILN_VALUE_OBJECT) {
         kiln_value *proto;
         status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 8);
+        if (status == KILN_C99_OK)
+            kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), resp, resp->url_object.ptr);
         if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
         status = kiln_c99_new_object_with_capacity_tenured(&resp->search_params_object, 6);
+        if (status == KILN_C99_OK)
+            kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), resp, resp->search_params_object.ptr);
         if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
         status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_PROTOTYPE, &proto);
         if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
@@ -307,7 +311,7 @@ static int kiln_c99_url_fast_raw(kiln_value *out, const kiln_value *args, size_t
     }
     {
         size_t path_len = (size_t)((query != NULL ? query : (fragment != NULL ? fragment : end)) - start);
-        resp->pathname_val = kiln_c99_copy_text(start, path_len);
+        kiln_c99_heap_store_value(resp, &resp->pathname_val, kiln_c99_copy_text(start, path_len));
         if (resp->pathname_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
         resp->pathname_cap = path_len + 1;
         /* Own data, not a put: the object's prototype is the class's, whose `pathname` is a
@@ -322,7 +326,7 @@ static int kiln_c99_url_fast_raw(kiln_value *out, const kiln_value *args, size_t
         if (query == NULL || q_len == 0) {
             query_val = kiln_c99_static_text("", 0);
         } else {
-            resp->query_val = kiln_c99_copy_text(query + 1, q_len);
+            kiln_c99_heap_store_value(resp, &resp->query_val, kiln_c99_copy_text(query + 1, q_len));
             if (resp->query_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
             resp->query_cap = q_len + 1;
             query_val = resp->query_val;
@@ -391,7 +395,7 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
             if (memchr(val_ptr, '%', val_len) == NULL) {
                 kiln_node_response *resp = kiln_c99_active_http_response;
                 if (resp != NULL) {
-                    resp->param_val = kiln_c99_copy_text(val_ptr, val_len);
+                    kiln_c99_heap_store_value(resp, &resp->param_val, kiln_c99_copy_text(val_ptr, val_len));
                     if (resp->param_val.tag != KILN_VALUE_STRING)
                         KILN_QUERY_RETURN(KILN_C99_OUT_OF_MEMORY);
                     resp->param_cap = val_len + 1;

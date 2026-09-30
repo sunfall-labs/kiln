@@ -2326,7 +2326,24 @@ static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
 static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
+#define KILN_C99_HOST_SERVER_FIELDS(V, P, A) \
+#define KILN_C99_HOST_SOCKET_FIELDS(V, P, A) \
+#define KILN_C99_HOST_REQUEST_FIELDS(V, P, A) \
+#define KILN_C99_HOST_RESPONSE_FIELDS(V, P, A) \
+#define KILN_C99_HOST_COMPLETION_FIELDS(V, P, A) \
+#define KILN_C99_HOST_FS_FIELDS(V, P, A) V(promise)
+#define KILN_C99_HOST_PROCESS_FIELDS(V, P, A) \
+#define KILN_C99_HOST_CALLBACK_FIELDS(V, P, A) V(callback) A(args, argc)
+#define KILN_C99_HOST_LAYOUTS(CASE) \
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
+#define KILN_C99_HOST_INCOMING_VALUE(field) \
+#define KILN_C99_HOST_INCOMING_POINTER(field) \
+#define KILN_C99_HOST_INCOMING_ARRAY(field, length) \
+#define KILN_C99_HOST_INCOMING_CASE(kind, type, fields) \
+#undef KILN_C99_HOST_INCOMING_CASE
+#undef KILN_C99_HOST_INCOMING_ARRAY
+#undef KILN_C99_HOST_INCOMING_POINTER
+#undef KILN_C99_HOST_INCOMING_VALUE
 typedef struct kiln_c99_candidate_owner_observer {
 static void kiln_c99_candidate_observe_pointer(void *context, const void *pointer) {
 static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
@@ -2438,6 +2455,14 @@ static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
 static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
+#define KILN_C99_HOST_MARK_VALUE(field) kiln_c99_gc_mark_value(heap, &owner->field);
+#define KILN_C99_HOST_MARK_POINTER(field) kiln_c99_gc_mark_block(heap, owner->field);
+#define KILN_C99_HOST_MARK_ARRAY(field, length) \
+#define KILN_C99_HOST_MARK_CASE(kind, type, fields) \
+#undef KILN_C99_HOST_MARK_CASE
+#undef KILN_C99_HOST_MARK_ARRAY
+#undef KILN_C99_HOST_MARK_POINTER
+#undef KILN_C99_HOST_MARK_VALUE
 static size_t kiln_c99_shared_facade_hash(uint32_t graph, uint32_t generation, uint32_t node) {
 static kiln_shared_facade *kiln_c99_shared_facade_find(kiln_gc_heap *heap, uint32_t graph,
 static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {

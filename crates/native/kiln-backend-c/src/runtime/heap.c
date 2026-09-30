@@ -5114,6 +5114,35 @@ static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
 /* A separate, read-only walk for edges *into* the candidate. The collector's tracer is not
  * suitable here: it mutates mark epochs and deliberately ignores non-heap pointers. Until each
  * kind's complete pointer layout is audited, an unhandled kind means "unknown", never "clear". */
+/* One host-reference inventory feeds collection, incoming proof and publication recording.
+ * Host handles, event buffers and malloc-owned transport bytes are not language heap edges.
+ * V is a wide value, P a GC pointer and A a malloc-owned array of wide values. */
+#define KILN_C99_HOST_SERVER_FIELDS(V, P, A) \
+    V(object) V(connection_listener) P(sockets)
+#define KILN_C99_HOST_SOCKET_FIELDS(V, P, A) \
+    V(object) P(next) P(server) P(client_requests) P(responses)
+#define KILN_C99_HOST_REQUEST_FIELDS(V, P, A) \
+    V(object) V(callback) V(response) P(socket) P(next)
+#define KILN_C99_HOST_RESPONSE_FIELDS(V, P, A) \
+    V(request) V(object) V(url_object) V(search_params_object) \
+    V(pathname_val) V(query_val) V(param_val) P(socket) P(next)
+#define KILN_C99_HOST_COMPLETION_FIELDS(V, P, A) \
+    P(server) P(socket) P(client_request)
+#define KILN_C99_HOST_FS_FIELDS(V, P, A) V(promise)
+#define KILN_C99_HOST_PROCESS_FIELDS(V, P, A) \
+    V(promise) V(result) V(stdout_value) V(stderr_value)
+#define KILN_C99_HOST_CALLBACK_FIELDS(V, P, A) V(callback) A(args, argc)
+#define KILN_C99_HOST_LAYOUTS(CASE) \
+    CASE(KILN_GC_NODE_SERVER, kiln_node_server, KILN_C99_HOST_SERVER_FIELDS) \
+    CASE(KILN_GC_NODE_SOCKET, kiln_node_socket, KILN_C99_HOST_SOCKET_FIELDS) \
+    CASE(KILN_GC_NODE_CLIENT_REQUEST, kiln_node_client_request, KILN_C99_HOST_REQUEST_FIELDS) \
+    CASE(KILN_GC_NODE_RESPONSE, kiln_node_response, KILN_C99_HOST_RESPONSE_FIELDS) \
+    CASE(KILN_GC_NODE_COMPLETION, kiln_node_completion, KILN_C99_HOST_COMPLETION_FIELDS) \
+    CASE(KILN_GC_NODE_FS_COMPLETION, kiln_node_fs_completion, KILN_C99_HOST_FS_FIELDS) \
+    CASE(KILN_GC_NODE_PROCESS_COMPLETION, kiln_node_process_completion, KILN_C99_HOST_PROCESS_FIELDS) \
+    CASE(KILN_GC_NEXT_TICK, kiln_next_tick, KILN_C99_HOST_CALLBACK_FIELDS) \
+    CASE(KILN_GC_TIMER, kiln_timer, KILN_C99_HOST_CALLBACK_FIELDS)
+
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
     const kiln_gc_block *block) {
@@ -5280,16 +5309,33 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         }
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
-    case KILN_GC_NODE_PROCESS_COMPLETION: {
-        const kiln_node_process_completion *completion =
-            (const kiln_node_process_completion *)(block + 1);
-        if (block->size < sizeof *completion) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
-        return kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->promise) ||
-               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->result) ||
-               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->stdout_value) ||
-               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->stderr_value)
-                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+#define KILN_C99_HOST_INCOMING_VALUE(field) \
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &owner->field)) \
+        return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+#define KILN_C99_HOST_INCOMING_POINTER(field) \
+    if (kiln_c99_graph_in_batch(heap, chunks, count, owner->field)) \
+        return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+#define KILN_C99_HOST_INCOMING_ARRAY(field, length) \
+    if (owner->length != 0 && owner->field == NULL) \
+        return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED; \
+    KILN_C99_HOST_INCOMING_POINTER(field) \
+    for (index = 0; index < owner->length; ++index) { \
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &owner->field[index])) \
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS; \
     }
+#define KILN_C99_HOST_INCOMING_CASE(kind, type, fields) \
+    case kind: { \
+        const type *owner = (const type *)(block + 1); \
+        if (block->size < sizeof *owner) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED; \
+        fields(KILN_C99_HOST_INCOMING_VALUE, KILN_C99_HOST_INCOMING_POINTER, \
+               KILN_C99_HOST_INCOMING_ARRAY) \
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED; \
+    }
+    KILN_C99_HOST_LAYOUTS(KILN_C99_HOST_INCOMING_CASE)
+#undef KILN_C99_HOST_INCOMING_CASE
+#undef KILN_C99_HOST_INCOMING_ARRAY
+#undef KILN_C99_HOST_INCOMING_POINTER
+#undef KILN_C99_HOST_INCOMING_VALUE
     case KILN_GC_METHOD_STORE: {
         const kiln_method_store *store = (const kiln_method_store *)(block + 1);
         if (block->size < sizeof *store) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -7656,72 +7702,21 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &((kiln_method_store *)payload)->properties);
         kiln_c99_gc_mark_block(heap, ((kiln_method_store *)payload)->next);
         break;
-    case KILN_GC_NODE_SERVER: {
-        kiln_node_server *server = (kiln_node_server *)payload;
-        kiln_c99_gc_mark_value(heap, &server->object);
-        kiln_c99_gc_mark_value(heap, &server->connection_listener);
-        kiln_c99_gc_mark_block(heap, server->sockets);
-        break;
+#define KILN_C99_HOST_MARK_VALUE(field) kiln_c99_gc_mark_value(heap, &owner->field);
+#define KILN_C99_HOST_MARK_POINTER(field) kiln_c99_gc_mark_block(heap, owner->field);
+#define KILN_C99_HOST_MARK_ARRAY(field, length) \
+    kiln_c99_gc_mark_values(heap, owner->field, owner->length);
+#define KILN_C99_HOST_MARK_CASE(kind, type, fields) \
+    case kind: { \
+        type *owner = (type *)payload; \
+        fields(KILN_C99_HOST_MARK_VALUE, KILN_C99_HOST_MARK_POINTER, KILN_C99_HOST_MARK_ARRAY) \
+        break; \
     }
-    case KILN_GC_NODE_SOCKET: {
-        kiln_node_socket *socket = (kiln_node_socket *)payload;
-        kiln_c99_gc_mark_value(heap, &socket->object);
-        kiln_c99_gc_mark_block(heap, socket->next);
-        kiln_c99_gc_mark_block(heap, socket->server);
-        kiln_c99_gc_mark_block(heap, socket->client_requests);
-        kiln_c99_gc_mark_block(heap, socket->responses);
-        break;
-    }
-    case KILN_GC_NODE_CLIENT_REQUEST: {
-        kiln_node_client_request *request = (kiln_node_client_request *)payload;
-        kiln_c99_gc_mark_value(heap, &request->object);
-        kiln_c99_gc_mark_value(heap, &request->callback);
-        kiln_c99_gc_mark_value(heap, &request->response);
-        kiln_c99_gc_mark_block(heap, request->socket);
-        kiln_c99_gc_mark_block(heap, request->next);
-        break;
-    }
-    case KILN_GC_NODE_RESPONSE: {
-        kiln_node_response *response = (kiln_node_response *)payload;
-        kiln_c99_gc_mark_value(heap, &response->request);
-        kiln_c99_gc_mark_value(heap, &response->object);
-        kiln_c99_gc_mark_value(heap, &response->url_object);
-        kiln_c99_gc_mark_value(heap, &response->search_params_object);
-        kiln_c99_gc_mark_value(heap, &response->pathname_val);
-        kiln_c99_gc_mark_value(heap, &response->query_val);
-        kiln_c99_gc_mark_value(heap, &response->param_val);
-        kiln_c99_gc_mark_block(heap, response->socket);
-        kiln_c99_gc_mark_block(heap, response->next);
-        break;
-    }
-    case KILN_GC_NODE_COMPLETION: {
-        kiln_node_completion *completion = (kiln_node_completion *)payload;
-        kiln_c99_gc_mark_block(heap, completion->server);
-        kiln_c99_gc_mark_block(heap, completion->socket);
-        kiln_c99_gc_mark_block(heap, completion->client_request);
-        break;
-    }
-    case KILN_GC_NODE_FS_COMPLETION:
-        kiln_c99_gc_mark_value(heap, &((kiln_node_fs_completion *)payload)->promise);
-        break;
-    case KILN_GC_NODE_PROCESS_COMPLETION:
-        kiln_c99_gc_mark_value(heap, &((kiln_node_process_completion *)payload)->promise);
-        kiln_c99_gc_mark_value(heap, &((kiln_node_process_completion *)payload)->result);
-        kiln_c99_gc_mark_value(heap, &((kiln_node_process_completion *)payload)->stdout_value);
-        kiln_c99_gc_mark_value(heap, &((kiln_node_process_completion *)payload)->stderr_value);
-        break;
-    case KILN_GC_NEXT_TICK: {
-        kiln_next_tick *tick = (kiln_next_tick *)payload;
-        kiln_c99_gc_mark_value(heap, &tick->callback);
-        kiln_c99_gc_mark_values(heap, tick->args, tick->argc);
-        break;
-    }
-    case KILN_GC_TIMER: {
-        kiln_timer *timer = (kiln_timer *)payload;
-        kiln_c99_gc_mark_value(heap, &timer->callback);
-        kiln_c99_gc_mark_values(heap, timer->args, timer->argc);
-        break;
-    }
+    KILN_C99_HOST_LAYOUTS(KILN_C99_HOST_MARK_CASE)
+#undef KILN_C99_HOST_MARK_CASE
+#undef KILN_C99_HOST_MARK_ARRAY
+#undef KILN_C99_HOST_MARK_POINTER
+#undef KILN_C99_HOST_MARK_VALUE
     case KILN_GC_REGEXP: {
         /* A pattern borrows the bytes it was compiled from, which may be a unit constant or a
          * string the program built; the block table decides which. The provider handle is not a

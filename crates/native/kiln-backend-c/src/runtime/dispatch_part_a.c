@@ -2373,14 +2373,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (status != KILN_C99_OK) return status;
             entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
             if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
-            entry->callback = callback;
+            kiln_c99_heap_store_value(entry, &entry->callback, callback);
             entry->argc = 1;
             entry->args = (kiln_value *)malloc(sizeof *entry->args);
             if (entry->args == NULL) {
                 kiln_c99_gc_release(entry);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            entry->args[0] = reason;
+            kiln_c99_heap_store_value(entry, &entry->args[0], reason);
             if (!(isfinite(delay) && delay > 0.0)) delay = 0.0;
             status = kiln_realm_set_timeout(delay, kiln_c99_run_timer, kiln_c99_drop_timer,
                                             entry, &id);
@@ -2516,7 +2516,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (entry == NULL) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            entry->callback = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_c99_heap_store_value(entry, &entry->callback, argc > 0 ? args[0] : kiln_c99_undefined());
             /* Everything after the delay is handed to the callback, which is how a timer carries
              * state without a closure. */
             entry->argc = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
@@ -2527,9 +2527,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     kiln_c99_gc_release(entry);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                memcpy(entry->args,
-                       args + (undelayed ? 1 : 2),
-                       entry->argc * sizeof *entry->args);
+                for (size_t index = 0; index < entry->argc; ++index)
+                    kiln_c99_heap_store_value(entry, &entry->args[index],
+                                              args[index + (undelayed ? 1 : 2)]);
             }
             status = kiln_c99_arm_timer(code, delay, kiln_c99_run_timer, kiln_c99_drop_timer,
                                         entry, &id);

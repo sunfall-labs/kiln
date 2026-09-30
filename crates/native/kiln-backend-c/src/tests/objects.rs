@@ -3167,6 +3167,109 @@ int main(void) {
 }
 
 #[test]
+fn executable_candidate_ledger_checks_host_callbacks_and_cached_response_values() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int ledger_host_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_node_server *server;
+    kiln_node_response *response;
+    kiln_timer *timer;
+    kiln_value root;
+    kiln_c99_candidate_group *group;
+    kiln_nursery_chunk **batch = NULL;
+    size_t count = 0;
+    kiln_next_tick *tick = NULL;
+    (void)context;
+    heap->fallback = 0;
+    heap->enabled = 0;
+    server = kiln_c99_gc_calloc(KILN_GC_NODE_SERVER, sizeof *server);
+    response = kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE, sizeof *response);
+    timer = kiln_c99_gc_calloc(KILN_GC_TIMER, sizeof *timer);
+    if (server == NULL || response == NULL || timer == NULL) return 1;
+    timer->argc = 1;
+    timer->args = calloc(1, sizeof *timer->args);
+    if (timer->args == NULL) return 2;
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&root) != KILN_C99_OK) return 3;
+    group = heap->actor_candidate_group;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 4;
+    kiln_c99_actor_candidate_seal(heap, root);
+    if (!kiln_c99_candidate_group_snapshot_owner(heap, group, &batch, &count)) return 5;
+    kiln_c99_heap_store_value(server, &server->connection_listener, root);
+    kiln_c99_heap_store_value(response, &response->query_val, root);
+    kiln_c99_heap_store_value(timer, &timer->args[0], root);
+    /* Exercise the real bulk-copy constructor, not just a fixture field assignment. */
+    if (kiln_c99_enqueue_next_tick(kiln_c99_undefined(), &root, 1) != KILN_C99_OK) return 6;
+    if (group->incoming_owners.count != 4) return 7;
+    for (size_t index = 0; index < group->incoming_owners.capacity; ++index) {
+        kiln_gc_block *owner = (kiln_gc_block *)group->incoming_owners.table[index];
+        if (owner != NULL && (owner->kind & KILN_GC_KIND_MASK) == KILN_GC_NEXT_TICK)
+            tick = (kiln_next_tick *)(owner + 1);
+    }
+    if (tick == NULL) return 8;
+    /* Each owner alone must be sufficient to reject, and clearing one cannot mask another. */
+    for (size_t step = 0; step < 4; ++step) {
+        kiln_c99_graph_incoming_result ledger = kiln_c99_graph_scan_candidate_owners(heap, group, batch, count);
+        kiln_c99_graph_incoming_result full = kiln_c99_graph_scan_outside_heap(heap, batch, count);
+        if (ledger != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS || full != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) {
+            fprintf(stderr, "host step %zu: ledger=%d full=%d\n", step, ledger, full);
+            return 9;
+        }
+        switch (step) {
+        case 0: kiln_c99_heap_store_value(server, &server->connection_listener, kiln_c99_undefined()); break;
+        case 1: kiln_c99_heap_store_value(response, &response->query_val, kiln_c99_undefined()); break;
+        case 2: kiln_c99_heap_store_value(timer, &timer->args[0], kiln_c99_undefined()); break;
+        case 3: kiln_c99_heap_store_value(tick, &tick->args[0], kiln_c99_undefined()); break;
+        }
+    }
+    if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
+        kiln_c99_graph_scan_outside_heap(heap, batch, count) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 10;
+    kiln_c99_drop_next_tick(tick);
+    free(batch);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 11;
+    status = kiln_realm_enter(realm, ledger_host_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 12;
+    return status;
+}
+"#;
+    // The ordinary fixture stub disposes of submitted work immediately. Retain this one
+    // payload until the wrapper clears its alias and drops it, modeling pending queue work.
+    let original = r#"int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work) {
+    (void)run;
+    if (drop != NULL) drop(work);
+    return KILN_C99_OK;
+}"#;
+    let retained = r#"int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work) {
+    (void)run;
+    (void)drop;
+    (void)work;
+    return KILN_C99_OK;
+}"#;
+    let source = linked_source(&generated.source, wrapper);
+    assert_eq!(source.matches(original).count(), 1);
+    let run = fixture_cache::run(&source.replace(original, retained));
+    assert!(
+        run.status.success(),
+        "host ledger failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_large_candidate_metadata_is_not_a_collector_root() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
