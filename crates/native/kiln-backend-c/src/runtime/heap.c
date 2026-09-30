@@ -5544,6 +5544,7 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         if (kiln_c99_graph_in_batch(heap, chunks, count, regexp->handle) ||
             kiln_c99_graph_in_batch(heap, chunks, count, regexp->source) ||
             kiln_c99_graph_in_batch(heap, chunks, count, regexp->flags) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &regexp->properties) ||
             kiln_c99_graph_in_batch(heap, chunks, count, regexp->cached_subject_ptr))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         for (index = 0; index < regexp->cached_group_count; ++index) {
@@ -8041,6 +8042,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         size_t ci;
         kiln_c99_gc_mark_block(heap, regexp->source);
         kiln_c99_gc_mark_block(heap, regexp->flags);
+        kiln_c99_gc_mark_value(heap, &regexp->properties);
         for (ci = 0; ci < regexp->cached_group_count && ci < 32; ++ci) {
             kiln_c99_gc_mark_val(heap, regexp->cached_elements[ci]);
         }

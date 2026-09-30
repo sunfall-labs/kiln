@@ -3006,6 +3006,7 @@ typedef struct kiln_regexp {
     int global;
     int sticky;
     double last_index;
+    int last_index_writable;
     const char *cached_subject_ptr;
     size_t cached_subject_len;
     int cached_is_ascii;
@@ -3015,6 +3016,8 @@ typedef struct kiln_regexp {
     int named_groups;
     int64_t cached_ranges[64];
     kiln_val cached_elements[32];
+    /* User-defined own properties (apart from the intrinsic, non-configurable lastIndex). */
+    kiln_value properties;
 } kiln_regexp;
 
 /* A symbol: a property key with an identity of its own.

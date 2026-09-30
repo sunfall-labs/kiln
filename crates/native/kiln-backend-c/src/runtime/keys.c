@@ -223,6 +223,13 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
         }
     }
+    if (builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE) {
+        kiln_value symbol;
+        if (kiln_c99_symbol_of_key("@@toStringTag", 13, &symbol)) {
+            status = kiln_c99_array_push(built, symbol);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
     status = kiln_c99_builtin_store_keys(builtin, built);
     if (status != KILN_C99_OK) return status;
     *out = built;
@@ -328,6 +335,37 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         *out = built;
         return status;
     }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        /* RegExp instances have one own property, `lastIndex`. It is non-enumerable, but
+         * Reflect.ownKeys and Object.getOwnPropertyNames must still report it. */
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        kiln_value extra = kiln_c99_undefined();
+        kiln_array *listed = NULL;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_all_own_keys(host, store, &extra, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            listed = kiln_c99_array_of(extra);
+            /* OrdinaryOwnPropertyKeys places integer-index names before all other strings. */
+            for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0)
+                    status = kiln_c99_array_push(built, key);
+            }
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("lastIndex", 9));
+        if (status == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT) {
+            for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0) continue;
+                status = kiln_c99_array_push(built, key);
+            }
+        }
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_builtin_own_keys(target.bits, out);
     }
@@ -389,6 +427,9 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
     }
     if (target.tag == KILN_VALUE_PROMISE) {
         return &kiln_c99_promise_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        return &kiln_c99_regexp_of(target)->properties;
     }
     return NULL;
 }

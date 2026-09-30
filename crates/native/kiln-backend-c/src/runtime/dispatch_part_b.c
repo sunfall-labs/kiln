@@ -1549,12 +1549,38 @@
              * clone reaches for -- accessors and all, where a spread would have called them. */
             kiln_value built;
             kiln_object *object;
-            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT) {
+            if (argc == 0 || (args[0].tag != KILN_VALUE_OBJECT &&
+                              args[0].tag != KILN_VALUE_REGEXP)) {
                 KILN_C99_REFUSE("Object.getOwnPropertyDescriptors of something that is not an "
                                 "object");
             }
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (args[0].tag == KILN_VALUE_REGEXP) {
+                kiln_value keys;
+                kiln_array *listed;
+                status = kiln_c99_all_own_keys(host, args[0], &keys, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                listed = kiln_c99_array_of(keys);
+                for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                    kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                    kiln_value descriptor;
+                    int found = 0;
+                    kiln_value property_key = key.tag == KILN_VALUE_SYMBOL
+                        ? kiln_c99_property_key(key) : key;
+                    const kiln_string *name = property_key.tag == KILN_VALUE_STRING
+                        ? (const kiln_string *)property_key.ptr : NULL;
+                    if (name == NULL) continue;
+                    const kiln_string *canonical = kiln_c99_property_ikey(key);
+                    status = kiln_c99_describe_property_key(host, args[0], name, canonical,
+                                                            &descriptor, &found, depth, thrown);
+                    if (status == KILN_C99_OK && found)
+                        status = kiln_c99_put_key(host, built, name, canonical, descriptor, 0,
+                                                  depth, thrown);
+                }
+                if (status == KILN_C99_OK) *result = built;
                 return status;
             }
             object = kiln_c99_object_of(args[0]);

@@ -5013,7 +5013,7 @@ fn render_module_positioned(
         symbol
     };
     let unit_symbol = shared_unit_symbol.unwrap_or(default_unit_symbol);
-    let plan = validate_program(program).expect("render called after validation");
+    let plan = validate_module_program(program)?;
     let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
     // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
@@ -5142,6 +5142,29 @@ fn render_module_positioned(
                 }
             }
         }
+    }
+    let has_live_direct_eval = pruned
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
+        || match &liveness {
+            Some((reachable, _, _)) => reachable.iter().any(|&index| {
+                pruned.functions[index]
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
+            }),
+            None => pruned.functions.iter().any(|function| {
+                function
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
+            }),
+        };
+    if has_live_direct_eval {
+        return Err(EmitError::Unsupported {
+            feature: "a direct `eval` call in reachable native code".to_owned(),
+        });
     }
     if policy.compact || policy.omit_source {
         compact_closure_source(

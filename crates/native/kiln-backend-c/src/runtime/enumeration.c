@@ -297,6 +297,11 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return kiln_c99_has_property_key(host, prototype, key, ikey, answer, depth, thrown);
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        if (target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE &&
+            kiln_c99_same_name_key(key, "@@toStringTag")) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
         kiln_value store;
         if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
             kiln_c99_store_has(store, key, ikey)) {
@@ -472,6 +477,11 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                                           "hasIndices", "global",      "ignoreCase", "multiline",
                                           "dotAll",     "unicode",     "unicodeSets", "sticky"};
         size_t index;
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
         for (index = 0; index < sizeof own / sizeof own[0]; ++index) {
             if (kiln_c99_same_name_key(key, own[index])) {
                 *answer = 1;
@@ -485,7 +495,8 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         {
             static const char *const inherited[] = {"exec",      "test",       "toString",
                                                     "compile",   "@@match",    "@@matchAll",
-                                                    "@@replace", "@@search",   "@@split"};
+                                                    "@@replace", "@@search",   "@@split",
+                                                    "@@toStringTag"};
             for (index = 0; index < sizeof inherited / sizeof inherited[0]; ++index) {
                 if (kiln_c99_same_name_key(key, inherited[index])) {
                     *answer = 1;
@@ -677,6 +688,16 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         *answer = !found;
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (kiln_c99_same_name_key(key, "lastIndex")) {
+            *answer = 0;
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
         /* A member the program wrote onto a built-in lives in the built-in's store, and deleting
          * it puts the table's member back in view (`delete Float64Array.prototype.map` after a
@@ -852,6 +873,12 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         kiln_object *object = kiln_c99_object_of(target);
         status = kiln_c99_append_enumerable_object_keys(object, built, 1);
         if (status != KILN_C99_OK) return status;
+    } else if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 1);
+            if (status != KILN_C99_OK) return status;
+        }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
          * gives "0" and "1", not 0 and 1. */

@@ -823,7 +823,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
 #endif
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        int found = 0;
         size_t index;
+        status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
         /* The flag letters, in the order the specification lists their accessors. */
         static const char known[] = "dgimsuvy";
         static const char *const names[] = {"hasIndices", "global",  "ignoreCase", "multiline",
@@ -842,6 +845,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name_key(key, "@@toStringTag")) {
+            *out = kiln_c99_copy_text("RegExp", 6);
             return KILN_C99_OK;
         }
         /* Each flag is a boolean named after itself, read off the flag *string* rather than from
@@ -1602,6 +1609,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                   : kiln_c99_copy_text(method, strlen(method));
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name_key(key, "length") &&
+            (target.bits == KILN_C99_METHOD_REGEXP_TEST ||
+             target.bits == KILN_C99_METHOD_REGEXP_EXEC ||
+             target.bits == KILN_C99_METHOD_REGEXP_TO_STRING)) {
+            *out = kiln_c99_number(target.bits == KILN_C99_METHOD_REGEXP_TO_STRING ? 0.0 : 1.0);
+            return KILN_C99_OK;
+        }
         KILN_C99_REFUSE("a member of a native method other than name");
     }
     case KILN_VALUE_BUILTIN: {
@@ -2086,6 +2100,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 if (kiln_c99_same_name_key(key, "source")) {
                     *out = kiln_c99_copy_text("(?:)", 4);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name_key(key, "@@toStringTag")) {
+                    *out = kiln_c99_copy_text("RegExp", 6);
                     return KILN_C99_OK;
                 }
             }

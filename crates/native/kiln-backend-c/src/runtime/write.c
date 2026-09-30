@@ -447,6 +447,10 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
         current = array->properties;
     } else if (target.tag == KILN_VALUE_GENERATOR) {
         current = kiln_c99_generator_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        if (kiln_c99_same_name_key(key, "lastIndex")) return regexp->last_index_writable;
+        current = regexp->properties;
     }
 
     if (current.tag != KILN_VALUE_OBJECT) {
@@ -454,10 +458,10 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
          * on their first named write. Only a value with nowhere at all to put a property -- a
          * primitive, or an object-like tag this backend has no store for -- answers no. */
         if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY ||
-            target.tag == KILN_VALUE_GENERATOR) {
+            target.tag == KILN_VALUE_GENERATOR || target.tag == KILN_VALUE_REGEXP) {
             return 1;
         }
-        return target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(key, "lastIndex");
+        return 0;
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object = kiln_c99_object_of(current);

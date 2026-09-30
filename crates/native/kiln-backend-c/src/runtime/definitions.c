@@ -367,6 +367,21 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(view, "lastIndex")) {
+        kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        if (has_getter || has_setter ||
+            (has_enumerable && kiln_c99_truthy(enumerable)) ||
+            (has_configurable && kiln_c99_truthy(configurable)) ||
+            (!regexp->last_index_writable && has_writable && kiln_c99_truthy(writable)) ||
+            (!regexp->last_index_writable && has_value &&
+             kiln_c99_as_number(value) != regexp->last_index)) {
+            return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+        }
+        if (has_value && regexp->last_index_writable)
+            regexp->last_index = kiln_c99_as_number(value);
+        if (has_writable && !kiln_c99_truthy(writable)) regexp->last_index_writable = 0;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_SHARED) {
         kiln_value held;
         int present = 0;
@@ -683,7 +698,44 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(view, "lastIndex")) {
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "value", 5,
+                                  kiln_c99_number(kiln_c99_regexp_of(target)->last_index), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "writable", 8,
+                                  kiln_c99_boolean(kiln_c99_regexp_of(target)->last_index_writable),
+                                  0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK) {
+            *found = 1;
+            *out = built;
+        }
+        return status;
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        if (target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE &&
+            kiln_c99_same_name_key(view, "@@toStringTag")) {
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "value", 5,
+                                      kiln_c99_copy_text("RegExp", 6), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+            if (status == KILN_C99_OK) {
+                *found = 1;
+                *out = built;
+            }
+            return status;
+        }
         if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
             kiln_c99_same_name_key(view, "@@unscopables")) {
             kiln_value val;
@@ -898,6 +950,13 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                                       depth, thrown);
             }
         }
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_value *slot = kiln_c99_exotic_store(target);
+        if (slot != NULL && slot->tag == KILN_VALUE_OBJECT)
+            return kiln_c99_describe_property_key(host, *slot, view, canonical, out, found,
+                                                  depth, thrown);
         return KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {

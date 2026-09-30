@@ -654,12 +654,6 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         if (status != KILN_C99_OK) return status;
         return kiln_c99_put_mode_key(host, store, key, ikey, value, strict, depth, thrown);
     }
-    if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(key, "lastIndex")) {
-        /* The one property of a regexp a program may write, and the reason two evaluations of one
-         * literal must not share a `kiln_regexp`. */
-        kiln_c99_regexp_of(target)->last_index = kiln_c99_as_number(value);
-        return KILN_C99_OK;
-    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An array is not an object here, but it can still carry a property that is not an
          * element -- which is how `exec` reports `index` and `input`. */
@@ -736,6 +730,22 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             }
         }
         return kiln_c99_put_mode_key(host, promise->properties, key, ikey, value, strict, depth,
+                                     thrown);
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        if (kiln_c99_same_name_key(key, "lastIndex")) {
+            /* RegExp.prototype.lastIndex is a writable, non-configurable own data property. */
+            if (!regexp->last_index_writable)
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+            regexp->last_index = kiln_c99_as_number(value);
+            return KILN_C99_OK;
+        }
+        if (regexp->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object_for_owner(&regexp->properties, regexp);
+            if (status != KILN_C99_OK) return status;
+        }
+        return kiln_c99_put_mode_key(host, regexp->properties, key, ikey, value, strict, depth,
                                      thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT) {

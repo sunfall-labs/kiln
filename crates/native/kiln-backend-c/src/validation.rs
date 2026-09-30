@@ -5,6 +5,19 @@ pub(crate) fn validate(program: &Program) -> Result<usize, EmitError> {
 }
 
 pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
+    validate_program_with_eval_policy(program, false)
+}
+
+/// Module emission can prune unreachable function bodies before deciding whether a direct eval
+/// is a live unsupported operation. All other instruction checks remain identical.
+pub(crate) fn validate_module_program(program: &Program) -> Result<StackPlan, EmitError> {
+    validate_program_with_eval_policy(program, true)
+}
+
+fn validate_program_with_eval_policy(
+    program: &Program,
+    allow_direct_eval: bool,
+) -> Result<StackPlan, EmitError> {
     if program.version != BYTECODE_VERSION {
         return Err(EmitError::Unsupported {
             feature: format!(
@@ -41,7 +54,13 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
             });
         }
     }
-    let body = validate_code(&program.code, program, program.local_count, 0)?;
+    let body = validate_code(
+        &program.code,
+        program,
+        program.local_count,
+        0,
+        allow_direct_eval,
+    )?;
     let functions = program
         .functions
         .iter()
@@ -51,6 +70,7 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
                 program,
                 proto.local_count,
                 proto.upvalues.len(),
+                allow_direct_eval,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -66,9 +86,12 @@ pub(crate) fn validate_code(
     program: &Program,
     local_count: u32,
     upvalue_count: usize,
+    allow_direct_eval: bool,
 ) -> Result<usize, EmitError> {
     for (index, instruction) in code.iter().enumerate() {
-        validate_supported_instruction(instruction)?;
+        if !allow_direct_eval || !matches!(instruction, Instruction::DirectEval(_)) {
+            validate_supported_instruction(instruction)?;
+        }
         match instruction {
             Instruction::Const(constant) if (*constant as usize) >= program.constants.len() => {
                 return Err(invalid(
@@ -477,7 +500,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
 }
 
 pub(crate) fn validate_module(module: &ModuleProgram) -> Result<usize, EmitError> {
-    let max_stack = validate(&module.program)?;
+    let max_stack = validate_module_program(&module.program)?.body;
     let local_count = u64::from(module.program.local_count);
     let mut initialized_slots = HashSet::with_capacity(module.imports.len());
     for (index, binding) in module.imports.iter().enumerate() {

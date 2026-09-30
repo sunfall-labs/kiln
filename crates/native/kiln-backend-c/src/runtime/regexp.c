@@ -30,11 +30,13 @@ static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
+    regexp->last_index_writable = 1;
     kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, NULL);
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
     regexp->named_groups = 0;
+    kiln_c99_heap_store_value(regexp, &regexp->properties, kiln_c99_undefined());
     for (index = 0; flags != NULL && index < flags->unit_len; ++index) {
         uint32_t flag = kiln_string_unit_at(flags, index);
         if (flag == 'g') {
@@ -73,10 +75,13 @@ static int kiln_c99_new_regexp_matcher(kiln_value *out, const kiln_string *sourc
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
+    regexp->last_index_writable = 1;
     kiln_c99_heap_store_pointer(regexp, &regexp->cached_subject_ptr, NULL);
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
+    regexp->named_groups = 0;
+    kiln_c99_heap_store_value(regexp, &regexp->properties, kiln_c99_undefined());
     for (index = 0; flags != NULL && index < flags->unit_len; ++index) {
         uint32_t flag = kiln_string_unit_at(flags, index);
         if (flag == 'g') {
