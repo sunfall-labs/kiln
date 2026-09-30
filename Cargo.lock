@@ -1914,6 +1914,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-date-core"
+version = "0.1.0"
+
+[[package]]
 name = "kiln-db"
 version = "0.1.0"
 dependencies = [
@@ -2009,6 +2013,7 @@ dependencies = [
  "flate2",
  "kiln-builtin-surface",
  "kiln-builtins",
+ "kiln-date-core",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",
@@ -2168,6 +2173,7 @@ version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
  "kiln-host-abi",
+ "kiln-date-core",
  "kiln-intl",
  "kiln-json",
  "kiln-native-provider-contract",

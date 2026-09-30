@@ -1507,12 +1507,15 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static void kiln_c99_node_drop_http_connection(void *opaque);
 static int kiln_c99_node_client_attach(kiln_node_client_request *request,
+double kiln_date_parse(const kiln_string *source);
 int32_t kiln_json_parse(const kiln_string *source, const kiln_json_node **out_nodes,
 int32_t kiln_regexp_compile(const kiln_string *pattern, const kiln_string *flags,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const kiln_string *subject, size_t start,
 size_t kiln_regexp_group_count(const void *handle);
 int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
+size_t kiln_regexp_named_group_count(const void *handle);
+int32_t kiln_regexp_named_group_at(const void *handle, size_t index, unsigned char *buffer,
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out);
 int32_t kiln_bigint_from_double(double value, void **out);
 void kiln_bigint_free(void *handle);

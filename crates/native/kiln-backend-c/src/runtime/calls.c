@@ -423,9 +423,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             if (args[0].tag == KILN_VALUE_DATE) {
                 time = kiln_c99_date_time(args[0]);
             } else if (args[0].tag == KILN_VALUE_STRING) {
-                size_t date_len = 0;
-                const char *date_bytes = kiln_c99_string_ascii_bytes(args[0], &date_len);
-                time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
+                time = kiln_c99_parse_date(args[0]);
             } else {
                 kiln_value primitive;
                 status = kiln_c99_to_primitive(host, args[0], 2 /* default */,
@@ -434,9 +432,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                     return status;
                 }
                 if (primitive.tag == KILN_VALUE_STRING) {
-                    size_t date_len = 0;
-                    const char *date_bytes = kiln_c99_string_ascii_bytes(primitive, &date_len);
-                    time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
+                    time = kiln_c99_parse_date(primitive);
                 } else if (primitive.tag == KILN_VALUE_SYMBOL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "Cannot convert a Symbol value to a number");

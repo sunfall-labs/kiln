@@ -225,6 +225,78 @@ pub unsafe extern "C" fn kiln_regexp_group_name(
     length
 }
 
+/// The number of distinct named captures in the last match.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_regexp_named_group_count(handle: *const KilnRegex) -> usize {
+    if handle.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller contract guarantees the handle is live.
+    let state = unsafe { &*handle };
+    state
+        .last
+        .as_ref()
+        .map_or(0, |found| found.named_groups().count())
+}
+
+/// Read a named capture by its ordinal among distinct names, keeping the capture's actual value
+/// with its name even when unnamed groups precede it. Unmatched named groups write (-1, -1).
+///
+/// Returns the UTF-8 name length, or -1 for invalid arguments or an unknown index.
+///
+/// # Safety
+///
+/// `handle` must be live; `buffer` must be writable for `capacity` bytes; `from` and `to` must be
+/// writable slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_regexp_named_group_at(
+    handle: *const KilnRegex,
+    index: usize,
+    buffer: *mut u8,
+    capacity: usize,
+    from: *mut i64,
+    to: *mut i64,
+) -> i32 {
+    if handle.is_null() || buffer.is_null() || from.is_null() || to.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller contract guarantees the handle is live.
+    let state = unsafe { &*handle };
+    let Some(found) = state.last.as_ref() else {
+        return INVALID_ARGUMENT;
+    };
+    let Some((name, range)) = found.named_groups().nth(index) else {
+        return INVALID_ARGUMENT;
+    };
+    let bytes = name.as_bytes();
+    let Ok(length) = i32::try_from(bytes.len()) else {
+        return INVALID_ARGUMENT;
+    };
+    if bytes.len() > capacity {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: `buffer` and the output slots are writable by the caller contract, and the source
+    // name is disjoint from the caller's buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
+        match range {
+            Some(range) => {
+                from.write(as_offset(range.start));
+                to.write(as_offset(range.end));
+            }
+            None => {
+                from.write(-1);
+                to.write(-1);
+            }
+        }
+    }
+    length
+}
+
 fn view_to_unicode(view: super::StringView<'_>) -> Option<Vec<u32>> {
     match view {
         super::StringView::Latin1(bytes) => {
@@ -295,6 +367,12 @@ macro_rules! assert_provider_export {
         };
         (regexp, kiln_regexp_group_name, regexp_group_name) => {
             const _: unsafe extern "C" fn(*const KilnRegex, usize, *mut u8, usize) -> i32 = kiln_regexp_group_name;
+        };
+        (regexp, kiln_regexp_named_group_count, regexp_named_group_count) => {
+            const _: unsafe extern "C" fn(*const KilnRegex) -> usize = kiln_regexp_named_group_count;
+        };
+        (regexp, kiln_regexp_named_group_at, regexp_named_group_at) => {
+            const _: unsafe extern "C" fn(*const KilnRegex, usize, *mut u8, usize, *mut i64, *mut i64) -> i32 = kiln_regexp_named_group_at;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }

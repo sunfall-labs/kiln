@@ -1463,7 +1463,7 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
                               thrown);
     }
     if (status == KILN_C99_OK && regexp != NULL) {
-        status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built), groups);
+        status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built));
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_put(host, built, "groups", 6, kiln_c99_array_of(built)->match_groups, depth, thrown);

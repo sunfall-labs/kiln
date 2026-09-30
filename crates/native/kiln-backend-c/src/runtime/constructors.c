@@ -1,52 +1,12 @@
-/* An ISO-8601 instant, or NaN. Deliberately narrow: the shapes a program writes down and the
- * shapes `toISOString` produces, which is what a round trip needs. Anything looser would accept
- * text the interpreter rejects, and the two have to agree. */
-static double kiln_c99_parse_date(const char *bytes, size_t len) {
-    int64_t fields[7] = {0, 1, 1, 0, 0, 0, 0};
-    size_t at = 0;
-    size_t index;
-    static const size_t WIDTHS[7] = {4, 2, 2, 2, 2, 2, 3};
-    while (at < len && (bytes[at] == ' ' || bytes[at] == '\t')) {
-        at += 1;
-    }
-    while (len > at && (bytes[len - 1] == ' ' || bytes[len - 1] == '\t')) {
-        len -= 1;
-    }
-    for (index = 0; index < 7; ++index) {
-        size_t width = WIDTHS[index];
-        size_t digit;
-        if (index > 0) {
-            /* The separator each field is introduced by, and the point past which the rest is
-             * optional: a date alone is a valid instant. */
-            char expected = index == 1 || index == 2 ? '-' : index == 3 ? 'T' : index == 6 ? '.' : ':';
-            if (at >= len || bytes[at] != expected) {
-                break;
-            }
-            at += 1;
-        }
-        if (len - at < width) {
-            return 0.0 / 0.0;
-        }
-        fields[index] = 0;
-        for (digit = 0; digit < width; ++digit) {
-            char byte = bytes[at + digit];
-            if (byte < '0' || byte > '9') {
-                return 0.0 / 0.0;
-            }
-            fields[index] = fields[index] * 10 + (byte - '0');
-        }
-        at += width;
-    }
-    /* A trailing `Z` is the only zone accepted, because the realm has no other. */
-    if (at < len && bytes[at] == 'Z') {
-        at += 1;
-    }
-    if (at != len || fields[1] < 1 || fields[1] > 12 || fields[2] < 1 || fields[2] > 31) {
-        return 0.0 / 0.0;
-    }
-    return (double)kiln_c99_days_from_civil(fields[0], fields[1], fields[2]) * 86400000.0 +
-           (double)fields[3] * 3600000.0 + (double)fields[4] * 60000.0 +
-           (double)fields[5] * 1000.0 + (double)fields[6];
+/* Date string grammar belongs to kiln-date-core, the semantic owner shared by interpreter and
+ * provider. This adapter only preserves the runtime string representation at that boundary. */
+static double kiln_c99_parse_date(kiln_value source) {
+    if (source.tag != KILN_VALUE_STRING || source.ptr == NULL) return 0.0 / 0.0;
+    const kiln_string *text = (const kiln_string *)source.ptr;
+    kiln_string view = { .unit_len = text->unit_len,
+                         .flags = text->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16),
+                         .data = text->data };
+    return kiln_date_parse(&view);
 }
 
 /* `Array(...)`, which is `new Array(...)`: the two are the same operation, and the ambiguity in

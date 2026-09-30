@@ -8,7 +8,10 @@
 (function installDatePrototype() {
   const rawGetTime: (this: Date) => number = Date.prototype.getTime;
   const rawSetTime: (this: Date, time: number) => number = (new Date(0) as any).setTime;
-  if (typeof rawGetTime !== "function" || typeof rawSetTime !== "function") return;
+  const rawParse: (dateString: any) => number = Date.parse;
+  if (typeof rawGetTime !== "function" || typeof rawSetTime !== "function" ||
+      typeof rawParse !== "function") return;
+  const parse = { parse(dateString: any): number { return rawParse(dateString); } }.parse;
 
   function floorMod(a: number, b: number): number {
     const m = a % b;
@@ -122,6 +125,7 @@
     const clock = ((h * 3600000 + min * 60000) + s * 1000) + ms;
     return timeClip(days * 86400000 + clock);
   }
+
 
   // --- Getters ---
   const getTime = { getTime(this: Date): number {
@@ -566,6 +570,13 @@
   defineMethod("toLocaleString", toLocaleString);
   defineMethod("toLocaleDateString", toLocaleDateString);
   defineMethod("toLocaleTimeString", toLocaleTimeString);
+  Object.defineProperty(Date, "parse", {
+    value: parse,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
   // The one method the specification makes read-only: `{ writable: false, configurable: true }`.
   Object.defineProperty(Date.prototype, Symbol.toPrimitive, {
     value: toPrimitive,

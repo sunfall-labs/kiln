@@ -914,16 +914,8 @@
             *result = kiln_c99_text(receiver);
             return KILN_C99_OK;
         case KILN_C99_METHOD_DATE_PARSE: {
-            /* Parsing accepts the ISO forms and rejects the rest, rather than guessing: a date
-             * a program did not write is worse than no date at all. */
             kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
-            size_t source_len = 0;
-            const char *source_bytes = source.tag == KILN_VALUE_STRING
-                                           ? kiln_c99_string_ascii_bytes(source, &source_len)
-                                           : NULL;
-            *result = kiln_c99_number(source_bytes != NULL
-                                          ? kiln_c99_parse_date(source_bytes, source_len)
-                                          : 0.0 / 0.0);
+            *result = kiln_c99_number(kiln_c99_parse_date(source));
             return KILN_C99_OK;
         }
         /* `Date.UTC`, and the two representation operations the shared `Date.prototype`

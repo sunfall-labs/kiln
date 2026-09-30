@@ -257,9 +257,12 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                     size_t name_len = close - (at + 2);
                     piece = subject;
                     piece_count = 0;
-                    for (group = 1; group < groups; ++group) {
+                    for (group = 0; group < kiln_regexp_named_group_count(regexp->handle); ++group) {
                         unsigned char name[256];
-                        int32_t len = kiln_regexp_group_name(regexp->handle, group, name, sizeof name);
+                        int64_t named_from = -1, named_to = -1;
+                        int32_t len = kiln_regexp_named_group_at(regexp->handle, group, name,
+                                                                 sizeof name, &named_from,
+                                                                 &named_to);
                         size_t k;
                         if (len <= 0) continue;
                         any_named = 1;
@@ -268,9 +271,9 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                             if (pattern[at + 2 + k] != (uint16_t)name[k]) break;
                         }
                         if (k != name_len) continue;
-                        if (ranges[group * 2] >= 0) {
-                            piece = subject + (size_t)ranges[group * 2];
-                            piece_count = (size_t)(ranges[group * 2 + 1] - ranges[group * 2]);
+                        if (named_from >= 0 && named_to >= named_from) {
+                            piece = subject + (size_t)named_from;
+                            piece_count = (size_t)(named_to - named_from);
                         }
                         break;
                     }

@@ -282,6 +282,9 @@ macro_rules! assert_root_provider_export {
     (root, kiln_string_to_number, string_to_number) => {
         const _: unsafe extern "C" fn(*const u8, usize) -> f64 = kiln_string_to_number;
     };
+    (date, kiln_date_parse, date_parse) => {
+        const _: unsafe extern "C" fn(*const KilnString) -> f64 = kiln_date_parse;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -289,6 +292,10 @@ macro_rules! assert_root_provider_export {
 }
 
 kiln_native_provider_contract::provider_abi_registry!(assert_root_provider_export);
+
+#[path = "provider/date.rs"]
+mod date;
+use date::kiln_date_parse;
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can

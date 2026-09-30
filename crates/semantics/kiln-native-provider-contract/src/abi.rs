@@ -198,12 +198,15 @@ macro_rules! provider_abi_registry {
             (realm, kiln_atomics_notify, atomics_notify);
             (root, kiln_number_to_js_string, number_to_js_string);
             (root, kiln_string_to_number, string_to_number);
+            (date, kiln_date_parse, date_parse);
             (root, kiln_typed_array_sort, typed_array_sort);
             (regexp, kiln_regexp_compile, regexp_compile);
             (regexp, kiln_regexp_free, regexp_free);
             (regexp, kiln_regexp_search, regexp_search);
             (regexp, kiln_regexp_group_count, regexp_group_count);
             (regexp, kiln_regexp_group_name, regexp_group_name);
+            (regexp, kiln_regexp_named_group_count, regexp_named_group_count);
+            (regexp, kiln_regexp_named_group_at, regexp_named_group_at);
             (bigint, kiln_bigint_parse, bigint_parse);
             (bigint, kiln_bigint_from_double, bigint_from_double);
             (bigint, kiln_bigint_free, bigint_free);

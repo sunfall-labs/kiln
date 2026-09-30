@@ -59,6 +59,8 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
     }
     return kiln_c99_node_client_try_start(request);
 }
+/* Date parsing is shared with the interpreter through the semantic provider. */
+double kiln_date_parse(const kiln_string *source);
 /* `JSON.parse`'s reader, linked from the provider archive as a tape (`crates/semantics/kiln-json`, ADR
  * 0025). The interpreter links the same crate, so the two engines cannot disagree about the
  * grammar; what is left here is the walk that makes this engine's strings, arrays and objects.
@@ -74,6 +76,9 @@ int32_t kiln_regexp_search(void *handle, const kiln_string *subject, size_t star
 size_t kiln_regexp_group_count(const void *handle);
 int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
                                size_t capacity);
+size_t kiln_regexp_named_group_count(const void *handle);
+int32_t kiln_regexp_named_group_at(const void *handle, size_t index, unsigned char *buffer,
+                                   size_t capacity, int64_t *from, int64_t *to);
 /* Arbitrary-precision integers. The handles are opaque: everything that knows what one contains
  * is on the other side of this boundary, which is the point (ADR 0025). */
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out);
@@ -524,7 +529,7 @@ static int kiln_c99_new_date(kiln_value *out, double time);
 static int kiln_c99_iso_string(kiln_value *out, double time);
 static int kiln_c99_date_to_string(kiln_value *out, double time);
 static double kiln_c99_instant_from_parts(const double parts[7]);
-static double kiln_c99_parse_date(const char *bytes, size_t len);
+static double kiln_c99_parse_date(kiln_value source);
 static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
 static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
@@ -551,7 +556,7 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
                                        kiln_value function, int kind);
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
-static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr, size_t groups);
+static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr);
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out);
 static int kiln_c99_url_parse_raw(kiln_value *out, const kiln_value *args, size_t argc,
                                   kiln_value *thrown);

@@ -350,7 +350,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         arr->match_index = ranges[0];
                         kiln_c99_heap_store_value(arr, &arr->match_input, sval);
                         {
-                            int gstatus = kiln_c99_match_groups(regexp, arr, groups);
+                            int gstatus = kiln_c99_match_groups(regexp, arr);
                             if (gstatus != KILN_C99_OK) {
                                 if (ranges != stack_ranges) free(ranges);
                                 return gstatus;

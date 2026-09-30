@@ -64,6 +64,9 @@ int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject
                            size_t start, int64_t *out_ranges, size_t out_capacity);
 /* The name of group `index` as UTF-8, or -1 when it has none. */
 int32_t kiln_regexp_group_name(void *handle, size_t index, uint8_t *buffer, size_t capacity);
+size_t kiln_regexp_named_group_count(const void *handle);
+int32_t kiln_regexp_named_group_at(const void *handle, size_t index, uint8_t *buffer,
+                                  size_t capacity, int64_t *from, int64_t *to);
 void    kiln_regexp_free(void *handle);
 ```
 

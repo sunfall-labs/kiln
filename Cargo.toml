@@ -21,6 +21,7 @@ kiln-backend-c = { path = "crates/native/kiln-backend-c" }
 kiln-builtin-surface = { path = "crates/semantics/kiln-builtin-surface" }
 kiln-builtins = { path = "crates/semantics/kiln-builtins" }
 kiln-data-formats = { path = "crates/foundation/kiln-data-formats" }
+kiln-date-core = { path = "crates/foundation/kiln-date-core" }
 kiln-db = { path = "crates/compile/kiln-db" }
 kiln-digest = { path = "crates/foundation/kiln-digest" }
 kiln-hir = { path = "crates/syntax/kiln-hir" }

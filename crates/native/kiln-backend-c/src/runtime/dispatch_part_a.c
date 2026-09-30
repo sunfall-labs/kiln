@@ -3163,7 +3163,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     arr->match_index = ranges[0];
                     kiln_c99_heap_store_value(arr, &arr->match_input, subject);
-                    status = kiln_c99_match_groups(regexp, arr, groups);
+                    status = kiln_c99_match_groups(regexp, arr);
                     if (status != KILN_C99_OK) {
                         if (ranges != stack_ranges) free(ranges);
                         if (units != NULL && !stack_used) free(units);

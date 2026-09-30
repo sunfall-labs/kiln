@@ -34,3 +34,18 @@ pub unsafe extern "C" fn kiln_regexp_group_name(
 ) -> i32 {
     INVALID_ARGUMENT
 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_regexp_named_group_count(_handle: *const c_void) -> usize {
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_regexp_named_group_at(
+    _handle: *const c_void,
+    _index: usize,
+    _buffer: *mut u8,
+    _capacity: usize,
+    _from: *mut i64,
+    _to: *mut i64,
+) -> i32 {
+    INVALID_ARGUMENT
+}
