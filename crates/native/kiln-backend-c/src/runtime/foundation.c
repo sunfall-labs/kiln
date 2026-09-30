@@ -1,3 +1,4 @@
+static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
