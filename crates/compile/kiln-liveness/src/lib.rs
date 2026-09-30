@@ -456,7 +456,15 @@ pub fn select_executable_modules<'a>(
                         }
                     }
                     Some(ResolvedExport::Namespace { module }) => {
-                        mark_live(module, &mut live, &mut queue);
+                        // An observable namespace re-export exposes the provider's complete
+                        // namespace. Marking only the provider module live leaves its export
+                        // slots empty, so downstream namespace objects can contain missing
+                        // members (for example htmlparser2's `DomUtils.getElementById`).
+                        let newly_live = live.insert(module.clone());
+                        let newly_demanded = namespace_demands.insert(module.clone());
+                        if newly_live || newly_demanded {
+                            queue.push_back(module.clone());
+                        }
                     }
                     Some(ResolvedExport::Ambiguous) | None => {}
                 }

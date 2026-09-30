@@ -743,12 +743,16 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                     | Instruction::StoreGlobal(slot) => *slot,
                     _ => continue,
                 };
-                if evaluation_reads.contains(&slot) {
+                // The slot may be used by another module through an exported/imported live
+                // binding without appearing in this module's evaluation instructions. `demanded`
+                // contains those graph-level roots; their closures and captured locals must be
+                // present before any member of the cycle begins evaluation.
+                if evaluation_reads.contains(&slot) || demanded.contains(&slot) {
                     retained.insert(slot);
-                    // The closure is itself loaded by evaluation, but the module locals its
-                    // upvalues point at must also survive instantiation DCE. Otherwise the
-                    // closure is retained while its captured lexical cell is pruned, so a class
-                    // or let declaration reached later can leave it permanently in TDZ.
+                    // The closure is retained for local evaluation or an imported export, but
+                    // module locals its upvalues point at must also survive instantiation DCE.
+                    // Otherwise the closure survives while its captured lexical cell is pruned,
+                    // so a class or let declaration can leave it permanently in TDZ.
                     if let Some(function) = module.program.functions.get(*function_index as usize) {
                         for upvalue in &function.upvalues {
                             match upvalue {

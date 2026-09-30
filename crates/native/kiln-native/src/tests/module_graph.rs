@@ -4214,6 +4214,59 @@ fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
 }
 
 #[test]
+fn executable_graph_namespace_reexport_demand_keeps_provider_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-full-namespace-reexport-demand");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let provider = project.path.join("provider.js");
+    fs::write(
+        &provider,
+        "export function used() { return 42; } export function otherwiseUnused() { return 7; }",
+    )
+    .expect("write namespace provider");
+    fs::write(
+        project.path.join("barrel.js"),
+        "export * as helpers from './provider.js';",
+    )
+    .expect("write namespace re-export");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        "const { helpers } = require('./barrel.js'); console.log(helpers.used());",
+    )
+    .expect("write CommonJS entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+    let provider = fs::canonicalize(provider).expect("canonical provider");
+    let provider_node = graph.module(&provider).expect("provider node");
+    let demanded = selected
+        .live_export_slots
+        .get(&provider)
+        .expect("namespace re-export requires the provider namespace");
+    for export in &provider_node.program.exports {
+        assert!(
+            demanded.contains(&export.local_slot),
+            "namespace member {} was not retained",
+            export.exported
+        );
+    }
+    assert!(!selected.partial_namespace_members.contains_key(&provider));
+}
+
+#[test]
 fn release_graph_selects_the_production_arm_of_an_exact_commonjs_dispatcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

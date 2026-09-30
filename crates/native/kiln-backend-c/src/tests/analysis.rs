@@ -702,8 +702,6 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
                 Instruction::StoreLocal(0),
                 Instruction::Const(0),
                 Instruction::StoreCell(1),
-                Instruction::LoadLocal(0),
-                Instruction::Pop,
                 Instruction::Return,
             ],
             local_count: 2,
@@ -738,6 +736,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
             .contains("kiln_c99_val_make_cell(&locals[1])")
     );
     assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
+    assert!(instantiation.source.contains("ku_fn_0("));
 }
 
 #[test]
