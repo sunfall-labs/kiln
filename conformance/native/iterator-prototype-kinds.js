@@ -11,3 +11,13 @@ console.log(Object.getPrototypeOf(arrayIterator) !== Object.getPrototypeOf(strin
 console.log(Object.getPrototypeOf(arrayIterator).next === arrayIterator.next);
 console.log(Object.hasOwn(arrayIterator, "next"));
 console.log(arrayIterator.next().value, stringIterator.next().value);
+// The IteratorClose protocol probes `return` on an iterator and treats an absent method as
+// normal. Distinct kind prototypes inherit the helper methods, then terminate at this prototype
+// and Object.prototype; an unknown name must not be mistaken for an unimplemented builtin.
+console.log("optional-return", arrayIterator.return === undefined,
+  stringIterator.return === undefined, mapReturnAbsent(), typeof arrayIterator.map,
+  arrayIterator.hasOwnProperty("next"));
+
+function mapReturnAbsent() {
+	return new Map().keys().return === undefined;
+}

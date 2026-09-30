@@ -2207,6 +2207,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_same_name_key(key, "name"))) {
                 KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
             }
+            if (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
+                kiln_c99_same_name_key(key, "@@toStringTag")) {
+                *out = kiln_c99_copy_text("Iterator", 8);
+                return KILN_C99_OK;
+            }
             if (target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Method get Set.prototype.size called on incompatible receiver");
@@ -2237,7 +2242,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_null();
                 return KILN_C99_OK;
             }
-
+            if (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+                /* Its TypeScript-installed extensions and Object.prototype members have already
+                 * been read above, as have the methods returned by the shared iterator table.
+                 * This prototype is a distinct node in Array/String/Map/Set iterator chains; a
+                 * name absent from that authority is an ordinary absent property (not a missing
+                 * method on a table-driven built-in). Keep the authority check explicit so a
+                 * future helper added to the table cannot silently fall through here. */
+                if (kiln_c99_iterator_prototype_method(intrinsic_key, intrinsic_len) != 0) {
+                    KILN_C99_REFUSE("an Iterator.prototype table member not returned by its method lookup");
+                }
+                KILN_C99_ABSENT("not an Iterator.prototype member: absent from the shared helper table and installed store", out);
+            }
         }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                         "built");
