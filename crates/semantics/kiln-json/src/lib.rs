@@ -187,12 +187,21 @@ impl TextArena {
 /// A decoded string span, addressed in JavaScript units.
 pub type TextSlice<'a> = StringView<'a>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Tape<'a> {
     nodes: &'a [Node],
     text: &'a TextArena,
     spans: &'a [Option<(usize, usize)>],
     source: &'a dyn UnitSource,
+}
+impl std::fmt::Debug for Tape<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tape")
+            .field("nodes", &self.nodes)
+            .field("text", &self.text)
+            .field("spans", &self.spans)
+            .finish_non_exhaustive()
+    }
 }
 impl<'a> Tape<'a> {
     pub fn nodes(&self) -> &'a [Node] {
