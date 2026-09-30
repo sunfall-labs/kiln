@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "coverage": "5 focused native probes; parity is not the full npm corpus",
+  "source_commit": "4485c94f9c797887f3d6ca5dd742f6d78ba2acb6",
+  "kiln_sha256": "859c257a1e1621a35e6f5cc4ad4a8bc0988e7934c70ac8fa02943c8755a83650",
+  "counts": {
+    "matched": 3,
+    "refused": 0,
+    "diverged": 2,
+    "invalid": 0
+  },
+  "blockers": [
+    "Native Symbol.species descriptor is enumerable when omitted in Object.defineProperty; corrected after this build",
+    "Native bounded literal eval cannot resolve captured util import"
+  ],
+  "raw_log": "target/npm-compat-evidence/bootstrap-native-twenty-ninth.log",
+  "full_npm_coverage": false
+}
