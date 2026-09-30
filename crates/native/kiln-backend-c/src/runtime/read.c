@@ -2110,6 +2110,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
+        if (target.bits == KILN_C99_BUILTIN_SET &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            /* Set's constructor has no ordinary string-named statics beyond name, length and
+             * prototype (handled above). In particular, feature tests such as kind-of's
+             * `Set.isBuffer` must receive undefined instead of a backend refusal. */
+            KILN_C99_ABSENT("Set constructor has no other string-named statics", out);
+        }
         {
             /* An absent name on a table-driven built-in is `undefined`, exactly as it is on an
              * object the program built: `Object.nope` is not a gap here, it is what the language

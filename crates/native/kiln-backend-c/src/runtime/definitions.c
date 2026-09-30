@@ -707,6 +707,24 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        if (target.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE &&
+            (kiln_c99_same_name_key(view, "name") || kiln_c99_same_name_key(view, "length"))) {
+            /* Function.prototype is itself callable and owns the same two intrinsic data
+             * properties as every other function: name is the empty string and length is zero. */
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "value", 5,
+                                      kiln_c99_same_name_key(view, "name")
+                                          ? kiln_c99_copy_text("", 0) : kiln_c99_number(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+            if (status == KILN_C99_OK) { *found = 1; *out = built; }
+            return status;
+        }
         if (target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE &&
             kiln_c99_same_name_key(view, "@@toStringTag")) {
             status = kiln_c99_new_object(&built);
@@ -765,6 +783,21 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             *found = 1;
             *out = built;
             return status;
+        }
+        if ((target.bits == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+             target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE) &&
+            kiln_c99_same_name_key(view, "size")) {
+            /* `size` is an accessor installed by the shared TypeScript bootstrap. The
+             * namespace-method table also knows its read implementation, but asking that table
+             * for a descriptor would invoke the getter with the prototype as receiver. Describe
+             * the accessor from its defining store instead. */
+            kiln_value held;
+            status = kiln_c99_callable_store(target, &held, 0);
+            if (status != KILN_C99_OK) return status;
+            if (held.tag == KILN_VALUE_OBJECT)
+                return kiln_c99_describe_property_key(host, held, view, canonical, out, found,
+                                                      depth, thrown);
+            return KILN_C99_OK;
         }
         char intrinsic_buffer[256];
         const char *intrinsic_key;
@@ -1157,6 +1190,9 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
          * knows about, so it answers rather than a fourth restatement of them. */
         return kiln_c99_describe_property_key(host, target, view, canonical, &descriptor, found,
                                           depth, thrown);
+    case KILN_VALUE_REGEXP:
+        return kiln_c99_describe_property_key(host, target, view, canonical, &descriptor, found,
+                                              depth, thrown);
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
         if (kiln_c99_same_name_key(view, "prototype")) {
@@ -1232,6 +1268,11 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_BUILTIN: {
         int enumerable;
         kiln_value names;
+        if (target.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE &&
+            (kiln_c99_same_name_key(view, "name") || kiln_c99_same_name_key(view, "length"))) {
+            *found = 1;
+            return KILN_C99_OK;
+        }
         if (kiln_c99_typed_prototype_own_key(target, view, NULL, found, &enumerable)) {
             return KILN_C99_OK;
         }
