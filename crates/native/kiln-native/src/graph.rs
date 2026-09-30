@@ -3979,6 +3979,20 @@ static int kiln_graph_enter_inner(void *opaque) {
             );
         }
     }
+    // Node exposes the entry module through every CommonJS `require.main`. The wrapper creates
+    // one require function per source module, so publish the same entry module object onto each
+    // require function after all wrappers exist and before any module body runs.
+    if modules[entry_index].0.source == ModuleSource::CommonJs {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if node.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "        status = kiln_c99_put(NULL, kiln_imports_{index}[1], \"main\", (size_t)4, kiln_imports_{entry_index}[2], 0, NULL);\n        if (status != KILN_C99_OK) {{ *result = kiln_graph_diagnostic(\"commonjs-main\", \"require.main property setup failed\"); return status; }}"
+                )
+                .unwrap();
+            }
+        }
+    }
     // ModuleDeclarationInstantiation is a graph phase: allocate every binding cell first, then
     // wire imports to those cells, and only then create any function closures. No module body is
     // evaluated in this block.

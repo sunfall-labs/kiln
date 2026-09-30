@@ -3084,6 +3084,8 @@ typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_val
 typedef struct kiln_commonjs_require {
     kiln_commonjs_require_fn call;
     void *context;
+    /* CommonJS require is a function object with a module-local own-property store. */
+    kiln_value properties;
     /* The launcher's registered module-root inventory, with its stable realm-owned anchor.
      * Opaque contexts without this authority remain unproven for graph transfer. */
     kiln_gc_visit_roots_fn visit_context;

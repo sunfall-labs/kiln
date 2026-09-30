@@ -145,10 +145,11 @@ static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
         return KILN_C99_INVALID_ARGUMENT;
     /* Context storage is owned by the launcher and traced by its registered root inventory.
      * These fields are initialized before publication; no GC heap edge is hidden from transfer. */
-    require = (kiln_commonjs_require *)kiln_c99_gc_alloc_pointer_free(KILN_GC_COMMONJS_REQUIRE,
-                                                                      sizeof *require);
+    require = (kiln_commonjs_require *)kiln_c99_gc_alloc(KILN_GC_COMMONJS_REQUIRE,
+                                                         sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
+    require->properties = kiln_c99_undefined();
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
     kiln_c99_heap_store_pointer(require, &require->root_context, root_context);

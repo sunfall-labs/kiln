@@ -5519,6 +5519,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         if (kiln_c99_graph_in_batch(heap, chunks, count, require->context) ||
             kiln_c99_graph_in_batch(heap, chunks, count, require->root_context))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &require->properties))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         if (require->visit_context == NULL)
             return require->context == NULL && require->root_context == NULL
                 ? KILN_C99_GRAPH_ROOTS_UNENUMERATED : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -7925,6 +7927,11 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_trace_object_properties(heap, object);
         kiln_c99_gc_mark_value(heap, &object->prototype);
         kiln_c99_gc_mark_value(heap, &object->boxed_primitive);
+        break;
+    }
+    case KILN_GC_COMMONJS_REQUIRE: {
+        kiln_commonjs_require *require = (kiln_commonjs_require *)payload;
+        kiln_c99_gc_mark_value(heap, &require->properties);
         break;
     }
     case KILN_GC_CLOSURE: {

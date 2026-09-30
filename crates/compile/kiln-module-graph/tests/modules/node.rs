@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn private_module_identity_is_checkout_stable_and_module_specific() {
+    let source = "class Cache { #value = 1; get() { return this.#value; } }";
+    let first_root = Path::new("/checkout/one/project");
+    let second_root = Path::new("/checkout/two/project");
+    let first_id = graph_module_identity(first_root, &first_root.join("src/cache.js"));
+    let same_logical_id = graph_module_identity(second_root, &second_root.join("src/cache.js"));
+    let other_module_id = graph_module_identity(second_root, &second_root.join("src/other.js"));
+    assert_eq!(first_id, same_logical_id);
+    assert_ne!(first_id, other_module_id);
+
+    let compile_private_key = |module_id: &str| {
+        let mut hir = kiln_frontend_oxc::parse("fixture.js", source);
+        hir.module_id = Arc::from(module_id);
+        let program = compile_module(&hir).expect("private class compiles").program;
+        program
+            .constants
+            .into_iter()
+            .filter_map(|constant| match constant {
+                kiln_ir::Constant::String(value) => value
+                    .to_scalar_string()
+                    .ok()
+                    .filter(|value| value.starts_with("@@private:")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_keys = compile_private_key(&first_id);
+    assert_eq!(first_keys, compile_private_key(&same_logical_id));
+    assert_ne!(first_keys, compile_private_key(&other_module_id));
+}
+
+#[test]
 fn module_addressed_actor_runs_in_a_worker_realm() {
     let project = TempProject::new();
     project.write(

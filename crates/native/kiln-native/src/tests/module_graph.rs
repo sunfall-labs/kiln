@@ -894,6 +894,51 @@ fn native_commonjs_cycle_observes_current_module_exports_assignment() {
 }
 
 #[test]
+fn native_commonjs_require_main_points_to_the_entry_module() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-require-main");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("dep.js"),
+        "module.exports = require.main === module;",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.js");
+    fs::write(
+        &entry,
+        "const dep = require('./dep.js'); console.log(require.main === module, dep);",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS require.main graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS require.main execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native CommonJS require.main graph builds and runs");
+    assert_eq!(report.stdout, b"true false\n");
+}
+
+#[test]
 fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

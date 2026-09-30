@@ -648,7 +648,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         }
     }
     if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
-        target.tag == KILN_VALUE_BOUND) {
+        target.tag == KILN_VALUE_BOUND || target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         kiln_value store;
         status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;

@@ -1358,6 +1358,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
+        /* A Map/Set subclass has an ordinary prototype in front of the native collection
+         * surface. Consult the instance store and that chain first, including for names the
+         * built-in also defines: `class LRU extends Map { get(key) { ... } }` must call its
+         * method, and an own `size` getter must override the native accessor. Previously the
+         * native `size`, `constructor`, and method rows returned before the chain was examined,
+         * silently making subclasses behave like plain Maps. */
+        {
+            int found;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+                                                &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         /* A weak collection has no `size` at all, so its name falls through to the absent
          * answer below rather than stopping the program. */
         if (!collection->is_weak && kiln_c99_same_name_key(key, "size")) {

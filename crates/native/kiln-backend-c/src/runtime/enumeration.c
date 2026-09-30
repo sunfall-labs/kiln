@@ -723,6 +723,14 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         return store.tag == KILN_VALUE_OBJECT
             ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown) : KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT)
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_OK;
     }
@@ -904,6 +912,14 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             if (status != KILN_C99_OK) {
                 return status;
             }
+        }
+    } else if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_value store;
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 0);
+            if (status != KILN_C99_OK) return status;
         }
     }
     *out = built;

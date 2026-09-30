@@ -118,6 +118,14 @@ class PrivateMap extends Map<string, number> {
 }
 console.log(new PrivateMap().read());
 
+// Collection intrinsics sit behind methods and accessors on a subclass prototype.
+class OverriddenMap extends Map<string, number> {
+  get(key: string): any { return `custom:${key}`; }
+  get size(): number { return 41; }
+}
+const overridden = new OverriddenMap();
+console.log(overridden.get("x"), overridden.size);
+
 // An arrow has no `new.target` of its own and uses the one from where it was written.
 function Outer(this: any): string {
   const inner = (): string => (new.target === Outer ? "outer" : String(new.target));

@@ -406,6 +406,18 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
         *out = bound->properties;
         return KILN_C99_OK;
     }
+    if (callable.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_commonjs_require *require = (kiln_commonjs_require *)(uintptr_t)callable.bits;
+        if (require->properties.tag != KILN_VALUE_OBJECT) {
+            if (!create) {
+                KILN_C99_ABSENT("a CommonJS require with no own-property store", out);
+            }
+            if (kiln_c99_new_object_for_owner(&require->properties, require) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+        }
+        *out = require->properties;
+        return KILN_C99_OK;
+    }
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN &&
         callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
