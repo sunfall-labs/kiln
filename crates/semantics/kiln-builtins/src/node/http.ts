@@ -1,6 +1,6 @@
 // kiln-builtins: node:http implementation (Phase 5.2, ADR 0005)
 
-import { Writable } from "./stream";
+import { Writable } from "node:stream";
 
 const nativeModule =
   typeof process !== "undefined"
