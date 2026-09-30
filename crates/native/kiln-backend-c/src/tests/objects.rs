@@ -4495,7 +4495,7 @@ int main(void) {
                                                     reservation)) return 5;
     if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 6;
     kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
-    if (sender.count != 0 || receiver.count != 2 || *date != 123456.0 ||
+    if (sender.count != 0 || receiver.count != 2 || date->time != 123456.0 ||
         receiver.realm.graph_inbox_root.bits != root.bits ||
         kiln_c99_gc_lookup(&receiver, date) == NULL ||
         kiln_c99_gc_lookup(&sender, date) != NULL) return 7;

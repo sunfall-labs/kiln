@@ -708,7 +708,10 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             status = kiln_c99_new_object_for_owner(&date->properties, date);
             if (status != KILN_C99_OK) return status;
         }
-        return kiln_c99_put_mode_key(host, date->properties, key, ikey, value, strict, depth, thrown);
+        kiln_string stable;
+        kiln_value key_value = kiln_c99_key_value(key, &stable);
+        return kiln_c99_set_with_receiver(host, date->properties, key_value, value,
+                                          target, strict, depth, thrown);
     }
     if (target.tag == KILN_VALUE_COLLECTION) {
         kiln_collection *collection = kiln_c99_collection_of(target);
