@@ -1460,9 +1460,128 @@ static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
     return KILN_C99_OK;
 }
 
+/* Recognize a member reference without evaluating it. A speculative read would run getters or
+ * computed-key effects twice when the expression is not an assignment. The real reference walk
+ * below runs only after this token-only lookahead proves that an assignment/update follows. */
+static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input) {
+    kiln_dyn_lexer scan = *input;
+    int member = 0;
+    if (scan.curr.kind != KILN_DYN_IDENT && scan.curr.kind != KILN_DYN_KW_THIS &&
+        scan.curr.kind != KILN_DYN_KW_ARGUMENTS) return 0;
+    kiln_dyn_lexer_next(&scan);
+    while (scan.curr.kind == KILN_DYN_DOT || scan.curr.kind == KILN_DYN_LBRACKET) {
+        member = 1;
+        if (scan.curr.kind == KILN_DYN_DOT) {
+            kiln_dyn_lexer_next(&scan);
+            if (!kiln_dyn_is_ident_name(scan.curr.kind)) {
+                kiln_dyn_token_free(&scan.curr);
+                return 0;
+            }
+            kiln_dyn_lexer_next(&scan);
+        } else {
+            int nesting = 1;
+            kiln_dyn_lexer_next(&scan);
+            while (nesting != 0 && scan.curr.kind != KILN_DYN_EOF &&
+                   scan.curr.kind != KILN_DYN_ERROR) {
+                if (scan.curr.kind == KILN_DYN_LBRACKET) nesting++;
+                else if (scan.curr.kind == KILN_DYN_RBRACKET) nesting--;
+                kiln_dyn_lexer_next(&scan);
+            }
+            if (nesting != 0) {
+                kiln_dyn_token_free(&scan.curr);
+                return 0;
+            }
+        }
+    }
+    kiln_dyn_token_kind kind = scan.curr.kind;
+    kiln_dyn_token_free(&scan.curr);
+    return member && (kind == KILN_DYN_ASSIGN || kind == KILN_DYN_PLUS_ASSIGN ||
+        kind == KILN_DYN_MINUS_ASSIGN || kind == KILN_DYN_STAR_ASSIGN ||
+        kind == KILN_DYN_SLASH_ASSIGN || kind == KILN_DYN_PERCENT_ASSIGN ||
+        kind == KILN_DYN_PLUS_PLUS || kind == KILN_DYN_MINUS_MINUS);
+}
+
+static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
+    kiln_dyn_scope *scope, kiln_value receiver, const kiln_value *args, size_t argc,
+    int depth, kiln_value *out, kiln_value *thrown) {
+    kiln_value target, key, current, rhs;
+    int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth,
+                                       &target, thrown);
+    if (status != KILN_C99_OK) return status;
+    while (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
+        int computed = lex->curr.kind == KILN_DYN_LBRACKET;
+        kiln_dyn_lexer_next(lex);
+        if (computed) {
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                        &key, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            if (status != KILN_C99_OK) return status;
+            if (lex->curr.kind != KILN_DYN_RBRACKET)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                            "Expected ']' in assignment reference");
+            kiln_dyn_lexer_next(lex);
+            kiln_value property_key;
+            status = kiln_c99_reduce_key(host, target, key, &property_key, depth, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            if (status != KILN_C99_OK) return status;
+            key = property_key;
+        } else {
+            key = kiln_c99_copy_text(lex->curr.start, lex->curr.len);
+            kiln_c99_gc_keep_alive(&target);
+            if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            kiln_dyn_lexer_next(lex);
+        }
+        if (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
+            kiln_value next;
+            status = kiln_c99_get_computed(host, target, key, &next, depth, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            kiln_c99_gc_keep_alive(&key);
+            if (status != KILN_C99_OK) return status;
+            target = next;
+        } else break;
+    }
+    kiln_dyn_token_kind assignment = lex->curr.kind;
+    int update = assignment == KILN_DYN_PLUS_PLUS || assignment == KILN_DYN_MINUS_MINUS;
+    if (assignment != KILN_DYN_ASSIGN) {
+        status = kiln_c99_get_computed(host, target, key, &current, depth, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        if (status != KILN_C99_OK) return status;
+    }
+    kiln_dyn_lexer_next(lex);
+    if (update) {
+        double number = kiln_c99_as_number(current);
+        *out = kiln_c99_number(number);
+        rhs = kiln_c99_number(number + (assignment == KILN_DYN_PLUS_PLUS ? 1.0 : -1.0));
+    } else {
+        status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        if (assignment != KILN_DYN_ASSIGN) kiln_c99_gc_keep_alive(&current);
+        if (status != KILN_C99_OK) return status;
+        switch (assignment) {
+        case KILN_DYN_PLUS_ASSIGN: rhs = kiln_c99_binary(1, current, rhs); break;
+        case KILN_DYN_MINUS_ASSIGN: rhs = kiln_c99_binary(2, current, rhs); break;
+        case KILN_DYN_STAR_ASSIGN: rhs = kiln_c99_binary(3, current, rhs); break;
+        case KILN_DYN_SLASH_ASSIGN: rhs = kiln_c99_binary(4, current, rhs); break;
+        case KILN_DYN_PERCENT_ASSIGN: rhs = kiln_c99_binary(5, current, rhs); break;
+        default: break;
+        }
+        *out = rhs;
+    }
+    status = kiln_c99_set_computed(host, target, key, rhs, depth, thrown);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&key);
+    kiln_c99_gc_keep_alive(out);
+    return status;
+}
+
 static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                     kiln_value receiver, const kiln_value *args, size_t argc,
                                     int depth, kiln_value *out, kiln_value *thrown) {
+    if (kiln_dyn_member_assignment_ahead(lex))
+        return kiln_dyn_eval_member_assignment(host, lex, scope, receiver, args, argc, depth,
+                                               out, thrown);
     if (lex->curr.kind == KILN_DYN_IDENT) {
         const char *name = lex->curr.start;
         size_t name_len = lex->curr.len;
