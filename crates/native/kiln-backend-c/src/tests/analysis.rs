@@ -765,7 +765,11 @@ fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
             source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::Undefined],
-            code: vec![Instruction::Const(0), Instruction::StoreLocal(0), Instruction::Return],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::StoreLocal(0),
+                Instruction::Return,
+            ],
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
@@ -786,12 +790,16 @@ fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
     let instantiation = emitted.instantiation.expect("instantiation unit");
 
     assert!(emitted.source.contains(&format!("int {}(", emitted.symbol)));
-    assert!(instantiation
-        .source
-        .contains(&format!("int {}_instantiate(", emitted.symbol)));
-    assert!(!instantiation
-        .source
-        .contains(&format!("int {}(", emitted.symbol)));
+    assert!(
+        instantiation
+            .source
+            .contains(&format!("int {}_instantiate(", emitted.symbol))
+    );
+    assert!(
+        !instantiation
+            .source
+            .contains(&format!("int {}(", emitted.symbol))
+    );
 }
 
 #[test]

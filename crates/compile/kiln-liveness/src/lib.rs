@@ -796,10 +796,12 @@ exports.annotations = function (ast, values) { return values; };
         let selection = select_executable_modules(&graph, &SelectionOptions::development())
             .expect("select executable modules");
         assert!(selection.modules.iter().any(|module| module.path == child));
-        assert!(selection
-            .live_export_slots
-            .get(&child)
-            .is_some_and(|slots| slots.contains(&0)));
+        assert!(
+            selection
+                .live_export_slots
+                .get(&child)
+                .is_some_and(|slots| slots.contains(&0))
+        );
     }
 }
 
