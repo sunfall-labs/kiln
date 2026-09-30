@@ -8,3 +8,7 @@ Array.prototype[1] = 'inherited';
 const { 1: inherited, 0: missing } = sparse;
 console.log(inherited, missing, sparse[1]);
 delete Array.prototype[1];
+
+const assigned = Object.assign([], [3, 4], { '2': 5 });
+console.log(assigned.length, JSON.stringify(assigned), assigned[0], assigned['2']);
+console.log(Reflect.set(assigned, '3', 6), assigned.length, assigned[3]);

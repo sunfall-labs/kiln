@@ -664,6 +664,11 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         /* An array is not an object here, but it can still carry a property that is not an
          * element -- which is how `exec` reports `index` and `input`. */
         kiln_array *array = kiln_c99_array_of(target);
+        double element_index = kiln_c99_key_index_key(key);
+        if (element_index >= 0.0) {
+            return kiln_c99_set_computed_mode(host, target, kiln_c99_number(element_index),
+                                              value, strict, depth, thrown);
+        }
         if (kiln_c99_same_name_key(key, "length")) {
             /* `length` is derived, not stored, so writing it is a resize: truncating drops the
              * tail and growing fills with holes, which are not undefined elements. */
