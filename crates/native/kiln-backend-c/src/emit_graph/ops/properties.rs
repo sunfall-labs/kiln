@@ -648,7 +648,7 @@ pub(super) fn emit_define_own_property(
     let check = status_check(ctx.diagnostic_site, pc, label, ctx.unwind);
     writeln!(output,
         "    {{ int status = kiln_c99_create_data_property(host, kiln_val_to_boundary(v{}), kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){}_key_{}, {}_key_{}->unit_len), kiln_val_to_boundary(v{}), depth, thrown); {} v{} = v{}; }}",
-        object.0, ctx.symbol, name, ctx.symbol, name, object.0, value.0, check, vid.0, value.0)
+        object.0, ctx.symbol, name, ctx.symbol, name, value.0, check, vid.0, value.0)
         .unwrap();
 }
 

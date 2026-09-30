@@ -4539,7 +4539,6 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             Instruction::SetComputed
             | Instruction::SetComputedStrict { .. }
             | Instruction::DefineOwnComputed
-            | Instruction::DefineOwnProperty(_)
             | Instruction::SetPrototype
             | Instruction::SetSuperPropertyStrict { .. }
             | Instruction::SetSuperElementStrict { .. }
