@@ -268,13 +268,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         _ if string_exotic(target, name).is_some() => {
                             string_exotic(target, name).unwrap_or(Value::Undefined)
                         }
-                        Some(Value::Undefined) => {
-                            self.inherited_native_property(target, name)
-                        }
+                        Some(Value::Undefined) => self.inherited_native_property(target, name),
                         Some(found) => found,
-                        None => identity_property(target, name).unwrap_or_else(|| {
-                            self.inherited_native_property(target, name)
-                        }),
+                        None => identity_property(target, name)
+                            .unwrap_or_else(|| self.inherited_native_property(target, name)),
                     }
                 }
             },
