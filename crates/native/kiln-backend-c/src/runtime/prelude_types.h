@@ -2830,6 +2830,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_par_add(kiln_c99_par_arena *arena,
  * sequence of labels with `goto` between them: the shape a bytecode interpreter has, and the
  * shape that makes resuming possible at all. */
 typedef struct kiln_generator {
+    kiln_value properties;
     kiln_value function;
     kiln_value receiver;
     /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --

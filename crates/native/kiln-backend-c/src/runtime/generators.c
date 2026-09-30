@@ -38,6 +38,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     for (index = 0; index < argc && index < locals; ++index) {
         kiln_c99_heap_store_val(frame, &frame->locals[index], kiln_val_from_boundary(args[index]));
     }
+    kiln_c99_heap_store_value(frame, &frame->properties, kiln_c99_undefined());
     kiln_c99_heap_store_value(frame, &frame->function, function);
     kiln_c99_heap_store_value(frame, &frame->receiver, receiver);
     frame->sp = 0;

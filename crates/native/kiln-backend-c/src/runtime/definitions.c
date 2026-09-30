@@ -1134,10 +1134,14 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         kiln_c99_typed_own_key(target, view, found, &enumerable);
         return KILN_C99_OK;
     }
+    case KILN_VALUE_GENERATOR: {
+        kiln_value store = kiln_c99_generator_of(target)->properties;
+        if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+        return kiln_c99_own_property_present(host, store, key, found, depth, thrown);
+    }
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_PROMISE:
     case KILN_VALUE_DATE:
-    case KILN_VALUE_GENERATOR:
     case KILN_VALUE_TEMPORAL:
     case KILN_VALUE_NUMBER:
     case KILN_VALUE_BOOLEAN:

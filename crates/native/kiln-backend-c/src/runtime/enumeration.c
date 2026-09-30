@@ -307,6 +307,19 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         *answer = kiln_c99_builtin_has_member(target.bits, intrinsic_key, intrinsic_len);
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_GENERATOR) {
+        kiln_value store = kiln_c99_generator_of(target)->properties;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            int status = kiln_c99_has_property_key(host, store, key, ikey, answer, depth, thrown);
+            if (status != KILN_C99_OK || *answer) return status;
+        }
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        *answer = kiln_c99_same_name_key(key, "throw") ||
+            (kiln_c99_same_name_key(key, "@@asyncIterator") && kiln_c99_generator_of(target)->async_generator) ||
+            kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GENERATOR_NEXT,
+                                    KILN_C99_METHOD_GENERATOR_SELF) != 0;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROMISE) {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         /* Mirrors the promise read: its own store first, then the three methods and
@@ -683,6 +696,11 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
             }
         }
         return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_GENERATOR) {
+        kiln_value store = kiln_c99_generator_of(target)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+            ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown) : KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_OK;

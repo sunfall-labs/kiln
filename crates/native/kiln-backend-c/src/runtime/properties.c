@@ -714,6 +714,14 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         return kiln_c99_put_mode_key(host, collection->properties, key, ikey, value, strict, depth,
                                      thrown);
     }
+    if (target.tag == KILN_VALUE_GENERATOR) {
+        kiln_generator *frame = kiln_c99_generator_of(target);
+        if (frame->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object_for_owner(&frame->properties, frame);
+            if (status != KILN_C99_OK) return status;
+        }
+        return kiln_c99_put_mode_key(host, frame->properties, key, ikey, value, strict, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_PROMISE) {
         kiln_promise *promise = kiln_c99_promise_of(target);
         if (promise->properties.tag != KILN_VALUE_OBJECT) {

@@ -5433,7 +5433,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             (frame->queue_count != 0 &&
              (frame->queue_promises == NULL || frame->queue_sent == NULL)))
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
-        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->function) ||
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->properties) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->function) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->receiver) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->promise) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->sent) ||
@@ -7950,6 +7951,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     }
     case KILN_GC_GENERATOR: {
         kiln_generator *frame = (kiln_generator *)payload;
+        kiln_c99_gc_mark_value(heap, &frame->properties);
         kiln_c99_gc_mark_value(heap, &frame->function);
         kiln_c99_gc_mark_value(heap, &frame->receiver);
         kiln_c99_gc_mark_value(heap, &frame->promise);
