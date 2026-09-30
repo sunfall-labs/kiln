@@ -1,5 +1,7 @@
 // kiln-builtins: node:http implementation (Phase 5.2, ADR 0005)
 
+import { Readable, Writable } from "./stream";
+
 const nativeModule =
   typeof process !== "undefined"
     ? (process as any).__kilnNativeModules?.http || null
@@ -43,10 +45,26 @@ export const METHODS = [
   "UNSUBSCRIBE",
 ];
 
-export const IncomingMessage: any =
+const NativeIncomingMessage: any =
   nativeModule && typeof nativeModule.IncomingMessage === "function"
     ? nativeModule.IncomingMessage
-    : function IncomingMessage() {};
+    : null;
+
+export const IncomingMessage: any = function IncomingMessage(this: any, socket?: any) {
+  Object.assign(this, new Readable());
+  this.socket = socket;
+  this.connection = socket;
+};
+Object.defineProperty(IncomingMessage, "name", { value: "IncomingMessage", configurable: true });
+if (NativeIncomingMessage) {
+  Object.setPrototypeOf(IncomingMessage, NativeIncomingMessage);
+  IncomingMessage.prototype = NativeIncomingMessage.prototype;
+  Object.defineProperty(IncomingMessage.prototype, "constructor", {
+    value: IncomingMessage, writable: true, configurable: true,
+  });
+} else {
+  IncomingMessage.prototype = Readable.prototype;
+}
 if (IncomingMessage.prototype && typeof IncomingMessage.prototype.unpipe !== "function") {
   IncomingMessage.prototype.unpipe = function unpipe() {
     return this;
@@ -63,12 +81,91 @@ export const Server: any =
         throw new Error("node:http requires an HTTP host capability that this realm does not provide");
       };
 
-export const ServerResponse: any =
+const NativeServerResponse: any =
   nativeModule && typeof nativeModule.ServerResponse === "function"
     ? nativeModule.ServerResponse
-    : function ServerResponse() {
-        throw new Error("node:http requires an HTTP host capability that this realm does not provide");
-      };
+    : null;
+const legacyResponseMarker = Symbol("kiln legacy ServerResponse receiver");
+
+function legacyResponseMethod(name: string, fallback: Function): void {
+  const prototype = NativeServerResponse && NativeServerResponse.prototype;
+  if (!prototype || typeof prototype[name] !== "function") return;
+  const nativeMethod = prototype[name];
+  const method = function (this: any, ...args: any[]) {
+    return this && this[legacyResponseMarker]
+      ? fallback.apply(this, args)
+      : nativeMethod.apply(this, args);
+  };
+  Object.defineProperty(method, "name", { value: name, configurable: true });
+  Object.defineProperty(prototype, name, { value: method, writable: true, configurable: true });
+}
+
+export const ServerResponse: any = function ServerResponse(this: any, req?: any) {
+  if (!NativeServerResponse) {
+    throw new Error("node:http requires an HTTP host capability that this realm does not provide");
+  }
+  if (new.target) return new NativeServerResponse(req);
+  Object.assign(this, new Writable());
+  Object.defineProperty(this, legacyResponseMarker, { value: true, configurable: true });
+  this.req = req;
+  this.socket = null;
+  this.connection = null;
+  this.statusCode = 200;
+  this.headersSent = false;
+  this._header = null;
+  this._legacyHeaders = Object.create(null);
+};
+Object.defineProperty(ServerResponse, "name", { value: "ServerResponse", configurable: true });
+if (NativeServerResponse) {
+  Object.setPrototypeOf(ServerResponse, NativeServerResponse);
+  ServerResponse.prototype = NativeServerResponse.prototype;
+  Object.defineProperty(ServerResponse.prototype, "constructor", {
+    value: ServerResponse, writable: true, configurable: true,
+  });
+
+  legacyResponseMethod("setHeader", function (this: any, name: any, value: any) {
+    this._legacyHeaders[String(name).toLowerCase()] = value;
+    return this;
+  });
+  legacyResponseMethod("getHeader", function (this: any, name: any) {
+    return this._legacyHeaders[String(name).toLowerCase()];
+  });
+  legacyResponseMethod("getHeaders", function (this: any) {
+    return Object.assign(Object.create(null), this._legacyHeaders);
+  });
+  legacyResponseMethod("hasHeader", function (this: any, name: any) {
+    return Object.prototype.hasOwnProperty.call(this._legacyHeaders, String(name).toLowerCase());
+  });
+  legacyResponseMethod("removeHeader", function (this: any, name: any) {
+    delete this._legacyHeaders[String(name).toLowerCase()];
+  });
+  legacyResponseMethod("writeHead", function (this: any, statusCode: any, statusMessage?: any,
+                                                  headers?: any) {
+    this.statusCode = statusCode;
+    if (statusMessage && typeof statusMessage === "object") headers = statusMessage;
+    if (headers && typeof headers === "object") {
+      for (const name of Object.keys(headers)) this._legacyHeaders[name.toLowerCase()] = headers[name];
+    }
+    this.headersSent = true;
+    return this;
+  });
+  legacyResponseMethod("write", function (this: any, ...args: any[]) {
+    return Writable.prototype.write.apply(this, args);
+  });
+  legacyResponseMethod("end", function (this: any, ...args: any[]) {
+    return Writable.prototype.end.apply(this, args);
+  });
+  legacyResponseMethod("assignSocket", function (this: any, socket: any) {
+    this.socket = socket;
+    this.connection = socket;
+    return this;
+  });
+  legacyResponseMethod("destroy", function (this: any, error?: any) {
+    return Writable.prototype.destroy.call(this, error);
+  });
+} else {
+  ServerResponse.prototype = Writable.prototype;
+}
 
 export function createServer(...args: any[]): any {
   if (nativeModule && typeof nativeModule.createServer === "function") {
@@ -155,4 +252,3 @@ const httpNamespace = {
 httpNamespace.default = httpNamespace;
 
 export default httpNamespace;
-
