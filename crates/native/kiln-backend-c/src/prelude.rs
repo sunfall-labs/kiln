@@ -2378,7 +2378,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 35,
+        sites: 36,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2389,7 +2389,8 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
                     kiln_c99_is_typed_array_member, RegExp instance slots followed by the complete \
                     RegExp.prototype and Object.prototype stores/tables, and native callable own \
-                    slots, the callable stores and prototype tables, Set constructor string statics (name, \
+                    slots, the callable stores and prototype tables, the current typed-array constructor \
+                    prototype chain after an explicit prototype replacement, Set constructor string statics (name, \
                     length and prototype), BigInt constructor string statics (asIntN and asUintN are \
                     handled above), then BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
