@@ -57,7 +57,10 @@ def main():
     unknown = sorted(set(args.packages) - set(names))
     if unknown:
         parser.error('unknown packages: ' + ', '.join(unknown))
-    selected = [row for row in rows if not args.packages or row[0] in args.packages]
+    by_name = {row[0]: row for row in rows}
+    # Explicit slices follow the requested order, so small discriminators can precede large
+    # compiler bundles. Deduplicate filters without silently changing full-corpus order.
+    selected = [by_name[name] for name in dict.fromkeys(args.packages)] if args.packages else rows
     tests = {}
     for name, version, porffor, detail, stem in rows:
         matches = [p for ext in ('js', 'mjs') if (p := HERE / 'tests' / f'{stem}.test.{ext}').is_file()]
