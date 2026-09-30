@@ -1621,6 +1621,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_url_adopt_raw(result, args, argc);
     if (code == KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW)
         return kiln_c99_array_buffer_detach_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW)
+        return kiln_c99_array_buffer_byte_length_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_CLONE_DATA_RAW)
         return kiln_c99_clone_data_raw(result, args, argc);
     if (code == KILN_C99_METHOD_SHARED_IS_RAW) {

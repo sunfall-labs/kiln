@@ -922,6 +922,18 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                                       depth, thrown);
             return KILN_C99_OK;
         }
+        if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE &&
+            kiln_c99_same_name_key(view, "byteLength")) {
+            /* The getter is a shared TypeScript accessor. Read its descriptor from the prototype
+             * store without invoking it against the prototype object. */
+            kiln_value held;
+            status = kiln_c99_callable_store(target, &held, 0);
+            if (status != KILN_C99_OK) return status;
+            if (held.tag == KILN_VALUE_OBJECT)
+                return kiln_c99_describe_property_key(host, held, view, canonical, out, found,
+                                                      depth, thrown);
+            return KILN_C99_OK;
+        }
         char intrinsic_buffer[256];
         const char *intrinsic_key;
         size_t intrinsic_len;

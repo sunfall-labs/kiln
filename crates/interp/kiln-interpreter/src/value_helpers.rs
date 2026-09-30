@@ -161,6 +161,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::UrlFastRaw => "__kilnUrlFast".to_owned(),
         Native::UrlAdoptRaw => "__kilnUrlAdopt".to_owned(),
         Native::ArrayBufferDetachRaw => "__kilnArrayBufferDetach".to_owned(),
+        Native::ArrayBufferByteLengthRaw => "__kilnArrayBufferByteLength".to_owned(),
         Native::ArrayBufferResizeRaw => "__kilnArrayBufferResize".to_owned(),
         Native::TypedArrayOutOfBoundsRaw => "__kilnTypedArrayOutOfBounds".to_owned(),
         Native::CollectionSizeRaw => "__kilnCollectionSize".to_owned(),

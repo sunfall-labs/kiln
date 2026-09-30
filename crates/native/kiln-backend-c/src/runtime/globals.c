@@ -503,6 +503,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW},
                      /* The transfer primitive `kiln-builtins/src/arraybuffer.ts` captures. */
                      {"__kilnArrayBufferDetach", KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW},
+                     {"__kilnArrayBufferByteLength", KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW},
                      /* The structured clone's plain-data fast path, captured the same way. */
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
                      {"__kilnSharedIs", KILN_C99_METHOD_SHARED_IS_RAW},

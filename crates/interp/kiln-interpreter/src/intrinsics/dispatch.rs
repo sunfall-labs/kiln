@@ -897,6 +897,15 @@ pub(crate) fn call_native(
                 properties: RefCell::new(ObjectData::default()),
             }))
         }
+        Native::ArrayBufferByteLengthRaw => {
+            let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            if buffer.shared {
+                return Err(ExecutionError::NotABuffer);
+            }
+            Value::Number(buffer.byte_length() as f64)
+        }
         // `ArrayBufferCopyAndDetach(O, newLength, ~immutable~)`: the same copy `transfer`
         // performs, into a buffer nothing can write to afterwards. A ceiling is never carried
         // across -- a length that could still move is exactly what immutability rules out.

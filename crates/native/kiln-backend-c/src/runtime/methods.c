@@ -239,6 +239,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_BUFFER_TO_STRING_RAW: return "__kilnBufferToString";
     case KILN_C99_METHOD_URL_PARSE_RAW: return "__kilnUrlParse";
     case KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW: return "__kilnArrayBufferDetach";
+    case KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW: return "__kilnArrayBufferByteLength";
     case KILN_C99_METHOD_CLONE_DATA_RAW: return "__kilnCloneData";
     case KILN_C99_METHOD_SHARE_RAW: return "__kilnShare";
     case KILN_C99_METHOD_SHARED_IS_RAW: return "__kilnSharedIs";

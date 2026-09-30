@@ -1259,6 +1259,8 @@ method_ids! {
     // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
     // deleted by `kiln-builtins/src/arraybuffer.ts`.
     (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),
+    // The internal-slot reader behind TypeScript's reflected byteLength accessor.
+    (KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW, 554, Direct; 0, 0),
     // The plain-data fast path of the structured clone (ADR 0065, measured), captured and
     // deleted by `kiln-builtins/src/structured_clone.ts`.
     (KILN_C99_METHOD_CLONE_DATA_RAW, 533, Direct; 0, 0),
@@ -3972,6 +3974,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
     emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
     emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW),
     emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
     emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),

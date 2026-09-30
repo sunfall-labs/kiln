@@ -829,6 +829,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnUrlAdopt", Native::UrlAdoptRaw),
             // The transfer primitive `arraybuffer.ts` captures and deletes (every realm).
             ("__kilnArrayBufferDetach", Native::ArrayBufferDetachRaw),
+            (
+                "__kilnArrayBufferByteLength",
+                Native::ArrayBufferByteLengthRaw,
+            ),
             // The in-place length move `resize` and `grow` make (`arraybuffer.ts`, every realm).
             ("__kilnArrayBufferResize", Native::ArrayBufferResizeRaw),
             // Whether a view has left its buffer (`typedarray.ts`, every realm).

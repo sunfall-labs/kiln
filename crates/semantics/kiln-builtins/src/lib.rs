@@ -1530,6 +1530,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),
         (family::WEAK_REFS, "__kilnSharedWeak"),
         (family::ARRAY_BUFFER, "__kilnArrayBufferDetach"),
+        (family::ARRAY_BUFFER, "__kilnArrayBufferByteLength"),
         (family::ARRAY_BUFFER, "__kilnArrayBufferResize"),
         (family::ARRAY_BUFFER, "__kilnSharedBuffer"),
         (family::ATOMICS, "__kilnAtomics"),

@@ -444,6 +444,22 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     return KILN_C99_OK;
 }
 
+/* `__kilnArrayBufferByteLength(buffer)`: the internal-slot read used by the shared TypeScript
+ * accessor function exposed as `ArrayBuffer.prototype.byteLength`. Keeping this private lets the
+ * public accessor and its reflected descriptor have one TypeScript owner while preserving the
+ * engine's brand check and avoiding a recursive property read. */
+static int kiln_c99_array_buffer_byte_length_raw(kiln_value *out, const kiln_value *args,
+                                                  size_t argc, kiln_value *thrown) {
+    kiln_typed_buffer *buffer;
+    if (argc == 0 || args[0].tag != KILN_VALUE_ARRAY_BUFFER ||
+        (buffer = kiln_c99_typed_buffer_of(args[0])) == NULL || buffer->shared != NULL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver");
+    }
+    *out = kiln_c99_number((double)buffer->byte_length);
+    return KILN_C99_OK;
+}
+
 /* ---- SharedArrayBuffer and Atomics over shared stores (realms issue 06) ------------------
  *
  * A `SharedArrayBuffer` here is an `ArrayBuffer` value whose bytes are a store of the provider's

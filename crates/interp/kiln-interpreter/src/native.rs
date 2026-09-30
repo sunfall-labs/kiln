@@ -738,6 +738,9 @@ pub enum Native {
     /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
     /// every transfer list, which are the shared bootstrap's.
     ArrayBufferDetachRaw,
+    /// `__kilnArrayBufferByteLength(buffer)`: the internal-slot reader for the shared TypeScript
+    /// `ArrayBuffer.prototype.byteLength` accessor.
+    ArrayBufferByteLengthRaw,
     /// `__kilnArrayBufferResize(buffer, length)`: move a resizable buffer's length, or grow a
     /// growable shared one, in place (ADR 0065, representation). `resize` and `grow` are the
     /// shared TypeScript over it (`kiln-builtins/src/arraybuffer.ts`), which makes every check a

@@ -11,6 +11,12 @@
 const __kilnDetachBuffer: (buffer: ArrayBuffer, length: number, preserveResizability: boolean) => ArrayBuffer =
   (globalThis as any).__kilnArrayBufferDetach;
 delete (globalThis as any).__kilnArrayBufferDetach;
+// The ordinary property read knows the ArrayBuffer internal slot, but intrinsic inspection also
+// needs the actual getter function (for example, call-bound's lookup of
+// `ArrayBuffer.prototype.byteLength`). Keep its slot read behind the same private engine seam.
+const __kilnArrayBufferByteLength: (buffer: any) => number =
+  (globalThis as any).__kilnArrayBufferByteLength;
+delete (globalThis as any).__kilnArrayBufferByteLength;
 
 // The primitive under `resize` and `grow` (ADR 0065, representation): move a resizable buffer's
 // length, or grow a growable shared one, in place. Every check a program can observe is made
@@ -49,6 +55,20 @@ delete (globalThis as any).__kilnSharedBuffer;
   // --- ArrayBuffer.prototype extensions ---
 
   const Proto = ArrayBuffer.prototype as any;
+
+  // Preserve the accessor as a callable TypeScript-owned function. A direct read on a valid
+  // buffer uses the engine's internal-slot primitive, so subclasses and detached buffers retain
+  // their brand semantics without consulting an overridable property.
+  const byteLengthGetter = function (this: any): number {
+    return __kilnArrayBufferByteLength(this);
+  };
+  Object.defineProperty(byteLengthGetter, "name", { value: "get byteLength", configurable: true });
+  Object.defineProperty(Proto, "byteLength", {
+    get: byteLengthGetter,
+    set: undefined,
+    enumerable: false,
+    configurable: true,
+  });
 
   function isDetachedBuffer(buf: any): boolean {
     return buf.detached === true;
