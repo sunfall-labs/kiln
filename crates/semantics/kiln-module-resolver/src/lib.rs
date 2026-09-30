@@ -68,6 +68,7 @@ pub enum NodeBuiltin {
     Actors,
     ActorsCore,
     ActorsWorker,
+    Gui,
     Assert,
     Buffer,
     AsyncHooks,
@@ -116,6 +117,7 @@ impl NodeBuiltin {
         Self::Actors,
         Self::ActorsCore,
         Self::ActorsWorker,
+        Self::Gui,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -167,6 +169,7 @@ impl NodeBuiltin {
             "kiln:actors" => Self::Actors,
             "kiln:actors/core" => Self::ActorsCore,
             "kiln:actors/worker" => Self::ActorsWorker,
+            "kiln:gui" => Self::Gui,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -217,6 +220,7 @@ impl NodeBuiltin {
             Self::Actors => "kiln:actors",
             Self::ActorsCore => "kiln:actors/core",
             Self::ActorsWorker => "kiln:actors/worker",
+            Self::Gui => "kiln:gui",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -301,14 +305,11 @@ impl ResolvedModule {
         } else if parent == "builtins" {
             // Kiln namespaces use an unprefixed virtual path. Preserve their identity here
             // without making the same bare names or `node:` names aliases.
-            // `kiln:process` is the original explicit Kiln namespace. Its virtual path uses the
-            // unprefixed stem for compatibility with the existing builtin path layout, so
-            // preserve that identity here without making `node:process` a Node builtin.
-            match stem {
-                "process" => "kiln:process".to_owned(),
-                "shared" => "kiln:shared".to_owned(),
-                "actors" => "kiln:actors".to_owned(),
-                _ => stem.to_owned(),
+            let candidate = format!("kiln:{stem}");
+            if NodeBuiltin::parse(&candidate).is_some() {
+                candidate
+            } else {
+                stem.to_owned()
             }
         } else {
             format!("{parent}/{stem}")
@@ -2299,6 +2300,8 @@ mod tests {
     #[test]
     fn bounded_node_builtin_parse_and_specifier_round_trip() {
         assert_eq!(NodeBuiltin::parse("kiln:shared"), Some(NodeBuiltin::Shared));
+        assert_eq!(NodeBuiltin::parse("kiln:gui"), Some(NodeBuiltin::Gui));
+        assert_eq!(NodeBuiltin::Gui.specifier(), "kiln:gui");
         assert_eq!(NodeBuiltin::parse("shared"), None);
         assert_eq!(NodeBuiltin::parse("node:shared"), None);
         assert_eq!(NodeBuiltin::parse("node:kiln:shared"), None);
@@ -2322,6 +2325,22 @@ mod tests {
                     Some(builtin)
                 );
             }
+        }
+        let project_root = Path::new("/test_project");
+        for builtin in NodeBuiltin::ALL {
+            let path = builtin.virtual_path(project_root);
+            let resolved = ResolvedModule {
+                path: path.clone(),
+                kind: ResolutionKind::Builtin,
+            };
+            assert_eq!(
+                resolved.builtin(),
+                Some(*builtin),
+                "Builtin {:?} (specifier '{}', virtual_path '{}') must round-trip through ResolvedModule::builtin()",
+                builtin,
+                builtin.specifier(),
+                path.display()
+            );
         }
     }
 

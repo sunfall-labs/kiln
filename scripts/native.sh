@@ -49,7 +49,18 @@ set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 cd "$(kiln_repo_root)"
 
-PROBES="${KILN_NATIVE_DIR:-conformance/native}"
+PROBES_DIR="${KILN_NATIVE_DIR:-conformance/native}"
+declare -a PROBES=("$@")
+if ((${#PROBES[@]} == 0)); then
+	shopt -s nullglob
+	PROBES=("$PROBES_DIR"/*.ts "$PROBES_DIR"/*.js "$PROBES_DIR"/*.cjs "$PROBES_DIR"/*.mjs)
+fi
+for probe in "${PROBES[@]}"; do
+	if [[ ! -f $probe ]]; then
+		echo "native.sh: no such probe: $probe" >&2
+		exit 2
+	fi
+done
 
 # Run the *native* side of each pair under the collector's stress mode.
 #
@@ -242,7 +253,7 @@ run_probe() {
 # stays what it says it is.
 shopt -s nullglob
 running=0
-for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
+for probe in "${PROBES[@]}"; do
 	run_probe "$probe" &
 	running=$((running + 1))
 	if (( running >= JOBS )); then
@@ -252,7 +263,7 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 done
 wait || true
 
-for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
+for probe in "${PROBES[@]}"; do
 	name="$(basename -- "$probe")"
 	name="${name%.*}"
 	if [[ -f "$WORK_DIR/$name.failed" ]]; then

@@ -34,10 +34,11 @@ pub enum ProviderCapability {
     Parallel,
     Http,
     Ffi,
+    Gui,
 }
 
 impl ProviderCapability {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Realm,
         Self::RegExp,
         Self::BigInt,
@@ -47,6 +48,7 @@ impl ProviderCapability {
         Self::Parallel,
         Self::Http,
         Self::Ffi,
+        Self::Gui,
     ];
 
     const fn bit(self) -> u16 {
@@ -64,6 +66,7 @@ impl ProviderCapability {
             Self::Parallel => "parallel",
             Self::Http => "http",
             Self::Ffi => "ffi",
+            Self::Gui => "gui",
         }
     }
 }
@@ -87,7 +90,8 @@ impl ProviderCapabilities {
             | ProviderCapability::Intl.bit()
             | ProviderCapability::Parallel.bit()
             | ProviderCapability::Http.bit()
-            | ProviderCapability::Ffi.bit(),
+            | ProviderCapability::Ffi.bit()
+            | ProviderCapability::Gui.bit(),
     );
 
     pub const fn with(self, capability: ProviderCapability) -> Self {
@@ -136,12 +140,13 @@ pub enum ProviderVariant {
     Parallel,
     Http,
     Ffi,
+    Gui,
     Common,
     Full,
 }
 
 impl ProviderVariant {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Realm,
         Self::RegExp,
         Self::BigInt,
@@ -151,6 +156,7 @@ impl ProviderVariant {
         Self::Parallel,
         Self::Http,
         Self::Ffi,
+        Self::Gui,
         Self::Common,
         Self::Full,
     ];
@@ -167,6 +173,7 @@ impl ProviderVariant {
             Self::Parallel => ProviderCapabilities::REALM.with(ProviderCapability::Parallel),
             Self::Http => ProviderCapabilities::REALM.with(ProviderCapability::Http),
             Self::Ffi => ProviderCapabilities::REALM.with(ProviderCapability::Ffi),
+            Self::Gui => ProviderCapabilities::REALM.with(ProviderCapability::Gui),
             Self::Common => ProviderCapabilities::COMMON,
             Self::Full => ProviderCapabilities::FULL,
         }
@@ -183,6 +190,7 @@ impl ProviderVariant {
             Self::Parallel => "parallel",
             Self::Http => "http",
             Self::Ffi => "ffi",
+            Self::Gui => "gui",
             Self::Common => "common",
             Self::Full => "full",
         }
@@ -203,6 +211,7 @@ impl ProviderVariant {
             Self::Parallel => "realm,parallel",
             Self::Http => "realm,realm-http",
             Self::Ffi => "realm,ffi",
+            Self::Gui => "realm,gui",
             Self::Common => SLIM_FEATURES,
             Self::Full => FULL_FEATURES,
         }

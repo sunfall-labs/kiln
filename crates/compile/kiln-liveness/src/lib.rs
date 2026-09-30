@@ -596,7 +596,7 @@ pub fn retained_method_groups(
             | Process | Shared | Tty | Zlib | StringDecoder | QueryString | WorkerThreads
             | PerfHooks | AsyncHooks | ChildProcess | Timers | TimersPromises | Readline
             | ReadlinePromises | Sqlite | Constants | V8 | Vm | Path | Util | UtilTypes
-            | DiagnosticsChannel => 0,
+            | DiagnosticsChannel | Gui => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })
@@ -789,6 +789,7 @@ pub fn retained_provider_capabilities(
             Some(ProviderCapability::Http)
         }
         Some(NodeBuiltin::Ffi) => Some(ProviderCapability::Ffi),
+        Some(NodeBuiltin::Gui) => Some(ProviderCapability::Gui),
         _ => None,
     };
 
@@ -816,6 +817,7 @@ pub fn retained_provider_capabilities(
                     required.with(ProviderCapability::Http)
                 }
                 NodeBuiltin::Ffi => required.with(ProviderCapability::Ffi),
+                NodeBuiltin::Gui => required.with(ProviderCapability::Gui),
                 _ => required,
             };
         }

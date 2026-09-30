@@ -131,4 +131,8 @@ fn capability_spelling_is_stable_json() {
         serde_json::to_string(&ProviderCapability::BigInt).unwrap(),
         "\"big-int\""
     );
+    assert_eq!(
+        serde_json::to_string(&ProviderCapability::Gui).unwrap(),
+        "\"gui\""
+    );
 }
