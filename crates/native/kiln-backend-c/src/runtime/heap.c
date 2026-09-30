@@ -8343,6 +8343,10 @@ static void kiln_c99_gc_weak_resources_process(kiln_gc_heap *heap) {
     }
 }
 
+/* Heap weak-resource processing precedes the promise implementation in the prelude. */
+extern int kiln_c99_enqueue_finalizer(kiln_value callback, kiln_value held_value);
+extern int kiln_c99_gc_keep_during_job(kiln_value value);
+
 typedef struct kiln_gc_finalization_cell {
     struct kiln_gc_finalization_cell *next;
     kiln_value target;
