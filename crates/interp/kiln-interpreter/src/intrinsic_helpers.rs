@@ -2021,6 +2021,12 @@ pub(super) fn json_value_and_sources_from_tape(
                     Some(name) => {
                         if let Some(raw) = source.clone() {
                             sources.insert(name.clone(), (value.clone(), raw));
+                        } else {
+                            // A repeated object-valued key replaces any earlier primitive
+                            // token source. The final value has no primitive source, and keeping
+                            // the old entry would incorrectly expose that token because the
+                            // holder and value identities still match after parsing.
+                            sources.remove(&name);
                         }
                         data.set_units(&name, value);
                         *remaining -= 1;

@@ -17,6 +17,12 @@ console.log(JSON.stringify(changed));
 console.log(JSON.stringify(JSON.parse('{"b":1,"b":1e0}', function (key, value, context) {
   return [key, value, context.source];
 })));
+const duplicateObjectSource = [];
+JSON.parse('{"b":1,"b":{"x":2}}', function (key, value, context) {
+  if (key === 'b') duplicateObjectSource.push(context.source);
+  return value;
+});
+console.log(JSON.stringify(duplicateObjectSource));
 console.log(JSON.stringify(JSON.parse('{"a":0,"child":{"x":4}}', function (key, value, context) {
   if (key === 'a') this.child = { x: 4 };
   return [key, value, context.source];
