@@ -1464,9 +1464,9 @@ pub(super) fn machine_own_accessor(target: &Value, key: &str) -> Option<BuiltinA
     machine_accessor(target, key)
 }
 
-/// Whether this built-in defines `Symbol.species`, which is the eight the specification names
-/// and nothing else -- a constructor that does not define one inherits whatever its own
-/// prototype has, which for the nine view constructors is `%TypedArray%`'s.
+/// Whether this built-in defines `Symbol.species` through the interpreter's native accessor.
+/// The typed-array abstract constructor installs its public getter in shared TypeScript instead;
+/// the concrete view constructors inherit that stored getter through their actual prototype link.
 pub(super) const fn defines_species(native: Native) -> bool {
     matches!(
         native,
@@ -1477,7 +1477,6 @@ pub(super) const fn defines_species(native: Native) -> bool {
             | Native::SetConstructor
             | Native::PromiseConstructor
             | Native::RegExpConstructor
-            | Native::TypedArrayIntrinsic
     )
 }
 

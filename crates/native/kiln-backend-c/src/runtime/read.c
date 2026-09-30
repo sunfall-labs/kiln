@@ -2001,6 +2001,31 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         {
             kiln_typed_kind typed_kind;
             if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind)) {
+                if (kiln_c99_same_name_key(key, "from") ||
+                    kiln_c99_same_name_key(key, "of") ||
+                    kiln_c99_same_name_key(key, "@@species")) {
+                    int found = 0;
+                    int status = kiln_c99_builtin_custom_prototype_read(
+                        host, target, key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                    /* These statics are inherited through the constructor's current
+                     * [[Prototype]]. The intrinsic fallback below is valid only while that
+                     * link is the default implicit one; after Object.setPrototypeOf, a missing
+                     * member on the replacement chain is genuinely absent. */
+                    {
+                        kiln_value store;
+                        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+                            store.tag == KILN_VALUE_OBJECT) {
+                            kiln_value parent = kiln_c99_object_prototype_read(store);
+                            if (parent.tag != KILN_VALUE_UNDEFINED &&
+                                !(parent.tag == KILN_VALUE_BUILTIN &&
+                                  parent.bits == KILN_C99_BUILTIN_TYPED_ARRAY)) {
+                                KILN_C99_ABSENT("not in the current typed-array constructor prototype chain",
+                                                out);
+                            }
+                        }
+                    }
+                }
                 if (kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;

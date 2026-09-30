@@ -2865,7 +2865,7 @@ pub(super) fn intrinsic_static_property_names(target: &Value) -> &'static [&'sta
         Value::Native(Native::TypedArrayConstructor(_), _) => {
             return &["BYTES_PER_ELEMENT"];
         }
-        Value::Native(Native::TypedArrayIntrinsic, _) => return &["from", "of"],
+        Value::Native(Native::TypedArrayIntrinsic, _) => return &["of", "from"],
         _ => {}
     }
     let tabulated = intrinsic_tabulated_property_names(target);
