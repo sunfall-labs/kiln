@@ -289,6 +289,17 @@ pub fn select_executable_modules<'a>(
                 });
             if node.source == ModuleSource::CommonJs || !removable {
                 mark_live(&dependency.target, &mut live, &mut queue);
+                if node.source == ModuleSource::CommonJs
+                    && graph
+                        .module(&dependency.target)
+                        .is_some_and(|target| target.source != ModuleSource::CommonJs)
+                {
+                    // CommonJS receives the complete namespace from synchronous require(esm),
+                    // so every ESM export remains observable across this edge.
+                    if namespace_demands.insert(dependency.target.clone()) {
+                        queue.push_back(dependency.target.clone());
+                    }
+                }
             }
         }
         // Literal createRequire/getBuiltinModule targets are lazy at execution time but remain

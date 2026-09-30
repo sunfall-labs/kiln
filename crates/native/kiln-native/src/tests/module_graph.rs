@@ -949,6 +949,56 @@ fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
 }
 
 #[test]
+fn native_graph_commonjs_require_of_esm_returns_the_module_namespace() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-cjs-requires-esm-namespace");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("main.cjs"),
+        "const dependency = require('./dependency');\n\
+         console.log(typeof dependency, dependency.answer);\n",
+    )
+    .expect("write CommonJS entry");
+    fs::write(
+        root.path.join("dependency.js"),
+        "export const answer = 42;\n",
+    )
+    .expect("write ESM dependency");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS to ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS-to-ESM execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("CommonJS can synchronously require an ESM dependency");
+    if report.exit_code != Some(0) || report.stdout != b"object 42\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"object 42\n");
+}
+
+#[test]
 fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

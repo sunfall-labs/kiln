@@ -1994,6 +1994,35 @@ pub(super) fn graph_namespace_plans(
                 required[provider_index] = true;
             }
         }
+        // Synchronous `require(esm)` returns the module namespace on Node versions that support
+        // it. The namespace must exist even though this edge is a runtime require rather than an
+        // ESM namespace import.
+        for dependency in &node.dependencies {
+            if node.source != ModuleSource::CommonJs {
+                continue;
+            }
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider_index].0.source == ModuleSource::Source {
+                required[provider_index] = true;
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider_index].0.source == ModuleSource::Source {
+                required[provider_index] = true;
+            }
+        }
+    }
+    for path in graph.declared_includes() {
+        if let Some(&provider_index) = indices.get(path)
+            && modules[provider_index].0.source == ModuleSource::Source
+        {
+            required[provider_index] = true;
+        }
     }
     if has_any_dynamic_import {
         for (idx, (node, _)) in modules.iter().enumerate() {
@@ -3355,9 +3384,6 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         let Some(&provider_index) = indices.get(path) else {
             continue;
         };
-        if modules[provider_index].0.source != ModuleSource::CommonJs {
-            continue;
-        }
         let matches = std::iter::once(path.to_string_lossy().into_owned())
             .chain(Url::from_file_path(path).ok().map(|url| url.to_string()))
             .map(|specifier| {
@@ -3400,6 +3426,19 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                     "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
                 )
                 .unwrap();
+            } else if modules[provider_index].0.source == ModuleSource::Source {
+                let has_top_level_await = modules[provider_index]
+                    .0
+                    .program
+                    .program
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+                if has_top_level_await {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                } else {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                }
             } else {
                 let Some(commonjs_export) =
                     native_commonjs_projection_index(modules[provider_index].0)
@@ -3487,6 +3526,19 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 let specifier_len = dependency.specifier.len();
                 if modules[provider_index].0.source == ModuleSource::CommonJs {
                     writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);").unwrap();
+                } else if modules[provider_index].0.source == ModuleSource::Source {
+                    let has_top_level_await = modules[provider_index]
+                        .0
+                        .program
+                        .program
+                        .code
+                        .iter()
+                        .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+                    if has_top_level_await {
+                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                    } else {
+                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                    }
                 } else if let Some(projection) =
                     native_commonjs_projection_index(modules[provider_index].0)
                 {
@@ -3550,6 +3602,19 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 "    if ({matches}) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
             )
             .unwrap();
+        } else if modules[provider_index].0.source == ModuleSource::Source {
+            let has_top_level_await = modules[provider_index]
+                .0
+                .program
+                .program
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+            if has_top_level_await {
+                writeln!(output, "    if ({matches}) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, \"require() cannot load an ES module with top-level await\"); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+            } else {
+                writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+            }
         } else if let Some(projection) = native_commonjs_projection_index(modules[provider_index].0)
         {
             writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();

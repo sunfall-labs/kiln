@@ -2298,6 +2298,20 @@ mod tests {
     }
 
     #[test]
+    fn node_require_resolves_extensionless_relative_javascript() {
+        let project = TempProject::new();
+        let importer = project.write("lib/main.cjs", "");
+        let target = project.write("lib/impl/format.js", "module.exports = {};\n");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+
+        let resolved = resolver
+            .resolve_for_request("./impl/format", &importer, NodeRequestKind::Require)
+            .expect("Node require resolves the .js extension");
+
+        assert_eq!(resolved.path, target);
+    }
+
+    #[test]
     fn unprefixed_node_builtin_aliases_share_one_identity() {
         let project = TempProject::new();
         let importer = project.write("main.js", "");
