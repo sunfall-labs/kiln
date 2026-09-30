@@ -932,10 +932,13 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                 kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
             if (member != NULL || kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
                 /* A table-driven or namespace member is an own property: writable and
-                 * configurable for methods and builtins, non-writable for text and numbers,
-                 * never enumerated. */
+                 * configurable for methods and builtins, non-writable for text and numbers.
+                 * Node's global Buffer is the exception to the usual non-enumerable builtin
+                 * statics: its constructor is assembled from ordinary assignments, and
+                 * safer-buffer copies those statics with `for (key in Buffer)`. */
                 kiln_value val;
                 int writable = 1;
+                int enumerable = target.bits == KILN_C99_BUILTIN_BUFFER;
                 if (member != NULL && (member->kind == KILN_C99_MEMBER_TEXT ||
                                        member->kind == KILN_C99_MEMBER_NUMBER ||
                                        member->kind == KILN_C99_MEMBER_SYMBOL)) {
@@ -953,7 +956,8 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                     status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(writable), 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+                    status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                          kiln_c99_boolean(enumerable), 0, NULL);
                 }
                 if (status == KILN_C99_OK) {
                     status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
