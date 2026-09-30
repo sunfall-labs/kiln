@@ -2003,7 +2003,7 @@ builtin_backlog! {
     ("Math", "f16round",
      "not implemented; needs a half-precision round the number provider does not export"),
     ("%TypedArray%", "@@species",
-     "not implemented; the intrinsic is not a value this backend hands back"),
+     "answered by the shared typedarray.ts bootstrap on the abstract constructor, not from a C row"),
     ("Promise", "allKeyed",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Promise", "allSettledKeyed",

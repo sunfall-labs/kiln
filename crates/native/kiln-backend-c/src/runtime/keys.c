@@ -112,6 +112,26 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    {
+        kiln_typed_kind kind;
+        if (kiln_c99_builtin_typed_kind(builtin, &kind)) {
+            /* Concrete constructors own their width constant. `from` and `of` are readable
+             * through the common surface table but live on the abstract parent; only the byte
+             * constructor appends the codec methods that typedarray.ts installed in its store. */
+            status = kiln_c99_new_array(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("BYTES_PER_ELEMENT", 17));
+            if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+            if (status == KILN_C99_OK) *out = built;
+            return status;
+        }
+    }
     if (kiln_c99_has_surface(builtin)) {
         /* A table-driven built-in can describe itself, which is the one thing the hand-written
          * chains could never do: the names it answers to *are* its rows. Refusing here is what
@@ -176,26 +196,6 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
         if (status == KILN_C99_OK) *out = built;
         return status;
-    }
-    {
-        kiln_typed_kind kind;
-        if (kiln_c99_builtin_typed_kind(builtin, &kind)) {
-            /* Concrete typed-array constructors own the standard callable properties and their
-             * element-width constant. Their `from`, `of`, and species behavior is inherited from
-             * `%TypedArray%`, so do not report those as own keys here. */
-            status = kiln_c99_new_array(&built);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("BYTES_PER_ELEMENT", 17));
-            if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
-            if (status == KILN_C99_OK) *out = built;
-            return status;
-        }
     }
     if (builtin >= KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE &&
         builtin <= KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME) {
