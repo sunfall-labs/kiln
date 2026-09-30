@@ -3119,10 +3119,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_not_a(thrown, receiver, "function");
             }
             regexp = kiln_c99_regexp_of(receiver);
-            subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-            if (subject.tag != KILN_VALUE_STRING) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            /* Coerce after the receiver brand check: object subjects run their string-hint
+             * conversion, and a Symbol throws instead of matching its diagnostic spelling. */
+            status = kiln_c99_to_text_argument(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                &subject, depth, thrown);
+            if (status != KILN_C99_OK) return status;
             int is_ascii = 0;
             if (regexp->cached_subject_ptr == subject.ptr && regexp->cached_subject_len == subject.len) {
                 is_ascii = regexp->cached_is_ascii;
