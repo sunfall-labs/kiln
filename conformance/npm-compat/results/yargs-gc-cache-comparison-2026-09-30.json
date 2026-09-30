@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "source_commit": "4485c94f9c797887f3d6ca5dd742f6d78ba2acb6",
+  "control_commit": "ec2cf3cbdcd5026c25b146d4fd0b1c065a856c0e",
+  "difference": "Positive nursery lookup cache disabled in heap.c and graph_capsule.c only",
+  "timing_kind": "native process wall time including startup and realm teardown; not warmed workload throughput",
+  "stdout_sha256": "29969be812f77d90121e5f1226eb1e57375c4a3757f97fd297aa99611c88dae7",
+  "samples": [
+    {
+      "runtime": "cache_off",
+      "seconds": 3.4238292280351743,
+      "iteration": 1
+    },
+    {
+      "runtime": "cache_on",
+      "seconds": 3.424897962016985,
+      "iteration": 1
+    },
+    {
+      "runtime": "cache_on",
+      "seconds": 3.4024403329822235,
+      "iteration": 2
+    },
+    {
+      "runtime": "cache_off",
+      "seconds": 3.41186952899443,
+      "iteration": 2
+    },
+    {
+      "runtime": "cache_off",
+      "seconds": 3.4055164760211483,
+      "iteration": 3
+    },
+    {
+      "runtime": "cache_on",
+      "seconds": 3.4238938890048303,
+      "iteration": 3
+    },
+    {
+      "runtime": "cache_on",
+      "seconds": 3.4095498499809764,
+      "iteration": 4
+    },
+    {
+      "runtime": "cache_off",
+      "seconds": 3.400897169020027,
+      "iteration": 4
+    },
+    {
+      "runtime": "cache_off",
+      "seconds": 3.4021468879655004,
+      "iteration": 5
+    },
+    {
+      "runtime": "cache_on",
+      "seconds": 3.41303864098154,
+      "iteration": 5
+    }
+  ],
+  "binaries": {
+    "cache_on": {
+      "path": "~/Work/kiln-npm-compat/target/npm-compat-evidence/yargs-cache-on-cli29.bin",
+      "sha256": "47cf25606319e28b979ec84b3d5a2b804bee0c861e044b7525021e93abc5704a"
+    },
+    "cache_off": {
+      "path": "~/Work/kiln-npm-gc-cache-control/target/yargs-cache-off-cli29.bin",
+      "sha256": "c6de95fd0de1179949f40086f072819aa4868dbb5e20f9cbfbaaeadf895d268e"
+    }
+  },
+  "median_seconds": {
+    "cache_on": 3.41303864098154,
+    "cache_off": 3.4055164760211483
+  },
+  "cache_on_vs_off_ratio": 1.0022088176678505
+}
