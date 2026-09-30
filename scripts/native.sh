@@ -90,6 +90,7 @@ if [[ -z $KILN ]]; then
 fi
 
 matched=0
+invalid=0
 diverged=0
 stress_skipped=0
 declare -a REFUSALS=()
@@ -269,11 +270,11 @@ for probe in "${PROBES[@]}"; do
 	if [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
 		kiln_say "$(<"$WORK_DIR/$name.failed")"
-		exit 1
+		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.broken" ]]; then
 		kiln_say "FAILED: the native build of $name did not complete, so there is nothing to compare:"
 		kiln_say "$(<"$WORK_DIR/$name.broken")"
-		exit 1
+		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.stress-skipped" ]]; then
 		stress_skipped=$((stress_skipped + 1))
 	elif [[ -f "$WORK_DIR/$name.matched" ]]; then
@@ -286,6 +287,9 @@ for probe in "${PROBES[@]}"; do
 		while IFS= read -r line; do
 			DIVERGENCES+=("$line")
 		done < "$WORK_DIR/$name.diverged"
+	else
+		kiln_say "FAILED: no result was retained for $name"
+		invalid=$((invalid + 1))
 	fi
 done
 
@@ -299,11 +303,18 @@ if ((${#REFUSALS[@]} > 0)); then
 	done
 fi
 
+if ((invalid > 0)); then
+	kiln_say "native: $invalid invalid probes; all collected verdicts are reported above"
+fi
+
 if ((diverged > 0)); then
 	kiln_say ""
 	kiln_say "DIVERGED - the two engines ran the same bytecode and did not agree:"
 	printf '%s\n' "${DIVERGENCES[@]}" | while IFS= read -r line; do kiln_say "$line"; done
 	kiln_say ""
 	kiln_say "One of the two is wrong. The bytecode is the same, so nothing else can explain it."
+fi
+
+if ((diverged > 0 || invalid > 0)); then
 	exit 1
 fi
