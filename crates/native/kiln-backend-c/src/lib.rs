@@ -769,7 +769,15 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                     _ => None,
                 })
                 .collect::<HashSet<_>>();
-            let mut retained = (**demanded).clone();
+            // Seed phase-one DCE from the same full-module liveness closure that protects the
+            // evaluation entrypoint. A hoisted helper can be reachable only through another
+            // function which runs after initialization, so scanning only top-level evaluation
+            // reads misses it and leaves its exported/imported cell empty.
+            let mut retained = evaluation_policy
+                .live_module_slots
+                .as_ref()
+                .map(|slots| (**slots).clone())
+                .unwrap_or_else(|| (**demanded).clone());
             for (pc, instruction) in module.program.code[..boundary.min(module.program.code.len())]
                 .iter()
                 .enumerate()

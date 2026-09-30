@@ -759,6 +759,92 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
 }
 
 #[test]
+fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
+    let function = |upvalues| FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count: 0,
+        code: if upvalues.is_empty() {
+            vec![Instruction::Const(0), Instruction::Return]
+        } else {
+            vec![Instruction::LoadUpvalue(0), Instruction::Return]
+        },
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        is_class: false,
+        mapped_arguments: false,
+        upvalues,
+        type_annotations: None,
+    };
+    let mut module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::MakeFunction(1),
+                Instruction::StoreLocal(1),
+                Instruction::MakeFunction(2),
+                Instruction::StoreLocal(2),
+                Instruction::MakeFunction(3),
+                Instruction::StoreLocal(3),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 4,
+            functions: vec![
+                function(Vec::new()),
+                function(vec![Upvalue::ParentLocal(0)]),
+                function(vec![Upvalue::ParentLocal(1)]),
+                function(Vec::new()),
+            ],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "run".into(),
+            local_slot: 2,
+        }],
+    );
+    module.link_facts.module_instantiation_end = 8;
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([2].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation entrypoint");
+    for function in [0, 1, 2] {
+        assert!(
+            instantiation
+                .source
+                .contains(&format!("{}_fn_{function}(", emitted.symbol)),
+            "function {function} must remain available to evaluation"
+        );
+    }
+    assert!(
+        !instantiation
+            .source
+            .contains(&format!("{}_fn_3(", emitted.symbol)),
+        "unreachable declaration remains dead"
+    );
+}
+
+#[test]
 fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
     let function = |local_count, code| FunctionProto {
         inferred_name: None,

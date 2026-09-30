@@ -30,6 +30,7 @@ static int kiln_c99_is_object_value(kiln_value value) {
 }
 
 static int kiln_c99_get_prototype_from_constructor(kiln_host *host, kiln_value constructor,
+                                                    kiln_value default_prototype,
                                                     kiln_value *out, int depth,
                                                     kiln_value *thrown) {
     kiln_value prototype;
@@ -37,7 +38,7 @@ static int kiln_c99_get_prototype_from_constructor(kiln_host *host, kiln_value c
     if (status != KILN_C99_OK) return status;
     *out = kiln_c99_is_object_value(prototype)
                ? prototype
-               : kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+               : default_prototype;
     return KILN_C99_OK;
 }
 
@@ -75,8 +76,13 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
             argc > 0 && kiln_c99_is_object_value(args[0])) {
             return KILN_C99_OK;
         }
+        kiln_value default_prototype;
+        status = kiln_c99_get_prototype_from_constructor(
+            host, callee, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+            &default_prototype, depth, thrown);
+        if (status != KILN_C99_OK) return status;
         status = kiln_c99_get_prototype_from_constructor(host, new_target, &target_prototype,
-                                                          depth, thrown);
+                                                          default_prototype, depth, thrown);
         if (status != KILN_C99_OK) return status;
         if (kiln_c99_is_object_value(*result)) {
             return kiln_c99_set_prototype(*result, target_prototype);
@@ -607,8 +613,9 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
             return kiln_c99_throw_not_a(thrown, callee, "constructor");
         }
     }
-    status = kiln_c99_get_prototype_from_constructor(host, new_target, &prototype, depth,
-                                                      thrown);
+    status = kiln_c99_get_prototype_from_constructor(
+        host, new_target, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &prototype,
+        depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
