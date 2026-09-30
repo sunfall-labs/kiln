@@ -13,26 +13,29 @@
 
   function localesList(locales: any): string[] {
     if (locales === undefined) return [];
-    let values: string[] = [];
     if (typeof locales === "string") {
-      values = [locales];
-    } else {
-      if (locales === null || (typeof locales !== "object" && typeof locales !== "function")) {
-        throw new TypeError("Cannot convert undefined or null to object");
-      }
-      const object = Object(locales);
-      const length = toLength(object.length);
-      for (let index = 0; index < length; index++) {
-        const item = object[index];
-        if (item === undefined) continue;
-        if (typeof item === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
-        values.push(`${item}`);
-      }
+      hostCase("", locales, false);
+      return [locales];
     }
-    // The provider is the single owner of BCP 47 parsing/canonicalization. Calling it with an
-    // empty input validates each supplied tag without inventing a TypeScript locale parser.
-    for (let index = 0; index < values.length; index++) {
-      hostCase("", values[index], false);
+    if (locales === null) throw new TypeError("Cannot convert undefined or null to object");
+    // CanonicalizeLocaleList applies ToObject to every non-string, non-null input. That makes a
+    // numeric or boolean primitive an empty array-like list, rather than a type error.
+    const object = Object(locales);
+    const length = toLength(object.length);
+    const values: string[] = [];
+    for (let index = 0; index < length; index++) {
+      // `in` performs the spec's HasProperty before Get, preserving inherited indices and proxy
+      // trap order while distinguishing a hole from a present undefined (which is a TypeError).
+      if (!(index in object)) continue;
+      const item = object[index];
+      if (typeof item !== "string" && (item === null || typeof item !== "object")) {
+        throw new TypeError("String.prototype.toLocaleLowerCase locales must be strings or objects");
+      }
+      const tag = typeof item === "string" ? item : `${item}`;
+      // Validate before touching the next index: an invalid earlier tag prevents later getters.
+      // BCP 47 parsing/canonicalization belongs to kiln-intl, not a bootstrap regex.
+      hostCase("", tag, false);
+      values.push(tag);
     }
     return values;
   }
@@ -47,13 +50,13 @@
   function toLocaleLowerCase(this: any, locales?: any): string {
     const value = receiverString(this, "toLocaleLowerCase");
     const tags = localesList(locales);
-    return hostCase(value, tags.length === 0 ? "" : tags[0], false);
+    return hostCase(value, tags.length === 0 ? undefined : tags[0], false);
   }
 
   function toLocaleUpperCase(this: any, locales?: any): string {
     const value = receiverString(this, "toLocaleUpperCase");
     const tags = localesList(locales);
-    return hostCase(value, tags.length === 0 ? "" : tags[0], true);
+    return hostCase(value, tags.length === 0 ? undefined : tags[0], true);
   }
 
   Object.defineProperty(String.prototype, "toLocaleLowerCase", {

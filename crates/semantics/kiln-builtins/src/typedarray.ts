@@ -38,6 +38,33 @@ delete (globalThis as any).__kilnTypedArraySort;
     return;
   }
 
+  Object.defineProperty(Uint8Array, "fromHex", {
+    value: function fromHex(input: any): Uint8Array {
+      if (typeof input !== "string") {
+        throw new TypeError("Uint8Array.fromHex requires a string argument");
+      }
+      if (input.length % 2 !== 0) {
+        throw new SyntaxError("hex string must have an even number of characters");
+      }
+      function digit(code: number): number {
+        if (code >= 48 && code <= 57) return code - 48;
+        if (code >= 65 && code <= 70) return code - 55;
+        if (code >= 97 && code <= 102) return code - 87;
+        return -1;
+      }
+      const bytes = new Uint8Array(input.length / 2);
+      for (let index = 0; index < bytes.length; index++) {
+        const high = digit(input.charCodeAt(index * 2));
+        const low = digit(input.charCodeAt(index * 2 + 1));
+        if (high < 0 || low < 0) throw new SyntaxError("invalid hex string");
+        bytes[index] = high * 16 + low;
+      }
+      return bytes;
+    },
+    writable: true,
+    configurable: true,
+  });
+
   const Proto = Object.getPrototypeOf(Uint8Array.prototype);
   if (!Proto) {
     return;

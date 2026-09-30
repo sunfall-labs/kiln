@@ -214,13 +214,12 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         if (enumerated == 0) {
             return kiln_c99_text_append_c(text, "{}");
         }
-        if (kiln_c99_text_append_c(text, "{ ") != KILN_C99_OK) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
         {
         kiln_text body = {NULL, 0, 0};
         size_t *bounds;
         size_t row_count = 0;
+        size_t column = 0, scan;
+        int flat_fits;
         int status = KILN_C99_OK;
         if (count > SIZE_MAX / (2 * sizeof *bounds)) return KILN_C99_OUT_OF_MEMORY;
         bounds = count == 0 ? NULL : (size_t *)malloc(count * 2 * sizeof *bounds);
@@ -250,7 +249,14 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             row_count += 1;
             if (status != KILN_C99_OK) break;
         }
-        if (status == KILN_C99_OK && text->len <= 76 && body.len <= 76 - text->len) {
+        for (scan = text->len; scan > 0 && text->bytes[scan - 1] != '\n'; --scan) column += 1;
+        flat_fits = body.len <= 80 && row_count <= (SIZE_MAX - body.len - 4) / 2;
+        if (flat_fits) {
+            size_t flat_len = body.len + 4 + (row_count == 0 ? 0 : 2 * (row_count - 1));
+            flat_fits = (body.len == 0 || !memchr(body.bytes, '\n', body.len)) &&
+                        column <= 80 && flat_len <= 80 - column;
+        }
+        if (status == KILN_C99_OK && flat_fits) {
             status = kiln_c99_text_append_c(text, "{ ");
             for (index = 0; status == KILN_C99_OK && index < row_count; ++index) {
                 if (index != 0) status = kiln_c99_text_append_c(text, ", ");

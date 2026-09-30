@@ -160,6 +160,86 @@ export function stripVTControlCharacters(value: string): string {
   return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "");
 }
 
+export function isDeepStrictEqual(actual: any, expected: any): boolean {
+  const leftSeen: any[] = [];
+  const rightSeen: any[] = [];
+  function unorderedMatch(left: any[], right: any[], matches: (a: any, b: any) => boolean): boolean {
+    if (left.length !== right.length) return false;
+    const used: boolean[] = [];
+    function search(index: number): boolean {
+      if (index === left.length) return true;
+      for (let candidate = 0; candidate < right.length; candidate++) {
+        if (used[candidate]) continue;
+        const leftMark = leftSeen.length;
+        const rightMark = rightSeen.length;
+        if (matches(left[index], right[candidate])) {
+          used[candidate] = true;
+          if (search(index + 1)) return true;
+          used[candidate] = false;
+        }
+        leftSeen.length = leftMark;
+        rightSeen.length = rightMark;
+      }
+      return false;
+    }
+    return search(0);
+  }
+  function equal(left: any, right: any): boolean {
+    if (Object.is(left, right)) return true;
+    if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
+      return false;
+    }
+    if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
+    for (let i = 0; i < leftSeen.length; i++) {
+      if (leftSeen[i] === left) return rightSeen[i] === right;
+      if (rightSeen[i] === right) return false;
+    }
+    leftSeen.push(left);
+    rightSeen.push(right);
+
+    if (left instanceof Date || right instanceof Date) {
+      if (!(left instanceof Date) || !(right instanceof Date) || !Object.is(left.getTime(), right.getTime())) return false;
+    }
+    if (left instanceof RegExp || right instanceof RegExp) {
+      if (!(left instanceof RegExp) || !(right instanceof RegExp) ||
+          left.source !== right.source || left.flags !== right.flags || left.lastIndex !== right.lastIndex) return false;
+    }
+    if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
+      if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right) ||
+          left.constructor !== right.constructor || left.byteLength !== right.byteLength) return false;
+      const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+      const b = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    }
+    if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
+      if (!(left instanceof ArrayBuffer) || !(right instanceof ArrayBuffer) || left.byteLength !== right.byteLength) return false;
+      const a = new Uint8Array(left), b = new Uint8Array(right);
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    }
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    if (Array.isArray(left) && left.length !== right.length) return false;
+    if (left instanceof Map || right instanceof Map) {
+      if (!(left instanceof Map) || !(right instanceof Map) || left.size !== right.size) return false;
+      const a = Array.from(left.entries()), b = Array.from(right.entries());
+      if (!unorderedMatch(a, b, (x, y) => equal(x[0], y[0]) && equal(x[1], y[1]))) return false;
+    }
+    if (left instanceof Set || right instanceof Set) {
+      if (!(left instanceof Set) || !(right instanceof Set) || left.size !== right.size) return false;
+      const a = Array.from(left.values()), b = Array.from(right.values());
+      if (!unorderedMatch(a, b, equal)) return false;
+    }
+    const aKeys = Reflect.ownKeys(left).filter((key: any) => Object.prototype.propertyIsEnumerable.call(left, key));
+    const bKeys = Reflect.ownKeys(right).filter((key: any) => Object.prototype.propertyIsEnumerable.call(right, key));
+    if (aKeys.length !== bKeys.length) return false;
+    for (let i = 0; i < aKeys.length; i++) {
+      const key = aKeys[i];
+      if (!Object.prototype.propertyIsEnumerable.call(right, key) || !equal(left[key], right[key])) return false;
+    }
+    return true;
+  }
+  return equal(actual, expected);
+}
+
 export function inherits(ctor: any, superCtor: any): void {
   if (typeof ctor !== "function" || typeof superCtor !== "function") {
     throw new TypeError("The constructor and super constructor must be functions");
@@ -409,6 +489,7 @@ const util = {
   isString,
   isSymbol,
   isUndefined,
+  isDeepStrictEqual,
   promisify,
   styleText,
   types,

@@ -121,7 +121,8 @@ pub unsafe extern "C" fn kiln_intl_string_case(
     let tag = if locale_len == 0 { &[] } else { unsafe { core::slice::from_raw_parts(locale, locale_len) } };
     let Ok(tag) = core::str::from_utf8(tag) else { return INVALID_ARGUMENT; };
     let mapped = catch_unwind(AssertUnwindSafe(|| {
-        map_case_utf16(input, if tag.is_empty() { None } else { Some(tag) }, uppercase != 0)
+        let locale = if locale.is_null() && locale_len == 0 { None } else { Some(tag) };
+        map_case_utf16(input, locale, uppercase != 0)
     }));
     match mapped {
         Ok(Ok(answer)) => unsafe { spill_units(&answer, out, capacity, out_len) },

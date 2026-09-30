@@ -401,6 +401,7 @@ declare_ts_builtins! {
             "isBoolean",
             "isBuffer",
             "isDate",
+            "isDeepStrictEqual",
             "isError",
             "isFunction",
             "isNull",
@@ -882,26 +883,37 @@ declare_ts_builtins! {
             "futimesSync",
             "glob",
             "globSync",
+            "lstat",
             "lstatSync",
+            "mkdir",
             "mkdirSync",
             "mkdtempSync",
             "open",
             "openSync",
             "promises",
+            "readFile",
             "readFileSync",
             "readSync",
             "readdirSync",
             "readlinkSync",
+            "realpath",
             "realpathSync",
             "renameSync",
             "rmSync",
+            "rmdir",
+            "rmdirSync",
+            "stat",
             "statSync",
             "truncateSync",
+            "unlink",
             "unlinkSync",
             "unwatchFile",
+            "utimes",
+            "utimesSync",
             "watch",
             "watchFile",
             "write",
+            "writeFile",
             "writeFileSync",
             "writeSync",
         ],
@@ -1501,8 +1513,8 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
 /// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    // The interpreter already owns spec-complete locale case methods. The native backend adds
-    // them from TypeScript only for programs whose demanded surface reaches those members.
+    // The interpreter adapters and native provider both call kiln-intl's ICU4X case mapper.
+    // The native backend adds the public TypeScript wrappers only when liveness retains a call.
     common_bootstrap_source_selected(
         native_bootstrap_family::ALL & !native_bootstrap_family::STRING_LOCALE,
     )
