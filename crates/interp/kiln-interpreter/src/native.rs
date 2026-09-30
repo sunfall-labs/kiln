@@ -744,6 +744,9 @@ pub enum Native {
     /// -- detached, or a resizable buffer shrunk under the window. The shared `%TypedArray%`
     /// methods ask it in `ValidateTypedArray` (`kiln-builtins/src/typedarray.ts`).
     TypedArrayOutOfBoundsRaw,
+    /// `__kilnCollectionSize(collection)`: internal Map/Set storage read used by the shared
+    /// TypeScript accessor so its descriptor and brand behavior have one owner.
+    CollectionSizeRaw,
     /// `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)`: a same-type element
     /// copy as bytes (ADR 0065, representation), `false` when the TypeScript's loop must run.
     TypedArrayCopyRaw,

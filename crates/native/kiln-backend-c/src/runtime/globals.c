@@ -506,6 +506,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
                      {"__kilnSharedIs", KILN_C99_METHOD_SHARED_IS_RAW},
                      {"__kilnSharedWeak", KILN_C99_METHOD_SHARED_WEAK_RAW},
+                     {"__kilnCollectionSize", KILN_C99_METHOD_COLLECTION_SIZE_RAW},
                      /* `%TypedArray%.prototype`'s element-storage primitives, captured the same
                       * way by `kiln-builtins/src/typedarray.ts`. */
                      {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},

@@ -787,6 +787,26 @@ pub(crate) fn call_native(
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
             _ => Value::Boolean(false),
         },
+        Native::CollectionSizeRaw => {
+            let Some(receiver) = arguments.first() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "get size: receiver does not have the required internal slot".to_owned(),
+                });
+            };
+            if is_weak_collection(receiver) || collection_state(receiver).is_none() {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "get size: receiver does not have the required internal slot".to_owned(),
+                });
+            }
+            let Value::Object(object) = receiver else {
+                unreachable!("collection state is stored on an object");
+            };
+            object
+                .borrow()
+                .get_own(COLLECTION_SIZE)
+                .cloned()
+                .unwrap_or(Value::Number(0.0))
+        }
         // `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` and
         // `__kilnTypedArraySort(view)` (ADR 0065, representation): the shared TypeScript has
         // computed every index; anything else answers `false`, "run the loop".

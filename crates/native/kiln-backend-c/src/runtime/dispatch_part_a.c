@@ -1587,6 +1587,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_SHARED);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
+        if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
+            kiln_c99_collection_of(args[0])->is_weak) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "get size: receiver does not have the required internal slot");
+        }
+        *result = kiln_c99_number((double)kiln_c99_collection_of(args[0])->live);
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_SHARED_WEAK_RAW) {
         double operation = argc > 0 && args[0].tag == KILN_VALUE_NUMBER
             ? kiln_c99_as_number(args[0]) : -1.0;

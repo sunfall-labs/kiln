@@ -220,6 +220,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_SHARE_RAW: return "__kilnShare";
     case KILN_C99_METHOD_SHARED_IS_RAW: return "__kilnSharedIs";
     case KILN_C99_METHOD_SHARED_WEAK_RAW: return "__kilnSharedWeak";
+    case KILN_C99_METHOD_COLLECTION_SIZE_RAW: return "__kilnCollectionSize";
     case KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW: return "__kilnTypedArrayCopy";
     case KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW: return "__kilnTypedArraySort";
     case KILN_C99_METHOD_WORKER_OP_RAW: return "__kilnWorkerOp";

@@ -337,17 +337,6 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
         status = kiln_c99_descriptor_field(host, descriptor, "set", &setter, &has_setter, depth,
                                            thrown);
     }
-    if (status == KILN_C99_OK && (has_getter || has_setter) &&
-        (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
-         target.tag == KILN_VALUE_BOUND)) {
-        /* A data property in a built-in's store is read wherever the store is consulted, which
-         * is what the runtime bootstrap and a library's symbol hook need. An accessor there would
-         * not run: an instance answers the built-in's own names -- `promise.constructor`,
-         * `re.flags` -- ahead of the prototype's store, so a getter defined on
-         * `Promise.prototype` is silently never called, which is worse than stopping here. */
-        KILN_C99_REFUSE("a property definition on a value with no property store for an "
-                        "accessor: an instance read would not run it");
-    }
     if (status == KILN_C99_OK) {
         status = kiln_c99_descriptor_field(host, descriptor, "value", &value, &has_value, depth,
                                            thrown);

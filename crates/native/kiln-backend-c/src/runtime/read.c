@@ -136,6 +136,27 @@ static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
     return KILN_C99_OK;
 }
 
+/* Accessors installed on a native prototype must observe the original receiver, not the hidden
+ * property-store object. Data members can use the ordinary projection above; Map/Set.size is the
+ * first native accessor whose TypeScript getter needs its instance's internal collection slot. */
+static int kiln_c99_prototype_store_read_with_receiver(
+    kiln_host *host, uint64_t prototype, kiln_value receiver, const kiln_string *key,
+    const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_property property;
+    int status = kiln_c99_callable_store(kiln_c99_builtin(prototype), &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    if (!kiln_c99_property_read_own_value(store, key, ikey, &property)) return KILN_C99_OK;
+    *found = 1;
+    if (!property.accessor) return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+    if (property.getter.tag == KILN_VALUE_UNDEFINED) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
+}
+
 /* Issue 30: a receiver whose members come from a method table -- a string's `trim`, an array's
  * `join`, a number's `toFixed` -- inherits them from a prototype built-in, and a member the program
  * wrote onto that built-in (`String.prototype.trim = f`) shadows the table's, exactly as it does
@@ -1340,6 +1361,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         /* A weak collection has no `size` at all, so its name falls through to the absent
          * answer below rather than stopping the program. */
         if (!collection->is_weak && kiln_c99_same_name_key(key, "size")) {
+            int found;
+            uint64_t prototype = collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                                    : KILN_C99_BUILTIN_SET_PROTOTYPE;
+            int status = kiln_c99_prototype_store_read_with_receiver(
+                host, prototype, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
         }

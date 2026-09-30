@@ -1050,7 +1050,7 @@ pub(super) fn native_bootstrap_families(
     if builtin(&["structuredClone"]) || members.globals.contains("structuredClone") {
         selected |= family::STRUCTURED_CLONE;
     }
-    if builtin(&["Map"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
+    if builtin(&["Map", "Set"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
         selected |= family::MAP_UPSERT;
     }
     if builtin(&["Promise"]) || names(&["try", "allKeyed", "allSettledKeyed"]) {
