@@ -591,7 +591,7 @@ class WritableImplementation extends Stream {
 export interface Writable extends WritableImplementation {}
 export const Writable: any = legacyStreamConstructor(WritableImplementation);
 
-export class Duplex extends Readable {
+class DuplexImplementation extends Readable {
   _writableState: any;
   writable: boolean;
   writableEnded: boolean;
@@ -627,7 +627,10 @@ export class Duplex extends Readable {
   }
 }
 
-export class Transform extends Duplex {
+export interface Duplex extends DuplexImplementation {}
+export const Duplex: any = legacyStreamConstructor(DuplexImplementation);
+
+class TransformImplementation extends Duplex {
   constructor(options?: any) {
     super(options);
     if (options && typeof options.transform === "function") {
@@ -692,6 +695,9 @@ export class Transform extends Duplex {
     return this;
   }
 }
+
+export interface Transform extends TransformImplementation {}
+export const Transform: any = legacyStreamConstructor(TransformImplementation);
 
 export class PassThrough extends Transform {}
 
