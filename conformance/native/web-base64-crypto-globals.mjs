@@ -19,3 +19,11 @@ const hmac = await crypto.subtle.sign("HMAC", hmacKey, new TextEncoder().encode(
 console.log(Buffer.from(hmac).toString("hex"),
   await crypto.subtle.verify("HMAC", hmacKey, hmac, new TextEncoder().encode("data")),
   await crypto.subtle.verify("HMAC", hmacKey, hmac, new TextEncoder().encode("other")));
+const verifyOnlyKey = await crypto.subtle.importKey(
+  "raw", new TextEncoder().encode("key"), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
+);
+console.log("verify-only:", await crypto.subtle.verify(
+  "HMAC", verifyOnlyKey, hmac, new TextEncoder().encode("data")
+));
+try { await crypto.subtle.sign("HMAC", verifyOnlyKey, new TextEncoder().encode("data")); }
+catch (error) { console.log("verify-only sign:", error.name); }

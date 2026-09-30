@@ -191,11 +191,11 @@ Object.defineProperty(Stream.prototype, "constructor", {
 // Node's stream constructors predate ES classes and remain callable with `.call(this, options)`.
 // Keep the implementation classes for `extends`, but expose callable constructor functions that
 // initialize an existing receiver as well as a newly allocated one.
-function legacyStreamConstructor(Implementation: any): any {
+function legacyStreamConstructor(Implementation: any, publicName: string): any {
   const Constructor: any = function (this: any, ...args: any[]): void {
     Object.assign(this, new Implementation(...args));
   };
-  Object.defineProperty(Constructor, "name", { value: Implementation.name, configurable: true });
+  Object.defineProperty(Constructor, "name", { value: publicName, configurable: true });
   Object.setPrototypeOf(Constructor, Implementation);
   Constructor.prototype = Implementation.prototype;
   Object.defineProperty(Constructor.prototype, "constructor", {
@@ -496,7 +496,7 @@ class ReadableImplementation extends Stream {
 }
 
 export interface Readable extends ReadableImplementation {}
-export const Readable: any = legacyStreamConstructor(ReadableImplementation);
+export const Readable: any = legacyStreamConstructor(ReadableImplementation, "Readable");
 
 class WritableImplementation extends Stream {
   _writableState: {
@@ -589,7 +589,7 @@ class WritableImplementation extends Stream {
 }
 
 export interface Writable extends WritableImplementation {}
-export const Writable: any = legacyStreamConstructor(WritableImplementation);
+export const Writable: any = legacyStreamConstructor(WritableImplementation, "Writable");
 
 class DuplexImplementation extends Readable {
   _writableState: any;
@@ -628,7 +628,7 @@ class DuplexImplementation extends Readable {
 }
 
 export interface Duplex extends DuplexImplementation {}
-export const Duplex: any = legacyStreamConstructor(DuplexImplementation);
+export const Duplex: any = legacyStreamConstructor(DuplexImplementation, "Duplex");
 
 class TransformImplementation extends Duplex {
   constructor(options?: any) {
@@ -697,7 +697,7 @@ class TransformImplementation extends Duplex {
 }
 
 export interface Transform extends TransformImplementation {}
-export const Transform: any = legacyStreamConstructor(TransformImplementation);
+export const Transform: any = legacyStreamConstructor(TransformImplementation, "Transform");
 
 export class PassThrough extends Transform {}
 

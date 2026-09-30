@@ -356,7 +356,7 @@ export class KeyObject {
 
   constructor(key: any, type: string = 'secret') {
     this.type = type;
-    this._key = toUint8Array(key);
+    this._key = toUint8Array(key).slice();
     this.symmetricKeySize = type === 'secret' ? this._key.length : undefined;
   }
 
@@ -367,8 +367,11 @@ export class KeyObject {
   }
 }
 
-export function createSecretKey(key: any): KeyObject {
-  if (key === undefined || key === null || typeof key !== 'object') {
+export function createSecretKey(key: any, encoding?: string): KeyObject {
+  if (typeof key === 'string') {
+    return new KeyObject(toUint8Array(key, encoding), 'secret');
+  }
+  if (key === undefined || key === null || typeof key !== 'object' || encoding !== undefined) {
     throw new TypeError('The "key" argument must be of type string or an instance of Buffer or TypedArray');
   }
   return new KeyObject(key, 'secret');

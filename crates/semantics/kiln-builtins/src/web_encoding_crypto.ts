@@ -69,6 +69,13 @@
     outer.set(sha256(inner), 64);
     return sha256(outer);
   }
+  function hmacForUsage(algorithm: any, key: any, data: any, usage: string): Uint8Array {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+    if (name !== 'HMAC' || !key || key.type !== 'secret' || !key.usages.includes(usage)) {
+      throw new DOMException('Invalid key or algorithm', 'InvalidAccessError');
+    }
+    return hmacSha256(key._key, bytesOf(data));
+  }
   const subtle = {
     async importKey(format: string, keyData: any, algorithm: any, extractable: boolean, usages: string[]): Promise<any> {
       const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
@@ -82,14 +89,10 @@
         [Symbol.toStringTag]: 'CryptoKey' };
     },
     async sign(algorithm: any, key: any, data: any): Promise<ArrayBuffer> {
-      const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
-      if (name !== 'HMAC' || !key || key.type !== 'secret' || !key.usages.includes('sign')) {
-        throw new DOMException('Invalid key or algorithm', 'InvalidAccessError');
-      }
-      return hmacSha256(key._key, bytesOf(data)).buffer as ArrayBuffer;
+      return hmacForUsage(algorithm, key, data, 'sign').buffer as ArrayBuffer;
     },
     async verify(algorithm: any, key: any, signature: any, data: any): Promise<boolean> {
-      const expected = new Uint8Array(await this.sign(algorithm, key, data));
+      const expected = hmacForUsage(algorithm, key, data, 'verify');
       const actual = bytesOf(signature);
       if (actual.length !== expected.length) return false;
       let difference = 0;
