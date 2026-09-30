@@ -1721,20 +1721,36 @@
         }
         case KILN_C99_METHOD_REFLECT_CONSTRUCT: {
             kiln_array *list;
-            if (argc < 2 || args[1].tag != KILN_VALUE_ARRAY) {
-                KILN_C99_REFUSE("Reflect.construct needs a callee and an array of arguments");
+            kiln_value target = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value new_target = argc > 2 ? args[2] : target;
+            if (!kiln_c99_is_constructor(target)) {
+                return kiln_c99_throw_not_a(thrown, target, "constructor");
             }
-            if (argc > 2) {
-                /* A third argument names a `new.target` other than the callee, which changes
-                 * both what the body reads and which prototype the instance gets. */
-                KILN_C99_REFUSE("Reflect.construct with a new.target other than the callee");
+            if (!kiln_c99_is_constructor(new_target)) {
+                return kiln_c99_throw_not_a(thrown, new_target, "constructor");
+            }
+            if (argc < 2 || args[1].tag != KILN_VALUE_ARRAY) {
+                KILN_C99_REFUSE("Reflect.construct requires an array-like argument list");
             }
             list = kiln_c99_array_of(args[1]);
-            kiln_val built_val = KILN_VAL_UNDEFINED;
-            status = kiln_c99_construct_val(host, &built_val, kiln_val_from_boundary(args[0]),
-                                            list->count == 0 ? NULL : list->elements, list->count,
-                                            depth, thrown);
-            if (status == KILN_C99_OK) *result = kiln_val_to_boundary(built_val);
+            kiln_value built = kiln_c99_undefined();
+            kiln_value inline_args[16];
+            kiln_value *construct_args = inline_args;
+            size_t index;
+            if (list->count > 16) {
+                construct_args = (kiln_value *)malloc(list->count * sizeof *construct_args);
+                if (construct_args == NULL) return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < list->count; ++index) {
+                construct_args[index] = list->elements[index] == KILN_VAL_HOLE
+                                            ? kiln_c99_undefined()
+                                            : kiln_val_to_boundary(list->elements[index]);
+            }
+            status = kiln_c99_construct_with_new_target(
+                host, &built, target, list->count == 0 ? NULL : construct_args, list->count,
+                new_target, depth, thrown);
+            if (construct_args != inline_args) free(construct_args);
+            if (status == KILN_C99_OK) *result = built;
             return status;
         }
         case KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE:

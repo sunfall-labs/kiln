@@ -29,9 +29,35 @@ static int kiln_c99_is_object_value(kiln_value value) {
     }
 }
 
+static int kiln_c99_get_prototype_from_constructor(kiln_host *host, kiln_value constructor,
+                                                    kiln_value *out, int depth,
+                                                    kiln_value *thrown) {
+    kiln_value prototype;
+    int status = kiln_c99_get(host, constructor, "prototype", 9, &prototype, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_c99_is_object_value(prototype)
+               ? prototype
+               : kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
+                                               kiln_value callee, const kiln_value *args,
+                                               size_t argc, kiln_value new_target, int depth,
+                                               kiln_value *thrown);
+static int kiln_c99_is_constructor(kiln_value value);
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
+    return kiln_c99_construct_with_new_target(host, result, callee, args, argc, callee, depth,
+                                              thrown);
+}
+
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
+                                               kiln_value callee, const kiln_value *args,
+                                               size_t argc, kiln_value new_target, int depth,
+                                               kiln_value *thrown) {
     kiln_value prototype;
     kiln_value instance;
     kiln_value produced;
@@ -39,6 +65,24 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value saved_adopted;
     kiln_value adopted;
     int status;
+    if ((new_target.tag != callee.tag || new_target.bits != callee.bits) &&
+        callee.tag != KILN_VALUE_FUNCTION && callee.tag != KILN_VALUE_PROXY &&
+        callee.tag != KILN_VALUE_BOUND) {
+        kiln_value target_prototype;
+        status = kiln_c99_construct(host, result, callee, args, argc, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_OBJECT &&
+            argc > 0 && kiln_c99_is_object_value(args[0])) {
+            return KILN_C99_OK;
+        }
+        status = kiln_c99_get_prototype_from_constructor(host, new_target, &target_prototype,
+                                                          depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_is_object_value(*result)) {
+            return kiln_c99_set_prototype(*result, target_prototype);
+        }
+        return KILN_C99_OK;
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_FUNCTION) {
         return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
     }
@@ -101,7 +145,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return status;
         }
         if (trap.tag == KILN_VALUE_UNDEFINED) {
-            return kiln_c99_construct(host, result, inner, args, argc, depth, thrown);
+            return kiln_c99_construct_with_new_target(host, result, inner, args, argc,
+                                                       new_target, depth, thrown);
         }
         {
             kiln_value list;
@@ -119,7 +164,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             }
             arguments[0] = inner;
             arguments[1] = list;
-            arguments[2] = callee;
+            arguments[2] = new_target;
             return kiln_c99_call(host, result, trap, handler, arguments, 3, depth, thrown);
         }
     }
@@ -531,7 +576,11 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         kiln_bound *bound = (kiln_bound *)(uintptr_t)callee.bits;
         kiln_value *joined;
         if (bound->count == 0) {
-            return kiln_c99_construct(host, result, bound->target, args, argc, depth, thrown);
+            return kiln_c99_construct_with_new_target(
+                host, result, bound->target, args, argc,
+                (new_target.tag == callee.tag && new_target.bits == callee.bits)
+                    ? bound->target : new_target,
+                depth, thrown);
         }
         joined = (kiln_value *)malloc((bound->count + argc) * sizeof *joined);
         if (joined == NULL) {
@@ -541,8 +590,11 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         if (argc != 0) {
             memcpy(joined + bound->count, args, argc * sizeof *joined);
         }
-        status = kiln_c99_construct(host, result, bound->target, joined, bound->count + argc,
-                                    depth, thrown);
+        status = kiln_c99_construct_with_new_target(
+            host, result, bound->target, joined, bound->count + argc,
+            (new_target.tag == callee.tag && new_target.bits == callee.bits)
+                ? bound->target : new_target,
+            depth, thrown);
         free(joined);
         return status;
     }
@@ -555,21 +607,14 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return kiln_c99_throw_not_a(thrown, callee, "constructor");
         }
     }
-    status = kiln_c99_prototype_object(callee, &prototype);
+    status = kiln_c99_get_prototype_from_constructor(host, new_target, &prototype, depth,
+                                                      thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
     status = kiln_c99_new_object(&instance);
     if (status != KILN_C99_OK) {
         return status;
-    }
-    /* GetPrototypeFromConstructor substitutes `Object.prototype` for a `prototype` that is not an
-     * object -- an assigned undefined or null among them -- and an unrecorded link is that. A null
-     * link would mean `Object.create(null)`, which is not what `new` builds. */
-    if (prototype.tag == KILN_VALUE_NULL || prototype.tag == KILN_VALUE_BOOLEAN ||
-        prototype.tag == KILN_VALUE_NUMBER || prototype.tag == KILN_VALUE_STRING ||
-        prototype.tag == KILN_VALUE_SYMBOL || prototype.tag == KILN_VALUE_BIGINT) {
-        prototype = kiln_c99_undefined();
     }
     kiln_c99_heap_store_value(kiln_c99_object_of(instance), &kiln_c99_object_of(instance)->prototype, prototype);
     /* Inside the body being constructed, `new.target` is the constructor the `new` named -- and
@@ -578,7 +623,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     saved_new_target = kiln_c99_new_target;
     saved_adopted = kiln_c99_adopted_this;
     kiln_c99_adopted_this = kiln_c99_undefined();
-    kiln_c99_new_target = callee;
+    kiln_c99_new_target = new_target;
     kiln_c99_inheriting_new_target = 1;
     status = kiln_c99_call(host, &produced, callee, instance, args, argc, depth, thrown);
     kiln_c99_inheriting_new_target = 0;
@@ -879,6 +924,10 @@ static int kiln_c99_heritage_constructs(kiln_value value) {
             if (kiln_c99_native_constructors[i].method == value.bits) return 1;
     }
     return 0;
+}
+
+static int kiln_c99_is_constructor(kiln_value value) {
+    return kiln_c99_heritage_constructs(value);
 }
 
 /* `SetPrototype` as emitted: a function target is `class D extends X` linking the two
