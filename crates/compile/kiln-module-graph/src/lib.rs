@@ -1179,12 +1179,35 @@ impl ModuleGraph {
                 let live = demand.live_imports.contains(&(node.path.clone(), index));
                 // An indirect re-export is an import into a synthetic slot
                 // plus an export of that slot. The module body does not read
-                // it, but resolve_exports still needs the binding metadata.
+                // it, but a demanded export still needs the binding metadata.
                 let links_export = node
                     .program
                     .exports
                     .iter()
                     .any(|export| export.local_slot == original_import.local_slot);
+                if !live && original_import.source != COMMONJS_WRAPPER_SOURCE {
+                    let undemanded_reexport_is_dropped = if links_export {
+                        let dependency = original_dependencies
+                            .iter()
+                            .find(|dependency| dependency.specifier == original_import.source)
+                            .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                                importer: node.path.clone(),
+                                source: original_import.source.clone(),
+                            })?;
+                        !demand.live.contains(&dependency.target)
+                    } else {
+                        true
+                    };
+                    if undemanded_reexport_is_dropped {
+                        // A re-export's import entry is retained only to support a demanded
+                        // export. Keeping its export row after its provider module was shaken
+                        // leaves a dangling dependency that fails relinking of the reduced graph.
+                        node.program
+                            .exports
+                            .retain(|export| export.local_slot != original_import.local_slot);
+                        continue;
+                    }
+                }
                 if !live && !links_export && original_import.source != COMMONJS_WRAPPER_SOURCE {
                     continue;
                 }

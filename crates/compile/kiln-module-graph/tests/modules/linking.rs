@@ -1224,6 +1224,53 @@ fn reduce_to_live_keeps_link_only_reexport_imports_inert() {
 }
 
 #[test]
+fn reduce_to_live_drops_unrequested_reexports_with_dead_providers() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"module","sideEffects":false}"#);
+    let used = project.write("used.mjs", "export const answer = 42;\n");
+    let dead = project.write("dead.mjs", "export const hidden = 7;\n");
+    let barrel = project.write(
+        "barrel.mjs",
+        "export { answer } from './used.mjs';\nexport { hidden } from './dead.mjs';\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { answer } from './barrel.mjs'; console.log(answer);\n",
+    );
+    let graph = project.graph(&entry).expect("re-export graph");
+    let used_slot = match graph
+        .resolved_export(&barrel, "answer")
+        .expect("answer re-export")
+    {
+        ResolvedExport::Local { module, local_slot } => {
+            assert_eq!(module, &used);
+            *local_slot
+        }
+        resolution => panic!("expected a local re-export, got {resolution:?}"),
+    };
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone(), barrel.clone(), used.clone()]),
+        slots: BTreeMap::from([(used.clone(), BTreeSet::from([used_slot]))]),
+        live_imports: BTreeSet::from([(entry.clone(), 0), (barrel.clone(), 0)]),
+    };
+
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("dead unused re-export is removed without a dangling link");
+
+    assert!(reduced.module(&dead).is_none());
+    let reduced_barrel = reduced.module(&barrel).expect("barrel retained");
+    assert_eq!(reduced_barrel.program.imports.len(), 1);
+    assert_eq!(reduced_barrel.program.exports.len(), 1);
+    assert_eq!(reduced_barrel.program.exports[0].exported, "answer");
+    assert_eq!(
+        reduced.resolved_export(&barrel, "answer"),
+        graph.resolved_export(&barrel, "answer")
+    );
+    assert!(reduced.resolved_export(&barrel, "hidden").is_none());
+}
+
+#[test]
 fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
     let project = TempProject::new();
     let origin = project.write("origin.mjs", "export const answer = 42;\n");
