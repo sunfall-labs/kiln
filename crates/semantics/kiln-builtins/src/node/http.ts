@@ -94,12 +94,12 @@ function legacyResponseMethod(name: string, fallback: Function): void {
     : { value: method, writable: true, configurable: true });
 }
 
-export const ServerResponse: any = function ServerResponse(this: any, req?: any) {
+export const ServerResponse: any = function ServerResponse(this: any, req?: any, options?: any) {
   if (!NativeServerResponse) {
     throw new Error("node:http requires an HTTP host capability that this realm does not provide");
   }
-  if (new.target) return new NativeServerResponse(req);
-  Object.assign(this, new Writable());
+  if (new.target) return new NativeServerResponse(req, options);
+  Object.assign(this, new Writable(options));
   legacyResponseReceivers.add(this);
   this.req = req;
   this.socket = null;

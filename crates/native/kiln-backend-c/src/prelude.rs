@@ -49,6 +49,51 @@ const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
         "unlinkSync",
     ),
     ("KILN_C99_METHOD_NODE_FS_RMDIR_SYNC", "node:fs", "rmdirSync"),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER",
+        "node:http.ServerResponse.prototype",
+        "setHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER",
+        "node:http.ServerResponse.prototype",
+        "getHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS",
+        "node:http.ServerResponse.prototype",
+        "getHeaders",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER",
+        "node:http.ServerResponse.prototype",
+        "hasHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER",
+        "node:http.ServerResponse.prototype",
+        "removeHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD",
+        "node:http.ServerResponse.prototype",
+        "writeHead",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_WRITE",
+        "node:http.ServerResponse.prototype",
+        "write",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_END",
+        "node:http.ServerResponse.prototype",
+        "end",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_WRITABLE_DESTROY",
+        "node:stream.Writable.prototype",
+        "destroy",
+    ),
 ];
 
 const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
