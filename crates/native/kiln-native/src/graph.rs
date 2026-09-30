@@ -2124,57 +2124,57 @@ pub(super) fn graph_namespace_plans(
 /// Whether synchronously requiring this ESM module would encounter top-level await anywhere in
 /// its static ESM dependency graph. `require(esm)` must reject before evaluation, including when
 /// the awaited module is several imports away.
-fn module_has_transitive_top_level_await(
-    root: usize,
+fn module_transitive_top_level_await(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     indices: &std::collections::HashMap<PathBuf, usize>,
-) -> bool {
-    fn visit(
-        index: usize,
-        modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
-        indices: &std::collections::HashMap<PathBuf, usize>,
-        visiting: &mut std::collections::HashSet<usize>,
-        memo: &mut std::collections::HashMap<usize, bool>,
-    ) -> bool {
-        if let Some(result) = memo.get(&index) {
-            return *result;
+) -> Vec<bool> {
+    // Reverse the static ESM edges and spread asynchrony backwards from top-level Await nodes.
+    // This is linear in the graph size and handles SCCs without an order-sensitive DFS cache.
+    let mut importers = vec![Vec::new(); modules.len()];
+    let mut asynchronous = vec![false; modules.len()];
+    for index in 0..modules.len() {
+        let node = modules[index].0;
+        if node.source != ModuleSource::Source {
+            continue;
         }
-        // A back-edge in an ESM SCC does not itself make the graph asynchronous. Continue
-        // checking the SCC's other outgoing edges from the first frame that entered it.
-        if !visiting.insert(index) {
-            return false;
+        asynchronous[index] = node
+            .program
+            .program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+        let static_specifiers = node
+            .program
+            .dependencies
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        for dependency in &node.dependencies {
+            if !static_specifiers.contains(dependency.specifier.as_str()) {
+                continue;
+            }
+            let Some(&provider) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider].0.source == ModuleSource::Source {
+                importers[provider].push(index);
+            }
         }
-        let node = &modules[index].0;
-        let own_await = node.source == ModuleSource::Source
-            && node
-                .program
-                .program
-                .code
-                .iter()
-                .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
-        let static_dependencies = node.program.dependencies.iter().filter_map(|specifier| {
-            node.dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == *specifier)
-                .and_then(|dependency| indices.get(&dependency.target).copied())
-        });
-        let result = own_await
-            || static_dependencies.into_iter().any(|dependency| {
-                modules[dependency].0.source == ModuleSource::Source
-                    && visit(dependency, modules, indices, visiting, memo)
-            });
-        visiting.remove(&index);
-        memo.insert(index, result);
-        result
     }
-
-    visit(
-        root,
-        modules,
-        indices,
-        &mut std::collections::HashSet::new(),
-        &mut std::collections::HashMap::new(),
-    )
+    let mut pending = asynchronous
+        .iter()
+        .enumerate()
+        .filter_map(|(index, async_module)| async_module.then_some(index))
+        .collect::<std::collections::VecDeque<_>>();
+    while let Some(provider) = pending.pop_front() {
+        for importer in &importers[provider] {
+            if !asynchronous[*importer] {
+                asynchronous[*importer] = true;
+                pending.push_back(*importer);
+            }
+        }
+    }
+    asynchronous
 }
 
 pub(super) fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
@@ -2951,11 +2951,7 @@ pub(super) fn graph_launcher_source_with_imports(
         .iter()
         .position(|(node, _)| node.path == graph.entry())
         .expect("entry module is present in the graph");
-    let synchronous_require_async = modules
-        .iter()
-        .enumerate()
-        .map(|(index, _)| module_has_transitive_top_level_await(index, modules, &indices))
-        .collect::<Vec<_>>();
+    let synchronous_require_async = module_transitive_top_level_await(modules, &indices);
     // The entry is the sole startup root. Its static dependency walk recursively ensures every
     // reachable provider, while the realm turn loop drives any pending top-level-await
     // continuations. Starting every reachable module independently can evaluate a cycle from the
