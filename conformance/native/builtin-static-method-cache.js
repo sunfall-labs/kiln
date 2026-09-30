@@ -22,3 +22,9 @@ async function main() {
   console.log(seen.join(","));
 }
 main();
+
+// Bootstrap definitions on callable namespaces must be visible before any site is warm.
+console.log(JSON.stringify({ a: 2 }, (_key, value) => typeof value === "number" ? value + 1 : value));
+const captureTarget = {};
+Error.captureStackTrace(captureTarget);
+console.log(typeof captureTarget.stack);

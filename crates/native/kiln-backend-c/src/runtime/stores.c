@@ -845,8 +845,17 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
     size_t steps;
     if (found == NULL || out == NULL || key == NULL) return KILN_C99_INVALID_ARGUMENT;
     *found = 0;
-    if (slot == NULL) return KILN_C99_OK;
-    current = *slot;
+    if (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
+        target.tag == KILN_VALUE_FUNCTION) {
+        /* Definitions on callable values live in their callable store. They are not exotic
+         * instance stores: skipping this projection hid bootstrap facades such as JSON.parse
+         * and Error.captureStackTrace behind their original native method-table answers. */
+        int status = kiln_c99_callable_store(target, &current, 0);
+        if (status != KILN_C99_OK) return status;
+    } else {
+        if (slot == NULL) return KILN_C99_OK;
+        current = *slot;
+    }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object;
         size_t index;
