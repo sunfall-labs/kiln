@@ -3345,6 +3345,12 @@ static int ledger_audit_entry(void *context) {
     kiln_c99_val_store_cell(owner, KILN_VAL_UNDEFINED);
     if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
             KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 8;
+    /* Even a conservative unknown ledger must not be counted as a successful audit. */
+    group->incoming_failed = 1;
+    if (kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 1) !=
+            KILN_C99_GRAPH_OUTGOING_UNPROVEN ||
+        kiln_c99_graph_scan_incoming_heap_checked(heap, group, batch, count, 0) !=
+            KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 11;
     free(batch);
     return 0;
 }
@@ -3368,7 +3374,7 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
             .matches("candidate ledger disagrees")
             .count(),
-        1
+        2
     );
 }
 

@@ -5738,9 +5738,9 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
-/* Audit real certification boundaries while the full walk remains authoritative. An unknown
- * ledger fails closed and may conservatively defer to the full walk. A definitive disagreement
- * means a store or inventory was missed; audit mode refuses rather than hiding that defect. */
+/* Audit real certification boundaries while the full walk remains authoritative. Any
+ * disagreement, including incomplete ledger metadata, refuses in audit mode: a successful
+ * audited certificate must not hide an unknown inventory behind the full walk's answer. */
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
     const kiln_gc_heap *heap, const kiln_c99_candidate_group *group,
     kiln_nursery_chunk *const *chunks, size_t count, int audit) {
@@ -5749,10 +5749,10 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
         kiln_c99_graph_incoming_result ledger = kiln_c99_graph_scan_local_shapes(heap, chunks, count);
         if (ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED)
             ledger = kiln_c99_graph_scan_candidate_owners(heap, group, chunks, count);
-        if ((ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
-             ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) && ledger != full) {
+        if (ledger != full) {
             fputs("kiln: candidate ledger disagrees with heap scan: ", stderr);
-            fputs(ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "ledger alias, " : "ledger clear, ", stderr);
+            fputs(ledger == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "ledger alias, " :
+                  ledger == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "ledger clear, " : "ledger unproven, ", stderr);
             fputs(full == KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS ? "heap alias\n" :
                   full == KILN_C99_GRAPH_ROOTS_UNENUMERATED ? "heap clear\n" : "heap unproven\n", stderr);
             return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
