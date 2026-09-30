@@ -2646,7 +2646,8 @@ const _: () = assert_refusals_name_themselves(
 /// which measures `kiln_c99_method_name`'s answer: a C string literal out of the method table.
 /// One added for the fixed Atomics name table's load-time registration (surface.c, realms 08).
 /// Native callable descriptors measure names from the literal method-name registry.
-pub const C_STRING_LENGTH_SITES: usize = 76;
+/// Stack snapshots measure the emitted source name, a NUL-terminated C literal.
+pub const C_STRING_LENGTH_SITES: usize = 77;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

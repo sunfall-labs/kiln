@@ -3394,8 +3394,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_OBJECT_ENTRIES: {
             kiln_value built;
             kiln_object *object;
-            if (argc == 0) {
-                KILN_C99_REFUSE("Object.keys, Object.values or Object.entries with no argument");
+            if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED ||
+                args[0].tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            }
+            if (args[0].tag == KILN_VALUE_BOOLEAN || args[0].tag == KILN_VALUE_NUMBER ||
+                args[0].tag == KILN_VALUE_SYMBOL || args[0].tag == KILN_VALUE_BIGINT) {
+                status = kiln_c99_new_array(&built);
+                *result = built;
+                return status;
             }
             if (args[0].tag == KILN_VALUE_PROXY || args[0].tag == KILN_VALUE_SHARED) {
                 /* A proxy's keys come from `ownKeys`; a shared facade's come from its sealed
@@ -3570,7 +3578,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return status;
             }
             if (args[0].tag == KILN_VALUE_FUNCTION || args[0].tag == KILN_VALUE_BOUND ||
-                args[0].tag == KILN_VALUE_METHOD || args[0].tag == KILN_VALUE_SETTLER) {
+                args[0].tag == KILN_VALUE_BUILTIN || args[0].tag == KILN_VALUE_METHOD ||
+                args[0].tag == KILN_VALUE_SETTLER || args[0].tag == KILN_VALUE_COMMONJS_REQUIRE) {
                 /* A function is an object: `f.version = 2` is an own enumerable property of it,
                  * and it is kept on the closure's store rather than in a slot list of its own.
                  * `name`, `length` and `prototype` are read from the closure and are not in that

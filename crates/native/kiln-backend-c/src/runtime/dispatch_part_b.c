@@ -1579,72 +1579,35 @@
                                                   &found, depth, thrown);
         }
         case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS: {
-            /* One object holding every own property's descriptor, which is what a structural
-             * clone reaches for -- accessors and all, where a spread would have called them. */
-            kiln_value built;
-            kiln_object *object;
-            if (argc == 0 || (args[0].tag != KILN_VALUE_OBJECT &&
-                              args[0].tag != KILN_VALUE_REGEXP)) {
-                KILN_C99_REFUSE("Object.getOwnPropertyDescriptors of something that is not an "
-                                "object");
-            }
-            status = kiln_c99_new_object(&built);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            if (args[0].tag == KILN_VALUE_REGEXP) {
-                kiln_value keys;
-                kiln_array *listed;
-                status = kiln_c99_all_own_keys(host, args[0], &keys, depth, thrown);
-                if (status != KILN_C99_OK) return status;
-                listed = kiln_c99_array_of(keys);
-                for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
-                    kiln_value key = kiln_val_to_boundary(listed->elements[index]);
-                    kiln_value descriptor;
-                    int found = 0;
-                    kiln_value property_key = key.tag == KILN_VALUE_SYMBOL
-                        ? kiln_c99_property_key(key) : key;
-                    const kiln_string *name = property_key.tag == KILN_VALUE_STRING
-                        ? (const kiln_string *)property_key.ptr : NULL;
-                    if (name == NULL) continue;
-                    const kiln_string *canonical = kiln_c99_property_ikey(key);
-                    status = kiln_c99_describe_property_key(host, args[0], name, canonical,
-                                                            &descriptor, &found, depth, thrown);
-                    if (status == KILN_C99_OK && found)
-                        status = kiln_c99_put_mode_key(host, built, name, canonical, descriptor, 0,
-                                                  depth, thrown);
-                }
-                if (status == KILN_C99_OK) *result = built;
-                return status;
-            }
-            object = kiln_c99_object_of(args[0]);
-            size_t property_count;
-            status = kiln_c99_property_walk(object, &property_count);
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value built, keys;
+            if (subject.tag == KILN_VALUE_UNDEFINED || subject.tag == KILN_VALUE_NULL)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                    "Object.getOwnPropertyDescriptors requires a non-null value");
+            status = kiln_c99_object_constructor(&subject, &subject, 1);
             if (status != KILN_C99_OK) return status;
-            for (index = 0; index < property_count; ++index) {
-                kiln_value described;
-                int found;
-                kiln_value symbol;
-                kiln_property projected;
-                const kiln_property *property = kiln_c99_property_view(object, index, &projected);
-                const kiln_string *key = property->key;
-                /* A symbol-keyed property is described too -- this is how a faithful copy is
-                 * made, and one that quietly leaves them out is the bug this family had. It
-                 * lands in the result under the same reserved key it came from, so nothing here
-                 * needs to know it is a symbol beyond deciding to keep it. */
-                if (kiln_c99_key_is_reserved(key) &&
-                    !kiln_c99_symbol_of_key_view(key, &symbol)) {
-                    continue;
+            status = kiln_c99_all_own_keys(host, subject, &keys, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) return status;
+            /* Snapshot [[OwnPropertyKeys]], then query each current descriptor. Proxy traps may
+             * remove a later key, and symbols retain their identity in the result. */
+            for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+                kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+                kiln_value property_key = kiln_c99_property_key(key), descriptor;
+                const kiln_string *name = property_key.tag == KILN_VALUE_STRING
+                    ? (const kiln_string *)property_key.ptr : NULL;
+                const kiln_string *canonical = kiln_c99_property_ikey(key);
+                int found = 0;
+                if (name == NULL) continue;
+                status = kiln_c99_describe_property_key(host, subject, name, canonical,
+                                                        &descriptor, &found, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (found) {
+                    status = kiln_c99_put_mode_key(host, built, name, canonical, descriptor,
+                                                   0, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
                 }
-                status = kiln_c99_describe_property_key(host, args[0], key, key, &described,
-                                                        &found, depth, thrown);
-                if (status == KILN_C99_OK && found) {
-                    status = kiln_c99_put_mode_key(NULL, built, key, key, described, 0, 0, NULL);
-                }
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                object = kiln_c99_object_of(args[0]);
             }
             *result = built;
             return KILN_C99_OK;
