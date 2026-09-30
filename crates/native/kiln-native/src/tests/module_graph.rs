@@ -938,6 +938,67 @@ fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
 }
 
 #[test]
+fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-namespace-builtin");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { before, read, describe } from './b.mjs';\n\
+         console.log(before());\n\
+         export let value = 'first';\n\
+         console.log(read());\n\
+         value = 'second';\n\
+         console.log(read());\n\
+         console.log(describe());\n",
+    )
+    .expect("write cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "import { basename } from 'node:path';\n\
+         import * as a from './a.mjs';\n\
+         export function before() {\n\
+           let direct = false; let descriptor = false;\n\
+           try { a.value; } catch (error) { direct = error instanceof ReferenceError; }\n\
+           try { Object.getOwnPropertyDescriptor(a, 'value'); } catch (error) { descriptor = error instanceof ReferenceError; }\n\
+           return `tdz:${direct}:${descriptor}`;\n\
+         }\n\
+         export function read() { return `${basename('/tmp/item.txt')}:${a.value}`; }\n\
+         export function describe() { const d = Object.getOwnPropertyDescriptor(a, 'value'); return `descriptor:${d.value}:${typeof d.value}:${d.writable}`; }\n",
+    )
+    .expect("write cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native ESM namespace-cycle execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic namespace graph builds and runs");
+    assert_eq!(
+        report.stdout,
+        b"tdz:true:true\nitem.txt:first\nitem.txt:second\ndescriptor:second:string:true\n"
+    );
+}
+
+#[test]
 fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
