@@ -12,7 +12,7 @@
   "blockers": [
     "Inherited TypedArray.from remains refused by native backend",
     "Interpreter require.resolve excludes resolution-only metadata",
-    "Interpreter eval replacement after getter-to-data conversion becomes undefined"
+    "Guarded eval fallback used the wrong Apply operand order; corrected in e790b249"
   ],
   "raw_log": "target/npm-compat-evidence/bootstrap-native-twenty-seventh.log",
   "full_npm_coverage": false
