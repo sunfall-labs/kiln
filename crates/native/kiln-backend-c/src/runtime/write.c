@@ -231,10 +231,18 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                 return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL,
                                         out, depth, thrown);
             }
-            return key.tag == KILN_VALUE_STRING
-                       ? kiln_c99_get_key(host, target, (const kiln_string *)key.ptr, NULL, out,
-                                          depth, thrown)
-                       : KILN_C99_INVALID_ARGUMENT;
+            /* Arrays still have ordinary named properties. A computed key such as `undefined`,
+             * `null`, or a boolean is a valid property key after ToPropertyKey; rejecting it
+             * here made `array[undefined]` fail even though the same access on an ordinary
+             * object correctly reads the property named "undefined". */
+            {
+                kiln_value text = kiln_c99_property_key(key);
+                if (text.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
+                                        kiln_c99_property_ikey(key), out, depth, thrown);
+            }
         }
         if ((size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE) {
             *out = kiln_val_to_boundary(array->elements[(size_t)index]);
