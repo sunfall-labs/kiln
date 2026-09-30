@@ -1736,6 +1736,11 @@ pub fn build_function_graph(
                     operations.push((res, GraphOp::LoadBuiltin(*builtin)));
                     frame.stack.push(res);
                 }
+                Instruction::LoadIntrinsicBuiltin(builtin) => {
+                    let res = graph.alloc_value();
+                    operations.push((res, GraphOp::LoadBuiltin(*builtin)));
+                    frame.stack.push(res);
+                }
                 Instruction::New { argc } => {
                     let argc = usize::from(*argc);
                     let mut args = Vec::with_capacity(argc);

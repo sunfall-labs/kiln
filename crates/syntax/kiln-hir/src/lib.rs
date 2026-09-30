@@ -691,6 +691,14 @@ pub enum ExpressionKind {
         /// call does not happen -- so the arguments are not evaluated either.
         optional: bool,
     },
+    /// A tightly bounded literal direct eval. The callee and argument remain explicit so the
+    /// compiler can guard the fast path against a replaced global `eval` and call that value
+    /// normally; `expression` is the single parsed expression evaluated in the caller's scope.
+    InlineLiteralEval {
+        callee: Box<Expression>,
+        argument: Box<Expression>,
+        expression: Box<Expression>,
+    },
     /// `super(...)` in a derived constructor: run the parent constructor against this instance
     /// rather than allocating a new one.
     SuperCall {

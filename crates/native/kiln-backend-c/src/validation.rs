@@ -394,6 +394,10 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Performance
             | kiln_ir::Builtin::StructuredClone,
         ) => Ok(()),
+        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Eval) => Ok(()),
+        Instruction::LoadIntrinsicBuiltin(builtin) => Err(EmitError::Unsupported {
+            feature: format!("the intrinsic `{builtin:?}` builtin in the native backend"),
+        }),
         // A direct `eval` needs the compiler at run time: it reads the caller's bindings and
         // compiles source that does not exist until the call happens. The native backend ships
         // without a compiler, so this is refused rather than approximated -- an indirect `eval`

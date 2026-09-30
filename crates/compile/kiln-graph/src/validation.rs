@@ -39,6 +39,7 @@ pub fn stack_effect(
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)
         | Instruction::LoadBuiltin(_)
+        | Instruction::LoadIntrinsicBuiltin(_)
         | Instruction::LoadGlobal(_)
         | Instruction::RestArguments(_)
         | Instruction::PushHole

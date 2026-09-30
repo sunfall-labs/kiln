@@ -337,6 +337,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 25);
                 word(&mut hash, *builtin as u64);
             }
+            Instruction::LoadIntrinsicBuiltin(builtin) => {
+                byte(&mut hash, 197);
+                word(&mut hash, *builtin as u64);
+            }
             Instruction::New { argc } => {
                 byte(&mut hash, 26);
                 word(&mut hash, u64::from(*argc));

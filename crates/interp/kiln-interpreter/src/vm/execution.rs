@@ -980,6 +980,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.builtin_value(*builtin, self.current_realm);
                     self.stack.push(value);
                 }
+                Instruction::LoadIntrinsicBuiltin(builtin) => {
+                    let value = self.builtin_value(*builtin, self.current_realm);
+                    self.stack.push(value);
+                }
                 Instruction::New { argc } => {
                     let argc = *argc as usize;
                     if self.stack.len() < argc + 1 {

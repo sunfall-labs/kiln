@@ -819,8 +819,17 @@ pub fn program_provider_capabilities(
         required = match instruction {
             Instruction::NewRegExp { .. } => required.with(ProviderCapability::RegExp),
             Instruction::LoadBuiltin(Builtin::RegExp) => required.with(ProviderCapability::RegExp),
+            Instruction::LoadIntrinsicBuiltin(Builtin::RegExp) => {
+                required.with(ProviderCapability::RegExp)
+            }
             Instruction::LoadBuiltin(Builtin::BigInt) => required.with(ProviderCapability::BigInt),
+            Instruction::LoadIntrinsicBuiltin(Builtin::BigInt) => {
+                required.with(ProviderCapability::BigInt)
+            }
             Instruction::LoadBuiltin(Builtin::Json) => required.with(ProviderCapability::Json),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Json) => {
+                required.with(ProviderCapability::Json)
+            }
             Instruction::Const(index)
                 if matches!(
                     program.constants.get(*index as usize),

@@ -58,7 +58,8 @@ pub fn analyze_demanded_members(
         let mut scan = |code: &[Instruction]| {
             for instruction in code {
                 match instruction {
-                    Instruction::LoadBuiltin(builtin) => {
+                    Instruction::LoadBuiltin(builtin)
+                    | Instruction::LoadIntrinsicBuiltin(builtin) => {
                         demanded.builtins.insert(format!("{builtin:?}"));
                     }
                     Instruction::LoadGlobal(name)

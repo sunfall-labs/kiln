@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 8;
+pub const BYTECODE_VERSION: u16 = 9;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -554,6 +554,9 @@ pub enum Instruction {
     /// A stack-neutral placeholder used by closed-world backends when a compiler-proven pure
     /// declaration is omitted while preserving bytecode PCs and jump targets.
     Nop,
+    /// Push the realm's intrinsic built-in directly, bypassing mutable global properties.
+    /// Used only to guard a bounded direct-eval inline against replacement of global `eval`.
+    LoadIntrinsicBuiltin(Builtin),
 }
 
 /// A template literal site for canonical template object caching (ECMA-262 §13.2.8.5).

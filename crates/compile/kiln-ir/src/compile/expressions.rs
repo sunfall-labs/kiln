@@ -146,6 +146,29 @@ impl super::Compiler {
                 arguments,
                 optional,
             } => self.call(callee, arguments, *optional, expression.span),
+            ExpressionKind::InlineLiteralEval {
+                callee,
+                argument,
+                expression: inline,
+            } => {
+                let name = self.constant_index(Constant::String("eval".into()));
+                self.code
+                    .push(Instruction::LoadGlobalBindingOrUndefined(name));
+                self.code.push(Instruction::Dup);
+                self.code
+                    .push(Instruction::LoadIntrinsicBuiltin(Builtin::Eval));
+                self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+                let fallback = self.emit_jump(Instruction::JumpIfFalse(0));
+                self.code.push(Instruction::Pop);
+                self.expression(inline);
+                let end = self.emit_jump(Instruction::Jump(0));
+                self.patch_jump(fallback);
+                self.push_constant(Constant::Undefined);
+                self.expression(argument);
+                self.code.push(Instruction::NewArray { count: 1 });
+                self.code.push(Instruction::Apply);
+                self.patch_jump(end);
+            }
             ExpressionKind::This => self.load_this(),
             // `undefined` in a field initialiser: the initialiser is its own function to the
             // language, and reading the frame's `new.target` there answered `C` for

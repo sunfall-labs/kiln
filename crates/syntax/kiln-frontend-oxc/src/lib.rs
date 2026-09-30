@@ -304,6 +304,12 @@ fn discover_node_runtime_requests_from_semantic(
     semantic: &oxc_semantic::Semantic<'_>,
 ) -> Vec<NodeRuntimeRequest> {
     let scoping = semantic.scoping();
+    if semantic
+        .nodes()
+        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
+    {
+        return HashSet::new();
+    }
     let mut create_symbols = HashSet::<SymbolId>::new();
     let mut module_symbols = HashMap::<SymbolId, String>::new();
     for statement in &program.body {
@@ -1785,10 +1791,12 @@ fn lower_parsed_in_context(
         }
         diagnostics.extend(early);
     }
+    let inline_eval_calls = global_literal_eval_call_spans(parsed);
     let mut lowerer = Lowerer {
         text: source,
         path,
         native_import_meta,
+        inline_eval_calls,
     };
     let body = lowerer.statements(&parsed.program.body);
 
@@ -1821,6 +1829,67 @@ fn lower_parsed_in_context(
         node_runtime_requests: Vec::new(),
     };
     module
+}
+
+fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> HashSet<(u32, u32)> {
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return HashSet::new();
+    }
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    semantic
+        .nodes()
+        .filter_map(|node| {
+            let AstKind::CallExpression(call) = node.kind() else {
+                return None;
+            };
+            if call.optional
+                || call.arguments.len() != 1
+                || !matches!(call.arguments.first(), Some(Argument::StringLiteral(literal)) if !literal.lone_surrogates)
+            {
+                return None;
+            }
+            let Expression::Identifier(id) = &call.callee else {
+                return None;
+            };
+            if id.name != "eval" || !id.is_global_reference(scoping) {
+                return None;
+            }
+            Some((call.span.start, call.span.end))
+        })
+        .collect()
+}
+
+fn inline_eval_syntax(expression: &HirExpression) -> bool {
+    use HirExpressionKind as K;
+    match &expression.kind {
+        K::Literal(_) | K::This => true,
+        K::Identifier(name) => !matches!(name.as_str(), "eval" | "await" | "yield"),
+        K::StaticMember {
+            object,
+            optional: false,
+            ..
+        } => inline_eval_syntax(object),
+        K::ComputedMember {
+            object,
+            property,
+            optional: false,
+        } => inline_eval_syntax(object) && inline_eval_syntax(property),
+        K::Call {
+            callee,
+            arguments,
+            optional: false,
+        } => {
+            inline_eval_syntax(callee)
+                && arguments
+                    .iter()
+                    .all(|arg| matches!(arg, ListElement::Item(value) if inline_eval_syntax(value)))
+        }
+        _ => false,
+    }
 }
 
 /// Whether a directive prologue opens with `"use strict"`.
@@ -1980,9 +2049,40 @@ struct Lowerer<'a> {
     /// build-time paths; `Some(is_entry)` lowers to a `__kilnNativeImportMeta(isEntry)` call
     /// whose values resolve at runtime from `process.execPath` (Node SEA semantics).
     native_import_meta: Option<bool>,
+    /// Call spans whose callee is Oxc-proven to be the unresolved global `eval` and whose sole
+    /// argument is a string literal. The inner source is narrowed further before HIR inlining.
+    inline_eval_calls: HashSet<(u32, u32)>,
 }
 
 impl Lowerer<'_> {
+    fn inline_eval_expression(&mut self, source: &str) -> Option<HirExpression> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::default().with_script(true))
+            .with_options(ParseOptions {
+                parse_regular_expression: true,
+                ..ParseOptions::default()
+            })
+            .parse();
+        if parsed.panicked
+            || !parsed.diagnostics.is_empty()
+            || !parsed.program.directives.is_empty()
+            || parsed.program.body.len() != 1
+        {
+            return None;
+        }
+        let Statement::ExpressionStatement(statement) = &parsed.program.body[0] else {
+            return None;
+        };
+        let mut nested = Lowerer {
+            text: source,
+            path: self.path,
+            native_import_meta: None,
+            inline_eval_calls: HashSet::new(),
+        };
+        let expression = nested.expression(&statement.expression);
+        inline_eval_syntax(&expression).then_some(expression)
+    }
+
     /// A class member's definition span, which for a static member starts after the `static`.
     ///
     /// `class C { static s() {} }` answers `"s() {}"`: `static` belongs to the `ClassElement`,
@@ -2689,6 +2789,39 @@ impl Lowerer<'_> {
             {
                 HirExpressionKind::SuperCall {
                     arguments: self.arguments(&expression.arguments),
+                }
+            }
+            Expression::CallExpression(expression)
+                if self
+                    .inline_eval_calls
+                    .contains(&(expression.span.start, expression.span.end))
+                    && !expression.optional
+                    && expression.arguments.len() == 1
+                    && matches!(
+                        expression.arguments.first(),
+                        Some(Argument::StringLiteral(literal)) if !literal.lone_surrogates
+                    ) =>
+            {
+                let Argument::StringLiteral(argument) = &expression.arguments[0] else {
+                    unreachable!()
+                };
+                match self.inline_eval_expression(&argument.value) {
+                    Some(inlined) => HirExpressionKind::InlineLiteralEval {
+                        callee: Box::new(self.expression(&expression.callee)),
+                        argument: Box::new(HirExpression {
+                            kind: HirExpressionKind::Literal(HirLiteral::String(oxc_string_units(
+                                argument.value.as_str(),
+                                argument.lone_surrogates,
+                            ))),
+                            span: span(argument.span),
+                        }),
+                        expression: Box::new(inlined),
+                    },
+                    None => HirExpressionKind::Call {
+                        callee: Box::new(self.expression(&expression.callee)),
+                        arguments: self.arguments(&expression.arguments),
+                        optional: expression.optional,
+                    },
                 }
             }
             Expression::CallExpression(expression) => HirExpressionKind::Call {

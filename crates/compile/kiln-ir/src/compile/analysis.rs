@@ -458,6 +458,9 @@ pub(super) fn expression_contains_direct_eval(expression: &Expression) -> bool {
                 || expression_contains_direct_eval(callee)
                 || arguments.iter().any(list_element_contains_direct_eval)
         }
+        ExpressionKind::InlineLiteralEval { callee, argument, expression } => {
+            expression_contains_direct_eval(callee) || expression_contains_direct_eval(argument) || expression_contains_direct_eval(expression)
+        }
         ExpressionKind::Function(function) => function_contains_direct_eval(function),
         ExpressionKind::Class(class) => class_contains_direct_eval(class),
         ExpressionKind::ImportCall { specifier, options } => {
@@ -758,6 +761,9 @@ pub(super) fn expression_contains_new_function(expression: &Expression) -> bool 
             matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "Function")
                 || expression_contains_new_function(callee)
                 || arguments.iter().any(list_element_contains_new_function)
+        }
+        ExpressionKind::InlineLiteralEval { callee, argument, expression } => {
+            expression_contains_new_function(callee) || expression_contains_new_function(argument) || expression_contains_new_function(expression)
         }
         ExpressionKind::New { callee, arguments } => {
             matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "Function")
@@ -1128,6 +1134,15 @@ pub(super) fn collect_dynamic_imports_from_expression(
             for arg in arguments {
                 collect_dynamic_imports_from_list_element(arg, imports);
             }
+        }
+        ExpressionKind::InlineLiteralEval {
+            callee,
+            argument,
+            expression,
+        } => {
+            collect_dynamic_imports_from_expression(callee, imports);
+            collect_dynamic_imports_from_expression(argument, imports);
+            collect_dynamic_imports_from_expression(expression, imports);
         }
         ExpressionKind::New { callee, arguments } => {
             collect_dynamic_imports_from_expression(callee, imports);
@@ -1816,6 +1831,15 @@ pub(super) fn collect_identifiers(
                 };
                 collect_identifiers(value, names, collecting);
             }
+        }
+        ExpressionKind::InlineLiteralEval {
+            callee,
+            argument,
+            expression,
+        } => {
+            collect_identifiers(callee, names, collecting);
+            collect_identifiers(argument, names, collecting);
+            collect_identifiers(expression, names, collecting);
         }
         ExpressionKind::Array { elements } => {
             for element in elements {
