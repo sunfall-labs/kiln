@@ -522,6 +522,12 @@ export function timingSafeEqual(a: any, b: any): boolean {
   return out === 0;
 }
 
+const webcryptoValue = typeof globalThis !== 'undefined'
+  ? (globalThis as any).crypto
+  : undefined;
+export const webcrypto = webcryptoValue;
+export const subtle = webcryptoValue ? webcryptoValue.subtle : undefined;
+
 const cryptoDefault = {
   Hash,
   Hmac,
@@ -536,9 +542,8 @@ const cryptoDefault = {
   randomFillSync,
   randomUUID,
   timingSafeEqual,
-  subtle: typeof globalThis !== 'undefined' && (globalThis as any).crypto
-    ? (globalThis as any).crypto.subtle
-    : undefined,
+  subtle,
+  webcrypto,
 };
 
 // The global `crypto`. The interpreter installs its own, which already carries every one of
