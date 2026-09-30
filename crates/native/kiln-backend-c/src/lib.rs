@@ -3154,7 +3154,12 @@ fn render_entry(
     }
 
     let entry_start = output.len();
-    let callables = produces_references(program) || (policy.compact && module.is_some());
+    // A split module phase calls the private `_body` symbol from the realm wrapper even when
+    // this entry has no closures of its own. Keep its naming/linkage decision aligned with the
+    // module-level `callables` policy above or the instantiation wrapper links an undefined body.
+    let callables = produces_references(program)
+        || (policy.compact && module.is_some())
+        || (preserve_export_cells && module.is_some());
     let entry_symbol = if callables {
         format!("{unit_symbol}_body")
     } else {
