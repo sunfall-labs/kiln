@@ -101,9 +101,9 @@ pub struct CallPlan {
     pub invariant: HashSet<ValueId>,
     /// Per proto: whether its typed entry is proven to return a number, and so hands its
     /// result back as a `double`.
-    pub typed_returns: Vec<bool>,
+    pub typed_returns: std::sync::Arc<Vec<bool>>,
     /// Per proto: what its typed entry takes beyond its parameters.
-    pub typed_needs: Vec<TypedNeeds>,
+    pub typed_needs: std::sync::Arc<Vec<TypedNeeds>>,
     /// Per proto: the built-in guard a caller evaluates before entering its typed entry, or
     /// empty when the entry relies on no built-in it cannot fall back from (issue 20). A typed
     /// entry has no generic path of its own: an inlined `Math.sqrt` whose guard fails inside it
@@ -111,14 +111,14 @@ pub struct CallPlan {
     /// first -- about every member the entry and its typed callees speculate on -- and when the
     /// answer is no they take the boxed call they would have made without a typed entry. Past
     /// that check the guard inside the entry fails only if the call itself modified the built-in.
-    pub typed_guards: Vec<String>,
+    pub typed_guards: std::sync::Arc<Vec<String>>,
     /// Per proto: whether its typed entry exists in the unit.
-    pub typed_entries: Vec<bool>,
+    pub typed_entries: std::sync::Arc<Vec<bool>>,
     /// Per proto: its body passes [`crate::parallel::parallel_safe`] and its typed entry returns
     /// a number, so a `parallelMap` site whose callback is proven to be it may run the proto's
     /// parallel clone on a worker thread -- once `set_parallel` has confirmed the clone's emitted
     /// text reaches no host, receiver, upvalue or heap.
-    pub parallel_safe: Vec<bool>,
+    pub parallel_safe: std::sync::Arc<Vec<bool>>,
     /// Per proto: the `parallelMap` verdict behind `parallel_safe` -- the captures a qualifying
     /// callback reads, or the first rule it failed -- shared by every plan, so the call site
     /// that acts on the decision and `--explain-parallel` read one answer.
@@ -126,19 +126,19 @@ pub struct CallPlan {
         std::sync::Arc<Vec<Result<crate::parallel::ParallelShape, crate::parallel::Refusal>>>,
     /// Per proto: how many columns its receiver-shape cache has -- the names its body reads
     /// of `this` -- so a call site can look a row up in the callee's table.
-    pub receiver_columns: Vec<usize>,
+    pub receiver_columns: std::sync::Arc<Vec<usize>>,
     /// Per proto: whether a fast clone exists -- the body with every slow path replaced by a
     /// restart through the boxed entry, for a body that can be restarted.
-    pub fast: Vec<bool>,
+    pub fast: std::sync::Arc<Vec<bool>>,
     /// Per proto: whether its boxed body is present in this closed-world translation unit.
     /// Empty means every body is available, preserving plans built outside module emission.
-    pub available: Vec<bool>,
+    pub available: std::sync::Arc<Vec<bool>>,
     /// Per proto: whether a call into it must publish the per-frame context, from
     /// [`crate::compute_publishes_frame`]'s one whole-program fixpoint. Cloned into every
-    /// function's plan the same way `typed_entries` is, so every user reads the same answer
+    /// function's plan through a shared immutable table, so every user reads the same answer
     /// instead of recomputing it -- the emitted C's `plain->publishes_frame` runtime flag must
     /// agree with this at every proto, since call sites branch on both.
-    pub publishes_frame: Vec<bool>,
+    pub publishes_frame: std::sync::Arc<Vec<bool>>,
     /// Whether the translation unit is chunked across multiple C files.
     pub should_chunk: bool,
 }
@@ -184,21 +184,28 @@ impl DirectPlan {
                 ));
                 function_count
             ]);
+            // Unit-wide tables are immutable snapshots shared by every body's plan. Copying
+            // one function-count table per function made large npm modules quadratic in memory.
+            let false_flags = std::sync::Arc::new(vec![false; function_count]);
+            let typed_needs = std::sync::Arc::new(vec![TypedNeeds::default(); function_count]);
+            let columns = std::sync::Arc::new(vec![0; function_count]);
+            let available = std::sync::Arc::new(vec![true; function_count]);
+            let publishes_frame = std::sync::Arc::new(publishes_frame.to_vec());
             let plan = || CallPlan {
                 compact,
                 compile_regex,
                 generic_only: true,
                 parallel_in_generic,
                 speculate,
-                typed_returns: vec![false; function_count],
-                typed_needs: vec![TypedNeeds::default(); function_count],
-                typed_entries: vec![false; function_count],
-                parallel_safe: vec![false; function_count],
+                typed_returns: false_flags.clone(),
+                typed_needs: typed_needs.clone(),
+                typed_entries: false_flags.clone(),
+                parallel_safe: false_flags.clone(),
                 parallel: generic_verdicts.clone(),
-                receiver_columns: vec![0; function_count],
-                fast: vec![false; function_count],
-                available: vec![true; function_count],
-                publishes_frame: publishes_frame.to_vec(),
+                receiver_columns: columns.clone(),
+                fast: false_flags.clone(),
+                available: available.clone(),
+                publishes_frame: publishes_frame.clone(),
                 ..CallPlan::default()
             };
             let mut generic = Self {
@@ -208,7 +215,7 @@ impl DirectPlan {
                 entry: plan(),
             };
             if parallel_in_generic {
-                generic.plan_parallel_sites(program, graphs, entry, publishes_frame, speculate);
+                generic.plan_parallel_sites(program, graphs, entry, &publishes_frame, speculate);
             }
             return generic;
         }
@@ -466,6 +473,14 @@ impl DirectPlan {
             .map(|v| matches!(v, Ok(shape) if shape.heap.is_none()))
             .collect();
         let parallel_verdicts = std::sync::Arc::new(parallel_verdicts);
+        let shared_returns = std::sync::Arc::new(typed_returns.clone());
+        let shared_needs = std::sync::Arc::new(vec![TypedNeeds::default(); graphs.len()]);
+        let shared_guards = std::sync::Arc::new(vec![String::new(); graphs.len()]);
+        let shared_false = std::sync::Arc::new(vec![false; graphs.len()]);
+        let shared_parallel_safe = std::sync::Arc::new(parallel_safe.clone());
+        let shared_columns = std::sync::Arc::new(vec![0; graphs.len()]);
+        let shared_available = std::sync::Arc::new(vec![true; graphs.len()]);
+        let shared_publishes = std::sync::Arc::new(publishes_frame.to_vec());
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
                         sites: &[Site],
@@ -511,16 +526,16 @@ impl DirectPlan {
                     .unwrap_or_default(),
                 unchecked: known.unchecked.clone(),
                 invariant: known.invariant.clone(),
-                typed_returns: typed_returns.clone(),
-                typed_needs: vec![TypedNeeds::default(); graphs.len()],
-                typed_guards: vec![String::new(); graphs.len()],
-                typed_entries: vec![false; graphs.len()],
-                parallel_safe: parallel_safe.clone(),
+                typed_returns: shared_returns.clone(),
+                typed_needs: shared_needs.clone(),
+                typed_guards: shared_guards.clone(),
+                typed_entries: shared_false.clone(),
+                parallel_safe: shared_parallel_safe.clone(),
                 parallel: parallel_verdicts.clone(),
-                receiver_columns: vec![0; graphs.len()],
-                fast: vec![false; graphs.len()],
-                available: vec![true; graphs.len()],
-                publishes_frame: publishes_frame.to_vec(),
+                receiver_columns: shared_columns.clone(),
+                fast: shared_false.clone(),
+                available: shared_available.clone(),
+                publishes_frame: shared_publishes.clone(),
                 should_chunk: false,
             }
         };
@@ -747,7 +762,8 @@ impl DirectPlan {
             .enumerate()
             .map(|(i, plan)| plan.filter(|_| referenced.contains(&(i as u32))))
             .collect();
-        let typed_entries: Vec<bool> = typed.iter().map(Option::is_some).collect();
+        let typed_entries =
+            std::sync::Arc::new(typed.iter().map(Option::is_some).collect::<Vec<_>>());
 
         let mut plan = DirectPlan {
             functions,
@@ -1095,7 +1111,10 @@ impl DirectPlan {
             self.typed[i] = Some(specialized(i, typed_seeds(i, cb)));
             self.parallel[i] = Some(specialized(i, seeds));
         }
-        let typed_entries: Vec<bool> = self.typed.iter().map(Option::is_some).collect();
+        let typed_entries =
+            std::sync::Arc::new(self.typed.iter().map(Option::is_some).collect::<Vec<_>>());
+        let typed_returns = std::sync::Arc::new(typed_returns);
+        let parallel_safe = std::sync::Arc::new(parallel_safe);
         for (i, plan) in self.functions.iter_mut().enumerate() {
             plan.known = function_known[i].clone();
         }
@@ -1117,6 +1136,7 @@ impl DirectPlan {
     /// Record what every typed entry needs, in every body's plan.
     /// Record which protos have a fast clone, in every body's plan.
     pub fn set_fast(&mut self, fast: &[bool]) {
+        let shared = std::sync::Arc::new(fast.to_vec());
         for plan in self
             .functions
             .iter_mut()
@@ -1124,12 +1144,21 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            plan.fast = fast.to_vec();
+            plan.fast = shared.clone();
         }
     }
 
     /// Restrict static dispatch and by-name specialization to bodies emitted in this unit.
     pub fn set_available(&mut self, available: &[bool]) {
+        let typed_entries = std::sync::Arc::new(
+            self.entry
+                .typed_entries
+                .iter()
+                .enumerate()
+                .map(|(index, typed)| *typed && available.get(index).copied().unwrap_or(false))
+                .collect::<Vec<_>>(),
+        );
+        let available = std::sync::Arc::new(available.to_vec());
         for plan in self
             .functions
             .iter_mut()
@@ -1137,15 +1166,14 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            plan.available = available.to_vec();
-            for (index, typed) in plan.typed_entries.iter_mut().enumerate() {
-                *typed &= available.get(index).copied().unwrap_or(false);
-            }
+            plan.available = available.clone();
+            plan.typed_entries = typed_entries.clone();
         }
     }
 
     /// Record every proto's receiver-shape cache width, in every body's plan.
     pub fn set_receiver_columns(&mut self, columns: &[usize]) {
+        let shared = std::sync::Arc::new(columns.to_vec());
         for plan in self
             .functions
             .iter_mut()
@@ -1153,11 +1181,12 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            plan.receiver_columns = columns.to_vec();
+            plan.receiver_columns = shared.clone();
         }
     }
 
     pub fn set_typed_needs(&mut self, needs: &[TypedNeeds]) {
+        let shared = std::sync::Arc::new(needs.to_vec());
         for plan in self
             .functions
             .iter_mut()
@@ -1165,11 +1194,12 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            plan.typed_needs = needs.to_vec();
+            plan.typed_needs = shared.clone();
         }
     }
 
     pub fn set_typed_guards(&mut self, guards: &[String]) {
+        let shared = std::sync::Arc::new(guards.to_vec());
         for plan in self
             .functions
             .iter_mut()
@@ -1177,7 +1207,7 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            plan.typed_guards = guards.to_vec();
+            plan.typed_guards = shared.clone();
         }
     }
 
@@ -1211,6 +1241,14 @@ impl DirectPlan {
     /// so it needs no clone, only the order its verdict proved.
     pub fn set_parallel(&mut self, admitted: &[bool]) {
         let verdicts = self.entry.parallel.clone();
+        let safe = std::sync::Arc::new(
+            self.entry
+                .parallel_safe
+                .iter()
+                .enumerate()
+                .map(|(i, ok)| *ok && admitted.get(i).copied().unwrap_or(false))
+                .collect::<Vec<_>>(),
+        );
         for plan in self
             .functions
             .iter_mut()
@@ -1218,9 +1256,7 @@ impl DirectPlan {
             .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
-            for (i, ok) in plan.parallel_safe.iter_mut().enumerate() {
-                *ok = *ok && admitted.get(i).copied().unwrap_or(false);
-            }
+            plan.parallel_safe = safe.clone();
             plan.parallel = verdicts.clone();
         }
     }

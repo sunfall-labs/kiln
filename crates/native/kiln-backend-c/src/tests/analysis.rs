@@ -1728,3 +1728,59 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
         }
     }
 }
+
+#[test]
+fn large_generic_units_share_planning_tables_and_publish_updates() {
+    use std::sync::Arc;
+    let mut program = program(
+        vec![Constant::Undefined],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    );
+    program.functions = vec![entry_proto(&program); 1024];
+    let (_, _, _, mut plans) = plan_unit(
+        &program,
+        "large npm unit",
+        true,
+        false,
+        true,
+        false,
+        None,
+        None,
+    )
+    .expect("a generic unit should plan without specialization");
+    for plan in &plans.functions {
+        assert!(Arc::ptr_eq(&plan.typed_returns, &plans.entry.typed_returns));
+        assert!(Arc::ptr_eq(&plan.typed_needs, &plans.entry.typed_needs));
+        assert!(Arc::ptr_eq(
+            &plan.publishes_frame,
+            &plans.entry.publishes_frame
+        ));
+    }
+    // Updating one unit-wide fact publishes a new immutable table to every body, without
+    // changing plans retained by a speculative clone or another reader.
+    let previous = plans.entry.fast.clone();
+    let mut fast = vec![false; program.functions.len()];
+    fast[17] = true;
+    plans.set_fast(&fast);
+    assert!(!previous[17]);
+    assert!(plans.entry.fast[17]);
+    assert!(
+        plans
+            .functions
+            .iter()
+            .all(|p| Arc::ptr_eq(&p.fast, &plans.entry.fast))
+    );
+    plans.entry.typed_entries = Arc::new(vec![true; program.functions.len()]);
+    let mut available = vec![true; program.functions.len()];
+    available[17] = false;
+    plans.set_available(&available);
+    assert!(!plans.entry.typed_entries[17]);
+    assert!(plans.entry.typed_entries[18]);
+    assert!(
+        plans
+            .functions
+            .iter()
+            .all(|p| Arc::ptr_eq(&p.typed_entries, &plans.entry.typed_entries))
+    );
+}
