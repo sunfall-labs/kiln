@@ -750,6 +750,9 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
         writeln!(output, "        case {base_index}:").unwrap();
         for node in modules.iter().map(|(node, _)| node) {
             for dependency in &node.runtime_dependencies {
+                if dependency.resolve_only {
+                    continue;
+                }
                 if dependency.importer != *importer {
                     continue;
                 }

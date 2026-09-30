@@ -2106,6 +2106,9 @@ pub(super) fn graph_namespace_plans(
             }
         }
         for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
             let Some(&provider_index) = indices.get(&dependency.target) else {
                 continue;
             };
@@ -3706,6 +3709,9 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         output.push_str(&format!("        case {base_index}:\n"));
         for node in modules.iter().map(|(node, _)| node) {
             for dependency in &node.runtime_dependencies {
+                if dependency.resolve_only {
+                    continue;
+                }
                 if dependency.importer != *importer {
                     continue;
                 }

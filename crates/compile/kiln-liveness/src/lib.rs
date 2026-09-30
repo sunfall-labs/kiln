@@ -319,6 +319,9 @@ pub fn select_executable_modules<'a>(
         // Literal createRequire/getBuiltinModule targets are lazy at execution time but remain
         // part of the closed graph: the runtime loader may request any one of them.
         for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
             mark_live(&dependency.target, &mut live, &mut queue);
             // A lazy require returns the target's complete runtime value. Preserve its CommonJS
             // module.exports slot or, for ESM, demand the full namespace before reduction.
@@ -690,6 +693,9 @@ pub fn retained_method_groups(
             }
         }
         for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
             let target = graph.module(&dependency.target);
             match target.map(|module| &module.source) {
                 Some(ModuleSource::NodeBuiltin(builtin)) => match builtin_groups(builtin) {

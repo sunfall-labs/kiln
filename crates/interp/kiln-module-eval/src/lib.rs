@@ -2050,6 +2050,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                     .find(|dependency| {
                         dependency.importer == Path::new(importer)
                             && dependency.specifier == specifier
+                            && !dependency.resolve_only
                     })
                     .cloned();
                 if let Some(dependency) = runtime_dependency {
