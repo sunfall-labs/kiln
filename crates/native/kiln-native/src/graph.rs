@@ -1007,6 +1007,9 @@ pub(super) fn native_bootstrap_families(
     if names(&["toLocaleLowerCase", "toLocaleUpperCase"]) {
         selected |= family::STRING_LOCALE;
     }
+    if builtin(&["Intl"]) || names(&["DateTimeFormat", "formatToParts", "resolvedOptions"]) {
+        selected |= family::INTL_DATETIME;
+    }
     if builtin(&["Date", "Intl"]) || names(&["getTime", "setTime", "toISOString", "toUTCString"]) {
         selected |= family::DATE;
     }

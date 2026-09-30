@@ -33,7 +33,7 @@ temporal = ["dep:kiln-temporal"]
 json = ["dep:kiln-json"]
 # ICU4X segmentation behind the scalar provider ABI. The JavaScript-visible facade stays compiled
 # source; this feature supplies only the boundary engine it cannot implement cheaply itself.
-intl = ["dep:kiln-intl"]
+intl = ["dep:kiln-intl", "dep:kiln-json"]
 # Parallel chunks and stable sort use the realm scheduler's lanes and ready queue.
 parallel = ["realm"]
 # Dynamic calls and same-thread callback closures for the native `node:ffi` capability. libffi is

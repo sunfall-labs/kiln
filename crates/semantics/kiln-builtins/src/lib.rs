@@ -1399,6 +1399,9 @@ pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 /// Locale aware string case methods, backed by the shared Unicode case mappings.
 pub const STRING_LOCALE_BOOTSTRAP_SOURCE: &str = include_str!("string_locale.ts");
 
+/// Native Intl.DateTimeFormat facade over the shared ICU4X formatter provider.
+pub const INTL_DATETIME_BOOTSTRAP_SOURCE: &str = include_str!("intl_datetime.ts");
+
 /// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
 pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
 
@@ -1453,7 +1456,8 @@ pub mod native_bootstrap_family {
     pub const PROMISE: u32 = 1 << 8;
     pub const OBJECT_REFLECT: u32 = 1 << 9;
     pub const STRING_LOCALE: u32 = 1 << 10;
-    pub const ALL: u32 = (1 << 11) - 1;
+    pub const INTL_DATETIME: u32 = 1 << 11;
+    pub const ALL: u32 = (1 << 12) - 1;
 }
 
 /// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
@@ -1471,6 +1475,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
         selected(family::STRING_LOCALE, STRING_LOCALE_BOOTSTRAP_SOURCE),
+        selected(family::INTL_DATETIME, INTL_DATETIME_BOOTSTRAP_SOURCE),
         ANNEXB_BOOTSTRAP_SOURCE,
         selected(family::DISPOSABLE, DISPOSABLE_BOOTSTRAP_SOURCE),
         REGEXP_BOOTSTRAP_SOURCE,
@@ -1498,6 +1503,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         (family::STRUCTURED_CLONE, "__kilnSharedIs"),
         (family::OBJECT_REFLECT, "__kilnSetPrototypeOf"),
         (family::OBJECT_REFLECT, "__kilnPreventExtensions"),
+        (family::INTL_DATETIME, "__kilnIntlDateTimeFormat"),
     ];
     for &(bit, name) in cleanup {
         if families & bit == 0 {
@@ -1516,7 +1522,9 @@ pub fn common_bootstrap_source() -> String {
     // The interpreter adapters and native provider both call kiln-intl's ICU4X case mapper.
     // The native backend adds the public TypeScript wrappers only when liveness retains a call.
     common_bootstrap_source_selected(
-        native_bootstrap_family::ALL & !native_bootstrap_family::STRING_LOCALE,
+        native_bootstrap_family::ALL
+            & !native_bootstrap_family::STRING_LOCALE
+            & !native_bootstrap_family::INTL_DATETIME,
     )
 }
 

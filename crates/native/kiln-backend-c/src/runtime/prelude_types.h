@@ -3397,6 +3397,8 @@ int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
 int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
                           uint64_t locale_len, uint32_t uppercase, uint16_t *out,
                           uint64_t capacity, uint64_t *out_len);
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds,
+                              uint32_t operation, const uint8_t **out, uint64_t *out_len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions

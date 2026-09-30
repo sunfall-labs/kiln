@@ -377,6 +377,22 @@ pub unsafe extern "C" fn kiln_intl_segment(
     INVALID_ARGUMENT
 }
 
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_datetime_format(
+    _spec: *const u8,
+    _spec_len: u64,
+    _epoch_milliseconds: f64,
+    _operation: u32,
+    _out: *mut *const u8,
+    _out_len: *mut u64,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
 #[cfg(not(feature = "parallel"))]
 /// # Safety
 ///

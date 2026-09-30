@@ -65,6 +65,22 @@ delete (globalThis as any).__kilnTypedArraySort;
     configurable: true,
   });
 
+  Object.defineProperty(Uint8Array.prototype, "toHex", {
+    value: function toHex(this: any): string {
+      if (!(this instanceof Uint8Array)) {
+        throw new TypeError("Uint8Array.prototype.toHex called on an incompatible receiver");
+      }
+      let output = "";
+      for (let index = 0; index < this.length; index++) {
+        const byte = this[index];
+        output += (byte < 16 ? "0" : "") + byte.toString(16);
+      }
+      return output;
+    },
+    writable: true,
+    configurable: true,
+  });
+
   const Proto = Object.getPrototypeOf(Uint8Array.prototype);
   if (!Proto) {
     return;

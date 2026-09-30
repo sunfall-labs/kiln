@@ -1495,6 +1495,37 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         free(mapped);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW) {
+        kiln_value spec = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value epoch = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value operation = argc > 2 ? args[2] : kiln_c99_undefined();
+        const uint8_t *bytes = NULL;
+        uint64_t length = 0;
+        uint8_t *owned = NULL;
+        size_t owned_len = 0;
+        int rc;
+        if (spec.tag != KILN_VALUE_STRING || epoch.tag != KILN_VALUE_NUMBER ||
+            operation.tag != KILN_VALUE_NUMBER || !isfinite(kiln_c99_as_number(operation)) ||
+            floor(kiln_c99_as_number(operation)) != kiln_c99_as_number(operation) ||
+            kiln_c99_as_number(operation) < 0 || kiln_c99_as_number(operation) > 2)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Invalid internal Intl.DateTimeFormat arguments");
+        status = kiln_c99_string_to_utf8_lossy(spec, &owned, &owned_len);
+        if (status != KILN_C99_OK) return status;
+        rc = kiln_intl_datetime_format(owned, owned_len, kiln_c99_as_number(epoch),
+                                       (uint32_t)kiln_c99_as_number(operation), &bytes, &length);
+        free(owned);
+        if (rc == -1) return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                  "Invalid Intl.DateTimeFormat specification");
+        if (rc == -3) return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                  "Invalid Intl.DateTimeFormat options");
+        if (rc != 0 || (length != 0 && bytes == NULL))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                        "Intl.DateTimeFormat provider failed");
+        *result = kiln_c99_val_from_text((const char *)bytes, (size_t)length);
+        if (result->tag == KILN_VALUE_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_UINT8_TO_HEX_RAW)
         return kiln_c99_uint8_to_hex_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_UINT8_TO_BASE64_RAW)
