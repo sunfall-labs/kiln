@@ -1316,6 +1316,79 @@ fn module_payload<E: QueryEngine>(
         })
 }
 
+#[cfg(test)]
+mod module_identity_tests {
+    use super::*;
+    use kiln_db::{MemoEngine, QueryEngine};
+    use kiln_module_graph::{ModulePayload, ModuleSource};
+
+    fn private_constants(payload: ModulePayload) -> Vec<String> {
+        let ModulePayload::Program(program) = payload else {
+            panic!("source module compiles to a program");
+        };
+        program
+            .program
+            .constants
+            .into_iter()
+            .filter_map(|constant| match constant {
+                kiln_ir::Constant::String(value) => value
+                    .to_scalar_string()
+                    .ok()
+                    .filter(|value| value.starts_with("@@private:")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn memoized_module_ir_tracks_graph_identity_changes_for_same_file() {
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kiln-private-module-identity-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let project = dir.join("project");
+        let source_dir = project.join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        let path = source_dir.join("private.ts");
+        let path_string = path.to_str().expect("UTF-8 test path");
+        let source = "class Cache { #value = 1; read() { return this.#value; } }";
+        let mut engine = MemoEngine::new(kiln_frontend_oxc::parse);
+        let file = engine.intern(path_string);
+        engine.set_source(file, source.to_owned());
+
+        let project_payload = module_payload(
+            &mut engine,
+            &path,
+            project.to_str().expect("UTF-8 project path"),
+            ModuleSource::Source,
+        )
+        .expect("compile under project identity");
+        let project_keys = private_constants(project_payload);
+        assert!(!project_keys.is_empty(), "fixture contains a private name");
+
+        let cached_payload = module_payload(
+            &mut engine,
+            &path,
+            project.to_str().expect("UTF-8 project path"),
+            ModuleSource::Source,
+        )
+        .expect("reuse cached graph identity");
+        assert_eq!(project_keys, private_constants(cached_payload));
+
+        let parent = dir.to_str().expect("UTF-8 parent path");
+        let parent_payload = module_payload(&mut engine, &path, parent, ModuleSource::Source)
+            .expect("compile under changed graph identity");
+        let parent_keys = private_constants(parent_payload);
+        assert_ne!(project_keys, parent_keys);
+        assert_eq!(engine.stats().ir_computed, 2);
+
+        std::fs::remove_dir_all(dir).expect("remove temporary project");
+    }
+}
+
 fn graph_sources<E: QueryEngine>(
     engine: &mut E,
     graph: &ModuleGraph,
