@@ -1211,7 +1211,7 @@ pub(super) fn parse_json_text_with_sources(
     text: &StringUnits,
 ) -> Result<(Value, JsonSourceMap, Option<StringUnits>), ExecutionError> {
     kiln_json::parse_units_with_source_spans(text, json_value_and_sources_from_tape)
-        .map_err(|_| ExecutionError::InvalidJson)
+        .map_err(|_| ExecutionError::InvalidJson)?
 }
 
 pub(super) fn is_json_whitespace(unit: u16) -> bool {
