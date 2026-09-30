@@ -37,13 +37,64 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         })?);
         if let Some(shared) = &self.module_realm {
-            shared.borrow_mut().global_objects.push(None);
+            let mut shared = shared.borrow_mut();
+            shared.global_objects.push(None);
+            shared
+                .regexp_legacy_captures
+                .push(std::array::from_fn(|_| StringUnits::default()));
         }
         self.global_objects.push(None);
         self.regexp_legacy_captures
             .push(std::array::from_fn(|_| StringUnits::default()));
         self.intrinsics.add_realm();
         Ok(realm)
+    }
+
+    /// Publish the captures from one successful RegExp execution. Module child VMs use the
+    /// module session's realm-owned table so statics remain visible across module boundaries.
+    pub(super) fn publish_regexp_legacy_captures(
+        &mut self,
+        subject: &[u16],
+        groups: &[Option<std::ops::Range<usize>>],
+    ) {
+        let mut captures: [StringUnits; 9] = std::array::from_fn(|_| StringUnits::default());
+        for (capture, group) in captures.iter_mut().zip(groups.iter().skip(1)) {
+            if let Some(range) = group {
+                *capture = StringUnits::from_units(&subject[range.clone()]);
+            }
+        }
+        let realm_index = self.current_realm.0 as usize;
+        if let Some(shared) = &self.module_realm {
+            if let Some(slot) = shared
+                .borrow_mut()
+                .regexp_legacy_captures
+                .get_mut(realm_index)
+            {
+                *slot = captures;
+            }
+        } else if let Some(slot) = self.regexp_legacy_captures.get_mut(realm_index) {
+            *slot = captures;
+        }
+    }
+
+    pub(super) fn regexp_legacy_capture(&self, index: usize) -> Option<StringUnits> {
+        if !(1..=9).contains(&index) {
+            return None;
+        }
+        let realm_index = self.current_realm.0 as usize;
+        if let Some(shared) = &self.module_realm {
+            shared
+                .borrow()
+                .regexp_legacy_captures
+                .get(realm_index)
+                .and_then(|captures| captures.get(index - 1))
+                .cloned()
+        } else {
+            self.regexp_legacy_captures
+                .get(realm_index)
+                .and_then(|captures| captures.get(index - 1))
+                .cloned()
+        }
     }
 
     /// `new ShadowRealm()`.

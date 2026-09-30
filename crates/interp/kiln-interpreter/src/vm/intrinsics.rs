@@ -2728,19 +2728,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 let found = regexp_search(&regexp, &subject, start);
                 if let Some((_, groups, _)) = &found {
-                    let mut captures: [StringUnits; 9] =
-                        std::array::from_fn(|_| StringUnits::default());
-                    for (capture, group) in captures.iter_mut().zip(groups.iter().skip(1)) {
-                        if let Some(range) = group {
-                            *capture = StringUnits::from_units(&subject[range.clone()]);
-                        }
-                    }
-                    if let Some(slot) = self
-                        .regexp_legacy_captures
-                        .get_mut(self.current_realm.0 as usize)
-                    {
-                        *slot = captures;
-                    }
+                    self.publish_regexp_legacy_captures(&subject, groups);
                 }
                 if (regexp.global || regexp.sticky) && found.is_none() {
                     // A failed search resets the cursor, which is what stops a `g` regexp from
@@ -2842,12 +2830,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if subject.is_empty() {
                     // An empty subject is the one case with no trailing piece: a separator that
                     // matches it splits it into nothing, and one that does not leaves it whole.
-                    if regexp_search(regexp, &subject, 0).is_none() {
+                    if let Some((_, groups, _)) = regexp_search(regexp, &subject, 0) {
+                        self.publish_regexp_legacy_captures(&subject, &groups);
+                    } else {
                         parts.push(Value::String(String::new().into()));
                     }
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
-                for (range, groups, _) in regexp_search_all(regexp, &subject) {
+                let matches = regexp_search_all(regexp, &subject);
+                if let Some((_, groups, _)) = matches.last() {
+                    self.publish_regexp_legacy_captures(&subject, groups);
+                }
+                for (range, groups, _) in matches {
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
@@ -2957,10 +2951,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Number(-1.0));
                 };
                 // `search` ignores `lastIndex` entirely and always scans from the start.
-                Ok(Value::Number(
-                    regexp_search(regexp, &subject, 0)
-                        .map_or(-1.0, |(range, _, _)| range.start as f64),
-                ))
+                let found = regexp_search(regexp, &subject, 0);
+                let index = found
+                    .as_ref()
+                    .map_or(-1.0, |(range, _, _)| range.start as f64);
+                if let Some((_, groups, _)) = found {
+                    self.publish_regexp_legacy_captures(&subject, &groups);
+                }
+                Ok(Value::Number(index))
             }
             Native::StringMatch | Native::StringMatchAll => {
                 let Value::String(text) = receiver else {
@@ -2984,15 +2982,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let all = matches!(native, Native::StringMatchAll) || regexp.global;
                 if !all {
                     // Without `g`, `match` is `exec`: one result with its groups.
-                    return Ok(match regexp_search(regexp, &subject, 0) {
+                    let found = regexp_search(regexp, &subject, 0);
+                    if let Some((_, groups, _)) = &found {
+                        self.publish_regexp_legacy_captures(&subject, groups);
+                    }
+                    return Ok(match found {
                         Some((range, groups, names)) => {
                             match_result(&subject, &range, &groups, &names, regexp.has_indices)
                         }
                         None => Value::Null,
                     });
                 }
+                let matches = regexp_search_all(regexp, &subject);
+                if let Some((_, groups, _)) = matches.last() {
+                    self.publish_regexp_legacy_captures(&subject, groups);
+                }
                 let mut results = Vec::new();
-                for (range, groups, names) in regexp_search_all(regexp, &subject) {
+                for (range, groups, names) in matches {
                     results.push(if matches!(native, Native::StringMatchAll) {
                         // `matchAll` yields full results; `match` with `g` yields only the text.
                         match_result(&subject, &range, &groups, &names, regexp.has_indices)
@@ -3075,12 +3081,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     _ => None,
                 });
                 Ok(index
-                    .and_then(|index| {
-                        self.regexp_legacy_captures
-                            .get(self.current_realm.0 as usize)
-                            .and_then(|captures| captures.get(index))
-                    })
-                    .cloned()
+                    .and_then(|index| self.regexp_legacy_capture(index + 1))
                     .map(Value::String)
                     .unwrap_or(Value::Undefined))
             }

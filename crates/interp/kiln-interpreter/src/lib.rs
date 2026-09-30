@@ -1971,6 +1971,7 @@ type TemplateObjectCache =
 struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
     global_objects: Vec<Option<Value>>,
+    regexp_legacy_captures: Vec<[StringUnits; 9]>,
     shared_hooks_pending: bool,
     saved_shared_global: Option<Vec<Slot>>,
     pending_host: Vec<PendingHostRequest>,
@@ -1996,6 +1997,7 @@ impl Default for ModuleRealmSession {
             shared: Rc::new(RefCell::new(ModuleRealmShared {
                 realm: Realm::new(),
                 global_objects: vec![None],
+                regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
                 shared_hooks_pending: false,
                 saved_shared_global: None,
                 pending_host: Vec::new(),

@@ -668,7 +668,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )
             }
         };
-        let _ = from_regexp;
+        if from_regexp && let Some((_, groups, _)) = matches.last() {
+            self.publish_regexp_legacy_captures(&subject, groups);
+        }
 
         let mut out = String::new();
         let mut copied = 0;
