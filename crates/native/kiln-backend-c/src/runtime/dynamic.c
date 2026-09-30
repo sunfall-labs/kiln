@@ -2548,10 +2548,14 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         int status = kiln_c99_to_primitive(host, args[0], KILN_C99_HINT_STRING,
                                            &primitive, depth, thrown);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&upvalues[0]);
+        kiln_c99_gc_keep_alive(&args[0]);
         if (primitive.tag == KILN_VALUE_SYMBOL)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Cannot convert a Symbol value to a string");
         upvalues[1] = kiln_c99_text(primitive);
+        kiln_c99_gc_keep_alive(&upvalues[0]);
+        kiln_c99_gc_keep_alive(&primitive);
     } else {
         size_t i;
         upvalues[0] = kiln_c99_from_units(NULL, 0);
@@ -2562,18 +2566,26 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
             int status = kiln_c99_to_primitive(host, args[i], KILN_C99_HINT_STRING,
                                                &primitive, depth, thrown);
             if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&upvalues[0]);
+            kiln_c99_gc_keep_alive(&args[i]);
             if (primitive.tag == KILN_VALUE_SYMBOL)
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Cannot convert a Symbol value to a string");
             text = kiln_c99_text(primitive);
             kiln_c99_gc_keep_alive(&upvalues[0]);
+            kiln_c99_gc_keep_alive(&primitive);
             kiln_c99_gc_keep_alive(&text);
             kiln_value next = kiln_c99_concat(upvalues[0], text);
+            kiln_c99_gc_keep_alive(&upvalues[0]);
+            kiln_c99_gc_keep_alive(&text);
+            kiln_c99_gc_keep_alive(&next);
             if (next.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
             upvalues[0] = next;
             if (i + 1 < argc - 1) {
                 kiln_c99_gc_keep_alive(&upvalues[0]);
                 next = kiln_c99_concat(upvalues[0], kiln_c99_static_text(",", 1));
+                kiln_c99_gc_keep_alive(&upvalues[0]);
+                kiln_c99_gc_keep_alive(&next);
                 if (next.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
                 upvalues[0] = next;
             }
@@ -2582,10 +2594,14 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         int status = kiln_c99_to_primitive(host, args[argc - 1], KILN_C99_HINT_STRING,
                                            &primitive, depth, thrown);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&upvalues[0]);
+        kiln_c99_gc_keep_alive(&args[argc - 1]);
         if (primitive.tag == KILN_VALUE_SYMBOL)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Cannot convert a Symbol value to a string");
         upvalues[1] = kiln_c99_text(primitive);
+        kiln_c99_gc_keep_alive(&upvalues[0]);
+        kiln_c99_gc_keep_alive(&primitive);
     }
     if (upvalues[0].tag != KILN_VALUE_STRING || upvalues[1].tag != KILN_VALUE_STRING)
         return KILN_C99_OUT_OF_MEMORY;
@@ -2604,6 +2620,9 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                        0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                        KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                        val_upvalues, 3);
+    kiln_c99_gc_keep_alive(val_upvalues);
+    kiln_c99_gc_keep_alive(&upvalues[0]);
+    kiln_c99_gc_keep_alive(&upvalues[1]);
     if (status == KILN_C99_OK) kiln_c99_heap_store_value(kiln_c99_closure_of(*result), &kiln_c99_closure_of(*result)->source_value, upvalues[1]);
     return status;
 }
