@@ -1335,3 +1335,46 @@ fn ambiguous_ts_with_static_imports_builds_as_esm() {
         node.program.imports
     );
 }
+
+#[test]
+fn reduce_to_live_retargets_commonjs_default_through_a_dropped_barrel() {
+    let project = TempProject::new();
+    let origin = project.write("origin.cjs", "module.exports = function FormData() {};\n");
+    let barrel = project.write("barrel.mjs", "export { default } from './origin.cjs';\n");
+    let entry = project.write(
+        "main.mjs",
+        "import FormData from './barrel.mjs'; console.log(typeof FormData);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("CommonJS barrel graph");
+    let demand = LiveDemand {
+        live: graph
+            .modules()
+            .filter(|node| node.path != barrel)
+            .map(|node| node.path.clone())
+            .collect(),
+        slots: BTreeMap::from([(origin.clone(), BTreeSet::from([0]))]),
+        live_imports: BTreeSet::from([(entry.clone(), 0)]),
+    };
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("retarget virtual default");
+    assert!(reduced.module(&barrel).is_none());
+    let node = reduced.module(&entry).unwrap();
+    assert_eq!(node.program.imports[0].imported, "default");
+    assert_eq!(node.dependencies[0].target, origin);
+    let mut host = kiln_runtime::CaptureHost::new();
+    reduced
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute retargeted CommonJS default");
+    assert_eq!(host.into_stdout(), "function\n");
+}

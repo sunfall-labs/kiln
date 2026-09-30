@@ -1230,14 +1230,25 @@ impl ModuleGraph {
                                     let imported = self
                                         .module(module)
                                         .and_then(|origin| {
-                                            origin.program.exports.iter().find(|export| {
-                                                export.local_slot == *local_slot
-                                                    && !export
-                                                        .exported
-                                                        .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
-                                            })
+                                            // CommonJS's default is module.exports, represented
+                                            // virtually by slot zero rather than an ESM export row.
+                                            if origin.source == ModuleSource::CommonJs
+                                                && *local_slot == 0
+                                            {
+                                                return Some("default".to_owned());
+                                            }
+                                            origin
+                                                .program
+                                                .exports
+                                                .iter()
+                                                .find(|export| {
+                                                    export.local_slot == *local_slot
+                                                        && !export.exported.starts_with(
+                                                            kiln_ir::STAR_REEXPORT_PREFIX,
+                                                        )
+                                                })
+                                                .map(|export| export.exported.clone())
                                         })
-                                        .map(|export| export.exported.clone())
                                         .ok_or_else(|| ModuleGraphError::MissingExport {
                                             importer: node.path.clone(),
                                             provider: module.clone(),
