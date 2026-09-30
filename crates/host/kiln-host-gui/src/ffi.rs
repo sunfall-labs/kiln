@@ -280,3 +280,211 @@ pub extern "C" fn kiln_gui_hotkey_unregister(id: u32) -> i32 {
 pub extern "C" fn kiln_gui_hotkey_poll() -> u32 {
     hotkey::poll_event().unwrap_or(0)
 }
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_init() -> i32 {
+    if crate::appkit::ensure_initialized() {
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_create(
+    id: u64,
+    title: *const c_char,
+    width: f64,
+    height: f64,
+) -> i32 {
+    let title_str =
+        unsafe { c_str_to_opt_string(title) }.unwrap_or_else(|| "Kiln Window".to_string());
+    if crate::appkit::window_create(id, &title_str, width, height) {
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_show(id: u64) -> i32 {
+    crate::appkit::window_show(id);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_close(id: u64) -> i32 {
+    crate::appkit::window_close(id);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_set_title(id: u64, title: *const c_char) -> i32 {
+    if let Some(t) = unsafe { c_str_to_opt_string(title) } {
+        crate::appkit::window_set_title(id, &t);
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_set_content(win_id: u64, child_id: u64) -> i32 {
+    crate::appkit::window_set_content(win_id, child_id);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_widget_create(
+    id: u64,
+    tag: *const c_char,
+    text: *const c_char,
+) -> i32 {
+    let tag_str = unsafe { c_str_to_opt_string(tag) }.unwrap_or_default();
+    let text_str = unsafe { c_str_to_opt_string(text) }.unwrap_or_default();
+    if crate::appkit::widget_create(id, &tag_str, &text_str) {
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_widget_set_property(
+    id: u64,
+    name: *const c_char,
+    val_str: *const c_char,
+    val_num: f64,
+) -> i32 {
+    let name_str = unsafe { c_str_to_opt_string(name) }.unwrap_or_default();
+    let str_val = unsafe { c_str_to_opt_string(val_str) }.unwrap_or_default();
+    crate::appkit::widget_set_property(id, &name_str, &str_val, val_num);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_widget_add_child(parent_id: u64, child_id: u64) -> i32 {
+    crate::appkit::widget_add_child(parent_id, child_id);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_widget_remove_child(parent_id: u64, child_id: u64) -> i32 {
+    crate::appkit::widget_remove_child(parent_id, child_id);
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_pump_events(wait_ms: f64) -> i32 {
+    if crate::appkit::pump_events(wait_ms) {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_poll_event(
+    out_id: *mut u64,
+    out_type_buf: *mut c_char,
+    out_type_len: usize,
+    out_val_buf: *mut c_char,
+    out_val_len: usize,
+) -> i32 {
+    if let Some((id, event_type, val)) = crate::appkit::poll_event() {
+        if !out_id.is_null() {
+            unsafe { *out_id = id };
+        }
+        unsafe {
+            copy_to_c_buf(&event_type, out_type_buf, out_type_len);
+            if !out_val_buf.is_null() && out_val_len > 0 {
+                copy_to_c_buf(&val, out_val_buf, out_val_len);
+            }
+        };
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_init() -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_create(_: u64, _: *const c_char, _: f64, _: f64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_show(_: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_close(_: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_set_title(_: u64, _: *const c_char) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_set_content(_: u64, _: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_widget_create(_: u64, _: *const c_char, _: *const c_char) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_widget_set_property(
+    _: u64,
+    _: *const c_char,
+    _: *const c_char,
+    _: f64,
+) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_widget_add_child(_: u64, _: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_widget_remove_child(_: u64, _: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_pump_events(_: f64) -> i32 {
+    0
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_poll_event(
+    _: *mut u64,
+    _: *mut c_char,
+    _: usize,
+    _: *mut c_char,
+    _: usize,
+) -> i32 {
+    0
+}

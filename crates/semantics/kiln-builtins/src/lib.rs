@@ -157,6 +157,8 @@ declare_ts_builtins! {
         compilation_test: gui_builtin_compiles_cleanly,
         exports: [
             "Button",
+            "Card",
+            "Divider",
             "Fragment",
             "HStack",
             "HostGuiBridge",

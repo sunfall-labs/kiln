@@ -61,7 +61,7 @@ export interface PlatformDriver {
   removeChild(parentHandle: bigint, childHandle: bigint): void;
   reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
   disposeWidget(node: Node): void;
-  pumpEvents(): boolean;
+  pumpEvents(waitMs?: number): boolean;
 }
 
 function toCStr(ffi: any, str: string): bigint {
@@ -522,27 +522,326 @@ export class Gtk4Driver implements PlatformDriver {
 export class AppKitDriver implements PlatformDriver {
   readonly name = "appkit";
   private initialized = false;
+  private appkit: any = null;
+  private ffi: any = null;
   private handles = new Map<number, bigint>();
+  private nodeByHandle = new Map<bigint, number>();
 
   init(): boolean {
-    if (this.initialized) return true;
+    if (this.initialized) return this.appkit !== null;
     this.initialized = true;
-    return typeof process !== "undefined" && process.platform === "darwin";
+    if (typeof process === "undefined" || process.platform !== "darwin") return false;
+    try {
+      this.ffi = (process as any).__kilnNativeModules?.ffi || null;
+      if (!this.ffi) return false;
+
+      const fs = (process as any).__kilnNativeModules?.fs || null;
+      const suffix = this.ffi.suffix || ".dylib";
+      const cwd = typeof process.cwd === "function" ? process.cwd() : ".";
+      const candidates = [
+        process.env?.KILN_HOST_GUI_LIB,
+        cwd + "/target/release/libkiln_host_gui" + suffix,
+        cwd + "/target/debug/libkiln_host_gui" + suffix,
+        "./target/release/libkiln_host_gui" + suffix,
+        "./target/debug/libkiln_host_gui" + suffix,
+      ].filter(Boolean) as string[];
+
+      let targetLib: string | null = null;
+      if (fs && typeof fs.existsSync === "function") {
+        for (const candidate of candidates) {
+          try {
+            if (fs.existsSync(candidate)) {
+              targetLib = candidate;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+      if (!targetLib && candidates.length > 0) targetLib = candidates[1] || candidates[0];
+      if (!targetLib) return false;
+
+      this.appkit = this.ffi.dlopen(targetLib, {
+        kiln_gui_appkit_init: { arguments: [], return: "i32" },
+        kiln_gui_appkit_window_create: { arguments: ["u64", "pointer", "f64", "f64"], return: "i32" },
+        kiln_gui_appkit_window_show: { arguments: ["u64"], return: "i32" },
+        kiln_gui_appkit_window_close: { arguments: ["u64"], return: "i32" },
+        kiln_gui_appkit_window_set_title: { arguments: ["u64", "pointer"], return: "i32" },
+        kiln_gui_appkit_window_set_content: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_widget_create: { arguments: ["u64", "pointer", "pointer"], return: "i32" },
+        kiln_gui_appkit_widget_set_property: { arguments: ["u64", "pointer", "pointer", "f64"], return: "i32" },
+        kiln_gui_appkit_widget_add_child: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_widget_remove_child: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_pump_events: { arguments: ["f64"], return: "i32" },
+        kiln_gui_appkit_poll_event: { arguments: ["pointer", "pointer", "u64", "pointer", "u64"], return: "i32" },
+      });
+
+      if (
+        this.appkit &&
+        this.appkit.functions &&
+        this.appkit.functions.kiln_gui_appkit_init &&
+        this.appkit.functions.kiln_gui_appkit_init() === 0
+      ) {
+        return true;
+      }
+    } catch (_) {}
+    this.appkit = null;
+    return false;
   }
 
-  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
-  createWindow(win: Window): bigint | null { return null; }
-  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
-  showWindow(win: Window): void { win.visible = true; }
-  closeWindow(win: Window): void { win.visible = false; }
-  createWidget(node: Node): bigint | null { return null; }
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  removeChild(parentHandle: bigint, childHandle: bigint): void {}
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  disposeWidget(node: Node): void { this.handles.delete(node.id); }
-  pumpEvents(): boolean { return false; }
+  getHandle(nodeId: number): bigint | null {
+    return this.handles.get(nodeId) || null;
+  }
+
+  createWindow(win: Window): bigint | null {
+    if (!this.appkit) return null;
+    let handle = this.handles.get(win.id);
+    if (handle) return handle;
+
+    try {
+      const res = this.appkit.functions.kiln_gui_appkit_window_create(
+        BigInt(win.id),
+        toCStr(this.ffi, win.title || "Kiln Window"),
+        Number(win.width || 500),
+        Number(win.height || 320)
+      );
+      if (res === 0) {
+        handle = BigInt(win.id);
+        this.handles.set(win.id, handle);
+        this.nodeByHandle.set(handle, win.id);
+        return handle;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  setWindowContent(winHandle: bigint, childHandle: bigint): void {
+    if (!this.appkit) return;
+    try {
+      this.appkit.functions.kiln_gui_appkit_window_set_content(winHandle, childHandle);
+    } catch (_) {}
+  }
+
+  showWindow(win: Window): void {
+    win.visible = true;
+    if (!this.appkit) return;
+    let winHandle = this.handles.get(win.id);
+    if (!winHandle) {
+      winHandle = this.createWindow(win);
+    }
+    if (winHandle) {
+      if (win.content) {
+        const childHandle = this.createWidget(win.content);
+        if (childHandle) {
+          this.setWindowContent(winHandle, childHandle);
+        }
+      }
+      this.appkit.functions.kiln_gui_appkit_window_show(BigInt(win.id));
+      this.pumpEvents();
+    }
+  }
+
+  closeWindow(win: Window): void {
+    win.visible = false;
+    if (!this.appkit) return;
+    const handle = this.handles.get(win.id);
+    if (handle) {
+      try {
+        this.appkit.functions.kiln_gui_appkit_window_close(BigInt(win.id));
+      } catch (_) {}
+      this.handles.delete(win.id);
+      this.nodeByHandle.delete(handle);
+    }
+  }
+
+  createWidget(node: Node): bigint | null {
+    if (!this.appkit) return null;
+    let handle = this.handles.get(node.id);
+    if (handle) return handle;
+
+    try {
+      let text = "";
+      if (node.tag === "button") {
+        text = String(node.getProperty("label") || "");
+      } else if (node.tag === "text") {
+        text = String(node.getProperty("text") || "");
+      } else if (node.tag === "textinput") {
+        text = String(node.getProperty("value") || "");
+      }
+      const res = this.appkit.functions.kiln_gui_appkit_widget_create(
+        BigInt(node.id),
+        toCStr(this.ffi, node.tag),
+        toCStr(this.ffi, text)
+      );
+      if (res === 0) {
+        handle = BigInt(node.id);
+        this.handles.set(node.id, handle);
+        this.nodeByHandle.set(handle, node.id);
+
+        if (node.tag === "slider") {
+          const val = node.getProperty("value");
+          if (val !== undefined) this.updateProperty(handle, node.tag, "value", val);
+          const min = node.getProperty("min");
+          if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
+          const max = node.getProperty("max");
+          if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
+        } else if (node.tag === "toggle") {
+          const chk = node.getProperty("checked");
+          if (chk !== undefined) this.updateProperty(handle, node.tag, "checked", chk);
+        } else if (node.tag === "text") {
+          const variant = node.getProperty("variant");
+          if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
+          const color = node.getProperty("color");
+          if (color !== undefined) this.updateProperty(handle, node.tag, "color", color);
+          const size = node.getProperty("size");
+          if (size !== undefined) this.updateProperty(handle, node.tag, "size", size);
+        } else if (node.tag === "button") {
+          const variant = node.getProperty("variant");
+          if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
+        } else if (node.tag === "textinput") {
+          const placeholder = node.getProperty("placeholder");
+          if (placeholder !== undefined) this.updateProperty(handle, node.tag, "placeholder", placeholder);
+        } else if (node.tag === "vstack" || node.tag === "hstack") {
+          const spacing = node.getProperty("spacing");
+          if (spacing !== undefined) this.updateProperty(handle, node.tag, "spacing", spacing);
+          const alignment = node.getProperty("alignment");
+          if (alignment !== undefined) this.updateProperty(handle, node.tag, "alignment", alignment);
+          const padding = node.getProperty("padding");
+          if (padding !== undefined) this.updateProperty(handle, node.tag, "padding", padding);
+          for (let i = 0; i < node.children.length; i++) {
+            const childHandle = this.createWidget(node.children[i]);
+            if (childHandle) {
+              this.appkit.functions.kiln_gui_appkit_widget_add_child(handle, childHandle);
+            }
+          }
+        } else if (node.tag === "card") {
+          for (let i = 0; i < node.children.length; i++) {
+            const childHandle = this.createWidget(node.children[i]);
+            if (childHandle) {
+              this.appkit.functions.kiln_gui_appkit_widget_add_child(handle, childHandle);
+            }
+          }
+        }
+
+        const width = node.getProperty("width");
+        if (width !== undefined) this.updateProperty(handle, node.tag, "width", width);
+        const height = node.getProperty("height");
+        if (height !== undefined) this.updateProperty(handle, node.tag, "height", height);
+        return handle;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  updateProperty(handle: bigint, tag: string, name: string, value: any): void {
+    if (!this.appkit) return;
+    try {
+      if (tag === "window" && name === "title") {
+        this.appkit.functions.kiln_gui_appkit_window_set_title(handle, toCStr(this.ffi, String(value)));
+      } else {
+        const valStr = typeof value === "string" ? value : String(value ?? "");
+        const valNum = typeof value === "number" ? value : 0;
+        this.appkit.functions.kiln_gui_appkit_widget_set_property(
+          handle,
+          toCStr(this.ffi, name),
+          toCStr(this.ffi, valStr),
+          valNum
+        );
+      }
+    } catch (_) {}
+  }
+
+  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
+    if (!this.appkit) return;
+    try {
+      this.appkit.functions.kiln_gui_appkit_widget_add_child(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  removeChild(parentHandle: bigint, childHandle: bigint): void {
+    if (!this.appkit) return;
+    try {
+      this.appkit.functions.kiln_gui_appkit_widget_remove_child(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
+    if (!this.appkit) return;
+    try {
+      this.appkit.functions.kiln_gui_appkit_widget_remove_child(parentHandle, childHandle);
+      this.appkit.functions.kiln_gui_appkit_widget_add_child(parentHandle, childHandle);
+    } catch (_) {}
+  }
+
+  disposeWidget(node: Node): void {
+    const handle = this.handles.get(node.id);
+    if (handle) {
+      if (node.tag === "window" && this.appkit) {
+        try {
+          this.appkit.functions.kiln_gui_appkit_window_close(handle);
+        } catch (_) {}
+      }
+      this.nodeByHandle.delete(handle);
+      this.handles.delete(node.id);
+    }
+  }
+
+  pumpEvents(waitMs = 0): boolean {
+    if (!this.appkit) return false;
+    let hadEvents = false;
+    try {
+      if (this.appkit.functions.kiln_gui_appkit_pump_events(waitMs) !== 0) {
+        hadEvents = true;
+      }
+      const outIdBuf = new BigUint64Array(1);
+      const outIdPtr = this.ffi.getRawPointer(outIdBuf.buffer);
+      const outTypeBuf = new Uint8Array(64);
+      const outTypePtr = this.ffi.getRawPointer(outTypeBuf.buffer);
+      const outValBuf = new Uint8Array(256);
+      const outValPtr = this.ffi.getRawPointer(outValBuf.buffer);
+
+      while (
+        this.appkit.functions.kiln_gui_appkit_poll_event(
+          outIdPtr,
+          outTypePtr,
+          64n,
+          outValPtr,
+          256n
+        ) === 1
+      ) {
+        hadEvents = true;
+        const targetId = Number(outIdBuf[0]);
+        let typeLen = 0;
+        while (typeLen < outTypeBuf.length && outTypeBuf[typeLen] !== 0) typeLen++;
+        const eventType = new TextDecoder().decode(outTypeBuf.subarray(0, typeLen));
+
+        let valLen = 0;
+        while (valLen < outValBuf.length && outValBuf[valLen] !== 0) valLen++;
+        const eventVal = new TextDecoder().decode(outValBuf.subarray(0, valLen));
+
+        if (targetId > 0 && eventType) {
+          if (eventType === "close") {
+            const winNode = nodeRegistry.get(targetId);
+            if (winNode && winNode.tag === "window") {
+              (winNode as any).visible = false;
+            }
+            turnMailbox.post(targetId, eventType);
+          } else if (eventType === "change") {
+            const num = Number(eventVal);
+            turnMailbox.post(targetId, eventType, isNaN(num) ? eventVal : num);
+          } else if (eventType === "input") {
+            turnMailbox.post(targetId, eventType, eventVal);
+          } else if (eventType === "toggle") {
+            turnMailbox.post(targetId, eventType, eventVal === "true");
+          } else {
+            turnMailbox.post(targetId, eventType);
+          }
+        }
+      }
+    } catch (_) {}
+    return hadEvents;
+  }
 }
+
 
 export class Win32Driver implements PlatformDriver {
   readonly name = "win32";
@@ -929,11 +1228,14 @@ export class Window extends Node {
 }
 
 export class VStack extends Node {
-  constructor(options?: { spacing?: number; alignment?: string; children?: Node[] }) {
+  constructor(options?: { spacing?: number; alignment?: string; padding?: number; width?: number; height?: number; children?: Node[] }) {
     super("vstack");
     if (options) {
       if (options.spacing !== undefined) this.setProperty("spacing", options.spacing);
       if (options.alignment !== undefined) this.setProperty("alignment", options.alignment);
+      if (options.padding !== undefined) this.setProperty("padding", options.padding);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
       if (options.children) {
         for (let i = 0; i < options.children.length; i++) {
           this.appendChild(options.children[i]);
@@ -958,11 +1260,14 @@ export class VStack extends Node {
 }
 
 export class HStack extends Node {
-  constructor(options?: { spacing?: number; alignment?: string; children?: Node[] }) {
+  constructor(options?: { spacing?: number; alignment?: string; padding?: number; width?: number; height?: number; children?: Node[] }) {
     super("hstack");
     if (options) {
       if (options.spacing !== undefined) this.setProperty("spacing", options.spacing);
       if (options.alignment !== undefined) this.setProperty("alignment", options.alignment);
+      if (options.padding !== undefined) this.setProperty("padding", options.padding);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
       if (options.children) {
         for (let i = 0; i < options.children.length; i++) {
           this.appendChild(options.children[i]);
@@ -986,13 +1291,44 @@ export class HStack extends Node {
   }
 }
 
+export class Card extends Node {
+  constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
+    super("card");
+    if (options) {
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+      if (options.child) {
+        this.appendChild(options.child);
+      } else if (options.children) {
+        const inner = new VStack({ spacing: 10, children: options.children });
+        this.appendChild(inner);
+      }
+    }
+  }
+}
+
+export class Divider extends Node {
+  constructor(options?: { width?: number }) {
+    super("divider");
+    if (options && options.width !== undefined) {
+      this.setProperty("width", options.width);
+    }
+  }
+}
+
 export class Text extends Node {
-  constructor(textOrOptions?: string | { text?: string }) {
+  constructor(textOrOptions?: string | { text?: string; variant?: string; color?: string; size?: number; bold?: boolean; width?: number; height?: number }) {
     super("text");
     if (typeof textOrOptions === "string") {
       this.text = textOrOptions;
-    } else if (textOrOptions && textOrOptions.text !== undefined) {
-      this.text = textOrOptions.text;
+    } else if (textOrOptions) {
+      if (textOrOptions.text !== undefined) this.text = textOrOptions.text;
+      if (textOrOptions.variant !== undefined) this.setProperty("variant", textOrOptions.variant);
+      if (textOrOptions.color !== undefined) this.setProperty("color", textOrOptions.color);
+      if (textOrOptions.size !== undefined) this.setProperty("size", textOrOptions.size);
+      if (textOrOptions.bold !== undefined) this.setProperty("bold", textOrOptions.bold);
+      if (textOrOptions.width !== undefined) this.setProperty("width", textOrOptions.width);
+      if (textOrOptions.height !== undefined) this.setProperty("height", textOrOptions.height);
     }
   }
 
@@ -1005,7 +1341,7 @@ export class Text extends Node {
 }
 
 export class Button extends Node {
-  constructor(labelOrOptions?: string | ButtonOptions) {
+  constructor(labelOrOptions?: string | (ButtonOptions & { width?: number; height?: number })) {
     super("button");
     if (typeof labelOrOptions === "string") {
       this.label = labelOrOptions;
@@ -1015,6 +1351,8 @@ export class Button extends Node {
       if (labelOrOptions.size !== undefined) this.size = labelOrOptions.size;
       if (labelOrOptions.disabled !== undefined) this.disabled = labelOrOptions.disabled;
       if (labelOrOptions.platform !== undefined) this.platform = labelOrOptions.platform;
+      if ((labelOrOptions as any).width !== undefined) this.setProperty("width", (labelOrOptions as any).width);
+      if ((labelOrOptions as any).height !== undefined) this.setProperty("height", (labelOrOptions as any).height);
       if (labelOrOptions.onPress) this.onPress = labelOrOptions.onPress;
     }
   }
@@ -1069,12 +1407,15 @@ export class Button extends Node {
 }
 
 export class TextInput extends Node {
-  constructor(options?: { placeholder?: string; value?: string; onChange?: (val: string) => void }) {
+  constructor(options?: { placeholder?: string; value?: string; width?: number; height?: number; onChange?: (val: string) => void; onInput?: (val: string) => void }) {
     super("textinput");
     if (options) {
       if (options.placeholder !== undefined) this.setProperty("placeholder", options.placeholder);
       if (options.value !== undefined) this.value = options.value;
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
       if (options.onChange) this.setProperty("onChange", options.onChange);
+      if (options.onInput) this.setProperty("onInput", options.onInput);
     }
   }
 
@@ -1094,13 +1435,16 @@ export class TextInput extends Node {
 }
 
 export class Slider extends Node {
-  constructor(options?: { min?: number; max?: number; value?: number; onChange?: (val: number) => void }) {
+  constructor(options?: { min?: number; max?: number; value?: number; width?: number; height?: number; onChange?: (val: number) => void; onInput?: (val: number) => void }) {
     super("slider");
     if (options) {
       if (options.min !== undefined) this.setProperty("min", options.min);
       if (options.max !== undefined) this.setProperty("max", options.max);
       if (options.value !== undefined) this.value = options.value;
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
       if (options.onChange) this.setProperty("onChange", options.onChange);
+      if (options.onInput) this.setProperty("onInput", options.onInput);
     }
   }
 
@@ -1127,10 +1471,12 @@ export class Slider extends Node {
 }
 
 export class Toggle extends Node {
-  constructor(options?: { checked?: boolean; onToggle?: (checked: boolean) => void }) {
+  constructor(options?: { checked?: boolean; width?: number; height?: number; onToggle?: (checked: boolean) => void }) {
     super("toggle");
     if (options) {
       if (options.checked !== undefined) this.checked = options.checked;
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
       if (options.onToggle) this.setProperty("onToggle", options.onToggle);
     }
   }
@@ -1161,6 +1507,10 @@ export function createRenderer<T extends Node = Node>(config?: any): {
     window: Window,
     vstack: VStack,
     hstack: HStack,
+    card: Card,
+    box: Card,
+    divider: Divider,
+    separator: Divider,
     button: Button,
     text: Text,
     textinput: TextInput,
@@ -1947,9 +2297,9 @@ const mailboxQueue: MailboxTurn[] = [];
 let isExecutingTurn = false;
 
 export const turnMailbox = {
-  pumpEvents(): boolean {
+  pumpEvents(waitMs = 0): boolean {
     const driver = getActiveDriver();
-    const driverHad = driver ? driver.pumpEvents() : false;
+    const driverHad = driver ? driver.pumpEvents(waitMs) : false;
     const shortcutHad = globalShortcut.poll();
     return driverHad || shortcutHad;
   },
@@ -2115,7 +2465,8 @@ export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
     let timerId: any = null;
 
     const tick = () => {
-      const hadEvents = turnMailbox.pumpEvents();
+      const waitMs = currentInterval > intervalMs ? 20 : 0;
+      const hadEvents = turnMailbox.pumpEvents(waitMs);
       if (win && !win.visible) {
         if (timerId !== null) clearInterval(timerId);
         resolve();
@@ -2142,6 +2493,8 @@ export default {
   Window,
   VStack,
   HStack,
+  Card,
+  Divider,
   Text,
   Button,
   TextInput,

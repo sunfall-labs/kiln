@@ -1991,6 +1991,7 @@ dependencies = [
  "dirs",
  "global-hotkey",
  "muda",
+ "objc",
  "rfd",
  "serde",
  "serde_json",
