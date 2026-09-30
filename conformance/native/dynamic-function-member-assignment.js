@@ -13,3 +13,5 @@ const define = new Function("Ctor", "Ctor.prototype.run = function(value) { retu
 console.log(define(function Example() {}));
 const append = new Function("this.res += '!'; return this.res;");
 console.log(append.call({ res: "Hi" }));
+const count = new Function("return ++this.now;");
+console.log(count.call({ now: 4 }));
