@@ -662,6 +662,15 @@ pub(crate) fn include_reachable_dependencies_with_includes(
                 _ => false,
             };
             if node || !exact_explicit {
+                // `createRequire()` can bind a loader to a file other than the source that
+                // contains its call. The runtime asks the pinned resolver with that captured
+                // base path, so key the decision by the same importer used above.
+                let resolution_importer = request_importer.to_str().ok_or_else(|| {
+                    Error::BadInput(format!(
+                        "path is not valid UTF-8: {}",
+                        request_importer.display()
+                    ))
+                })?;
                 let package_json = resolved.package_json.as_deref();
                 let (package_json, package_json_hash) = if let Some(package_json) = package_json {
                     let package_json_text =
@@ -682,9 +691,9 @@ pub(crate) fn include_reachable_dependencies_with_includes(
                     (None, None)
                 };
                 resolutions.insert(
-                    (importer_path.to_owned(), specifier.clone(), request),
+                    (resolution_importer.to_owned(), specifier.clone(), request),
                     PackageResolution {
-                        importer: importer_path.to_owned(),
+                        importer: resolution_importer.to_owned(),
                         specifier: specifier.clone(),
                         target: target.to_string_lossy().into_owned(),
                         condition: match request {
@@ -1610,6 +1619,64 @@ mod tests {
         assert!(resolutions.is_empty());
         assert_eq!(node_formats.len(), 1);
         assert_eq!(texts.len(), 1);
+    }
+
+    #[test]
+    fn create_require_resolution_is_pinned_to_its_captured_base() {
+        let tree = Tree::new("create-require-base-resolution");
+        tree.file("main.mjs");
+        tree.file("loader/index.cjs");
+        tree.file("loader/node_modules/pkg/package.json");
+        tree.file("loader/node_modules/pkg/index.js");
+        std::fs::write(
+            tree.0.join("loader/node_modules/pkg/package.json"),
+            r#"{"main":"index.js"}"#,
+        )
+        .expect("write nested package manifest");
+        std::fs::write(
+            tree.0.join("loader/node_modules/pkg/index.js"),
+            "module.exports = 42;\n",
+        )
+        .expect("write nested package entry");
+        let loader = tree
+            .0
+            .join("loader/index.cjs")
+            .canonicalize()
+            .expect("canonical createRequire base");
+        std::fs::write(
+            tree.0.join("main.mjs"),
+            format!(
+                "import {{ createRequire }} from 'node:module';\nconst require = createRequire({:?});\nrequire('pkg');\n",
+                loader.to_string_lossy()
+            ),
+        )
+        .expect("write entry");
+        let entry = tree.0.join("main.mjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, _) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolve createRequire package from its captured base");
+
+        assert!(resolutions.iter().any(|resolution| {
+            resolution.importer == loader.to_string_lossy()
+                && resolution.specifier == "pkg"
+                && resolution
+                    .target
+                    .ends_with("/loader/node_modules/pkg/index.js")
+        }));
+        assert!(
+            texts
+                .iter()
+                .any(|(path, _)| path.ends_with("/pkg/index.js"))
+        );
     }
 
     #[test]
