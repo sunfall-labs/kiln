@@ -1061,6 +1061,28 @@ fn resolve_transform_options(path: Option<&str>) -> TransformOptions {
     }
 }
 
+fn unwrap_parenthesized_expression(mut expression: &Expression<'_>) -> &Expression<'_> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    expression
+}
+
+fn function_parameters(expression: &Expression<'_>) -> Option<&FormalParameters<'_>> {
+    match unwrap_parenthesized_expression(expression) {
+        Expression::FunctionExpression(function) => Some(&function.params),
+        Expression::ArrowFunctionExpression(function) => Some(&function.params),
+        _ => None,
+    }
+}
+
+fn simple_parameter_symbol(parameter: &oxc_ast::ast::FormalParameter<'_>) -> Option<SymbolId> {
+    parameter
+        .pattern
+        .get_binding_identifier()
+        .and_then(|identifier| identifier.symbol_id.get())
+}
+
 fn parse_source_with_commonjs_requires(
     path: Option<&str>,
     source: &str,
@@ -1093,6 +1115,81 @@ fn parse_source_with_commonjs_requires(
             .with_build_nodes(true)
             .build(&parsed.program)
             .semantic;
+        let scoping = semantic.scoping();
+        // UMD loaders pass the real `require` through a factory parameter, e.g.
+        // `(factory => factory(require, exports))((require, exports) => { ... })`.
+        // Track only that proven data flow; a function merely named `require` is not a loader.
+        let mut factory_callbacks = HashMap::<SymbolId, Vec<SymbolId>>::new();
+        for node in semantic.nodes() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            let Some(factory_parameters) = function_parameters(&call.callee) else {
+                continue;
+            };
+            for (parameter, argument) in factory_parameters.items.iter().zip(&call.arguments) {
+                let Some(factory_symbol) = simple_parameter_symbol(parameter) else {
+                    continue;
+                };
+                let Some(callback_parameters) = argument
+                    .as_expression()
+                    .and_then(function_parameters)
+                    .map(|callback| {
+                        callback
+                            .items
+                            .iter()
+                            .filter_map(simple_parameter_symbol)
+                            .collect::<Vec<_>>()
+                    })
+                else {
+                    continue;
+                };
+                factory_callbacks.insert(factory_symbol, callback_parameters);
+            }
+        }
+        let mut loader_parameters = HashSet::new();
+        loop {
+            let mut discovered = Vec::new();
+            for node in semantic.nodes() {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    continue;
+                };
+                let Expression::Identifier(callee) = &call.callee else {
+                    continue;
+                };
+                let Some(reference) = callee.reference_id.get() else {
+                    continue;
+                };
+                let Some(factory_symbol) = scoping.get_reference(reference).symbol_id() else {
+                    continue;
+                };
+                let Some(callback_parameters) = factory_callbacks.get(&factory_symbol) else {
+                    continue;
+                };
+                for (index, argument) in call.arguments.iter().enumerate() {
+                    let Some(Expression::Identifier(identifier)) = argument.as_expression() else {
+                        continue;
+                    };
+                    let is_node_require =
+                        identifier.name == "require" && identifier.is_global_reference(scoping);
+                    let is_forwarded_loader = identifier
+                        .reference_id
+                        .get()
+                        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                        .is_some_and(|symbol| loader_parameters.contains(&symbol));
+                    if (is_node_require || is_forwarded_loader)
+                        && let Some(parameter) = callback_parameters.get(index)
+                        && !loader_parameters.contains(parameter)
+                    {
+                        discovered.push(*parameter);
+                    }
+                }
+            }
+            if discovered.is_empty() {
+                break;
+            }
+            loader_parameters.extend(discovered);
+        }
         let mut requires = semantic
             .nodes()
             .iter()
@@ -1103,7 +1200,14 @@ fn parse_source_with_commonjs_requires(
                 let Expression::Identifier(callee) = &call.callee else {
                     return None;
                 };
-                if callee.name != "require" || !callee.is_global_reference(semantic.scoping()) {
+                let is_node_require =
+                    callee.name == "require" && callee.is_global_reference(scoping);
+                let is_loader_parameter = callee
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    .is_some_and(|symbol| loader_parameters.contains(&symbol));
+                if !is_node_require && !is_loader_parameter {
                     return None;
                 }
                 let argument = call.arguments.first()?.as_expression()?;
@@ -4249,6 +4353,33 @@ mod tests {
             [
                 "./key", "./value", "./method", "./base", "./field", "./array", "./spread"
             ]
+        );
+    }
+
+    #[test]
+    fn commonjs_require_discovery_tracks_umd_loader_parameters_by_flow() {
+        let source = r#"
+            (function (factory) {
+                factory(require, exports);
+            })(function (require, exports) {
+                exports.format = require("./impl/format");
+                exports.edit = require("./impl/edit");
+            });
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(requires, ["./impl/format", "./impl/edit"]);
+
+        let unrelated = r#"
+            (function (factory) {
+                factory(function (require) { return require("./not-a-loader"); });
+            })(function (callback) {
+                callback(function (id) { return id; });
+            });
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", unrelated);
+        assert!(
+            requires.is_empty(),
+            "unexpected loader requests: {requires:?}"
         );
     }
 
