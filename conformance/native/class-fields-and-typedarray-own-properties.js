@@ -19,6 +19,7 @@ const view = new Uint8Array([3, 4]);
 view.label = "bytes";
 console.log(view.label, Object.hasOwn(view, "label"), Object.keys(view).join(","));
 console.log(Object.getOwnPropertyDescriptor(view, "label").value);
+console.log(delete view.label, Object.hasOwn(view, "label"));
 
 // The global object record also sees inherited Object.prototype methods as bare names.
 console.log(toString === Object.prototype.toString);

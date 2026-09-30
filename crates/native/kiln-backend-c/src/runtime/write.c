@@ -445,6 +445,11 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
             return 1;
         }
         current = array->properties;
+    } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        /* Integer-indexed writes are handled by the view itself. A non-index key belongs to
+         * its ordinary own-property store, created lazily by the write path below. */
+        if (kiln_c99_key_index_key(key) >= 0.0) return 1;
+        current = kiln_c99_typed_array_of(target)->properties;
     } else if (target.tag == KILN_VALUE_GENERATOR) {
         current = kiln_c99_generator_of(target)->properties;
     } else if (target.tag == KILN_VALUE_REGEXP) {
@@ -458,7 +463,8 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
          * on their first named write. Only a value with nowhere at all to put a property -- a
          * primitive, or an object-like tag this backend has no store for -- answers no. */
         if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY ||
-            target.tag == KILN_VALUE_GENERATOR || target.tag == KILN_VALUE_REGEXP) {
+            target.tag == KILN_VALUE_TYPED_ARRAY || target.tag == KILN_VALUE_GENERATOR ||
+            target.tag == KILN_VALUE_REGEXP) {
             return 1;
         }
         return 0;

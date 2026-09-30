@@ -685,7 +685,16 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         int found;
         int enumerable;
         kiln_c99_typed_own_key(target, key, &found, &enumerable);
-        *answer = !found;
+        if (found) {
+            *answer = 0;
+            return KILN_C99_OK;
+        }
+        {
+            kiln_value store = kiln_c99_typed_array_of(target)->properties;
+            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, key, ikey))
+                return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        }
+        *answer = 1;
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_REGEXP) {
