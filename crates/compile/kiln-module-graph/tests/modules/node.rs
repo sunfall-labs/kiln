@@ -610,10 +610,7 @@ fn commonjs_resolve_only_target_metadata_survives_live_reduction() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
     let project = TempProject::new();
-    let entry = project.write(
-        "main.cjs",
-        "console.log(require.resolve('./target.cjs'));",
-    );
+    let entry = project.write("main.cjs", "console.log(require.resolve('./target.cjs'));");
     project.write("target.cjs", "globalThis.shouldNotLoad = true;\n");
     let graph = ModuleGraph::build_node(
         &entry,
