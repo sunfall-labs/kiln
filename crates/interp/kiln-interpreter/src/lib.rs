@@ -887,6 +887,7 @@ pub trait CommonJsModuleLoader {
 #[derive(Debug, PartialEq)]
 pub struct CommonJsRequire {
     targets: Vec<(String, String, Cell)>,
+    resolutions: Vec<(String, String)>,
     importer: Option<String>,
 }
 
@@ -894,6 +895,7 @@ impl CommonJsRequire {
     pub fn new(targets: impl IntoIterator<Item = (String, String, Cell)>) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            resolutions: Vec::new(),
             importer: None,
         }
     }
@@ -901,6 +903,7 @@ impl CommonJsRequire {
     pub fn for_importer(importer: impl Into<String>) -> Self {
         Self {
             targets: Vec::new(),
+            resolutions: Vec::new(),
             importer: Some(importer.into()),
         }
     }
@@ -911,8 +914,19 @@ impl CommonJsRequire {
     ) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            resolutions: Vec::new(),
             importer: Some(importer.into()),
         }
+    }
+
+    /// Add importer-scoped literal resolver answers without turning them into eager `require`
+    /// targets. `require.resolve` observes the selected filename but never evaluates the module.
+    pub fn with_resolutions(
+        mut self,
+        resolutions: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.resolutions = resolutions.into_iter().collect();
+        self
     }
 
     pub fn importer(&self) -> Option<&str> {
@@ -931,6 +945,12 @@ impl CommonJsRequire {
             .iter()
             .find(|(candidate, _, _)| candidate == specifier)
             .map(|(_, target, _)| target.clone())
+            .or_else(|| {
+                self.resolutions
+                    .iter()
+                    .find(|(candidate, _)| candidate == specifier)
+                    .map(|(_, target)| target.clone())
+            })
     }
 
     /// Return the cache cell selected by one statically discovered specifier.

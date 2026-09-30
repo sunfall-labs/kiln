@@ -101,6 +101,9 @@ pub struct NodeRuntimeRequest {
     /// `process.getBuiltinModule`. Kept as source identity so relative requests resolve through
     /// the ordinary resolver with the same importer base.
     pub importer: String,
+    /// True for `require.resolve`, whose result is the resolved filename and which must not
+    /// evaluate the target module. The graph still retains the resolution as a lazy capability.
+    pub resolve_only: bool,
 }
 
 /// Coarse TypeScript type annotation hints.

@@ -414,6 +414,8 @@ typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     kiln_value *exports, size_t export_count);
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                         kiln_value *result, kiln_value *thrown);
+typedef int (*kiln_commonjs_resolve_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
 typedef struct kiln_commonjs_context kiln_commonjs_context;
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
@@ -538,7 +540,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 output,
-                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context);",
+                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, kiln_commonjs_resolve_fn require_resolve, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context);",
                 module.symbol
             )
             .unwrap();
@@ -713,6 +715,22 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
         output.push_str(
             "    if (thrown != NULL) *thrown = specifier;\n    return KILN_C99_HOST_ERROR;\n}\n",
         );
+        writeln!(output, "\nstatic int kiln_commonjs_resolve_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    kiln_commonjs_graph_context *graph = (kiln_commonjs_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;").unwrap();
+        for dependency in &node.runtime_dependencies {
+            let resolved = if matches!(dependency.source, ModuleSource::NodeBuiltin(_)) {
+                dependency.specifier.clone()
+            } else {
+                dependency.target.to_string_lossy().into_owned()
+            };
+            writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = kiln_c99_copy_text({}, (size_t){}); return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY; }}", native_c_string(&dependency.specifier), dependency.specifier.len(), native_c_string(&resolved), resolved.len()).unwrap();
+        }
+        for ((failure_importer, failure_specifier), message) in graph.runtime_failures(&node.path) {
+            if failure_importer != node.path {
+                continue;
+            }
+            writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+        }
+        output.push_str("    if (thrown != NULL) { (void)kiln_c99_new_type_error(thrown, \"Cannot find module\"); return KILN_C99_THROWN; }\n    return KILN_C99_HOST_ERROR;\n}\n");
     }
     output.push_str("\nstatic int kiln_shared_require_builtin(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_commonjs_graph_context *graph = (kiln_commonjs_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
@@ -768,7 +786,33 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
         }
         output.push_str("            break;\n");
     }
-    output.push_str("        default: break;\n    }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\nstatic int kiln_shared_create_require(kiln_proxy_host *proxy, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_commonjs_graph_context *graph;\n    if (proxy == NULL || result == NULL || argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING || (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    graph = proxy->graph;\n    if (graph == NULL || graph->require_contexts == NULL) return KILN_C99_HOST_ERROR;\n");
+    output.push_str("        default: break;\n    }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\nstatic int kiln_shared_runtime_resolve(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_shared_require_context *context = (kiln_shared_require_context *)opaque;\n    kiln_commonjs_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
+    for (base_index, importer) in runtime_importers.keys().enumerate() {
+        writeln!(output, "        case {base_index}:").unwrap();
+        for node in modules.iter().map(|(node, _)| node) {
+            for dependency in &node.runtime_dependencies {
+                if dependency.importer != *importer {
+                    continue;
+                }
+                let resolved = if matches!(dependency.source, ModuleSource::NodeBuiltin(_)) {
+                    dependency.specifier.clone()
+                } else {
+                    dependency.target.to_string_lossy().into_owned()
+                };
+                writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = kiln_c99_copy_text({}, (size_t){}); return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY; }}", native_c_string(&dependency.specifier), dependency.specifier.len(), native_c_string(&resolved), resolved.len()).unwrap();
+            }
+            for ((failure_importer, failure_specifier), message) in
+                graph.runtime_failures(&node.path)
+            {
+                if failure_importer != importer {
+                    continue;
+                }
+                writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+            }
+        }
+        output.push_str("            break;\n");
+    }
+    output.push_str("        default: break;\n    }\n    if (thrown != NULL) { (void)kiln_c99_new_type_error(thrown, \"Cannot find module\"); return KILN_C99_THROWN; }\n    return KILN_C99_HOST_ERROR;\n}\n\nstatic int kiln_shared_create_require(kiln_proxy_host *proxy, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_commonjs_graph_context *graph;\n    if (proxy == NULL || result == NULL || argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING || (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    graph = proxy->graph;\n    if (graph == NULL || graph->require_contexts == NULL) return KILN_C99_HOST_ERROR;\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
         let importer = importer.to_string_lossy();
         let file_url = Url::from_file_path(importer.as_ref())
@@ -798,7 +842,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
                 ))
                 .unwrap_or_default()
         );
-        writeln!(output, "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_roots(result, kiln_shared_runtime_require, &graph->require_contexts[{base_index}], graph->visit_roots, graph->root_context); }}", native_c_string(importer.as_ref()), importer.len(), aliases).unwrap();
+        writeln!(output, "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_shared_runtime_require, kiln_shared_runtime_resolve, &graph->require_contexts[{base_index}], graph->visit_roots, graph->root_context); }}", native_c_string(importer.as_ref()), importer.len(), aliases).unwrap();
     }
     output.push_str("    return kiln_c99_commonjs_require_value_with_roots(result, kiln_shared_require_builtin, graph, graph->visit_roots, graph->root_context);\n}\n");
     let has_any_dynamic_import = modules

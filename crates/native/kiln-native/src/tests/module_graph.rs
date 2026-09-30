@@ -894,6 +894,51 @@ fn native_commonjs_cycle_observes_current_module_exports_assignment() {
 }
 
 #[test]
+fn native_commonjs_require_resolve_returns_path_without_evaluating_target() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-require-resolve");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("target.cjs"),
+        "console.log('target evaluated'); module.exports = 42;",
+    )
+    .expect("write resolve target");
+    let entry = root.path.join("main.cjs");
+    fs::write(
+        &entry,
+        "const resolve = require.resolve; console.log(resolve('./target.cjs').slice(-10) === 'target.cjs');",
+    )
+    .expect("write require.resolve entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS require.resolve graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native require.resolve execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native require.resolve graph builds and runs");
+    assert_eq!(report.stdout, b"true\n");
+}
+
+#[test]
 fn native_commonjs_require_main_points_to_the_entry_module() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -1349,7 +1394,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
-        "kiln_commonjs_require_{commonjs_index}, graph, kiln_graph_gc_visit_roots, graph)"
+        "kiln_commonjs_require_{commonjs_index}, kiln_graph_runtime_resolve, graph, kiln_graph_gc_visit_roots, graph)"
     )));
     assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",

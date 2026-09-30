@@ -1809,10 +1809,21 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             .insert(path.to_path_buf(), module_object.clone());
         let imports = vec![
             initial_exports,
-            Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::for_module(
-                path.to_string_lossy(),
-                targets,
-            ))),
+            Value::CommonJsRequire(std::rc::Rc::new(
+                CommonJsRequire::for_module(path.to_string_lossy(), targets).with_resolutions(
+                    module_node
+                        .runtime_dependencies
+                        .iter()
+                        .filter_map(|dependency| {
+                            (dependency.importer == path).then(|| {
+                                (
+                                    dependency.specifier.clone(),
+                                    dependency.target.to_string_lossy().into_owned(),
+                                )
+                            })
+                        }),
+                ),
+            )),
             module_object.clone(),
             Value::String(path.to_string_lossy().into_owned().into()),
             Value::String(
@@ -1978,8 +1989,21 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 message: "The argument must be an absolute path or file URL".to_owned(),
             });
         }
+        let resolutions = self
+            .graph
+            .module_map()
+            .values()
+            .flat_map(|node| node.runtime_dependencies.iter())
+            .filter(|dependency| dependency.importer == path)
+            .map(|dependency| {
+                (
+                    dependency.specifier.clone(),
+                    dependency.target.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
         Ok(Value::CommonJsRequire(std::rc::Rc::new(
-            CommonJsRequire::for_importer(path.to_string_lossy()),
+            CommonJsRequire::for_importer(path.to_string_lossy()).with_resolutions(resolutions),
         )))
     }
 

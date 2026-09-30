@@ -3176,8 +3176,11 @@ typedef struct kiln_bound {
 
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                         kiln_value *result, kiln_value *thrown);
+typedef int (*kiln_commonjs_resolve_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
 typedef struct kiln_commonjs_require {
     kiln_commonjs_require_fn call;
+    kiln_commonjs_resolve_fn resolve;
     void *context;
     /* CommonJS require is a function object with a module-local own-property store. */
     kiln_value properties;

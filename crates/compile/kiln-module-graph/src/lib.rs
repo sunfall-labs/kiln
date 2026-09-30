@@ -109,6 +109,9 @@ pub struct RuntimeDependency {
     pub importer: PathBuf,
     pub specifier: String,
     pub target: PathBuf,
+    pub source: ModuleSource,
+    /// A `require.resolve` request retains a resolver answer but does not evaluate the target.
+    pub resolve_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2129,6 +2132,8 @@ where
                                 importer,
                                 specifier: request.specifier.clone(),
                                 target: resolved.path,
+                                source: runtime_source,
+                                resolve_only: request.resolve_only,
                             });
                             runtime_sources.push(runtime_source);
                         }
@@ -2240,6 +2245,9 @@ where
                             .cloned()
                             .zip(runtime_sources.iter().cloned())
                         {
+                            if dependency.resolve_only {
+                                continue;
+                            }
                             self.runtime_work.push(RuntimeWork {
                                 owner: path.clone(),
                                 importer: dependency.importer,

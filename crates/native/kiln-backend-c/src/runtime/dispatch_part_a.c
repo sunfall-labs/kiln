@@ -1499,6 +1499,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
+    if (code == KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE) {
+        kiln_commonjs_require *require;
+        if (argc != 2 || args == NULL || args[0].tag != KILN_VALUE_COMMONJS_REQUIRE)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "module resolver requires a CommonJS require function");
+        require = (kiln_commonjs_require *)(uintptr_t)args[0].bits;
+        if (require->resolve == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "require.resolve is unavailable for this loader");
+        if (args[1].tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "The \"request\" argument must be of type string");
+        return require->resolve(require->context, host, args[1], result, thrown);
+    }
     if (code == KILN_C99_METHOD_NUMBER_VALUE_OF || code == KILN_C99_METHOD_NUMBER_TO_STRING ||
         code == KILN_C99_METHOD_NUMBER_TO_FIXED ||
         code == KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL ||

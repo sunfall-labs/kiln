@@ -641,6 +641,7 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: importer.clone(),
+                resolve_only: false,
             });
             continue;
         } else if let Expression::CallExpression(factory) = &call.callee {
@@ -655,9 +656,23 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer,
+                resolve_only: false,
             });
             continue;
         } else if let Expression::StaticMemberExpression(member) = &call.callee {
+            if member.property.name == "resolve"
+                && let Expression::Identifier(require) = &member.object
+                && require.name == "require"
+                && require.is_global_reference(scoping)
+                && let Some(specifier) = literal_argument(call)
+            {
+                requests.push(NodeRuntimeRequest {
+                    specifier,
+                    importer: path.to_owned(),
+                    resolve_only: true,
+                });
+                continue;
+            }
             // `x.getBuiltinModule(id)`: the receiver is usually the global `process`, but
             // bundlers routinely alias it (`e.getBuiltinModule(...)` with `e` a parameter),
             // so any receiver is accepted. A literal id is a statically-provable builtin
@@ -672,6 +687,7 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: path.to_owned(),
+                resolve_only: false,
             });
             continue;
         } else {
@@ -721,6 +737,7 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: path.to_owned(),
+                resolve_only: false,
             });
         }
     }
@@ -761,13 +778,19 @@ fn discover_node_runtime_requests_from_semantic(
                 requests.push(NodeRuntimeRequest {
                     specifier,
                     importer: path.to_owned(),
+                    resolve_only: false,
                 });
             }
         }
     }
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
-        left.specifier == right.specifier && left.importer == right.importer
+        if left.specifier == right.specifier && left.importer == right.importer {
+            left.resolve_only &= right.resolve_only;
+            true
+        } else {
+            false
+        }
     });
     requests
 }
@@ -4330,6 +4353,26 @@ mod tests {
     }
 
     #[test]
+    fn commonjs_runtime_discovery_tracks_require_resolve_without_evaluating() {
+        let requests = discover_node_runtime_requests(
+            "fixture.cjs",
+            r#"
+                require.resolve("./local.js");
+                const read = require.resolve;
+                read("./detached.js");
+                function shadow(require) { require.resolve("./not-loader.js"); }
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [NodeRuntimeRequest {
+                specifier: "./local.js".to_owned(),
+                importer: "fixture.cjs".to_owned(),
+                resolve_only: true,
+            }]
+        );
+    }
+
     fn node_runtime_discovery_tracks_esbuild_require_helper_literals() {
         let source = r#"
             import { createRequire as __prettierCreateRequire } from "module";
@@ -4344,6 +4387,7 @@ mod tests {
             [NodeRuntimeRequest {
                 specifier: "os".to_owned(),
                 importer: "prettier/index.mjs".to_owned(),
+                resolve_only: false,
             }]
         );
 

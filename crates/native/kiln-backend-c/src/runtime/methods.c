@@ -137,9 +137,9 @@ static kiln_value kiln_c99_method(uint64_t code) {
  * context belongs to this anchor's complete registered root inventory. The launcher supplies
  * the same visitor it registers for collection. Context and anchor outlive the callable;
  * this constructor neither registers roots nor creates a second module-root field list. */
-static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
-    kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context,
-    void *root_context) {
+int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
+    kiln_commonjs_require_fn call, kiln_commonjs_resolve_fn resolve, void *context,
+    kiln_gc_visit_roots_fn visit_context, void *root_context) {
     kiln_commonjs_require *require;
     if (out == NULL || call == NULL || (visit_context != NULL && root_context == NULL))
         return KILN_C99_INVALID_ARGUMENT;
@@ -149,6 +149,7 @@ static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
                                                          sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
+    require->resolve = resolve;
     require->properties = kiln_c99_undefined();
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
@@ -157,7 +158,24 @@ static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
         return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
+    if (resolve != NULL) {
+        kiln_value decorator;
+        kiln_value decorated;
+        int status = kiln_c99_bootstrap_global(&decorator,
+            "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_call(NULL, &decorated, decorator, kiln_c99_undefined(), out, 1, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        *out = decorated;
+    }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
+    kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context,
+    void *root_context) {
+    return kiln_c99_commonjs_require_value_with_resolver(out, call, NULL, context,
+                                                         visit_context, root_context);
 }
 
 static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
@@ -210,6 +228,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
     case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
     case KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE: return "__kilnHostModuleCreateRequire";
+    case KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE: return "__kilnHostModuleRequireResolve";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_STRING_LOCALE_CASE_RAW: return "__kilnHostStringLocaleCase";
     case KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW: return "__kilnIntlDateTimeFormat";
