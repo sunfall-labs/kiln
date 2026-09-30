@@ -759,6 +759,42 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
 }
 
 #[test]
+fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::Undefined],
+            code: vec![Instruction::Const(0), Instruction::StoreLocal(0), Instruction::Return],
+            local_count: 1,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "value".into(),
+            local_slot: 0,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "cycle/value.mjs",
+        EmissionPolicy::default(),
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation unit");
+
+    assert!(emitted.source.contains(&format!("int {}(", emitted.symbol)));
+    assert!(instantiation
+        .source
+        .contains(&format!("int {}_instantiate(", emitted.symbol)));
+    assert!(!instantiation
+        .source
+        .contains(&format!("int {}(", emitted.symbol)));
+}
+
+#[test]
 fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
     let function = |upvalues: Vec<Upvalue>| FunctionProto {
         inferred_name: None,

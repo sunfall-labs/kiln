@@ -5146,7 +5146,12 @@ fn render_module_positioned(
     };
     let unit_symbol = shared_unit_symbol.unwrap_or(default_unit_symbol);
     let plan = validate_module_program(program)?;
-    let callables = produces_references(program) || policy.compact;
+    // Split ESM modules render evaluation and instantiation as separate translation units that
+    // share `unit_symbol`. Even an entry with no closures needs a private body symbol in each
+    // unit; otherwise both units define the public `unit_symbol` entrypoint. The realm wrapper
+    // below owns that public symbol and dispatches to this phase's body.
+    let split_module_phase = external_unit || export_cells;
+    let callables = produces_references(program) || policy.compact || split_module_phase;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
     // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
     // strict is what keeps every unit that is really ESM emitting the bytes it emitted before.
