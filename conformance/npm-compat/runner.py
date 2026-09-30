@@ -24,7 +24,10 @@ def command(argv, prefix, timeout):
         except subprocess.TimeoutExpired:
             timed_out = True
             # Include compiler and host children: an orphan can keep consuming the shared budget.
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             code = process.wait()
     return {'argv': list(map(str, argv)), 'exit': code, 'timeout': timed_out,
             'seconds': round(time.perf_counter() - started, 6)}
@@ -65,6 +68,7 @@ def main():
                 'inventory_sha256': hashlib.sha256((HERE / 'packages.tsv').read_bytes()).hexdigest(),
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
+                'timezone': os.environ.get('TZ'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
     for name, version, porffor, _, stem in selected:

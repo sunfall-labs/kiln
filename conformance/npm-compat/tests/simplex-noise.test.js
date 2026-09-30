@@ -1,7 +1,8 @@
 // kiln eval smoke test (authored for kiln, not from porffor).
 const { createNoise2D } = require('simplex-noise');
 
-const noise2D = createNoise2D();
+// Compare deterministic permutations across engines; ambient randomness is not parity evidence.
+const noise2D = createNoise2D(mulberry32(98765));
 console.log(noise2D(0, 0).toFixed(6));
 console.log(noise2D(0.5, -1.25).toFixed(6));
 console.log(noise2D(0, 0) === noise2D(0, 0));

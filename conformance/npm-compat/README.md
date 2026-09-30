@@ -43,6 +43,8 @@ failures remain informational. Compilation and binary execution have separate
 identify the failed phase. These wall times include process startup and are
 **not** warmed workload throughput measurements. The JSON records selected and
 deferred coverage, inventory and CLI digests, exact commands, exit codes and timing.
+Runs use `TZ=UTC`, and sampled simplex noise uses explicit seeds so its numeric
+output compares identical permutations across engines.
 
 `run.sh` builds `target/release/kiln` first if it is missing. Two environment
 quirks it handles: the native backend shells out to `cargo`/`rustc` (via the

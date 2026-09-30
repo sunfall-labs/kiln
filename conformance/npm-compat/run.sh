@@ -47,6 +47,8 @@ RAW="$OUT/raw/$RUN_ID"
 
 mkdir -p "$RAW" "$HERE/tmp"
 export TMPDIR="$HERE/tmp"
+# Match the declared UTC realm timezone rather than the launcher's local timezone.
+export TZ=UTC
 export CARGO="${CARGO:-$(command -v cargo)}"
 export RUSTC="${RUSTC:-$(command -v rustc)}"
 
