@@ -1,0 +1,361 @@
+name	version	kiln_status	porffor_status	detail
+semver	7.8.5	wrong-output	runtime-error	(18s) dur=18s
+ansi-styles	7.0.0	compile-error	pass	(3s) exit=1; stderr: kiln: uncaught SyntaxError: Invalid regular expression at module=node_modules/ansi-styles/index.js instruction=342 operation=Call detail=Call invocation threw function=assembleSty
+ms	2.1.3	pass	pass	(1s) stdout identical; dur=1s
+string-width	8.3.0	pass	missing-api	(4s) stdout identical; dur=4s
+chalk	6.0.1	runtime-error	pass	(10s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=tests/chalk.test.mjs instruction=10 operation=CallMethod(red) detail=non-callable callee kind;
+picomatch	4.0.7	runtime-error	pass	(13s) exit=1; stderr: kiln: native backend refusal: module=node_modules/picomatch/lib/picomatch.js instruction=99 operation=SetPropertyStrict(state) detail=a property write to a value whose store noth
+ansi-regex	6.4.0	pass	pass	(2s) stdout identical; dur=2s
+wrap-ansi	10.0.2	pass	missing-api	(5s) stdout identical; dur=5s
+tslib	2.8.1	pass	runtime-error	(5s) stdout identical; dur=5s
+glob	13.0.6	runtime-error	missing-api	(1s) exit=1; stderr: kiln: module /home/hatch/workspace/kiln-npm-eval/node_modules/glob/dist/esm/index.min.js imports missing export `readdir` from /home/hatch/workspace/kiln-npm-eval/.kiln/builtins/f
+ajv	8.20.0	pass	runtime-error	(50s) stdout identical; dur=50s
+source-map	0.8.0	pass	missing-api	(14s) stdout identical; dur=14s
+escape-string-regexp	5.0.0	pass	wrong-output	(2s) stdout identical; dur=2s
+color-convert	3.1.3	pass	wrong-output	(5s) stdout identical; dur=5s
+json-schema-traverse	1.0.0	pass	pass	(2s) stdout identical; dur=2s
+safe-buffer	5.2.1	pass	missing-api	(3s) stdout identical; dur=3s
+zod	4.6.5	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/zod/v4/locales/index.js has an unresolved import source `./ar.js`;
+iconv-lite	0.7.3	runtime-error	missing-api	(16s) exit=1; stderr: kiln: native backend refusal: module=node_modules/safer-buffer/safer.js instruction=33 operation=Call detail=a built-in with no call behaviour in the native backend: Buffer recei
+typescript	6.0.3	runtime-error	compile-error	(75s) exit=137; stderr:
+uuid	14.0.2	pass	missing-api	(8s) stdout identical; dur=8s
+mime-db	1.54.0	pass	runtime-error	(3s) stdout identical; dur=3s
+mime-types	3.0.2	pass	missing-api	(4s) stdout identical; dur=4s
+string_decoder	1.3.0	wrong-output	missing-api	(3s) dur=3s
+acorn	8.18.0	pass	runtime-error	(39s) stdout identical; dur=39s
+@babel/parser	7.29.9	pass	runtime-error	(92s) stdout identical; dur=92s
+estraverse	5.3.0	pass	pass	(4s) stdout identical; dur=4s
+@jridgewell/sourcemap-codec	1.6.0	pass	pass	(2s) stdout identical; dur=2s
+punycode	2.3.1	pass	runtime-error	(3s) stdout identical; dur=3s
+yaml	2.9.1	pass	wrong-output	(49s) stdout identical; dur=49s
+negotiator	1.1.0	pass	pass	(1s) stdout identical; dur=1s
+@babel/generator	8.0.6	pass	runtime-error	(130s) stdout identical; dur=130s
+@babel/traverse	8.0.6	compile-error	missing-api	(194s) exit=1; stderr: kiln: native toolchain failed: C compilation failed (status Some(1)): In file included from kiln_module_path_387520abd055df6472810f22e1ae0563_chunk_0.c:2:;kiln_runtime_prelude.h
+@babel/runtime	8.0.5	pass	runtime-error	(4s) stdout identical; dur=4s
+@babel/core	8.0.6	runtime-error	missing-api	(1s) exit=1; stderr: kiln: module /home/hatch/workspace/kiln-npm-eval/node_modules/empathic/package.mjs imports missing export `env` from /home/hatch/workspace/kiln-npm-eval/.kiln/builtins/process.bui
+camelcase	9.0.0	runtime-error	pass	(1s) exit=1; stderr: kiln: native backend refusal: module=node_modules/camelcase/index.js instruction=3 operation=CallMethod(toLocaleLowerCase) detail=a String.prototype member this backend has not im
+form-data	4.0.6	runtime-error	missing-api	(2s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+http-errors	2.0.1	runtime-error	missing-api	(5s) exit=1; stderr: kiln: uncaught TypeError: Cannot read properties of undefined at module=node_modules/depd/index.js instruction=34 operation=CallMethod(slice) detail=CallMethod property lookup thr
+buffer	6.0.3	pass	wrong-output	(3s) stdout identical; dur=3s
+react-dom	19.3.0	pass	missing-api	(145s) stdout identical; dur=145s
+lodash	4.18.1	pass	runtime-error	(22s) stdout identical; dur=22s
+braces	3.0.3	pass	missing-api	(7s) stdout identical; dur=7s
+mime	4.1.0	pass	pass	(1s) stdout identical; dur=1s
+accepts	1.3.8	pass	missing-api	(6s) stdout identical; dur=6s
+util-deprecate	1.0.2	pass	missing-api	(3s) stdout identical; dur=3s
+base64-js	1.5.1	pass	missing-api	(3s) stdout identical; dur=3s
+esquery	1.7.0	pass	compile-error	(52s) stdout identical; dur=52s
+diff	9.0.0	pass	pass	(5s) stdout identical; dur=5s
+fresh	0.5.2	wrong-output	pass	(2s) dur=2s
+@eslint-community/regexpp	4.12.2	pass	wrong-output	(22s) stdout identical; dur=22s
+normalize-path	3.0.0	pass	pass	(3s) stdout identical; dur=3s
+jose	6.2.12	runtime-error	missing-api	(9s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a constructor at module=tests/jose.test.mjs instruction=0 operation=FunctionBody detail=generated function body refused before an inst
+express	5.2.1	runtime-error	missing-api	(2s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+prettier	3.9.9	timeout	runtime-error	(600s) kiln run --native exceeded 600s
+bytes	3.1.2	pass	pass	(6s) stdout identical; dur=6s
+ajv-formats	3.0.1	pass	runtime-error	(6s) stdout identical; dur=6s
+lodash.merge	4.6.2	pass	runtime-error	(5s) stdout identical; dur=5s
+clsx	2.1.1	pass	pass	(1s) stdout identical; dur=1s
+axios	1.20.0	runtime-error	missing-api	(0s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/axios/lib/helpers/toFormData.js imports missing export `default` from /home/hatch/workspa
+slice-ansi	9.0.1	pass	missing-api	(6s) stdout identical; dur=6s
+vary	1.1.2	pass	pass	(1s) stdout identical; dur=1s
+esprima	4.0.1	pass	runtime-error	(3s) stdout identical; dur=3s
+prop-types	15.8.1	runtime-error	wrong-output	(6s) exit=1; stderr: kiln: native backend refusal: module=node_modules/object-assign/index.js instruction=21 operation=New detail=a primitive wrapper constructor function=String receiver_tag=8;
+async	3.2.6	pass	runtime-error	(9s) stdout identical; dur=9s
+arg	5.0.2	pass	wrong-output	(3s) stdout identical; dur=3s
+htmlparser2	12.0.0	compile-error	pass	(0s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/htmlparser2/dist/index.js has an unresolved import source `./Parser.js`;
+path-is-absolute	1.0.1	pass	missing-api	(3s) stdout identical; dur=3s
+events	3.3.0	pass	pass	(4s) stdout identical; dur=4s
+@noble/hashes	2.4.0	runtime-error	runtime-error	(12s) exit=1; stderr: kiln: native backend refusal: module=node_modules/@noble/hashes/utils.js instruction=11 operation=GetProperty(fromHex) detail=a member the language puts on this built-in and this
+tiny-invariant	1.3.3	pass	wrong-output	(7s) stdout identical; dur=7s
+fflate	0.8.3	runtime-error	runtime-error	(17s) exit=1; stderr: kiln: uncaught Error: date not in range 1980-2099 at module=node_modules/fflate/lib/node.cjs instruction=174 operation=Call detail=Call invocation threw function=err receiver_tag
+figures	6.1.0	pass	missing-api	(3s) stdout identical; dur=3s
+fast-xml-parser	5.11.2	compile-error	pass	(27s) exit=1; stderr: kiln: native backend refusal: module=node_modules/fast-xml-parser/lib/fxp.cjs instruction=931 operation=SetComputedStrict detail=a property write to a value whose store nothing e
+terser	5.51.2	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+p-map	7.0.8	runtime-error	runtime-error	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/p-map/index.js instruction=125 operation=GetComputed detail=@@asyncIterator on a synchronous generator receiver_tag=12;
+d3-time-format	4.1.0	pass	pass	(8s) stdout identical; dur=8s
+marked	18.0.14	runtime-error	runtime-error	(27s) exit=1; stderr: kiln: uncaught Error: Cannot find module 'marked' at module=tests/marked.test.js instruction=6 operation=Call detail=Call invocation threw receiver_tag=26;
+acorn-walk	8.3.5	pass	pass	(6s) stdout identical; dur=6s
+is-plain-object	5.1.0	pass	wrong-output	(8s) stdout identical; dur=8s
+@tanstack/query-core	5.104.0	runtime-error	missing-api	(28s) exit=1; stderr: FAILED {};
+jsonc-parser	3.3.1	compile-error	pass	(4s) exit=1; stderr: kiln: uncaught Error: Cannot find module './impl/format' at module=node_modules/jsonc-parser/lib/umd/main.js instruction=78 operation=Call detail=Call invocation threw receiver_ta
+regenerator-runtime	0.14.1	pass	runtime-error	(6s) stdout identical; dur=6s
+lz-string	1.5.0	wrong-output	pass	(5s) dur=5s
+bn.js	5.2.5	pass	pass	(13s) stdout identical; dur=13s
+bignumber.js	11.1.5	pass	pass	(7s) stdout identical; dur=7s
+safe-stable-stringify	2.5.0	runtime-error	runtime-error	(6s) exit=1; stderr: kiln: uncaught TypeError: get %TypedArray%.prototype[@@toStringTag] needs a typed array receiver at module=node_modules/safe-stable-stringify/index.js instruction=2 operation=Call
+ansi-colors	4.1.3	pass	wrong-output	(3s) stdout identical; dur=3s
+array-union	3.0.1	pass	wrong-output	(5s) stdout identical; dur=5s
+bluebird	3.7.2	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: a direct `eval` call in the native backend;
+micromark	4.0.3	pass	pass	(30s) stdout identical; dur=30s
+zustand	5.0.15	pass	pass	(3s) stdout identical; dur=3s
+escodegen	2.1.0	pass	pass	(23s) stdout identical; dur=23s
+reselect	5.3.0	pass	pass	(6s) stdout identical; dur=6s
+cac	7.0.0	wrong-output	missing-api	(8s) dur=8s
+arrify	3.0.0	pass	runtime-error	(2s) stdout identical; dur=2s
+fast-safe-stringify	2.1.1	pass	pass	(3s) stdout identical; dur=3s
+h3	2.0.1-rc.32	runtime-error	missing-api	(20s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=tests/h3.test.mjs instruction=6 operation=Call detail=non-callable callee kind;
+uglify-js	3.19.3	runtime-error	missing-api	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/uglify-js/tools/node.js instruction=25 operation=CallMethod(resolve) detail=own properties are not modelled on this callable rece
+emittery	2.1.0	pass	pass	(8s) stdout identical; dur=8s
+quick-lru	7.3.0	runtime-error	runtime-error	(5s) exit=1; stderr: kiln: native backend refusal: module=node_modules/quick-lru/index.js instruction=26 operation=DefinePrivate detail=a method definition on a value with no property store;
+redux	5.0.1	pass	pass	(4s) stdout identical; dur=4s
+he	1.2.0	pass	runtime-error	(10s) stdout identical; dur=10s
+immutable	5.1.9	runtime-error	runtime-error	(24s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=tests/immutable.test.js instruction=152 operation=CallMethod(setIn) detail=non-callable callee kind;
+util	0.12.5	runtime-error	runtime-error	(3s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=tests/util.test.js instruction=63 operation=CallMethod(isDeepStrictEqual) detail=non-callable callee kind;
+text-table	0.2.0	pass	pass	(3s) stdout identical; dur=3s
+luxon	3.7.2	runtime-error	missing-api	(38s) exit=1; stderr: kiln: native backend refusal: module=node_modules/luxon/build/node/luxon.js instruction=8 operation=GetProperty(DateTimeFormat) detail=a member the language puts on this built-in
+querystringify	2.2.0	pass	pass	(1s) stdout identical; dur=1s
+moment	2.31.0	runtime-error	pass	(19s) exit=1; stderr: kiln: out of memory;
+preact	10.29.8	pass	runtime-error	(8s) stdout identical; dur=8s
+big.js	7.0.1	pass	pass	(4s) stdout identical; dur=4s
+map-obj	6.0.0	pass	pass	(3s) stdout identical; dur=3s
+@noble/curves	2.4.0	runtime-error	runtime-error	(26s) exit=1; stderr: kiln: native backend refusal: module=node_modules/@noble/hashes/utils.js instruction=11 operation=GetProperty(fromHex) detail=a member the language puts on this built-in and this
+hookable	6.1.2	runtime-error	pass	(3s) exit=1; stderr: kiln: uncaught Error: Cannot find module 'hookable' at module=tests/hookable.test.js instruction=4 operation=Call detail=Call invocation threw receiver_tag=26;
+@reduxjs/toolkit	2.13.0	runtime-error	runtime-error	(30s) exit=1; stderr: kiln: native backend refusal: module=node_modules/@reduxjs/toolkit/dist/cjs/redux-toolkit.development.cjs instruction=84 operation=CallMethod(assign) detail=Object.assign target 
+mitt	3.0.1	pass	pass	(2s) stdout identical; dur=2s
+underscore	1.13.8	runtime-error	runtime-error	(9s) exit=1; stderr: kiln: uncaught SyntaxError: Unexpected token in expression at module=node_modules/underscore/underscore-node-f.cjs instruction=4 operation=CallMethod(call) detail=Call invocation 
+lodash.clonedeep	4.5.0	runtime-error	runtime-error	(5s) exit=1; stderr: kiln: native backend refusal: module=node_modules/lodash.clonedeep/index.js instruction=4 operation=Call detail=an own-key listing of a value with no property store receiver_tag=1
+boxen	9.0.0	runtime-error	missing-api	(1s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/boxen/index.js has an unresolved import source `cli-boxes`;
+winston	3.19.0	runtime-error	missing-api	(60s) exit=1; stderr: kiln: uncaught TypeError: Class constructor Stream cannot be invoked without 'new' at module=node_modules/winston/node_modules/readable-stream/lib/_stream_readable.js instruction
+validator	13.15.35	runtime-error	runtime-error	(37s) exit=1; stderr: kiln: uncaught ReferenceError: toString is not defined;
+mri	1.2.0	pass	pass	(4s) stdout identical; dur=4s
+astring	1.9.0	pass	pass	(10s) stdout identical; dur=10s
+filter-obj	6.1.0	pass	pass	(2s) stdout identical; dur=2s
+xmlbuilder2	4.0.3	runtime-error	runtime-error	(113s) exit=1; stderr: kiln: uncaught TypeError: class heritage is not a constructor or null at module=node_modules/@oozcitak/dom/lib/dom/ElementImpl.js instruction=33 operation=Call detail=Call invoc
+@paralleldrive/cuid2	3.3.0	runtime-error	runtime-error	(11s) exit=1; stderr: kiln: native backend refusal: module=node_modules/@noble/hashes/utils.js instruction=11 operation=GetProperty(fromHex) detail=a member the language puts on this built-in and this
+assert	2.1.0	runtime-error	missing-api	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+md5	2.3.0	pass	wrong-output	(4s) stdout identical; dur=4s
+mustache	4.2.0	pass	pass	(4s) stdout identical; dur=4s
+sort-keys	6.0.1	pass	runtime-error	(3s) stdout identical; dur=3s
+papaparse	5.7.0	pass	pass	(10s) stdout identical; dur=10s
+@vue/reactivity	3.5.43	pass	wrong-output	(17s) stdout identical; dur=17s
+filesize	11.0.25	pass	pass	(3s) stdout identical; dur=3s
+escape-goat	4.0.0	pass	runtime-error	(3s) stdout identical; dur=3s
+tinycolor2	1.6.0	pass	pass	(5s) stdout identical; dur=5s
+bcryptjs	3.0.3	pass	missing-api	(34s) stdout identical; dur=34s
+title-case	4.3.2	runtime-error	pass	(1s) exit=1; stderr: kiln: uncaught TypeError: Cannot read properties of undefined at module=tests/title-case.test.mjs instruction=2 operation=Call detail=Call invocation threw function=titleCase rece
+yup	1.7.1	pass	runtime-error	(20s) stdout identical; dur=20s
+ulid	3.0.2	pass	runtime-error	(3s) stdout identical; dur=3s
+remeda	2.50.0	pass	runtime-error	(4s) stdout identical; dur=4s
+meriyah	7.3.3	pass	wrong-output	(31s) stdout identical; dur=31s
+gl-matrix	3.4.4	pass	wrong-output	(14s) stdout identical; dur=14s
+spark-md5	3.0.2	pass	runtime-error	(4s) stdout identical; dur=4s
+turndown	7.2.4	runtime-error	runtime-error	(74s) exit=1; stderr: kiln: uncaught TypeError: a object is not a constructor at module=node_modules/turndown/lib/turndown.cjs.js instruction=2 operation=CallMethod(createDocument) detail=CallMethod i
+seedrandom	3.0.5	pass	wrong-output	(6s) stdout identical; dur=6s
+@preact/signals-core	1.14.4	pass	pass	(3s) stdout identical; dur=3s
+fast-json-patch	3.1.1	runtime-error	wrong-output	(0s) exit=1; stderr: kiln: could not resolve `./src/core` imported by /home/hatch/workspace/kiln-npm-eval/node_modules/fast-json-patch/index.ts: could not inspect target /home/hatch/workspace/kiln-npm
+@iarna/toml	2.2.5	runtime-error	missing-api	(0s) exit=1; stderr: kiln: native emission failed: unsupported native emission: a direct `eval` call in the native backend;
+kolorist	1.8.0	pass	pass	(3s) stdout identical; dur=3s
+tiny-emitter	2.1.0	pass	pass	(3s) stdout identical; dur=3s
+eta	4.6.0	compile-error	missing-api	(5s) exit=1; stderr: kiln: uncaught SyntaxError: Unexpected token in expression at module=node_modules/eta/dist/index.mjs instruction=59 operation=CallMethod(call) detail=CallMethod invocation threw f
+koa	3.2.1	runtime-error	missing-api	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: a direct `eval` call in the native backend;
+ts-pattern	5.9.0	pass	runtime-error	(6s) stdout identical; dur=6s
+just-diff	6.0.2	runtime-error	pass	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/just-diff/index.mjs instruction=73 operation=Call detail=Object() of a primitive this backend has no wrapper for receiver_tag=8;
+@sindresorhus/slugify	3.0.1	pass	pass	(5s) stdout identical; dur=5s
+jsbi	4.3.2	wrong-output	runtime-error	(9s) dur=9s
+node-cache	5.1.2	pass	missing-api	(5s) stdout identical; dur=5s
+hash-sum	2.0.0	wrong-output	pass	(2s) dur=2s
+mobx	7.0.5	pass	runtime-error	(33s) stdout identical; dur=33s
+js-sha3	0.13.0	pass	pass	(6s) stdout identical; dur=6s
+rrule	2.8.1	pass	compile-error	(19s) stdout identical; dur=19s
+object-path	0.11.8	pass	pass	(4s) stdout identical; dur=4s
+rambda	11.3.0	pass	runtime-error	(3s) stdout identical; dur=3s
+numeral	2.0.6	pass	pass	(5s) stdout identical; dur=5s
+blueimp-md5	2.19.0	pass	pass	(3s) stdout identical; dur=3s
+radash	12.1.1	pass	wrong-output	(8s) stdout identical; dur=8s
+@date-fns/utc	2.1.1	runtime-error	missing-api	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/@date-fns/utc/date/mini.js instruction=11 operation=GetComputed detail=a member the language puts on this built-in and this backe
+valtio	2.3.2	pass	runtime-error	(5s) stdout identical; dur=5s
+htm	3.1.1	pass	runtime-error	(3s) stdout identical; dur=3s
+arktype	2.2.5	runtime-error	missing-api	(3s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `nodeClassesByKind`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/@ark/schema
+merge-anything	6.0.8	pass	pass	(3s) stdout identical; dur=3s
+showdown	2.1.0	runtime-error	runtime-error	(18s) exit=1; stderr: kiln: an argument was not valid;
+hashids	2.3.0	pass	runtime-error	(3s) stdout identical; dur=3s
+inferno	9.1.0	pass	missing-api	(10s) stdout identical; dur=10s
+random-seed	0.3.0	runtime-error	wrong-output	(3s) exit=1; stderr: kiln: uncaught TypeError: a object is not a function at module=node_modules/random-seed/index.js instruction=61 operation=Call detail=non-callable callee kind receiver_tag=9;
+change-case	5.4.4	runtime-error	pass	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/change-case/dist/index.js instruction=2 operation=CallMethod(toLocaleLowerCase) detail=a String.prototype member this backend has
+chroma-js	3.2.0	pass	pass	(31s) stdout identical; dur=31s
+class-variance-authority	0.7.1	pass	pass	(3s) stdout identical; dur=3s
+classnames	2.5.1	pass	pass	(2s) stdout identical; dur=2s
+cli-table3	0.6.5	wrong-output	missing-api	(10s) dur=10s
+cli-truncate	6.1.1	pass	missing-api	(3s) stdout identical; dur=3s
+clone	2.1.2	pass	pass	(3s) stdout identical; dur=3s
+color	5.0.3	pass	runtime-error	(5s) stdout identical; dur=5s
+color-name	2.1.1	pass	pass	(2s) stdout identical; dur=2s
+colord	2.10.0	pass	wrong-output	(5s) stdout identical; dur=5s
+colorette	2.0.20	pass	missing-api	(3s) stdout identical; dur=3s
+commander	15.0.0	runtime-error	missing-api	(0s) exit=1; stderr: kiln: module /home/hatch/workspace/kiln-npm-eval/node_modules/commander/lib/help.js imports missing export `stripVTControlCharacters` from /home/hatch/workspace/kiln-npm-eval/.kil
+common-tags	1.8.2	runtime-error	pass	(13s) exit=1; stderr: kiln: uncaught TypeError: a object is not a function at module=tests/common-tags.test.js instruction=34 operation=Call detail=non-callable callee kind receiver_tag=9;
+compare-versions	6.1.1	pass	pass	(3s) stdout identical; dur=3s
+complex.js	2.4.3	pass	pass	(3s) stdout identical; dur=3s
+consola	3.4.2	runtime-error	missing-api	(15s) exit=1; stderr: kiln: native backend refusal: module=@kiln/runtime-bootstrap.ts instruction=19 operation=GetProperty(DateTimeFormat) detail=a member the language puts on this built-in and this b
+content-type	3.1.1	pass	pass	(1s) stdout identical; dur=1s
+convert-units	2.3.4	pass	missing-api	(9s) stdout identical; dur=9s
+cookie	2.0.1	pass	pass	(2s) stdout identical; dur=2s
+cookie-signature	1.2.2	pass	missing-api	(2s) stdout identical; dur=2s
+core-js	3.50.0	runtime-error	runtime-error	(22s) exit=1; stderr: kiln: native backend refusal: module=node_modules/core-js/internals/indexed-object.js instruction=2 operation=Call detail=Object() of a primitive this backend has no wrapper for 
+cron-parser	5.10.1	compile-error	runtime-error	(13s) exit=1; stderr: kiln: uncaught TypeError: Cannot read private member #values from an object whose class did not declare it at module=node_modules/cron-parser/dist/fields/CronSecond.js instructio
+crypto-js	4.2.0	pass	wrong-output	(18s) stdout identical; dur=18s
+css-tree	3.2.1	runtime-error	missing-api	(1s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/css-tree/lib/index.js has an unresolved import source `./version.js`;
+css-what	8.0.0	pass	pass	(4s) stdout identical; dur=4s
+cssesc	3.0.0	pass	runtime-error	(2s) stdout identical; dur=2s
+cssom	0.5.0	compile-error	runtime-error	(10s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a constructor at module=tests/cssom.test.js instruction=10 operation=CallMethod(parse) detail=CallMethod invocation threw function=pa
+csv-parse	7.0.3	compile-error	missing-api	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `transform`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/csv-parse/lib/api/i
+csv-stringify	6.9.0	pass	missing-api	(7s) stdout identical; dur=7s
+culori	4.0.2	compile-error	runtime-error	(3s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `default`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/culori/src/parse.js` 
+currency.js	2.0.4	pass	wrong-output	(3s) stdout identical; dur=3s
+d3-array	3.2.4	pass	runtime-error	(6s) stdout identical; dur=6s
+d3-color	3.1.0	pass	pass	(4s) stdout identical; dur=4s
+d3-format	3.1.2	runtime-error	wrong-output	(5s) exit=1; stderr: kiln: uncaught Error: invalid format:  >-,.0f at module=node_modules/d3-format/src/locale.js instruction=50 operation=Call detail=Call invocation threw function=formatSpecifier re
+d3-interpolate	3.0.1	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `default`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/d3-interpolate/src/va
+d3-scale	4.0.2	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `default`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/d3-interpolate/src/va
+d3-shape	3.2.0	pass	pass	(7s) stdout identical; dur=7s
+date-fns	4.4.0	pass	pass	(15s) stdout identical; dur=15s
+date-fns-tz	3.2.0	runtime-error	missing-api	(81s) exit=1; stderr: kiln: native backend refusal: module=node_modules/date-fns-tz/dist/cjs/_lib/tzTokenizeDate/index.js instruction=62 operation=GetProperty(DateTimeFormat) detail=a member the langu
+dayjs	1.11.23	pass	runtime-error	(4s) stdout identical; dur=4s
+debug	4.4.3	pass	missing-api	(4s) stdout identical; dur=4s
+decamelize	6.0.1	pass	pass	(1s) stdout identical; dur=1s
+decimal.js	10.6.0	pass	wrong-output	(12s) stdout identical; dur=12s
+dedent	1.7.2	pass	pass	(1s) stdout identical; dur=1s
+deep-equal	2.2.3	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+deepmerge	4.3.1	pass	pass	(3s) stdout identical; dur=3s
+defu	6.1.7	pass	pass	(2s) stdout identical; dur=2s
+dequal	2.0.3	pass	pass	(0s) stdout identical; dur=0s
+dinero.js	2.0.2	runtime-error	runtime-error	(0s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/dinero.js/dist/esm/index.js has an unresolved import source `./currencies/index.js`;
+dot-prop	10.2.0	pass	runtime-error	(3s) stdout identical; dur=3s
+dotenv	18.0.4	runtime-error	missing-api	(6s) exit=1; stderr: kiln: native backend refusal: module=node_modules/dotenv/dist/index.cjs instruction=89 operation=GetProperty(main) detail=own properties are not modelled on this callable receiver
+effect	3.22.2	runtime-error	missing-api	(573s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=node_modules/effect/dist/cjs/Schema.js instruction=5088 operation=CallMethod(annotations) detail=non-callable c
+ejs	6.0.1	compile-error	missing-api	(9s) exit=1; stderr: kiln: uncaught SyntaxError: Unexpected token in expression at module=node_modules/ejs/lib/cjs/ejs.js instruction=41 operation=CallMethod(apply) detail=Call invocation threw functi
+emoji-regex	11.0.0	pass	runtime-error	(3s) stdout identical; dur=3s
+entities	8.1.0	runtime-error	wrong-output	(1s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/entities/dist/decode.js has an unresolved import source `./generated/decode-data-xml.js`;
+es-toolkit	1.52.0	pass	pass	(49s) stdout identical; dur=49s
+escape-html	1.0.3	pass	pass	(2s) stdout identical; dur=2s
+espree	11.2.0	runtime-error	runtime-error	(0s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/espree/espree.js has an unresolved import source `eslint-visitor-keys`;
+etag	1.8.1	pass	missing-api	(3s) stdout identical; dur=3s
+eventemitter3	5.0.4	pass	pass	(5s) stdout identical; dur=5s
+eventsource-parser	4.1.1	pass	pass	(3s) stdout identical; dur=3s
+fast-deep-equal	3.1.3	pass	pass	(0s) stdout identical; dur=0s
+fast-diff	1.3.0	pass	pass	(4s) stdout identical; dur=4s
+fast-json-stable-stringify	2.1.0	pass	pass	(2s) stdout identical; dur=2s
+fast-querystring	1.1.2	pass	pass	(3s) stdout identical; dur=3s
+fastest-levenshtein	1.0.16	pass	wrong-output	(3s) stdout identical; dur=3s
+fastify	5.12.5	runtime-error	missing-api	(127s) exit=1; stderr: kiln: native backend refusal: module=node_modules/thread-stream/index.js instruction=341 operation=New detail=new on a callee that is not a generated function function=Finalizat
+flat	6.0.1	pass	runtime-error	(2s) stdout identical; dur=2s
+fp-ts	2.16.11	pass	pass	(19s) stdout identical; dur=19s
+fraction.js	5.3.4	pass	runtime-error	(3s) stdout identical; dur=3s
+glob-parent	6.0.2	pass	missing-api	(2s) stdout identical; dur=2s
+handlebars	4.7.9	runtime-error	runtime-error	(29s) exit=1; stderr: kiln: native backend refusal: module=node_modules/handlebars/lib/index.js instruction=43 operation=GetProperty(extensions) detail=own properties are not modelled on this callable
+hono	4.13.11	runtime-error	missing-api	(12s) exit=1; stderr: kiln: uncaught TypeError: Cannot write private member #path to an object whose class did not declare it at module=tests/hono.test.mjs instruction=11 operation=CallMethod(get) det
+html-entities	2.6.0	pass	wrong-output	(3s) stdout identical; dur=3s
+humanize-duration	3.35.0	pass	pass	(5s) stdout identical; dur=5s
+ieee754	1.2.1	pass	wrong-output	(2s) stdout identical; dur=2s
+immer	11.1.18	pass	runtime-error	(3s) stdout identical; dur=3s
+indent-string	5.0.0	pass	wrong-output	(3s) stdout identical; dur=3s
+inherits	2.0.4	pass	pass	(3s) stdout identical; dur=3s
+ini	7.0.0	pass	pass	(1s) stdout identical; dur=1s
+invariant	2.2.4	pass	wrong-output	(2s) stdout identical; dur=2s
+is-glob	4.0.3	pass	pass	(2s) stdout identical; dur=2s
+is-number	7.0.0	pass	pass	(1s) stdout identical; dur=1s
+is-what	5.5.6	pass	wrong-output	(3s) stdout identical; dur=3s
+itty-router	5.0.24	wrong-output	compile-error	(5s) dur=5s
+joi	18.2.9	runtime-error	missing-api	(67s) exit=1; stderr: kiln: uncaught TypeError: Cannot read properties of undefined at module=node_modules/@hapi/address/dist/index.js instruction=67 operation=Call detail=Call invocation threw receiv
+jotai	3.0.1	pass	pass	(6s) stdout identical; dur=6s
+js-base64	3.9.4	runtime-error	runtime-error	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/js-base64/base64.js instruction=227 operation=GetProperty(fromBase64) detail=a member the language puts on this built-in and this
+js-sha256	1.0.0	pass	pass	(3s) stdout identical; dur=3s
+js-tokens	10.0.0	pass	wrong-output	(3s) stdout identical; dur=3s
+js-yaml	5.4.2	pass	wrong-output	(26s) stdout identical; dur=26s
+json-stable-stringify	1.3.0	runtime-error	runtime-error	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+json5	2.2.3	pass	runtime-error	(5s) stdout identical; dur=5s
+jsonpointer	5.0.1	pass	pass	(2s) stdout identical; dur=2s
+jsonwebtoken	9.0.3	runtime-error	missing-api	(11s) exit=1; stderr: kiln: uncaught TypeError: Cannot read properties of undefined;
+keyv	5.6.0	pass	missing-api	(9s) stdout identical; dur=9s
+kind-of	6.0.3	runtime-error	wrong-output	(7s) exit=1; stderr: kiln: native backend refusal: module=node_modules/kind-of/index.js instruction=2 operation=GetProperty(length) detail=a RegExp.prototype member this backend has not implemented re
+kleur	4.1.5	pass	pass	(3s) stdout identical; dur=3s
+klona	2.0.6	pass	wrong-output	(3s) stdout identical; dur=3s
+ky	2.1.0	pass	missing-api	(13s) stdout identical; dur=13s
+leven	4.1.0	pass	pass	(1s) stdout identical; dur=1s
+linkifyjs	4.3.3	pass	runtime-error	(6s) stdout identical; dur=6s
+liquidjs	10.29.0	runtime-error	missing-api	(53s) exit=1; stderr: kiln: native backend refusal: module=node_modules/liquidjs/dist/liquid.node.js instruction=6 operation=GetProperty(DateTimeFormat) detail=a member the language puts on this built
+lodash-es	4.18.1	pass	runtime-error	(28s) stdout identical; dur=28s
+lodash.get	4.4.2	pass	runtime-error	(5s) stdout identical; dur=5s
+lodash.isequal	4.5.0	pass	runtime-error	(7s) stdout identical; dur=7s
+loglevel	1.9.2	pass	runtime-error	(3s) stdout identical; dur=3s
+long	5.3.2	pass	pass	(6s) stdout identical; dur=6s
+lru-cache	11.5.3	pass	missing-api	(11s) stdout identical; dur=11s
+magic-string	1.4.2	pass	missing-api	(12s) stdout identical; dur=12s
+markdown-it	15.0.2	runtime-error	runtime-error	(29s) exit=1; stderr: kiln: uncaught ReferenceError: atob is not defined at module=node_modules/markdown-it/dist/markdown-it.cjs.js instruction=871 operation=Call detail=Call invocation threw function
+mathjs	15.2.0	runtime-error	runtime-error	(10s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `hasOwnProperty`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/mathjs/lib/es
+micromatch	4.0.8	runtime-error	missing-api	(15s) exit=1; stderr: kiln: native backend refusal: module=node_modules/micromatch/node_modules/picomatch/lib/picomatch.js instruction=99 operation=SetPropertyStrict(state) detail=a property write to 
+minimatch	10.2.6	runtime-error	compile-error	(11s) exit=1; stderr: kiln: native backend refusal: module=node_modules/minimatch/dist/esm/ast.js instruction=314 operation=CallMethod(assign) detail=Object.assign target must be an object, an array o
+minimist	1.2.8	pass	pass	(3s) stdout identical; dur=3s
+ml-matrix	6.15.0	pass	pass	(28s) stdout identical; dur=28s
+nanoevents	10.0.0	pass	pass	(2s) stdout identical; dur=2s
+nanoid	6.0.1	runtime-error	missing-api	(3s) exit=1; stderr: kiln: native backend refusal: module=node_modules/nanoid/index.js instruction=22 operation=CallMethod(getRandomValues) detail=a member the language puts on this built-in and this 
+nanostores	1.5.4	pass	missing-api	(4s) stdout identical; dur=4s
+neverthrow	8.2.0	pass	wrong-output	(6s) stdout identical; dur=6s
+nunjucks	3.2.4	runtime-error	missing-api	(23s) exit=1; stderr: kiln: uncaught TypeError: Class constructor EventEmitter cannot be invoked without 'new' at module=node_modules/nunjucks/src/object.js instruction=6 operation=CallMethod(call) de
+object-hash	3.0.0	runtime-error	missing-api	(4s) exit=1; stderr: kiln: native backend refusal: module=node_modules/object-hash/index.js instruction=151 operation=CallMethod(keys) detail=an own-key listing of a value with no property store;
+ofetch	1.5.1	pass	runtime-error	(42s) stdout identical; dur=42s
+p-limit	7.3.3	pass	wrong-output	(3s) stdout identical; dur=3s
+p-queue	9.3.3	pass	runtime-error	(8s) stdout identical; dur=8s
+p-retry	8.0.1	pass	pass	(3s) stdout identical; dur=3s
+pako	3.0.2	pass	missing-api	(29s) stdout identical; dur=29s
+parse5	8.0.1	pass	pass	(43s) stdout identical; dur=43s
+path-browserify	1.0.1	pass	pass	(3s) stdout identical; dur=3s
+path-to-regexp	8.4.2	pass	runtime-error	(4s) stdout identical; dur=4s
+picocolors	1.1.1	pass	missing-api	(3s) stdout identical; dur=3s
+pino	10.3.1	runtime-error	missing-api	(4s) exit=1; stderr: kiln: native backend refusal: module=node_modules/thread-stream/index.js instruction=341 operation=New detail=new on a callee that is not a generated function function=Finalizatio
+pluralize	8.0.0	pass	runtime-error	(3s) stdout identical; dur=3s
+postcss	8.5.28	pass	missing-api	(23s) stdout identical; dur=23s
+preact-render-to-string	6.7.0	pass	pass	(5s) stdout identical; dur=5s
+pretty-bytes	7.2.0	pass	runtime-error	(2s) stdout identical; dur=2s
+pretty-ms	9.3.1	pass	wrong-output	(2s) stdout identical; dur=2s
+process	0.11.10	pass	missing-api	(2s) stdout identical; dur=2s
+pubsub-js	1.9.5	pass	missing-api	(2s) stdout identical; dur=2s
+qs	6.16.0	runtime-error	missing-api	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+query-string	9.5.1	pass	pass	(4s) stdout identical; dur=4s
+querystring-es3	0.2.1	pass	pass	(2s) stdout identical; dur=2s
+ramda	0.32.0	pass	runtime-error	(60s) stdout identical; dur=60s
+range-parser	1.3.0	pass	pass	(1s) stdout identical; dur=1s
+react	19.3.0	pass	missing-api	(1s) stdout identical; dur=1s
+readable-stream	4.7.0	runtime-error	missing-api	(22s) exit=1; stderr: kiln: uncaught TypeError: Class constructor EventEmitter cannot be invoked without 'new' at module=node_modules/readable-stream/lib/internal/streams/legacy.js instruction=3 opera
+recast	0.24.0	runtime-error	runtime-error	(46s) exit=1; stderr: kiln: uncaught TypeError: a undefined is not a function at module=node_modules/ast-types/lib/types.js instruction=121 operation=Call detail=non-callable callee kind;
+rfdc	1.4.1	pass	runtime-error	(1s) stdout identical; dur=1s
+rxjs	7.8.2	pass	pass	(51s) stdout identical; dur=51s
+sanitize-html	2.17.7	compile-error	missing-api	(0s) exit=1; stderr: kiln: native module graph failed: module /home/hatch/workspace/kiln-npm-eval/node_modules/htmlparser2/dist/index.js has an unresolved import source `./Parser.js`;
+sax	1.6.1	pass	runtime-error	(9s) stdout identical; dur=9s
+set-cookie-parser	3.1.2	pass	pass	(1s) stdout identical; dur=1s
+simplex-noise	4.0.3	wrong-output	pass	(2s) dur=2s
+slugify	1.6.9	pass	runtime-error	(1s) stdout identical; dur=1s
+smol-toml	1.9.0	compile-error	wrong-output	(1s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `parseArray`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/smol-toml/dist/str
+solid-js	1.9.15	pass	pass	(2s) stdout identical; dur=2s
+source-map-js	1.2.1	compile-error	runtime-error	(2s) exit=1; stderr: kiln: uncaught SyntaxError: Unexpected token in expression at module=node_modules/source-map-js/lib/quick-sort.js instruction=39 operation=Call detail=Call invocation threw functi
+spdx-expression-parse	5.0.0	pass	runtime-error	(2s) stdout identical; dur=2s
+spdx-license-ids	3.0.24	pass	pass	(2s) stdout identical; dur=2s
+sprintf-js	1.1.3	pass	wrong-output	(2s) stdout identical; dur=2s
+statuses	2.0.2	pass	runtime-error	(1s) stdout identical; dur=1s
+stream-browserify	3.0.0	runtime-error	missing-api	(11s) exit=1; stderr: kiln: uncaught TypeError: Class constructor Stream cannot be invoked without 'new' at module=node_modules/stream-browserify/node_modules/readable-stream/lib/_stream_writable.js i
+string-similarity	4.0.4	pass	wrong-output	(1s) stdout identical; dur=1s
+strip-ansi	7.2.0	pass	pass	(1s) stdout identical; dur=1s
+strip-indent	4.1.1	pass	pass	(1s) stdout identical; dur=1s
+striptags	3.2.0	pass	runtime-error	(2s) stdout identical; dur=2s
+sucrase	3.35.1	pass	pass	(80s) stdout identical; dur=80s
+superstruct	2.0.2	pass	runtime-error	(5s) stdout identical; dur=5s
+svelte	5.57.1	runtime-error	pass	(47s) exit=1; stderr: kiln: native emission failed: unsupported native emission: `has_await_expression`, imported across a module cycle before `/home/hatch/workspace/kiln-npm-eval/node_modules/svelte/
+tailwind-merge	3.7.0	pass	pass	(6s) stdout identical; dur=6s
+tapable	2.3.3	wrong-output	missing-api	(7s) dur=7s
+through2	5.0.11	runtime-error	missing-api	(4s) exit=1; stderr: kiln: uncaught TypeError: Class constructor EventEmitter cannot be invoked without 'new' at module=node_modules/readable-stream/lib/internal/streams/legacy.js instruction=3 operat
+timeago.js	4.0.2	pass	pass	(2s) stdout identical; dur=2s
+toml	5.0.0	runtime-error	pass	(10s) exit=1; stderr: kiln: native backend refusal: module=node_modules/toml/lib/parser.js instruction=49 operation=CallMethod(call) detail=an own-property question about a built-in member the surface
+trim-newlines	5.0.0	pass	wrong-output	(1s) stdout identical; dur=1s
+tweetnacl	1.0.3	pass	missing-api	(10s) stdout identical; dur=10s
+type-detect	4.1.0	runtime-error	wrong-output	(2s) exit=1; stderr: kiln: native backend refusal: module=node_modules/type-detect/type-detect.js instruction=177 operation=GetComputed detail=a RegExp.prototype member this backend has not implemente
+url	0.11.4	runtime-error	missing-api	(0s) exit=1; stderr: kiln: native emission failed: unsupported native emission: the `Eval` builtin in the native backend;
+url-parse	1.5.10	pass	runtime-error	(3s) stdout identical; dur=3s
+valibot	1.5.0	pass	pass	(3s) stdout identical; dur=3s
+validate-npm-package-name	8.0.0	pass	runtime-error	(2s) stdout identical; dur=2s
+vue	3.5.43	pass	runtime-error	(114s) stdout identical; dur=114s
+warning	4.0.3	pass	wrong-output	(2s) stdout identical; dur=2s
+word-wrap	1.2.5	pass	pass	(0s) stdout identical; dur=0s
+ws	8.22.0	runtime-error	missing-api	(12s) exit=1; stderr: kiln: uncaught Error: Cannot find module 'tls' at module=node_modules/ws/lib/websocket.js instruction=184 operation=Call detail=Call invocation threw receiver_tag=26;
+xstate	5.33.2	pass	runtime-error	(17s) stdout identical; dur=17s
+yargs	18.2.0	runtime-error	missing-api	(0s) exit=1; stderr: kiln: native Node execution does not yet materialize the `node:fs` export `writeFile`;
