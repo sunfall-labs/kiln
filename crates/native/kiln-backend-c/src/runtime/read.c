@@ -1652,8 +1652,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
-        if (kiln_c99_store_has(store, key, ikey))
-            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+        {
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
+        }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
         if (kiln_c99_same_name_key(key, "name")) {
@@ -1687,8 +1690,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         kiln_value store;
         int stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
-        if (kiln_c99_store_has(store, key, ikey))
-            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+        {
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
+        }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
          * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
 #if KILN_RETAIN_GROUP_TEMPORAL
