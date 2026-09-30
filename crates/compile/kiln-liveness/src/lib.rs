@@ -616,7 +616,7 @@ pub fn retained_method_groups(
             | Process | Shared | Tty | Zlib | StringDecoder | QueryString | WorkerThreads
             | PerfHooks | AsyncHooks | ChildProcess | Timers | TimersPromises | Readline
             | ReadlinePromises | Sqlite | Constants | V8 | Vm | Path | Util | UtilTypes
-            | DiagnosticsChannel | Gui => 0,
+            | DiagnosticsChannel | Gui | Tls => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })
