@@ -5353,9 +5353,10 @@ fn render_module_positioned(
             })
             .or_else(|| {
                 (0..pruned.functions.len()).find_map(|function_index| {
-                    if liveness.as_ref().is_some_and(|(reachable, _, _)| {
-                        !reachable.contains(&function_index)
-                    }) {
+                    if liveness
+                        .as_ref()
+                        .is_some_and(|(reachable, _, _)| !reachable.contains(&function_index))
+                    {
                         return None;
                     }
                     pruned.functions[function_index]
