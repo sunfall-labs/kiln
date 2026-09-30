@@ -579,6 +579,13 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
     kiln_closure *closure;
+    if (kiln_c99_intrinsic_has_instance(callee)) {
+        int answer;
+        int status = kiln_c99_ordinary_has_instance(host, argc > 0 ? args[0] : kiln_c99_undefined(), receiver, &answer, depth, thrown);
+        if (status == KILN_C99_OK) *result = kiln_c99_boolean(answer);
+        return status;
+    }
+
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }

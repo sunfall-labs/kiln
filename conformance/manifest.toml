@@ -2280,3 +2280,95 @@ here
 q,Symbol(s) 1 2
 3 Symbol(s)
 """
+
+[[test]]
+id = "regress/r50-anonymous-sequence-name"
+group = "regress"
+source = "regress/r50-anonymous-sequence-name.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for anonymous-sequence-name; interpreter and native-release must agree."
+expected_stdout = """
+["","","","",""] 1
+n n
+"""
+
+[[test]]
+id = "regress/r51-instanceof-primitive-prototype"
+group = "regress"
+source = "regress/r51-instanceof-primitive-prototype.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for instanceof-primitive-prototype; interpreter and native-release must agree."
+expected_stdout = """
+undefined TypeError false
+object TypeError false
+boolean TypeError false
+number TypeError false
+string TypeError false
+symbol TypeError false
+bigint TypeError false
+true false
+true false
+TypeError
+"""
+
+[[test]]
+id = "regress/r52-function-own-keys"
+group = "regress"
+source = "regress/r52-function-own-keys.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for function-own-keys; interpreter and native-release must agree."
+expected_stdout = """
+length,name,prototype,extra extra 1
+length,name,extra extra 1
+length,name,prototype,extra extra 1
+length,name,prototype,extra extra 1
+length,name,extra extra 1
+"""
+
+[[test]]
+id = "regress/r53-super-bound-constructor"
+group = "regress"
+source = "regress/r53-super-bound-constructor.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for super-bound-constructor; interpreter and native-release must agree."
+expected_stdout = """
+30 true true true true undefined
+3 4
+"""
+
+[[test]]
+id = "regress/r54-bound-function-prototype"
+group = "regress"
+source = "regress/r54-bound-function-prototype.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for bound-function-prototype; interpreter and native-release must agree."
+expected_stdout = """
+true true captured captured
+true true
+true
+"""
+
+[[test]]
+id = "regress/r55-array-from-constructor"
+group = "regress"
+source = "regress/r55-array-from-constructor.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Recorded Node parity for array-from-constructor; interpreter and native-release must agree."
+expected_stdout = """
+true true 3,6 true
+true 4,5
+true 7 8 2 length,construct:1:2,zero,map:7,map:8
+true 9 1 construct:0:undefined,iterate
+TypeError true
+false 1 2 2
+1,2
+true false true
+true true 4 7
+true
+"""

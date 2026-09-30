@@ -242,8 +242,34 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
     }
-    if (target.tag == KILN_VALUE_FUNCTION) {
-        target = kiln_c99_closure_store(kiln_c99_closure_of(target));
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND) {
+        kiln_value store, extra;
+        kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
+        int owns_prototype = closure != NULL && !closure->arrow &&
+            (!closure->asynchronous || closure->async_generator) &&
+            (!closure->is_method || closure->generator);
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK && owns_prototype)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_all_own_keys(host, store, &extra, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < kiln_c99_array_of(extra)->count; ++index) {
+            kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(extra)->elements[index]);
+            if (key.tag == KILN_VALUE_STRING &&
+                (kiln_c99_same_name_key((const kiln_string *)key.ptr, "length") ||
+                 kiln_c99_same_name_key((const kiln_string *)key.ptr, "name") ||
+                 (owns_prototype && kiln_c99_same_name_key((const kiln_string *)key.ptr, "prototype")))) continue;
+            status = kiln_c99_array_push(built, key);
+            if (status != KILN_C99_OK) return status;
+        }
+        *out = built;
+        return KILN_C99_OK;
     } else if (target.tag == KILN_VALUE_COLLECTION) {
         target = kiln_c99_collection_of(target)->properties;
     } else if (target.tag == KILN_VALUE_PROMISE) {
@@ -325,6 +351,7 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
  * the same question, so the two kinds answer it in one place rather than each spelling out where
  * it keeps its store. */
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {
+    if (target.tag == KILN_VALUE_BOUND) return &((kiln_bound *)(uintptr_t)target.bits)->properties;
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *arr = kiln_c99_array_of(target);
         if (arr->match_index >= 0 && arr->properties.tag != KILN_VALUE_OBJECT) {

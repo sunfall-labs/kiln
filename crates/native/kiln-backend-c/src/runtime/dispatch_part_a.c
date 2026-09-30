@@ -2151,10 +2151,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (status == KILN_C99_OK) *result = kiln_val_to_boundary(call_result_val);
             return status;
         }
-        case KILN_C99_METHOD_FUNCTION_BIND:
-            return kiln_c99_bind_with(result, receiver,
+        case KILN_C99_METHOD_FUNCTION_BIND: {
+            kiln_value prototype, store;
+            status = kiln_c99_invoke_method(host, &prototype, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                            kiln_c99_undefined(), &receiver, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_bind_with(result, receiver,
                                       argc > 0 ? args[0] : kiln_c99_undefined(),
                                       argc > 1 ? args + 1 : NULL, argc > 1 ? argc - 1 : 0);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_callable_store(*result, &store, 1);
+            if (status == KILN_C99_OK) status = kiln_c99_set_prototype(store, prototype);
+            return status;
+        }
         case KILN_C99_METHOD_FUNCTION_TO_STRING:
             /* The same conversion `String(f)` and `"" + f` already went through, so the three
              * spellings cannot disagree with each other or with the interpreter. */
@@ -3377,12 +3386,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = built;
                 return status;
             }
-            if (args[0].tag == KILN_VALUE_FUNCTION) {
+            if (args[0].tag == KILN_VALUE_FUNCTION || args[0].tag == KILN_VALUE_BOUND) {
                 /* A function is an object: `f.version = 2` is an own enumerable property of it,
                  * and it is kept on the closure's store rather than in a slot list of its own.
                  * `name`, `length` and `prototype` are read from the closure and are not in that
                  * store, which is right -- none of the three is enumerated. */
-                kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(args[0]));
+                kiln_value store;
+                status = kiln_c99_callable_store(args[0], &store, 0);
+                if (status != KILN_C99_OK) return status;
                 if (store.tag != KILN_VALUE_OBJECT) {
                     /* Nothing was ever assigned to it, so there is nothing to list. */
                     status = kiln_c99_new_array(&built);

@@ -585,6 +585,17 @@ static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *thrown) {
     int status;
+    if (parent.tag == KILN_VALUE_BOUND) {
+        kiln_bound *bound = (kiln_bound *)(uintptr_t)parent.bits;
+        size_t count = bound->count + argc;
+        kiln_value *joined = count == 0 ? NULL : malloc(count * sizeof *joined);
+        if (count != 0 && joined == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (bound->count != 0) memcpy(joined, bound->arguments, bound->count * sizeof *joined);
+        if (argc != 0) memcpy(joined + bound->count, args, argc * sizeof *joined);
+        status = kiln_c99_super_call(host, produced, bound->target, receiver, joined, count, depth, thrown);
+        free(joined);
+        return status;
+    }
     if (parent.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_construct(host, produced, parent, args, argc, depth, thrown);
     }
@@ -787,7 +798,7 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_c99_heap_store_value(kiln_c99_object_of(target), &kiln_c99_object_of(target)->prototype, prototype);
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_FUNCTION || kiln_c99_exotic_store(target) != NULL) {
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND || kiln_c99_exotic_store(target) != NULL) {
         /* A function, an array and a collection all keep the link on the store they already use
          * for named properties, because none of them has a prototype field of its own -- and it
          * is the store the read walk and `instanceof` both consult. */
@@ -828,7 +839,13 @@ static int kiln_c99_heritage_constructs(kiln_value value) {
         return !(closure->arrow || closure->generator || closure->asynchronous ||
                  closure->is_method);
     }
-    return kiln_c99_is_callable(value);
+    if (value.tag == KILN_VALUE_BUILTIN)
+        return !kiln_c99_is_namespace(value.bits) && value.bits != KILN_C99_BUILTIN_SYMBOL && value.bits != KILN_C99_BUILTIN_BIGINT;
+    if (value.tag == KILN_VALUE_METHOD) {
+        for (size_t i = 0; i < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors; ++i)
+            if (kiln_c99_native_constructors[i].method == value.bits) return 1;
+    }
+    return 0;
 }
 
 /* `SetPrototype` as emitted: a function target is `class D extends X` linking the two
@@ -847,17 +864,48 @@ static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototyp
 
 /* `x instanceof C` walks the same chain a property read walks, looking for `C.prototype` rather
  * than for a name -- which is why the two must agree about the shape of the chain. */
-static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
-    kiln_value prototype;
-    kiln_value current;
+/* The intrinsic is recognized by immutable realm-owned identity, never by function name.
+ * The bootstrap installs this non-writable, non-configurable slot before user code. */
+static int kiln_c99_intrinsic_has_instance(kiln_value callable) {
+    if (callable.tag != KILN_VALUE_FUNCTION || !kiln_c99_closure_of(callable)->is_method) return 0;
+    kiln_value store;
+    kiln_property property;
+    if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE), &store, 0) != KILN_C99_OK ||
+        store.tag != KILN_VALUE_OBJECT) return 0;
+    return kiln_c99_property_read_own_value(store, &kiln_c99_symbol_key_has_instance, NULL, &property) &&
+        !property.writable && !property.configurable && kiln_c99_strict_equal(property.value, callable);
+}
+
+static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
+    kiln_value handler;
+    int status;
+    if (!kiln_c99_can_be_prototype(constructor) || constructor.tag == KILN_VALUE_NULL)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Right-hand side of instanceof is not an object");
+    status = kiln_c99_probe_symbol(host, constructor, "@@hasInstance", 13, &handler, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (handler.tag != KILN_VALUE_UNDEFINED && handler.tag != KILN_VALUE_NULL && !kiln_c99_intrinsic_has_instance(handler)) {
+        kiln_value result;
+        if (!kiln_c99_is_callable(handler))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Symbol.hasInstance is not callable");
+        status = kiln_c99_call(host, &result, handler, constructor, &value, 1, depth, thrown);
+        if (status == KILN_C99_OK) *answer = kiln_c99_truthy(result);
+        return status;
+    }
+    if (!kiln_c99_is_callable(constructor))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Right-hand side of instanceof is not callable");
+    return kiln_c99_ordinary_has_instance(host, value, constructor, answer, depth, thrown);
+}
+
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
+    kiln_value prototype, current;
     size_t steps;
     int status;
-    if (value.tag == KILN_VALUE_PROXY) {
-        value = kiln_c99_proxy_inner(value);
-    }
-    if (constructor.tag == KILN_VALUE_PROXY) {
-        constructor = kiln_c99_proxy_inner(constructor);
-    }
+    *answer = 0;
+    if (!kiln_c99_is_callable(constructor)) return KILN_C99_OK;
+    if (constructor.tag == KILN_VALUE_BOUND)
+        return kiln_c99_instance_of(host, value, ((kiln_bound *)(uintptr_t)constructor.bits)->target, answer, depth, thrown);
+    if (value.tag == KILN_VALUE_PROXY) value = kiln_c99_proxy_inner(value);
+    if (constructor.tag == KILN_VALUE_PROXY) constructor = kiln_c99_proxy_inner(constructor);
     /* A builtin constructor has no prototype object here; the question it answers is about the
      * tag instead, which is the same question and a shorter walk. */
     if (constructor.tag == KILN_VALUE_BUILTIN) {
@@ -1000,6 +1048,13 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     if (constructor.tag != KILN_VALUE_FUNCTION) {
         KILN_C99_REFUSE("instanceof against a constructor that is not a generated function");
     }
+    if (value.tag == KILN_VALUE_UNDEFINED || value.tag == KILN_VALUE_NULL ||
+        value.tag == KILN_VALUE_BOOLEAN || value.tag == KILN_VALUE_NUMBER ||
+        value.tag == KILN_VALUE_STRING || value.tag == KILN_VALUE_SYMBOL ||
+        value.tag == KILN_VALUE_BIGINT) {
+        *answer = 0;
+        return KILN_C99_OK;
+    }
     status = kiln_c99_prototype_object(constructor, &prototype);
     if (status != KILN_C99_OK) {
         return status;
@@ -1008,12 +1063,13 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     /* A `prototype` that is not an object -- `F.prototype = undefined` now reads back as the
      * undefined it is (issue 28) -- matches nothing. Walking on would compare it with the
      * undefined an ordinary object's unrecorded link holds and answer true. OrdinaryHasInstance
-     * throws a TypeError here; that is not modelled, and false is what it answered before. */
+     * throws a TypeError here, after rejecting primitive left-hand values. */
     if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL ||
         prototype.tag == KILN_VALUE_BOOLEAN || prototype.tag == KILN_VALUE_NUMBER ||
         prototype.tag == KILN_VALUE_STRING || prototype.tag == KILN_VALUE_SYMBOL ||
         prototype.tag == KILN_VALUE_BIGINT) {
-        return KILN_C99_OK;
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Function has non-object prototype in instanceof check");
     }
     current = value;
     {

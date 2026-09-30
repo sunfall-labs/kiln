@@ -1103,7 +1103,8 @@ fn runtime_prelude_size() {
     // string/symbol passes and trap-key handling; no section is duplicated.
     // Independent context witnesses and canonical-key ownership enable candidate-scaled
     // admission (66,653 lines before the symbol change). Sum both branches' ceiling growth.
-    const CEILING_LINES: usize = 66_760;
+    // Function/constructor parity repairs and custom-species map authority, intrinsic identity, and species walk: 66,858 measured.
+    const CEILING_LINES: usize = 66_880;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

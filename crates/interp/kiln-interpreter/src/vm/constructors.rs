@@ -336,7 +336,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let built = if is_callable(&iterator) {
                     // An iterable has no count ahead of its elements: they arrive through calls,
                     // and `Array.from` is where that protocol is already written.
-                    let collected = self.array_from(&arguments[..1], current)?;
+                    let collected = self.array_from(&Value::Undefined, &arguments[..1], current)?;
                     construct_typed_array(kind, &[collected])?
                 } else {
                     // An array-like states its count first, so a `length` no buffer could hold

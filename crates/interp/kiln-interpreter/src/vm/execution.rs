@@ -2028,6 +2028,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // listing two shapes here made every one of those silently discarded.
                         value = instance;
                     }
+                    if frame.super_call {
+                        if is_reflect_target(&value) {
+                            self.this_value = value.clone();
+                            if let Some(caller) = self.frames.last_mut() {
+                                caller.constructing = Some(value.clone());
+                            }
+                        } else {
+                            value = self.this_value.clone();
+                        }
+                    }
                     self.stack.push(value);
                     if self.frames.len() == stop_at {
                         return Ok(ExecutionResult {
@@ -2280,6 +2290,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
             constructing: None,
+            super_call: false,
             locals: std::mem::replace(&mut self.locals, std::mem::take(locals)),
             // The binding reads the module scope its own function was written in, which is the
             // caller's here for the same reason an ordinary call's is.
@@ -2714,6 +2725,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
             constructing: None,
+            super_call: false,
             locals: std::mem::replace(&mut self.locals, locals),
             // A generator body belongs to the module that wrote it, and so does the module scope
             // it reads -- which is the caller's here for the same reason an ordinary call's is.

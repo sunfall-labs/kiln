@@ -538,6 +538,9 @@ if (typeof JSON !== "undefined") {
                 return false;
             }
             const target = this.prototype;
+            if (target === null || (typeof target !== "object" && typeof target !== "function")) {
+                throw new TypeError("Function has non-object prototype in instanceof check");
+            }
             let current = Object.getPrototypeOf(value);
             while (current !== null) {
                 if (current === target) return true;
@@ -546,7 +549,9 @@ if (typeof JSON !== "undefined") {
             return false;
         },
     };
-    data(Function.prototype, Symbol.hasInstance, hasInstance[Symbol.hasInstance]);
+    Object.defineProperty(Function.prototype, Symbol.hasInstance, {
+        value: hasInstance[Symbol.hasInstance], writable: false, configurable: false, enumerable: false,
+    });
 }
 
 // The ES2025 Set methods, over the Set intrinsics. `other` is a set-like: anything with a

@@ -1950,6 +1950,12 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
 #else
 #endif
+static int kiln_c99_iterator_direct(kiln_host *host, kiln_value source, kiln_value *next, int depth, kiln_value *thrown);
+static int kiln_c99_iterator_advance(kiln_host *host, kiln_value iterator, kiln_value next, kiln_value *value, int *finished, int depth, kiln_value *thrown);
+static void kiln_c99_iterator_close_discarding(kiln_host *host, kiln_value iterator, int depth, kiln_value *thrown);
+static int kiln_c99_heritage_constructs(kiln_value value);
+static int kiln_c99_intrinsic_has_instance(kiln_value callable);
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
@@ -3190,6 +3196,7 @@ static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string 
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
+static int kiln_c99_function_species(kiln_host *host, kiln_value target,
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
@@ -3831,7 +3838,9 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
 static int kiln_c99_heritage_constructs(kiln_value value) {
 static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
-static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
+static int kiln_c99_intrinsic_has_instance(kiln_value callable) {
+static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
 static kiln_value kiln_c99_typeof(kiln_value value) {
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {

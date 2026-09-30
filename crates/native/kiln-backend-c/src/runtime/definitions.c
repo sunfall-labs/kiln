@@ -508,7 +508,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                 return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
             }
         }
-        if (!existed && object->frozen) {
+        if (!existed && (object->frozen || object->not_extensible)) {
             /* A frozen object is not extensible either, so a name it never had cannot be added.
              * Same promise, the other half of it. */
             return kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, "");
