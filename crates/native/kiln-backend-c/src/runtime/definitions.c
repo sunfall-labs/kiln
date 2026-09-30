@@ -783,27 +783,28 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         *out = built;
         return status;
     }
-    if (target.tag == KILN_VALUE_FUNCTION) {
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND) {
         /* A function's own properties are `name`, `length`, `prototype`, and whatever a program
          * assigned beside them. The first three are read from the closure rather than from a
          * slot list, so they are described from the closure too -- all three non-enumerable,
          * which is why `Object.keys(f)` is empty for a function nobody has decorated.
          *
-         * `prototype` is the one still refused: whether it is writable and configurable depends
-         * on how the function was written -- a plain function's is writable, a class's is not,
-         * and a method has none at all -- and this backend does not record which. Undefined is a
-         * real answer here, so guessing would be a wrong answer indistinguishable from a right
-         * one. */
-        kiln_closure *closure = kiln_c99_closure_of(target);
+         * Constructor kind comes from the IR; class prototypes are non-writable while ordinary
+         * and generator prototypes are writable. Methods and arrows have none. */
+        kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
         int is_name = kiln_c99_same_name_key(view, "name");
         if (is_name || kiln_c99_same_name_key(view, "length")) {
-            kiln_value value = is_name
+            kiln_value value = closure == NULL ? kiln_c99_undefined() : is_name
                                    ? (closure->name == NULL
                                           ? kiln_c99_from_units(NULL, 0)
                                           : kiln_c99_value(KILN_VALUE_STRING, 0,
                                                            (const char *)closure->name,
                                                            closure->name->unit_len))
                                    : kiln_c99_number((double)closure->arity);
+            if (closure == NULL) {
+                status = kiln_c99_get_key(host, target, view, canonical, &value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
             status = kiln_c99_new_object(&built);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
@@ -822,14 +823,23 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             *out = built;
             return status;
         }
-        if (kiln_c99_same_name_key(view, "prototype")) {
-            KILN_C99_REFUSE("the prototype property of a callable has no descriptor to answer "
-                            "with");
+        if (closure != NULL && kiln_c99_same_name_key(view, "prototype")) {
+            kiln_value prototype;
+            if (closure->arrow || (closure->asynchronous && !closure->async_generator) ||
+                (closure->is_method && !closure->generator)) return KILN_C99_OK;
+            status = kiln_c99_prototype_object(target, &prototype);
+            if (status == KILN_C99_OK) status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "value", 5, prototype, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(!closure->is_class), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
+            *found = 1;
+            *out = built;
+            return status;
         }
-        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) {
-            return KILN_C99_OK;
-        }
-        store = kiln_c99_closure_store(closure);
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         target = store;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {

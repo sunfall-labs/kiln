@@ -2326,6 +2326,11 @@ length,name,extra extra 1
 length,name,prototype,extra extra 1
 length,name,prototype,extra extra 1
 length,name,extra extra 1
+object,true,false,false
+absent
+object,false,false,false
+object,true,false,false
+absent
 """
 
 [[test]]

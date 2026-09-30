@@ -297,6 +297,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
             generator: false,
             async_generator: false,
             is_method: false,
+            is_class: false,
             parameter_count: 0,
             declared_length: 0,
             mapped_arguments: false,

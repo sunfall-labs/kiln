@@ -983,6 +983,7 @@ struct kiln_closure;
 struct kiln_generator;
 typedef struct kiln_call_context {
 typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues,
+enum kiln_c99_function_kind {
 typedef struct kiln_closure {
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {

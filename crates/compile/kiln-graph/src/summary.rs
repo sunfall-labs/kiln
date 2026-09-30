@@ -271,6 +271,7 @@ mod tests {
             generator: false,
             async_generator: false,
             is_method: false,
+            is_class: false,
             parameter_count,
             mapped_arguments: false,
             declared_length: parameter_count,

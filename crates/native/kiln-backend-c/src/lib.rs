@@ -1136,7 +1136,7 @@ struct ClosureFields {
     generator: i32,
     asynchronous: i32,
     async_generator: i32,
-    is_method: i32,
+    function_kind: i32,
     arrow: i32,
     strict: i32,
     frame_locals: u32,
@@ -1188,7 +1188,11 @@ fn closure_fields(
         generator: i32::from(target.generator || target.asynchronous),
         asynchronous: i32::from(target.asynchronous),
         async_generator: i32::from(target.async_generator),
-        is_method: i32::from(target.is_method),
+        function_kind: if target.is_class {
+            2
+        } else {
+            i32::from(target.is_method)
+        },
         arrow,
         strict: i32::from(
             strict_functions
@@ -1241,7 +1245,7 @@ pub(crate) fn closure_construction(
         generator,
         asynchronous,
         async_generator,
-        is_method,
+        function_kind,
         arrow,
         strict,
         frame_locals,
@@ -1259,7 +1263,7 @@ pub(crate) fn closure_construction(
         publishes_frame,
     );
     format!(
-        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+        "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {function_kind}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
     )
 }
 
@@ -1290,7 +1294,7 @@ pub(crate) fn region_closure_construction(
         generator,
         asynchronous,
         async_generator,
-        is_method,
+        function_kind,
         arrow,
         strict,
         frame_locals,
@@ -1309,7 +1313,7 @@ pub(crate) fn region_closure_construction(
     );
     let publishes = i32::from(publishes_frame);
     format!(
-        "kiln_c99_region_closure(&built, &{symbol}_region_sites[{site}], {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {publishes})"
+        "kiln_c99_region_closure(&built, &{symbol}_region_sites[{site}], {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {function_kind}, {arrow}, {strict}, {defining_receiver}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {publishes})"
     )
 }
 
@@ -2034,6 +2038,9 @@ fn render_functions(
             if target.is_method {
                 flags |= 1 << 3;
             }
+            if target.is_class {
+                flags |= 1 << 7;
+            }
             if target.arrow {
                 flags |= 1 << 4;
             }
@@ -2086,7 +2093,7 @@ fn render_functions(
              (m->flags & 1) != 0,\n\
              (m->flags & 2) != 0,\n\
              (m->flags & 4) != 0,\n\
-             (m->flags & 8) != 0,\n\
+             (m->flags & 128) != 0 ? KILN_C99_FUNCTION_CLASS : ((m->flags & 8) != 0 ? KILN_C99_FUNCTION_METHOD : KILN_C99_FUNCTION_ORDINARY),\n\
              (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0,\n\
              (m->flags & 32) != 0,\n\
              receiver,\n\
@@ -2114,7 +2121,7 @@ fn render_functions(
                  const ku_proto_meta *m = &ku_protos[proto];\n\
                  kiln_value b;\n\
                  const char *src = m->span_len ? ({source_expr} + m->span_start) : NULL;\n\
-                 int status = kiln_c99_region_closure(&b, site, m->body, m->name, src, (size_t)m->span_len, ku_site, proto, (uint32_t)m->arity, (m->flags & 1) != 0, (m->flags & 2) != 0, (m->flags & 4) != 0, (m->flags & 8) != 0, (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0, (m->flags & 32) != 0, receiver, (uint32_t)m->locals, (uint32_t)m->stack, (uint32_t)m->handlers, (uint32_t)m->resume, (m->flags & 64) != 0);\n\
+                 int status = kiln_c99_region_closure(&b, site, m->body, m->name, src, (size_t)m->span_len, ku_site, proto, (uint32_t)m->arity, (m->flags & 1) != 0, (m->flags & 2) != 0, (m->flags & 4) != 0, (m->flags & 128) != 0 ? KILN_C99_FUNCTION_CLASS : ((m->flags & 8) != 0 ? KILN_C99_FUNCTION_METHOD : KILN_C99_FUNCTION_ORDINARY), (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0, (m->flags & 32) != 0, receiver, (uint32_t)m->locals, (uint32_t)m->stack, (uint32_t)m->handlers, (uint32_t)m->resume, (m->flags & 64) != 0);\n\
                  if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
                  *dst = kiln_val_from_boundary(b);\n\
                  return KILN_C99_OK;\n\
@@ -2427,6 +2434,7 @@ fn entry_proto(program: &Program) -> FunctionProto {
         generator: false,
         async_generator: false,
         is_method: false,
+        is_class: false,
         parameter_count: 0,
         mapped_arguments: false,
         declared_length: 0,
