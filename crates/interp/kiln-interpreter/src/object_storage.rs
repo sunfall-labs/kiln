@@ -684,6 +684,7 @@ pub(super) fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> 
         Value::Date(date) => &date.properties,
         Value::Temporal(built) => &built.properties,
         Value::Promise(promise) => &promise.properties,
+        Value::Generator(generator) => &generator.properties,
         // A wrapped function is exotic in exactly one respect -- what calling it does -- and an
         // ordinary object in every other: it starts out holding the `name` and `length` copied
         // off its target, and a holder may add to it. Its store is its own and is never the

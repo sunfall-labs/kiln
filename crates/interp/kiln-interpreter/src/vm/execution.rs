@@ -2231,26 +2231,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             0
         };
 
-        Ok(Value::Generator(Rc::new(RefCell::new(GeneratorState {
-            closure: Rc::clone(closure),
-            locals,
-            stack: Vec::new(),
-            handlers: Vec::new(),
-            instruction: start,
-            // Captured at the call, not at the first resumption: the receiver a generator body
-            // sees is the one the *call* named, and by the time `next` runs the interpreter is
-            // in whatever frame the consumer happens to be in. Dropping it here made `this`
-            // undefined in every generator, async function and async method body.
-            this_value,
-            new_target,
-            arguments: received,
-            started: false,
-            running: false,
-            done: false,
-            awaiting: false,
-            returning: None,
-            delegate: None,
-        }))))
+        Ok(Value::Generator(Rc::new(GeneratorData {
+            properties: RefCell::new(ObjectData::default()),
+            state: RefCell::new(GeneratorState {
+                closure: Rc::clone(closure),
+                locals,
+                stack: Vec::new(),
+                handlers: Vec::new(),
+                instruction: start,
+                // Captured at the call, not at the first resumption: the receiver a generator body
+                // sees is the one the *call* named, and by the time `next` runs the interpreter is
+                // in whatever frame the consumer happens to be in. Dropping it here made `this`
+                // undefined in every generator, async function and async method body.
+                this_value,
+                new_target,
+                arguments: received,
+                started: false,
+                running: false,
+                done: false,
+                awaiting: false,
+                returning: None,
+                delegate: None,
+            }),
+        })))
     }
 
     /// Run a generator's parameter binding, before the generator object exists.
@@ -2382,7 +2385,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(crate) fn delegate_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         delegate: Value,
         exit_target: usize,
         sent: Value,
@@ -2469,7 +2472,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(crate) fn delegate_generator_throw(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         delegate: Value,
         exit_target: usize,
         thrown: Value,
@@ -2612,7 +2615,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Start or resume a generator, returning its next value and whether it finished.
     pub(crate) fn resume_generator(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2626,7 +2629,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `finally`.
     pub(crate) fn resume_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2642,7 +2645,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     pub(crate) fn resume_generator_with(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2677,7 +2680,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// One resumption, with the guards already taken.
     pub(crate) fn resume_generator_body(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {

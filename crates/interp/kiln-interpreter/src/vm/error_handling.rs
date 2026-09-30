@@ -4,7 +4,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Resume a generator, recovering what it threw rather than unwinding past this point.
     pub(super) fn resume_catching(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<Result<(Value, bool), Value>, ExecutionError> {

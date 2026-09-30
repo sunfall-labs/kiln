@@ -99,13 +99,13 @@ pub(super) enum Sink {
     Replay(Rc<PromiseData>, Settled),
     /// An `await` inside an async function: resume its body with whatever the awaited promise
     /// produced, and settle the function's own promise when the body finishes.
-    Async(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    Async(Rc<GeneratorData>, Rc<PromiseData>),
     /// An `await` inside an async *generator*: resume its body, and settle the promise the
     /// consumer's `next()` returned once the body reaches its next `yield` or finishes.
     ///
     /// The promise here belongs to one step rather than to the whole function, which is the
     /// whole difference between the two.
-    AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGenerator(Rc<GeneratorData>, Rc<PromiseData>),
     /// One awaited disposer inside `AsyncDisposableStack.prototype.disposeAsync`. Like the two
     /// above, there is no JavaScript handler: what resumes is the walk down the stack.
     AsyncDisposal(Rc<AsyncDisposal>),
@@ -114,7 +114,7 @@ pub(super) enum Sink {
     /// `yield v` in an async generator is `Await(v)` and then the yield, which is why an async
     /// generator that yields promises hands back their *values*. Without this the consumer got
     /// the promise itself, and `for await (const x of gen())` bound `x` to a promise.
-    AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorYield(Rc<GeneratorData>, Rc<PromiseData>),
     ModuleAwait(Rc<RefCell<ModuleSuspension>>),
     /// `AsyncGeneratorAwaitReturn`: the argument of a `return()` on a generator with no body
     /// left to unwind, being awaited before it becomes the final step.
@@ -123,16 +123,16 @@ pub(super) enum Sink {
     /// finished, and all that remains is to decide the step this `return()` promised.
     AsyncGeneratorReturn(Rc<PromiseData>),
     /// Awaiting the `return` argument when the delegate iterator has no `return` method.
-    AsyncGeneratorDelegateReturnMissing(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorDelegateReturnMissing(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` to close the delegate when `throw()` is missing.
-    AsyncGeneratorDelegateClose(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorDelegateClose(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` on an active delegate iterator.
-    AsyncGeneratorDelegateReturn(Rc<RefCell<GeneratorState>>, Rc<PromiseData>, bool),
+    AsyncGeneratorDelegateReturn(Rc<GeneratorData>, Rc<PromiseData>, bool),
     /// Awaiting the result of calling `throw()` on an active delegate iterator.
-    AsyncGeneratorDelegateThrow(Rc<RefCell<GeneratorState>>, Rc<PromiseData>, usize, bool),
+    AsyncGeneratorDelegateThrow(Rc<GeneratorData>, Rc<PromiseData>, usize, bool),
     /// Awaiting an inner promise-valued `.value` from a wrapped synchronous iterator during delegation.
     AsyncGeneratorDelegateStep {
-        generator: Rc<RefCell<GeneratorState>>,
+        generator: Rc<GeneratorData>,
         step: Rc<PromiseData>,
         exit_target: usize,
         done: bool,

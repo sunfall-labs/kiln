@@ -3,7 +3,7 @@ use super::*;
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn delegate_async_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         delegate: Value,
         exit_target: usize,
@@ -79,7 +79,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(super) fn delegate_async_generator_throw(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         delegate: Value,
         exit_target: usize,
@@ -191,7 +191,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// separates this from [`Vm::drive_async`], which has only the first kind.
     pub(super) fn drive_async_generator(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         resume: Resume,
     ) -> Result<(), ExecutionError> {

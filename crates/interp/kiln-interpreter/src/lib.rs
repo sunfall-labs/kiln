@@ -674,6 +674,22 @@ pub struct WrappedFunction {
     properties: RefCell<ObjectData>,
 }
 
+/// A generator owns ordinary properties independently of its suspended execution state.
+/// Keeping the stores separate lets property access work while its frame is running.
+#[derive(Debug)]
+pub struct GeneratorData {
+    state: RefCell<GeneratorState>,
+    properties: RefCell<ObjectData>,
+}
+
+impl std::ops::Deref for GeneratorData {
+    type Target = RefCell<GeneratorState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
 /// A generator's saved execution state.
 ///
 /// A generator is the first thing in this VM whose frame does not run to completion, so its
@@ -748,7 +764,7 @@ impl PartialEq for ModuleSuspension {
 /// It has to come off on every path -- a suspension, a return, an unwind, or a `?` out of the
 /// middle of `resume_generator_with` -- because a generator left marked as executing would
 /// refuse every later `next()`.
-struct RunningGuard<'a>(&'a Rc<RefCell<GeneratorState>>);
+struct RunningGuard<'a>(&'a Rc<GeneratorData>);
 
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {

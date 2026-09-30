@@ -31,7 +31,7 @@ pub enum Value {
     /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
     Native(Native, RealmId),
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
-    Generator(Rc<RefCell<GeneratorState>>),
+    Generator(Rc<GeneratorData>),
     Promise(Rc<PromiseData>),
     RegExp(Rc<RegExpData>),
     /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same

@@ -368,7 +368,7 @@ pub(super) fn uninitialized_export_error(name: &str) -> ExecutionError {
 }
 
 /// Whether this generator object came from an `async function*`.
-pub(super) fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
+pub(super) fn is_async_generator(state: &Rc<GeneratorData>) -> bool {
     let state = state.borrow();
     state
         .closure
@@ -991,9 +991,9 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             // exits, terminating workers with the process; the rejection check below is what
             // reports it here.
             if drain
-                && vm.module_outcome().is_none_or(|outcome| {
-                    !matches!(outcome, Settled::Rejected(_))
-                })
+                && vm
+                    .module_outcome()
+                    .is_none_or(|outcome| !matches!(outcome, Settled::Rejected(_)))
             {
                 vm.run_node_event_loop(runtime)
                     .map_err(|error| record(&mut vm, error))?;

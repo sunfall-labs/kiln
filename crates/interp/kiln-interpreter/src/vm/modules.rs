@@ -8,7 +8,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `async`/`await` is a generator plus this loop.
     pub(crate) fn drive_async(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         promise: &Rc<PromiseData>,
         resume: Resume,
     ) -> Result<(), ExecutionError> {
