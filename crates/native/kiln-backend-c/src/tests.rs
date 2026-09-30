@@ -389,6 +389,24 @@ int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, 
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+/* Provider-disabled C fixtures still link every prelude handler. Provider semantics are covered
+ * by the native-provider and native graph suites rather than these collector fixtures. */
+double kiln_date_parse(const kiln_string *source) {
+    (void)source;
+    return NAN;
+}
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
+                         uint64_t locale_len, uint32_t uppercase, uint16_t *out,
+                         uint64_t capacity, uint64_t *out_len) {
+    (void)units; (void)count; (void)locale; (void)locale_len; (void)uppercase;
+    (void)out; (void)capacity; (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch,
+                            uint32_t operation, const uint8_t **out, uint64_t *out_len) {
+    (void)spec; (void)spec_len; (void)epoch; (void)operation; (void)out; (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right,
                       uint64_t right_len, const uint8_t *spec, uint64_t spec_len,
                       int32_t *out_order) {
