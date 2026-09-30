@@ -1038,8 +1038,10 @@ typedef struct kiln_c99_realm_state {
     kiln_value regexp_string_iterator_prototype;
     /* Annex B RegExp legacy capture strings; match state belongs to this realm, never a process
      * static, so parallel realms cannot observe one another's last match. */
-    kiln_value regexp_legacy_captures[9];
     kiln_value regexp_legacy_empty;
+    kiln_value regexp_legacy_subject;
+    int64_t regexp_legacy_ranges[20];
+    size_t regexp_legacy_groups;
     kiln_value typed_array_iterator_prototype;
     kiln_value map_iterator_prototype;
     kiln_value set_iterator_prototype;

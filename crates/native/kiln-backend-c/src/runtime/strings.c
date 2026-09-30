@@ -1554,7 +1554,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
          * splits it into nothing, and one that does not leaves it whole. */
         size_t groups = 0;
         int matched = 0;
-        status = kiln_c99_regexp_find(regexp, units, count, 0, ranges,
+        status = kiln_c99_regexp_find(regexp, receiver, units, count, 0, ranges,
                                       ranges_capacity, &groups, &matched);
         if (status == KILN_C99_OK && !matched) {
             status = kiln_c99_array_push(collected, kiln_c99_from_units(units, 0));
@@ -1578,7 +1578,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     for (;;) {
         size_t groups = 0;
         int matched = 0;
-        status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
+        status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
                                       ranges_capacity, &groups, &matched);
         if (status != KILN_C99_OK || !matched) {
             break;
@@ -1594,7 +1594,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             }
             ranges = new_ranges;
             ranges_capacity = groups * 2;
-            status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
+            status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
                                           ranges_capacity, &groups, &matched);
             if (status != KILN_C99_OK || !matched) {
                 break;

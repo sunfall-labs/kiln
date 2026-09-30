@@ -5,14 +5,20 @@
   if (typeof RegExp === "undefined" || !RegExp.prototype) return;
   const Proto = RegExp.prototype as any;
 
-  // Annex B legacy capture properties. The native backend records these per realm as part of
-  // each RegExp match; keep the public accessors in this TypeScript bootstrap so the runtime C
-  // only owns match storage, not a JavaScript builtin implementation.
+  // Annex B legacy capture properties. Both engines keep this state per realm; keep the public
+  // accessors in this TypeScript bootstrap so runtime C owns only the private capture bridge.
   const legacyCapture = (globalThis as any).__kilnRegExpLegacyCapture;
   delete (globalThis as any).__kilnRegExpLegacyCapture;
   for (let index = 1; index <= 9; index++) {
-    Object.defineProperty(RegExp, `$${index}`, {
-      get: legacyCapture === undefined ? () => "" : () => legacyCapture(index) ?? "",
+    const property = `$${index}`;
+    const descriptor = {
+      get [property]() { return legacyCapture === undefined ? "" : legacyCapture(index) ?? ""; },
+      set [property](_value: any) {},
+    };
+    const accessor = Object.getOwnPropertyDescriptor(descriptor, property) as PropertyDescriptor;
+    Object.defineProperty(RegExp, property, {
+      get: accessor.get,
+      set: accessor.set,
       enumerable: false,
       configurable: true,
     });

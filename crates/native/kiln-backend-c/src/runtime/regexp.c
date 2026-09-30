@@ -140,46 +140,48 @@ static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr) {
     return KILN_C99_OK;
 }
 
-/* Annex B exposes the most recent match's captures as RegExp.$1 through RegExp.$9. Store these
- * on the active heap's realm, and keep the strings rooted there until the next match. */
-int kiln_c99_regexp_publish_legacy(const uint16_t *units, size_t count,
-                                    const int64_t *ranges, size_t groups, int matched) {
+/* Annex B exposes the most recent successful match's captures as RegExp.$1 through RegExp.$9.
+ * Keep its subject and capture ranges rooted on the active realm; materialize a group only if a
+ * program actually reads its static property. */
+int kiln_c99_regexp_publish_legacy(kiln_value subject, const int64_t *ranges,
+                                    size_t groups, int matched) {
     kiln_c99_realm_state *realm = kiln_c99_realm();
-    size_t index;
-    if (realm == NULL) return KILN_C99_OK;
+    if (realm == NULL || !matched || ranges == NULL || groups == 0 ||
+        subject.tag != KILN_VALUE_STRING)
+        return KILN_C99_OK;
+    if (groups > 10) groups = 10;
+    kiln_c99_heap_store_value(NULL, &realm->regexp_legacy_subject, subject);
+    memcpy(realm->regexp_legacy_ranges, ranges, groups * 2 * sizeof *ranges);
+    realm->regexp_legacy_groups = groups;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out) {
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    uint16_t *units = NULL;
+    size_t count = 0;
+    int status;
+    if (realm == NULL) return KILN_C99_OUT_OF_MEMORY;
     if (realm->regexp_legacy_empty.tag == KILN_VALUE_UNDEFINED) {
         kiln_value empty = kiln_c99_from_units(NULL, 0);
         if (empty.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
         kiln_c99_heap_store_value(NULL, &realm->regexp_legacy_empty, empty);
     }
-    for (index = 0; index < 9; ++index) {
-        kiln_c99_heap_store_value(NULL, &realm->regexp_legacy_captures[index],
-                                  realm->regexp_legacy_empty);
+    if (index == 0 || index > 9 || index >= realm->regexp_legacy_groups ||
+        realm->regexp_legacy_subject.tag != KILN_VALUE_STRING) {
+        *out = realm->regexp_legacy_empty;
+        return KILN_C99_OK;
     }
-    if (!matched || ranges == NULL || groups == 0) return KILN_C99_OK;
-    if (units == NULL && count != 0) return KILN_C99_OK;
-    for (index = 0; index < 9 && index + 1 < groups; ++index) {
-        int64_t from = ranges[(index + 1) * 2];
-        int64_t to = ranges[(index + 1) * 2 + 1];
-        kiln_value capture = from < 0 || to < from || (uint64_t)to > count
-                                 ? realm->regexp_legacy_empty
-                                 : kiln_c99_from_units(units == NULL ? NULL : units + (size_t)from,
-                                                       (size_t)(to - from));
-        if (capture.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
-        kiln_c99_heap_store_value(NULL, &realm->regexp_legacy_captures[index], capture);
-    }
-    return KILN_C99_OK;
-}
-
-int kiln_c99_regexp_publish_legacy_subject(kiln_value subject, const int64_t *ranges,
-                                           size_t groups, int matched) {
-    uint16_t *units = NULL;
-    size_t count = 0;
-    int status = kiln_c99_to_units(subject, &units, &count);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_regexp_publish_legacy(units, count, ranges, groups, matched);
+    status = kiln_c99_to_units(realm->regexp_legacy_subject, &units, &count);
+    if (status != KILN_C99_OK) return status;
+    int64_t from = realm->regexp_legacy_ranges[index * 2];
+    int64_t to = realm->regexp_legacy_ranges[index * 2 + 1];
+    *out = from < 0 || to < from || (uint64_t)to > count
+               ? realm->regexp_legacy_empty
+               : kiln_c99_from_units(units == NULL ? NULL : units + (size_t)from,
+                                     (size_t)(to - from));
     free(units);
-    return status;
+    return out->tag == KILN_VALUE_UNDEFINED ? KILN_C99_OUT_OF_MEMORY : KILN_C99_OK;
 }
 
 /* One search, and the match it found.
@@ -187,13 +189,14 @@ int kiln_c99_regexp_publish_legacy_subject(kiln_value subject, const int64_t *ra
  * Returns 1 for a match, 0 for none. A sticky pattern must match exactly at the cursor, not merely
  * at or after it -- the engine reports the first match from `start`, and that check is what turns
  * it into the stickier promise. */
-static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size_t count,
+static int kiln_c99_regexp_find(kiln_regexp *regexp, kiln_value js_subject,
+                                const uint16_t *units, size_t count,
                                 size_t start, int64_t *ranges, size_t capacity, size_t *groups,
                                 int *matched) {
     *matched = 0;
     *groups = 0;
     if (start > count) {
-        return kiln_c99_regexp_publish_legacy(units, count, NULL, 0, 0);
+        return KILN_C99_OK;
     }
     if (regexp->matcher != NULL) {
         int status = regexp->matcher(units, count, start, ranges, capacity, groups, matched);
@@ -203,10 +206,10 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
         if (*matched) {
             if (regexp->sticky && ranges[0] != (int64_t)start) {
                 *matched = 0;
-                return kiln_c99_regexp_publish_legacy(units, count, NULL, 0, 0);
+                return KILN_C99_OK;
             }
         }
-        return kiln_c99_regexp_publish_legacy(units, count, ranges, *groups, *matched);
+        return kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, *matched);
     }
     kiln_string subject = {
         .unit_len = count > UINT32_MAX ? 0 : (uint32_t)count,
@@ -215,12 +218,12 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
     };
     if (count > UINT32_MAX ||
         kiln_regexp_search(regexp->handle, &subject, start, ranges, capacity / 2) != 1) {
-        return kiln_c99_regexp_publish_legacy(units, count, NULL, 0, 0);
+        return KILN_C99_OK;
     }
     if (regexp->sticky && ranges[0] != (int64_t)start) {
-        return kiln_c99_regexp_publish_legacy(units, count, NULL, 0, 0);
+        return KILN_C99_OK;
     }
     *groups = kiln_regexp_group_count(regexp->handle);
     *matched = 1;
-    return kiln_c99_regexp_publish_legacy(units, count, ranges, *groups, 1);
+    return kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, 1);
 }

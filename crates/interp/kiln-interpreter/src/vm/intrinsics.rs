@@ -2727,6 +2727,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     0
                 };
                 let found = regexp_search(&regexp, &subject, start);
+                if let Some((_, groups, _)) = &found {
+                    let mut captures: [StringUnits; 9] =
+                        std::array::from_fn(|_| StringUnits::default());
+                    for (capture, group) in captures.iter_mut().zip(groups.iter().skip(1)) {
+                        if let Some(range) = group {
+                            *capture = StringUnits::from_units(&subject[range.clone()]);
+                        }
+                    }
+                    if let Some(slot) = self
+                        .regexp_legacy_captures
+                        .get_mut(self.current_realm.0 as usize)
+                    {
+                        *slot = captures;
+                    }
+                }
                 if (regexp.global || regexp.sticky) && found.is_none() {
                     // A failed search resets the cursor, which is what stops a `g` regexp from
                     // being permanently stuck past the end.
@@ -3047,6 +3062,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Some(value) => Some(self.as_text_units(value, instruction)?),
                 };
                 Ok(self.new_symbol(description))
+            }
+            Native::RegExpLegacyCaptureRaw => {
+                let index = arguments.first().and_then(|value| match value {
+                    Value::Number(number)
+                        if number.is_finite()
+                            && number.fract() == 0.0
+                            && (1.0..=9.0).contains(number) =>
+                    {
+                        Some(*number as usize - 1)
+                    }
+                    _ => None,
+                });
+                Ok(index
+                    .and_then(|index| {
+                        self.regexp_legacy_captures
+                            .get(self.current_realm.0 as usize)
+                            .and_then(|captures| captures.get(index))
+                    })
+                    .cloned()
+                    .map(Value::String)
+                    .unwrap_or(Value::Undefined))
             }
             // The two built-ins that compile. Both need the machine -- a compiled program is
             // entered as a frame and run -- so neither can live in `call_native`, which is a

@@ -94,6 +94,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// to find it again. What it does *not* do is back variable lookup: writing
     /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
     pub(super) global_objects: Vec<Option<Value>>,
+    /// Successful RegExp capture strings, indexed by realm. Failed matches leave this snapshot
+    /// alone, as Annex B requires.
+    pub(super) regexp_legacy_captures: Vec<[StringUnits; 9]>,
     /// How many built-ins are currently between the running code and the interpreter loop.
     pub(super) native_depth: usize,
     /// `process`, built on first use and shared from then on.

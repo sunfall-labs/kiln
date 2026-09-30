@@ -40,6 +40,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             shared.borrow_mut().global_objects.push(None);
         }
         self.global_objects.push(None);
+        self.regexp_legacy_captures
+            .push(std::array::from_fn(|_| StringUnits::default()));
         self.intrinsics.add_realm();
         Ok(realm)
     }
@@ -864,6 +866,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Node's unhandled-rejection tracking registers itself here
             // (`kiln-builtins/src/rejections.ts`).
             ("__kilnPromiseRejections", Native::PromiseRejectionsRaw),
+            ("__kilnRegExpLegacyCapture", Native::RegExpLegacyCaptureRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }

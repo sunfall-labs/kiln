@@ -175,6 +175,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::WorkerOpRaw => "__kilnWorkerOp".to_owned(),
         Native::PortWaitRaw => "__kilnPortWait".to_owned(),
         Native::PromiseRejectionsRaw => "__kilnPromiseRejections".to_owned(),
+        Native::RegExpLegacyCaptureRaw => "__kilnRegExpLegacyCapture".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it

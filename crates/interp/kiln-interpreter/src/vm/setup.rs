@@ -49,6 +49,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             suspended_awaiting: false,
             suspended_delegate: None,
             global_objects: vec![None],
+            regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
             process_object: None,
             intrinsics: Rc::new(Intrinsics::default()),
             native_depth: 0,

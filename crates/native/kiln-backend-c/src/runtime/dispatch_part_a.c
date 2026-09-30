@@ -1648,7 +1648,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             capture < 1.0 || capture > 9.0) {
             *result = kiln_c99_undefined();
         } else {
-            *result = realm->regexp_legacy_captures[(size_t)capture - 1];
+            return kiln_c99_regexp_legacy_capture((size_t)capture, result);
         }
         return KILN_C99_OK;
     }
@@ -3242,7 +3242,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                 }
-                status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
+                status = kiln_c99_regexp_find(regexp, subject, units, count, start, ranges,
                                               ranges_capacity, &groups, &matched);
                 if (status == KILN_C99_OK && matched && groups > ranges_capacity / 2) {
                     ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
@@ -3253,7 +3253,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                     ranges_capacity = groups * 2;
-                    status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
+                    status = kiln_c99_regexp_find(regexp, subject, units, count, start, ranges,
                                                   ranges_capacity, &groups, &matched);
                 }
             }
@@ -3266,7 +3266,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 return status;
             }
-            status = kiln_c99_regexp_publish_legacy_subject(subject, ranges, groups, matched);
+            status = kiln_c99_regexp_publish_legacy(subject, ranges, groups, matched);
             if (status != KILN_C99_OK) {
                 if (ranges != stack_ranges) free(ranges);
                 if (units != NULL && !stack_used) free(units);

@@ -845,6 +845,7 @@ pub enum Native {
     RegExpConstructor,
     RegExpTest,
     RegExpExec,
+    RegExpLegacyCaptureRaw,
     StringMatch,
     StringMatchAll,
     StringSearch,
