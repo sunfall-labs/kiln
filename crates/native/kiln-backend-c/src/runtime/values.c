@@ -52,8 +52,7 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
                                        frame->closure->name->unit_len);
     }
     status = kiln_c99_put_mode(host, *out, "fileName", 8,
-                               source != NULL ? kiln_c99_value(KILN_VALUE_STRING, 0, source,
-                                                               strlen(source))
+                               source != NULL ? kiln_c99_copy_text(source, strlen(source))
                                               : kiln_c99_undefined(),
                                1, depth, thrown);
     if (status == KILN_C99_OK)

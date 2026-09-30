@@ -51,12 +51,16 @@
   // The engine-owned primitive returns only activation metadata. Keep public CallSite methods
   // here so both execution engines expose the same ordinary JavaScript facade.
   const ErrorCtor = G.Error || Error;
+  if (ErrorCtor.stackTraceLimit === undefined) defineHidden(ErrorCtor, "stackTraceLimit", 10);
   const captureFrameSnapshots = ErrorCtor.captureStackTrace;
   if (typeof captureFrameSnapshots === "function") {
     function captureStackTrace(target: any, constructorOpt?: Function): void {
       const frames = captureFrameSnapshots(target, constructorOpt) || [];
       const sites: any[] = [];
-      for (let i = 0; i < frames.length; i++) {
+      const configuredLimit = ErrorCtor.stackTraceLimit;
+      const limit = typeof configuredLimit === "number"
+        ? Math.max(0, configuredLimit) : 0;
+      for (let i = 0; i < frames.length && i < limit; i++) {
         const frame = frames[i];
         const site: any = {};
         const functionName = frame.functionName;
