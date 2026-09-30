@@ -1381,8 +1381,13 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
      * class's property store, and a function value is not a `kiln_object` -- written through
      * `kiln_c99_object_of(target)` it landed in the closure itself. */
     {
-        kiln_value holder =
-            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_store(kiln_c99_closure_of(target)) : target;
+        kiln_value holder = target;
+        if (target.tag == KILN_VALUE_FUNCTION) {
+            holder = kiln_c99_closure_store(kiln_c99_closure_of(target));
+        } else if (kiln_c99_exotic_store(target) != NULL) {
+            kiln_value *store = kiln_c99_exotic_store(target);
+            if (store != NULL && store->tag == KILN_VALUE_OBJECT) holder = *store;
+        }
         if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
     }
     return KILN_C99_OK;
@@ -1416,8 +1421,13 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
      * class's property store, and a function value is not a `kiln_object` -- written through
      * `kiln_c99_object_of(target)` it landed in the closure itself. */
     {
-        kiln_value holder =
-            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_store(kiln_c99_closure_of(target)) : target;
+        kiln_value holder = target;
+        if (target.tag == KILN_VALUE_FUNCTION) {
+            holder = kiln_c99_closure_store(kiln_c99_closure_of(target));
+        } else if (kiln_c99_exotic_store(target) != NULL) {
+            kiln_value *store = kiln_c99_exotic_store(target);
+            if (store != NULL && store->tag == KILN_VALUE_OBJECT) holder = *store;
+        }
         if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
     }
     return KILN_C99_OK;
@@ -1434,6 +1444,12 @@ static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
         if (status != KILN_C99_OK) {
             return status;
         }
+        return kiln_c99_define_method_key(store, key, method);
+    }
+    if (target.tag != KILN_VALUE_OBJECT && kiln_c99_exotic_store(target) != NULL) {
+        kiln_value store;
+        status = kiln_c99_definition_store(target, &store);
+        if (status != KILN_C99_OK) return status;
         return kiln_c99_define_method_key(store, key, method);
     }
     if (target.tag != KILN_VALUE_OBJECT) {

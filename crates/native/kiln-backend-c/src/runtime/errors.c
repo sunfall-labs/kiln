@@ -228,7 +228,9 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     } else if (target.tag == KILN_VALUE_OBJECT) {
         object = kiln_c99_object_of(target);
     } else {
-        return NULL;
+        kiln_value *store = kiln_c99_exotic_store(target);
+        if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
+        object = kiln_c99_object_of(*store);
     }
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
@@ -255,7 +257,9 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
     } else if (target.tag == KILN_VALUE_OBJECT) {
         object = kiln_c99_object_of(target);
     } else {
-        return NULL;
+        kiln_value *store = kiln_c99_exotic_store(target);
+        if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
+        object = kiln_c99_object_of(*store);
     }
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);

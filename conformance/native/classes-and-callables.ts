@@ -105,6 +105,19 @@ class Middle extends Rooted {}
 class Leaf extends Middle {}
 console.log(new Rooted().builtBy, new Middle().builtBy, new Leaf().builtBy);
 
+// A constructor may explicitly return any object, including a callable function. This also
+// exercises libraries whose constructors return a closure with methods attached to it.
+function CallableResult(): any { return function () { return "returned function"; }; }
+console.log(new (CallableResult as any)()());
+
+// Built-in collection subclasses still carry private elements on their instance store.
+class PrivateMap extends Map<string, number> {
+  #sizeValue = 1;
+  #value(): number { return this.#sizeValue; }
+  read(): number { return this.#value(); }
+}
+console.log(new PrivateMap().read());
+
 // An arrow has no `new.target` of its own and uses the one from where it was written.
 function Outer(this: any): string {
   const inner = (): string => (new.target === Outer ? "outer" : String(new.target));

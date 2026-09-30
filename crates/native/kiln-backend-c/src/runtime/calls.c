@@ -1,4 +1,34 @@
 
+/* JavaScript's constructor return override is any object, including a function. Keep this
+ * predicate separate from prototype eligibility: `null` is a legal prototype but a primitive
+ * constructor return, while Temporal and host callables are objects even though they are not all
+ * represented by ordinary object storage. */
+static int kiln_c99_is_object_value(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_OBJECT:
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_ARRAY:
+    case KILN_VALUE_METHOD:
+    case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_DATE:
+    case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
+    case KILN_VALUE_SETTLER:
+    case KILN_VALUE_BOUND:
+    case KILN_VALUE_REGEXP:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
+    case KILN_VALUE_PROXY:
+    case KILN_VALUE_TEMPORAL:
+    case KILN_VALUE_COMMONJS_REQUIRE:
+    case KILN_VALUE_DATA_VIEW:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
@@ -562,7 +592,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
      * constructor whose `super()` built something exotic yields *that* -- the instance allocated
      * above was abandoned the moment `this` was rebound, and returning it would hand back an
      * ordinary object wearing the subclass's prototype. */
-    *result = produced.tag == KILN_VALUE_OBJECT || produced.tag == KILN_VALUE_ARRAY ? produced
+    *result = kiln_c99_is_object_value(produced) ? produced
               : adopted.tag != KILN_VALUE_UNDEFINED                                 ? adopted
                                                                                     : instance;
     return KILN_C99_OK;
