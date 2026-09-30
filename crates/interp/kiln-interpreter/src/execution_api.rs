@@ -983,8 +983,18 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             // The entry is the module the loop is for: once its await has settled, whatever the
             // continuation armed -- a timer, a server -- still has to run. Stopping here left
             // `await x; setTimeout(f)` with `f` never called (fixed 2026-09-19); a dependency
-            // returns to its importer instead, which is what `until_module` is for.
-            if drain {
+            // returns to its importer instead, which is what `until_module` is for. But an
+            // await that settled by *failing* is reported before that drain, not after: a
+            // faulted continuation cannot stop what it armed, so waiting for full quiet first
+            // holds the loop open exactly as long as the worker it can no longer reach (an
+            // actor whose owner died with the error). Node reports the uncaught error and
+            // exits, terminating workers with the process; the rejection check below is what
+            // reports it here.
+            if drain
+                && vm.module_outcome().is_none_or(|outcome| {
+                    !matches!(outcome, Settled::Rejected(_))
+                })
+            {
                 vm.run_node_event_loop(runtime)
                     .map_err(|error| record(&mut vm, error))?;
             }
