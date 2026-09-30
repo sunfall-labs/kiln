@@ -2557,7 +2557,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         upvalues[0] = kiln_c99_copy_text("", 0);
         kiln_c99_gc_keep_alive(&upvalues[0]);
         kiln_value primitive;
-        int status = kiln_c99_to_primitive(host, args[0], KILN_C99_HINT_STRING,
+        int status = kiln_c99_to_primitive(host, args[0], 1 /* string */,
                                            &primitive, depth, thrown);
         if (status != KILN_C99_OK) return status;
         kiln_c99_gc_keep_alive(&upvalues[0]);
@@ -2575,7 +2575,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         for (i = 0; i < argc - 1; ++i) {
             kiln_value primitive;
             kiln_value text;
-            int status = kiln_c99_to_primitive(host, args[i], KILN_C99_HINT_STRING,
+            int status = kiln_c99_to_primitive(host, args[i], 1 /* string */,
                                                &primitive, depth, thrown);
             if (status != KILN_C99_OK) return status;
             kiln_c99_gc_keep_alive(&upvalues[0]);
@@ -2603,7 +2603,7 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
             }
         }
         kiln_value primitive;
-        int status = kiln_c99_to_primitive(host, args[argc - 1], KILN_C99_HINT_STRING,
+        int status = kiln_c99_to_primitive(host, args[argc - 1], 1 /* string */,
                                            &primitive, depth, thrown);
         if (status != KILN_C99_OK) return status;
         kiln_c99_gc_keep_alive(&upvalues[0]);
