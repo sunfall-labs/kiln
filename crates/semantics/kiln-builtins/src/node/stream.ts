@@ -1,6 +1,8 @@
 // kiln-builtins: node:stream implementation (Phase 5.2, ADR 0005)
 
 class EventEmitter {
+  static defaultMaxListeners = 10;
+
   _events: Record<string | symbol, Function[]>;
   _eventsCount: number;
   _maxListeners: number | undefined;
@@ -99,6 +101,21 @@ class EventEmitter {
   listenerCount(event: string | symbol): number {
     const list = this._events ? this._events[event] : undefined;
     return Array.isArray(list) ? list.length : 0;
+  }
+
+  setMaxListeners(n: number): this {
+    const max = Number(n);
+    if (Number.isNaN(max) || max < 0) {
+      throw new RangeError('The value of "n" is out of range. It must be >= 0.');
+    }
+    this._maxListeners = max;
+    return this;
+  }
+
+  getMaxListeners(): number {
+    return this._maxListeners === undefined
+      ? EventEmitter.defaultMaxListeners
+      : this._maxListeners;
   }
 
   listeners(event: string | symbol): Function[] {

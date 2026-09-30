@@ -1692,8 +1692,14 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                                           client);
             if (status == KILN_C99_OK) {
                 client->response_started = 1;
-                status = kiln_c99_call(client->host, &ignored, client->callback,
-                                       kiln_c99_undefined(), &client->response, 1, 0, exception);
+                if (kiln_c99_is_callable(client->callback)) {
+                    status = kiln_c99_call(client->host, &ignored, client->callback,
+                                           kiln_c99_undefined(), &client->response, 1, 0,
+                                           exception);
+                } else {
+                    status = kiln_c99_node_emit(client->host, client->object, "response",
+                                                client->response, 1, 0, exception);
+                }
             }
         return status;
     }
@@ -4141,8 +4147,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         host_value = kiln_c99_text(host_value);
         path_value = kiln_c99_text(path_value);
         method_value = kiln_c99_text(method_value);
-        if (!kiln_c99_is_callable(callback))
-            return kiln_c99_throw_not_a(thrown, callback, "function");
         request = (kiln_node_client_request *)kiln_c99_gc_calloc(KILN_GC_NODE_CLIENT_REQUEST,
                                                                  sizeof *request);
         if (request == NULL) return KILN_C99_OUT_OF_MEMORY;
