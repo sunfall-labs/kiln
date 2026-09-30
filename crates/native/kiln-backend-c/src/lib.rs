@@ -646,10 +646,11 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 &instantiation,
                 program_hash,
                 &instantiation_symbol,
-                &symbol,
+                Some(&symbol),
                 true,
                 true,
                 &policy,
+                false,
                 logical_path,
             )
         })?;
@@ -679,6 +680,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
             instantiate,
             false,
             &policy,
+            false,
             logical_path,
         )
     })?;
@@ -4824,6 +4826,7 @@ fn render_module(
         false,
         false,
         policy,
+        commonjs,
         diagnostic_site,
     )
 }
@@ -4836,6 +4839,7 @@ fn render_module_with_unit(
     external_unit: bool,
     export_cells: bool,
     policy: &EmissionPolicy,
+    commonjs: bool,
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
     // `parallelMap` site records name positions in the module as written; emission packs the
