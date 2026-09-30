@@ -194,6 +194,12 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, intl_collate) => {
         concat!("int ", stringify!($name), "(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);\n")
     };
+    ($group:ident, $name:ident, intl_string_case) => {
+        concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, const uint8_t *locale, uint64_t locale_len, uint32_t uppercase, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, intl_datetime_format) => {
+        concat!("int ", stringify!($name), "(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds, uint32_t operation, const uint8_t **out, uint64_t *out_len);\n")
+    };
     ($group:ident, $name:ident, url_set) => {
         concat!("int ", stringify!($name), "(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };

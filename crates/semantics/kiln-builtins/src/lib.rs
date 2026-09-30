@@ -1399,6 +1399,9 @@ pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 /// Locale aware string case methods, backed by the shared Unicode case mappings.
 pub const STRING_LOCALE_BOOTSTRAP_SOURCE: &str = include_str!("string_locale.ts");
 
+/// Shared CanonicalizeLocaleList behavior for the native string and Intl facades.
+pub const LOCALE_TOOLS_BOOTSTRAP_SOURCE: &str = include_str!("locale_tools.ts");
+
 /// Native Intl.DateTimeFormat facade over the shared ICU4X formatter provider.
 pub const INTL_DATETIME_BOOTSTRAP_SOURCE: &str = include_str!("intl_datetime.ts");
 
@@ -1474,6 +1477,10 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
+        selected(
+            family::STRING_LOCALE | family::INTL_DATETIME,
+            LOCALE_TOOLS_BOOTSTRAP_SOURCE,
+        ),
         selected(family::STRING_LOCALE, STRING_LOCALE_BOOTSTRAP_SOURCE),
         selected(family::INTL_DATETIME, INTL_DATETIME_BOOTSTRAP_SOURCE),
         ANNEXB_BOOTSTRAP_SOURCE,
@@ -1511,6 +1518,10 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
             source.push_str(name);
             source.push(';');
         }
+    }
+    source.push_str("\ndelete (globalThis as any).__kilnLocaleTools;");
+    if families & (family::STRING_LOCALE | family::INTL_DATETIME) == 0 {
+        source.push_str("\ndelete (globalThis as any).__kilnHostStringLocaleCase;");
     }
     source
 }

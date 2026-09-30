@@ -4,11 +4,12 @@ use kiln_intl::casemap::map_case_utf16;
 use kiln_intl::datetime::{DateTimeFormat, Options as DateTimeOptions, TimeZoneChoice};
 use kiln_intl::segmenter::Segmenter;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 thread_local! {
     static RECORDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
-    static DATETIME_FORMATTER: RefCell<Option<(String, DateTimeFormat)>> = const { RefCell::new(None) };
+    static DATETIME_FORMATTERS: RefCell<VecDeque<(String, DateTimeFormat)>> = const { RefCell::new(VecDeque::new()) };
     static DATETIME_RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -237,6 +238,47 @@ fn datetime_result(
     }
 }
 
+fn canonical_locales(locales: &[String]) -> Result<Vec<String>, kiln_intl::Error> {
+    let canonical = locales
+        .iter()
+        .map(|locale| kiln_intl::locale::canonicalize(locale))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unique = Vec::with_capacity(canonical.len());
+    for locale in canonical {
+        if !unique.contains(&locale) {
+            unique.push(locale);
+        }
+    }
+    Ok(unique)
+}
+
+fn supported_locale_result(locales: &[String]) -> Result<String, kiln_intl::Error> {
+    let canonical = canonical_locales(locales)?;
+    let supported = kiln_intl::locale::supported_locales(&canonical);
+    let mut output = String::from("[");
+    for (index, locale) in supported.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        json_quote(&mut output, locale);
+    }
+    output.push(']');
+    Ok(output)
+}
+
+fn canonical_locale_result(locales: &[String]) -> Result<String, kiln_intl::Error> {
+    let canonical = canonical_locales(locales)?;
+    let mut output = String::from("[");
+    for (index, locale) in canonical.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        json_quote(&mut output, locale);
+    }
+    output.push(']');
+    Ok(output)
+}
+
 /// Format a date or return the formatter's resolved record/parts as JSON for the TypeScript
 /// facade. The formatter and output bytes are thread-local, keyed by the canonical request.
 #[unsafe(no_mangle)]
@@ -248,7 +290,7 @@ pub unsafe extern "C" fn kiln_intl_datetime_format(
     out: *mut *const u8,
     out_len: *mut u64,
 ) -> i32 {
-    if out.is_null() || out_len.is_null() || spec.is_null() || operation > 2 {
+    if out.is_null() || out_len.is_null() || spec.is_null() || operation > 6 {
         return INVALID_ARGUMENT;
     }
     let Ok(spec_len) = usize::try_from(spec_len) else {
@@ -259,14 +301,30 @@ pub unsafe extern "C" fn kiln_intl_datetime_format(
         return INVALID_ARGUMENT;
     };
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        DATETIME_FORMATTER.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            if slot.as_ref().is_none_or(|(known, _)| known != spec_text) {
+        if operation == 5 || operation == 6 {
+            let (locales, _) = parse_datetime_spec(bytes).map_err(|_| -1)?;
+            return if operation == 5 {
+                supported_locale_result(&locales).map_err(|_| -3)
+            } else {
+                canonical_locale_result(&locales).map_err(|_| -3)
+            };
+        }
+        DATETIME_FORMATTERS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let existing = cache.iter().position(|(known, _)| known == spec_text);
+            if let Some(index) = existing {
+                if let Some(entry) = cache.remove(index) {
+                    cache.push_front(entry);
+                }
+            } else {
                 let (locales, options) = parse_datetime_spec(bytes).map_err(|_| -1)?;
                 let formatter = DateTimeFormat::new(&locales, options).map_err(|_| -3)?;
-                *slot = Some((spec_text.to_owned(), formatter));
+                cache.push_front((spec_text.to_owned(), formatter));
+                if cache.len() > 32 {
+                    cache.pop_back();
+                }
             }
-            let formatter = &slot.as_ref().expect("formatter just initialized").1;
+            let formatter = &cache.front().expect("formatter just initialized").1;
             datetime_result(formatter, epoch_milliseconds, operation).map_err(|_| -3)
         })
     }));

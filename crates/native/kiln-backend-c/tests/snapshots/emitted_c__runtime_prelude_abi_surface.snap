@@ -1353,6 +1353,10 @@ int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
 int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind);
 int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
+                          uint64_t locale_len, uint32_t uppercase, uint16_t *out,
+                          uint64_t capacity, uint64_t *out_len);
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds, uint32_t operation, const uint8_t **out, uint64_t *out_len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_lane_run_fn)(void *context, void *host, void *thrown);
@@ -1478,6 +1482,8 @@ void kiln_atomics_wait_async_cancel(uint64_t ticket);
 uint64_t kiln_atomics_notify(void *handle, uint64_t offset, uint64_t count);
 int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, uint16_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale, uint64_t locale_len, uint32_t uppercase, uint16_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds, uint32_t operation, const uint8_t **out, uint64_t *out_len);
 int kiln_ffi_open(const uint8_t *path, uint64_t path_len, uint64_t *out_library);
 int kiln_ffi_close(uint64_t library);
 int kiln_ffi_prepare(uint64_t library, const uint8_t *symbol, uint64_t symbol_len, const uint32_t *argument_types, uint64_t argument_count, uint32_t result_type, uint64_t *out_function);
