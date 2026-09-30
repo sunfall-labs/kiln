@@ -21,3 +21,12 @@ const make = new Function("scope",
   '};');
 const validate = make(s);
 console.log("validator", JSON.stringify(validate(1)), JSON.stringify(validate(2, { instancePath: "/x" })));
+const compiled = new Function(
+  'function root() { return "rendered"; } return {root: root};',
+)();
+console.log("function declaration", typeof compiled.root, compiled.root());
+const rendered = new Function(
+  'function root() { try { throw "caught"; } catch (error) { return {value: error}; } } ' +
+  'return {root: root};',
+)();
+console.log("dynamic try catch", rendered.root().value);

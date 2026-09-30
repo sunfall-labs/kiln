@@ -300,16 +300,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::NodeStringDecoderConstructor, _) => {
                 self.stack.push(string_decoder::node_string_decoder());
             }
-            // `new Object(v)` and `Object(v)` are the same operation: the specification routes
-            // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
-            // use for.  Sharing the call behaviour keeps them from drifting apart.
+            // The call form delegates to ToObject. Construction shares that behavior unless
+            // Reflect.construct supplied a distinct new.target, which the constructor branch
+            // below preserves as an ordinary allocation.
             Value::Native(Native::ObjectConstructor, _) => {
-                let object = call_native(
-                    &self.intrinsics,
-                    Native::ObjectConstructor,
-                    &Value::Undefined,
-                    &arguments,
-                )?;
+                // `Object(value)` normally returns `value` when it is already an object. With
+                // a distinct `new.target`, [[Construct]] instead performs
+                // OrdinaryCreateFromConstructor and ignores that argument. The shared tail
+                // below applies `new_target.prototype` (including its realm fallback).
+                let object = if subclassed {
+                    Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+                } else {
+                    call_native(
+                        &self.intrinsics,
+                        Native::ObjectConstructor,
+                        &Value::Undefined,
+                        &arguments,
+                    )?
+                };
                 self.stack.push(object);
             }
             // `new Uint8Array(arrayLike)` and `new Uint8Array(iterable)` read their elements

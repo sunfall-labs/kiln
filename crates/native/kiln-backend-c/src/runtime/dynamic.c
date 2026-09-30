@@ -187,6 +187,7 @@ typedef enum {
     KILN_DYN_REGEX,
     KILN_DYN_IDENT,
     KILN_DYN_KW_RETURN,
+    KILN_DYN_KW_THROW,
     KILN_DYN_KW_IF,
     KILN_DYN_KW_ELSE,
     KILN_DYN_KW_VAR,
@@ -466,6 +467,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 
         #define KILN_CHECK_KW(s, k) if (id_len == strlen(s) && strncmp(&lex->src[id_start], s, id_len) == 0) { lex->curr.kind = k; return; }
         KILN_CHECK_KW("return", KILN_DYN_KW_RETURN);
+        KILN_CHECK_KW("throw", KILN_DYN_KW_THROW);
         KILN_CHECK_KW("if", KILN_DYN_KW_IF);
         KILN_CHECK_KW("else", KILN_DYN_KW_ELSE);
         KILN_CHECK_KW("var", KILN_DYN_KW_VAR);
@@ -1368,9 +1370,127 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     return kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth, out, thrown);
 }
 
+static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {
+    if (lex->curr.kind != KILN_DYN_LBRACE) return 0;
+    size_t start = lex->pos;
+    size_t pos = start;
+    int nesting = 1;
+    while (pos < lex->len && nesting > 0) {
+        char c = lex->src[pos++];
+        if (c == '\"' || c == '\'' || c == '`') {
+            char quote = c;
+            while (pos < lex->len) {
+                c = lex->src[pos++];
+                if (c == '\\' && pos < lex->len) pos++;
+                else if (c == quote) break;
+            }
+        } else if (c == '{') {
+            nesting++;
+        } else if (c == '}') {
+            nesting--;
+        }
+    }
+    if (nesting != 0) return 0;
+    *body = &lex->src[start];
+    *body_len = pos - start - 1;
+    lex->pos = pos;
+    kiln_dyn_lexer_next(lex);
+    return 1;
+}
+
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *result, int *returned, kiln_value *thrown) {
+    if (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 3 &&
+        memcmp(lex->curr.start, "try", 3) == 0) {
+        const char *try_body;
+        size_t try_len;
+        kiln_dyn_lexer block;
+        kiln_dyn_lexer_next(lex);
+        if (!kiln_dyn_capture_block(lex, &try_body, &try_len)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                        "Expected block after try");
+        }
+        memset(&block, 0, sizeof(block));
+        block.src = try_body;
+        block.len = try_len;
+        kiln_dyn_lexer_next(&block);
+        int status = KILN_C99_OK;
+        while (block.curr.kind != KILN_DYN_EOF) {
+            status = kiln_dyn_eval_stmt(host, &block, scope, receiver, args, argc, depth,
+                                        result, returned, thrown);
+            if (status != KILN_C99_OK || *returned) break;
+        }
+        kiln_dyn_token_free(&block.curr);
+        int did_throw = status == KILN_C99_THROWN;
+        kiln_value exception = did_throw && thrown != NULL ? *thrown : kiln_c99_undefined();
+        if (did_throw) {
+            status = KILN_C99_OK;
+            if (thrown != NULL) *thrown = kiln_c99_undefined();
+        }
+        int has_catch = lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 5 &&
+                        memcmp(lex->curr.start, "catch", 5) == 0;
+        if (has_catch) {
+            const char *catch_name = NULL;
+            size_t catch_name_len = 0;
+            const char *catch_body;
+            size_t catch_len;
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind != KILN_DYN_LPAREN) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                            "Expected '(' after catch");
+            }
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind == KILN_DYN_IDENT) {
+                catch_name = lex->curr.start;
+                catch_name_len = lex->curr.len;
+                kiln_dyn_lexer_next(lex);
+            }
+            if (lex->curr.kind != KILN_DYN_RPAREN) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                            "Expected ')' after catch binding");
+            }
+            kiln_dyn_lexer_next(lex);
+            if (!kiln_dyn_capture_block(lex, &catch_body, &catch_len)) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                            "Expected catch block");
+            }
+            if (did_throw) {
+                kiln_dyn_scope catch_scope;
+                kiln_dyn_scope_init(&catch_scope, scope);
+                if (catch_name != NULL &&
+                    !kiln_dyn_scope_set(&catch_scope, catch_name, catch_name_len, exception)) {
+                    kiln_dyn_scope_destroy(&catch_scope);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                memset(&block, 0, sizeof(block));
+                block.src = catch_body;
+                block.len = catch_len;
+                kiln_dyn_lexer_next(&block);
+                while (block.curr.kind != KILN_DYN_EOF) {
+                    status = kiln_dyn_eval_stmt(host, &block, &catch_scope, receiver, args,
+                                                argc, depth, result, returned, thrown);
+                    if (status != KILN_C99_OK || *returned) break;
+                }
+                kiln_dyn_token_free(&block.curr);
+                kiln_dyn_scope_destroy(&catch_scope);
+            }
+        } else if (did_throw) {
+            if (thrown != NULL) *thrown = exception;
+            return KILN_C99_THROWN;
+        }
+        return status;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_THROW) {
+        kiln_value exception;
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                        &exception, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+        if (thrown != NULL) *thrown = exception;
+        return KILN_C99_THROWN;
+    }
     if (lex->curr.kind == KILN_DYN_IDENT) {
         size_t saved_pos = lex->pos;
         kiln_dyn_token saved_tok = lex->curr;
