@@ -161,6 +161,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
             "main.js",
             &embedded,
             profile,
+            false,
             || {
                 calls.set(calls.get() + 1);
                 Ok(expected.clone())
