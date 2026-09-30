@@ -1022,6 +1022,12 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_DATA_VIEW:
             *answer = value.tag == KILN_VALUE_DATA_VIEW;
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE:
+            /* `Object.getPrototypeOf(Uint8Array)` is the abstract `%TypedArray%` constructor.
+             * Its `@@hasInstance` follows the inherited Function implementation and accepts
+             * every typed-array view, which packages such as axios use to recognize views. */
+            *answer = value.tag == KILN_VALUE_TYPED_ARRAY;
+            return KILN_C99_OK;
         case KILN_C99_BUILTIN_INT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:

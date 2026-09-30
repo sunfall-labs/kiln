@@ -3671,6 +3671,21 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                     ? kiln_c99_text(args[1])
                                     : kiln_c99_copy_text("localhost", 9);
         size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
+        if (argc > 0 && args[0].tag == KILN_VALUE_OBJECT) {
+            kiln_value options = args[0];
+            int get_status = kiln_c99_get(host, options, "port", 4, &port_value, depth, thrown);
+            if (get_status != KILN_C99_OK) return get_status;
+            get_status = kiln_c99_get(host, options, "host", 4, &host_value, depth, thrown);
+            if (get_status != KILN_C99_OK) return get_status;
+            if (host_value.tag == KILN_VALUE_UNDEFINED) {
+                get_status = kiln_c99_get(host, options, "hostname", 8, &host_value,
+                                          depth, thrown);
+                if (get_status != KILN_C99_OK) return get_status;
+            }
+            if (host_value.tag == KILN_VALUE_UNDEFINED)
+                host_value = kiln_c99_copy_text("localhost", 9);
+            callback_index = 1;
+        }
         double port = kiln_c99_as_number(port_value);
         int status;
         if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))

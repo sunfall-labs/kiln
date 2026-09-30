@@ -14,5 +14,7 @@ LegacyReadable.prototype.addListener = LegacyReadable.prototype.on;
 const stream = new LegacyReadable();
 let seen = 0;
 stream.on('value', value => { seen += value; });
+const listenerCount = stream.listenerCount('value');
 stream.emit('value', 7);
-console.log(seen, stream instanceof Stream, Stream.prototype.on === Stream.prototype.addListener);
+console.log(seen, listenerCount, stream instanceof Stream,
+  Stream.prototype.on === Stream.prototype.addListener);

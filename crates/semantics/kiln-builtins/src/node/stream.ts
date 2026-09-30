@@ -96,6 +96,11 @@ class EventEmitter {
     return this;
   }
 
+  listenerCount(event: string | symbol): number {
+    const list = this._events ? this._events[event] : undefined;
+    return Array.isArray(list) ? list.length : 0;
+  }
+
   listeners(event: string | symbol): Function[] {
     if (!this._events || !this._events[event]) return [];
     return this._events[event].slice();
