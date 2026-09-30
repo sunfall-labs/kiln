@@ -1,4 +1,6 @@
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
+static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
+                                                               kiln_val value);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
