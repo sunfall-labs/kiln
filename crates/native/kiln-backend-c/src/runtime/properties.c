@@ -708,8 +708,8 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             status = kiln_c99_new_object_for_owner(&date->properties, date);
             if (status != KILN_C99_OK) return status;
         }
-        kiln_string stable;
-        kiln_value key_value = kiln_c99_key_value(key, &stable);
+        const kiln_string *canonical = ikey;
+        kiln_value key_value = kiln_c99_key_value(key, &canonical);
         return kiln_c99_set_with_receiver(host, date->properties, key_value, value,
                                           target, strict, depth, thrown);
     }

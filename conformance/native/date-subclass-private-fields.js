@@ -12,9 +12,8 @@ date.flagValue = false;
 console.log(date.flag());
 
 const marker = Symbol('marker');
-const held = { value: 42 };
 const plainDate = new Date(0);
-plainDate.extra = held;
+plainDate.extra = { value: 42 };
 plainDate[marker] = 'symbol';
 console.log(Object.keys(plainDate).join(','), Object.hasOwn(plainDate, 'extra'),
   Object.getOwnPropertyDescriptor(plainDate, marker).value);
