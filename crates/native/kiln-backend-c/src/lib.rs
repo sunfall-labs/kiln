@@ -2821,9 +2821,7 @@ fn prune_unreachable_direct_eval(program: &mut Program) -> bool {
             }
         }
         for (pc, instruction) in code.iter_mut().enumerate() {
-            if matches!(instruction, Instruction::DirectEval(_))
-                && !reachable.contains(&pc)
-            {
+            if matches!(instruction, Instruction::DirectEval(_)) && !reachable.contains(&pc) {
                 *instruction = Instruction::Nop;
             }
         }

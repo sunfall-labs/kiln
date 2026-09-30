@@ -820,7 +820,8 @@ fn snapshot_module_payload(
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let (mut hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
-        hir.module_id = kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
+        hir.module_id =
+            kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
         if hir.has_static_module_syntax() {
             return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
                 path: path.to_path_buf(),
@@ -1342,8 +1343,7 @@ mod module_identity_tests {
 
     #[test]
     fn memoized_module_ir_tracks_graph_identity_changes_for_same_file() {
-        static NEXT: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "kiln-private-module-identity-{}-{}",
             std::process::id(),

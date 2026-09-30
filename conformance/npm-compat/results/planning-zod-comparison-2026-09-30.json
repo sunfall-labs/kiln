@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "experiment": "shared call-planning tables versus deep-copy control",
+  "source_commit": "a469094d81584b3cb497e3719c7cf20cd147d5a2",
+  "control_source_diff": "direct.rs only; ef7ac112 with unrelated patch reverted",
+  "coverage": "one isolated cold build per arm; not a warmed runtime benchmark",
+  "shared": {
+    "schema": 1,
+    "generated": "2026-09-30T18:15:50.997420+00:00",
+    "state": "complete",
+    "completed": 1,
+    "inventory_sha256": "9b611ad683899bd56bbdce5b9edc787c8a47361fa2afb92508e8d5fb4e8c1a49",
+    "kiln_sha256": "4227b82a12ddc3a336a724af6b8abaa3efa17e5f089aae5f65f1bcd967978c94",
+    "selected": 1,
+    "deferred": 359,
+    "timezone": "UTC",
+    "host": "node",
+    "kiln_jobs": "1",
+    "timing_kind": "phase wall time including startup; not warmed workload throughput",
+    "results": [
+      {
+        "name": "zod",
+        "version": "4.6.5",
+        "porffor_status": "runtime-error",
+        "test_sha256": "c6ae88dc9940fd57299394d921ea19a91ac5f790c294e6509c1d927b5cc76627",
+        "phases": {
+          "node": {
+            "argv": [
+              "node",
+              "~/Work/kiln-npm-perf-shared/conformance/npm-compat/tests/zod.test.mjs"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 0.11409
+          },
+          "build": {
+            "argv": [
+              "~/Work/kiln-npm-perf-shared/target/release/kiln",
+              "--one-shot",
+              "build",
+              "~/Work/kiln-npm-perf-shared/conformance/npm-compat/tests/zod.test.mjs",
+              "--node",
+              "--output",
+              "~/Work/kiln-npm-perf-shared/conformance/npm-compat/results/raw/20260930T181550Z.1982320/zod.bin"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 14.257481,
+            "native_timing_ms": {
+              "emit": 3860,
+              "compile": 9552,
+              "link": 110
+            }
+          },
+          "native": {
+            "argv": [
+              "~/Work/kiln-npm-perf-shared/conformance/npm-compat/results/raw/20260930T181550Z.1982320/zod.bin"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 0.064145
+          }
+        },
+        "binary_bytes": 61743832,
+        "status": "pass"
+      }
+    ],
+    "git_head": "a469094d81584b3cb497e3719c7cf20cd147d5a2",
+    "node_version": "v26.8.1",
+    "counts": {
+      "pass": 1
+    }
+  },
+  "copy_control": {
+    "schema": 1,
+    "generated": "2026-09-30T18:23:54.239765+00:00",
+    "state": "complete",
+    "completed": 1,
+    "inventory_sha256": "9b611ad683899bd56bbdce5b9edc787c8a47361fa2afb92508e8d5fb4e8c1a49",
+    "kiln_sha256": "a9907848e410078c445603682177edc3ee7a0099e3e40335cd65fa7358612403",
+    "selected": 1,
+    "deferred": 359,
+    "timezone": "UTC",
+    "host": "node",
+    "kiln_jobs": "1",
+    "timing_kind": "phase wall time including startup; not warmed workload throughput",
+    "results": [
+      {
+        "name": "zod",
+        "version": "4.6.5",
+        "porffor_status": "runtime-error",
+        "test_sha256": "c6ae88dc9940fd57299394d921ea19a91ac5f790c294e6509c1d927b5cc76627",
+        "phases": {
+          "node": {
+            "argv": [
+              "node",
+              "~/Work/kiln-npm-perf-copy/conformance/npm-compat/tests/zod.test.mjs"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 0.114007
+          },
+          "build": {
+            "argv": [
+              "~/Work/kiln-npm-perf-copy/.scratch/npm-perf/kiln-copy",
+              "--one-shot",
+              "build",
+              "~/Work/kiln-npm-perf-copy/conformance/npm-compat/tests/zod.test.mjs",
+              "--node",
+              "--output",
+              "~/Work/kiln-npm-perf-copy/conformance/npm-compat/results/raw/20260930T182354Z.1984525/zod.bin"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 14.104324,
+            "native_timing_ms": {
+              "emit": 3898,
+              "compile": 9391,
+              "link": 116
+            }
+          },
+          "native": {
+            "argv": [
+              "~/Work/kiln-npm-perf-copy/conformance/npm-compat/results/raw/20260930T182354Z.1984525/zod.bin"
+            ],
+            "exit": 0,
+            "timeout": false,
+            "seconds": 0.031815
+          }
+        },
+        "binary_bytes": 61743832,
+        "status": "pass"
+      }
+    ],
+    "git_head": "f4390adbfa6ca9954e176484be834b94ca93aedb",
+    "node_version": "v26.8.1",
+    "counts": {
+      "pass": 1
+    }
+  },
+  "output_sha256": {
+    "zod.node.stdout": "80b1d0304cd9664eca7b68ee74d81be38a8f9368ad991e2be3e0efabd7ec550f",
+    "zod.kiln.stdout": "80b1d0304cd9664eca7b68ee74d81be38a8f9368ad991e2be3e0efabd7ec550f"
+  },
+  "conclusion": "No measurable compile-time improvement on Zod: emit 3860 ms shared versus 3898 ms copy (1.0% difference). Total build 14.257 versus 14.104 seconds. This single trial does not support a performance speedup claim."
+}

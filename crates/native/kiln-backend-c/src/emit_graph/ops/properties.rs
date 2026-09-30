@@ -640,7 +640,9 @@ pub(super) fn emit_define_own_property(
     value: &ValueId,
     ctx: &OpContext,
 ) {
-    let (pc, label) = ctx.origins.get(&vid)
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
         .map(|origin| (origin.pc, origin.label.as_str()))
         .unwrap_or((0, "Op"));
     let check = status_check(ctx.diagnostic_site, pc, label, ctx.unwind);
@@ -658,7 +660,9 @@ pub(super) fn emit_define_own_computed(
     value: &ValueId,
     ctx: &OpContext,
 ) {
-    let (pc, label) = ctx.origins.get(&vid)
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
         .map(|origin| (origin.pc, origin.label.as_str()))
         .unwrap_or((0, "Op"));
     let check = status_check(ctx.diagnostic_site, pc, label, ctx.unwind);

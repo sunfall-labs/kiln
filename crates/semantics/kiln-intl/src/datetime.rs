@@ -39,15 +39,15 @@ use icu_datetime::range::DateRangeFormatter;
 use icu_locale_core::preferences::extensions::unicode::keywords::{
     CalendarAlgorithm, HourCycle, NumberingSystem,
 };
-use icu_time::zone::iana::IanaParserExtended;
 use icu_time::zone::UtcOffset;
+use icu_time::zone::iana::IanaParserExtended;
 use icu_time::{DateTime, TimeZone, ZonedDateTime};
+#[cfg(feature = "timezone_database")]
+use std::sync::OnceLock;
 #[cfg(feature = "timezone_database")]
 use timezone_provider::provider::TimeZoneProvider;
 #[cfg(feature = "timezone_database")]
 use timezone_provider::tzif::CompiledTzdbProvider;
-#[cfg(feature = "timezone_database")]
-use std::sync::OnceLock;
 
 use crate::locale::{RelevantKey, Resolution};
 use crate::{Error, Setting};
@@ -496,10 +496,16 @@ impl DateTimeFormat {
     /// `{start} - {end}`, and the two ends of a range are by construction in one zone.
     fn at(&self, epoch_milliseconds: f64, naming: f64) -> Result<ZonedInstant, Error> {
         let offset = resolve_offset(&self.zone, epoch_milliseconds).ok_or_else(|| {
-            Error::range(format!("time zone {} has no transition data", self.time_zone()))
+            Error::range(format!(
+                "time zone {} has no transition data",
+                self.time_zone()
+            ))
         })?;
         let naming_offset = resolve_offset(&self.zone, naming).ok_or_else(|| {
-            Error::range(format!("time zone {} has no transition data", self.time_zone()))
+            Error::range(format!(
+                "time zone {} has no transition data",
+                self.time_zone()
+            ))
         })?;
         let milliseconds = epoch_milliseconds as i64;
         let zoned = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(milliseconds, offset);
@@ -507,7 +513,8 @@ impl DateTimeFormat {
             TimeZoneChoice::Named(_, id) => *id,
             TimeZoneChoice::Offset(_) => TimeZone::UNKNOWN,
         };
-        let naming = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, naming_offset);
+        let naming =
+            ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, naming_offset);
         let info = id.with_offset(Some(naming_offset)).at_date_time(DateTime {
             date: naming.date,
             time: naming.time,

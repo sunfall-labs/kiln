@@ -4290,9 +4290,13 @@ mod tests {
               (function(x) { throw Error("Dynamic require of " + x + " is not supported"); });
             const require_path = __commonJS((exports) => { const os = __require("os"); });
         "#;
-        assert!(discover_node_runtime_requests("prettier/index.mjs", bundled_source).iter().any(
-            |request| request.specifier == "os" && request.importer == "prettier/index.mjs"
-        ));
+        assert!(
+            discover_node_runtime_requests("prettier/index.mjs", bundled_source)
+                .iter()
+                .any(
+                    |request| request.specifier == "os" && request.importer == "prettier/index.mjs"
+                )
+        );
 
         let unrelated = discover_node_runtime_requests(
             "fixture.mjs",

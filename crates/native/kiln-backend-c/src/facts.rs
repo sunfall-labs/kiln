@@ -1018,7 +1018,11 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                     });
                 }
                 GraphOp::DefineOwnComputed { site, .. } => {
-                    sites.push(SiteFact { id: site.0, kind: "DefineOwnComputed".to_string(), detail: None });
+                    sites.push(SiteFact {
+                        id: site.0,
+                        kind: "DefineOwnComputed".to_string(),
+                        detail: None,
+                    });
                 }
                 GraphOp::MakeFunction { index, site } => {
                     sites.push(SiteFact {

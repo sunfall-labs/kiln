@@ -611,7 +611,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     };
                     if !accepted {
-                        self.throw_error(ErrorKind::Type, "Cannot define class field".into(), current)?;
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "Cannot define class field".into(),
+                            current,
+                        )?;
                         continue;
                     }
                     self.stack.push(value);
@@ -620,7 +624,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let Some(key) = self.catchable(key.property_key_units_checked(), current)? else {
+                    let Some(key) = self.catchable(key.property_key_units_checked(), current)?
+                    else {
                         continue;
                     };
                     let descriptor = Descriptor {
@@ -640,7 +645,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     };
                     if !accepted {
-                        self.throw_error(ErrorKind::Type, "Cannot define class field".into(), current)?;
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "Cannot define class field".into(),
+                            current,
+                        )?;
                         continue;
                     }
                     self.stack.push(value);

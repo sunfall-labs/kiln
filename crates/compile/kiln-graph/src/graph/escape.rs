@@ -480,7 +480,10 @@ pub(super) fn escape_analysis_with(
                     ..
                 }
                 | GraphOp::DefineOwnProperty {
-                    object, name, value, ..
+                    object,
+                    name,
+                    value,
+                    ..
                 } => {
                     if let Some(&root) = alias_to_root.get(value) {
                         escaped.insert(root);
@@ -655,7 +658,10 @@ pub(super) fn escape_analysis_with(
                         ..
                     }
                     | GraphOp::DefineOwnProperty {
-                        object, name, value, ..
+                        object,
+                        name,
+                        value,
+                        ..
                     } if alias_to_root.get(object) == Some(&alloc_id) => {
                         if let Some(&field_idx) = field_by_name_index.get(name) {
                             field_written_values

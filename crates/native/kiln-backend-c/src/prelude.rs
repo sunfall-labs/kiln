@@ -15,8 +15,16 @@ const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 /// receiver rows. The member's arity still comes from `kiln_builtin_surface`; this table only
 /// connects the C dispatch ID to that public identity.
 const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
-    ("KILN_C99_METHOD_STRING_INDEX_OF", "String.prototype", "indexOf"),
-    ("KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC", "node:fs", "readFileSync"),
+    (
+        "KILN_C99_METHOD_STRING_INDEX_OF",
+        "String.prototype",
+        "indexOf",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC",
+        "node:fs",
+        "readFileSync",
+    ),
 ];
 
 const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
@@ -26,18 +34,18 @@ const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     let mut start = 0;
     while start + needle.len() <= haystack.len() {
         let end = start + needle.len();
-        let before_is_identifier = start > 0 &&
-            ((haystack[start - 1] >= b'a' && haystack[start - 1] <= b'z') ||
-             (haystack[start - 1] >= b'A' && haystack[start - 1] <= b'Z') ||
-             (haystack[start - 1] >= b'0' && haystack[start - 1] <= b'9') ||
-             haystack[start - 1] == b'_');
-        let after_is_identifier = end < haystack.len() &&
-            ((haystack[end] >= b'a' && haystack[end] <= b'z') ||
-             (haystack[end] >= b'A' && haystack[end] <= b'Z') ||
-             (haystack[end] >= b'0' && haystack[end] <= b'9') ||
-             haystack[end] == b'_');
-        if !before_is_identifier && !after_is_identifier &&
-            bytes_match_at(haystack, start, needle) {
+        let before_is_identifier = start > 0
+            && ((haystack[start - 1] >= b'a' && haystack[start - 1] <= b'z')
+                || (haystack[start - 1] >= b'A' && haystack[start - 1] <= b'Z')
+                || (haystack[start - 1] >= b'0' && haystack[start - 1] <= b'9')
+                || haystack[start - 1] == b'_');
+        let after_is_identifier = end < haystack.len()
+            && ((haystack[end] >= b'a' && haystack[end] <= b'z')
+                || (haystack[end] >= b'A' && haystack[end] <= b'Z')
+                || (haystack[end] >= b'0' && haystack[end] <= b'9')
+                || haystack[end] == b'_');
+        if !before_is_identifier && !after_is_identifier && bytes_match_at(haystack, start, needle)
+        {
             return true;
         }
         start += 1;
@@ -58,10 +66,9 @@ fn method_declared_length(method: &MethodId) -> u32 {
     while index < BUILTIN_SURFACE.len() {
         let member = BUILTIN_SURFACE[index];
         if bytes_contain(member.answers.as_bytes(), method.name.as_bytes()) {
-            if let Some(candidate) = kiln_builtin_surface::native_function_length(
-                member.owner,
-                member.name,
-            ) {
+            if let Some(candidate) =
+                kiln_builtin_surface::native_function_length(member.owner, member.name)
+            {
                 if let Some(previous) = length {
                     if previous != candidate {
                         return METHOD_LENGTH_UNSPECIFIED;
@@ -178,8 +185,7 @@ fn compute_native_method_length_rows() -> String {
             writeln!(
                 rows,
                 "    case UINT64_C({}): return UINT32_C({});",
-                method.value,
-                length
+                method.value, length
             )
             .expect("writing to a String cannot fail");
         }

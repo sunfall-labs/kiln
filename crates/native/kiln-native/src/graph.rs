@@ -1914,8 +1914,7 @@ pub(super) fn graph_import_value(
                     path: node.path.clone(),
                 })
             })?;
-            if provider_index >= importer_index
-                && modules[provider_index].1.instantiation.is_none()
+            if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none()
             {
                 return Err(NativeError::Emit(EmitError::Unsupported {
                     feature: "self or cyclic namespace re-exports in native module graphs"

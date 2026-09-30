@@ -393,10 +393,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     primitive.to_display_string().into(),
                 )));
             }
-            Value::Native(
-                native @ (Native::NumberConstructor | Native::BooleanConstructor),
-                _,
-            ) => {
+            Value::Native(native @ (Native::NumberConstructor | Native::BooleanConstructor), _) => {
                 let primitive =
                     self.dispatch_native(native, &Value::Undefined, &arguments, current)?;
                 self.stack.push(wrap_primitive(primitive));

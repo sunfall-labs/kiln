@@ -880,14 +880,16 @@ impl Proof<'_> {
                         }
                     }
                     GraphOp::GetComputed { .. } => None,
-                    GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. }
+                    GraphOp::SetProperty { name, .. }
+                    | GraphOp::SetPropertyStrict { name, .. }
                     | GraphOp::DefineOwnProperty { name, .. } => {
                         Some(match constant_name(program, *name) {
                             Some(n) => Refusal::with(Reason::WritesProperty, n),
                             None => Refusal::new(Reason::WritesProperty),
                         })
                     }
-                    GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. }
+                    GraphOp::SetComputed { .. }
+                    | GraphOp::SetComputedStrict { .. }
                     | GraphOp::DefineOwnComputed { .. } => {
                         Some(Refusal::new(Reason::WritesProperty))
                     }
@@ -1843,17 +1845,17 @@ pub fn parallel_verdict(
                     None => Refusal::new(Reason::ReadsProperty),
                 }),
                 GraphOp::GetComputed { .. } => Some(Refusal::new(Reason::ReadsProperty)),
-                GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. }
+                GraphOp::SetProperty { name, .. }
+                | GraphOp::SetPropertyStrict { name, .. }
                 | GraphOp::DefineOwnProperty { name, .. } => {
                     Some(match constant_name(program, *name) {
                         Some(n) => Refusal::with(Reason::WritesProperty, n),
                         None => Refusal::new(Reason::WritesProperty),
                     })
                 }
-                GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. }
-                | GraphOp::DefineOwnComputed { .. } => {
-                    Some(Refusal::new(Reason::WritesProperty))
-                }
+                GraphOp::SetComputed { .. }
+                | GraphOp::SetComputedStrict { .. }
+                | GraphOp::DefineOwnComputed { .. } => Some(Refusal::new(Reason::WritesProperty)),
                 GraphOp::NewArray { .. }
                 | GraphOp::NewObject { .. }
                 | GraphOp::MakeFunction { .. }

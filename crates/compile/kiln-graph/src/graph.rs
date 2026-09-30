@@ -1650,7 +1650,15 @@ pub fn build_function_graph(
                     let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::DefineOwnProperty { object, name: *name, value, site }));
+                    operations.push((
+                        result,
+                        GraphOp::DefineOwnProperty {
+                            object,
+                            name: *name,
+                            value,
+                            site,
+                        },
+                    ));
                     frame.stack.push(result);
                 }
                 Instruction::DefineOwnComputed => {
@@ -1659,7 +1667,15 @@ pub fn build_function_graph(
                     let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::DefineOwnComputed { object, key, value, site }));
+                    operations.push((
+                        result,
+                        GraphOp::DefineOwnComputed {
+                            object,
+                            key,
+                            value,
+                            site,
+                        },
+                    ));
                     frame.stack.push(result);
                 }
                 Instruction::MakeFunction(index) => {

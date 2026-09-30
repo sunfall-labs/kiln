@@ -179,7 +179,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             "functionName".to_owned(),
                             frame
                                 .and_then(|closure| closure.name.clone())
-                                .map_or(Value::Undefined, |name| Value::String(name.as_ref().into())),
+                                .map_or(Value::Undefined, |name| {
+                                    Value::String(name.as_ref().into())
+                                }),
                         ),
                         ("instruction".to_owned(), Value::Number(0.0)),
                     ])

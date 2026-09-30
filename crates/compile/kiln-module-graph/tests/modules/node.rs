@@ -14,7 +14,9 @@ fn private_module_identity_is_checkout_stable_and_module_specific() {
     let compile_private_key = |module_id: &str| {
         let mut hir = kiln_frontend_oxc::parse("fixture.js", source);
         hir.module_id = Arc::from(module_id);
-        let program = compile_module(&hir).expect("private class compiles").program;
+        let program = compile_module(&hir)
+            .expect("private class compiles")
+            .program;
         program
             .constants
             .into_iter()

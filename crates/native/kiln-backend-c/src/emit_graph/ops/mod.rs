@@ -1584,9 +1584,12 @@ pub(super) fn emit_graph_op(
             value,
             ..
         } => properties::emit_set_property(output, vid, op, object, name, value, &ctx),
-        GraphOp::DefineOwnProperty { object, name, value, .. } => {
-            properties::emit_define_own_property(output, vid, object, name, value, &ctx)
-        }
+        GraphOp::DefineOwnProperty {
+            object,
+            name,
+            value,
+            ..
+        } => properties::emit_define_own_property(output, vid, object, name, value, &ctx),
         GraphOp::GetComputed { object, key, .. } => {
             properties::emit_get_computed(output, vid, object, key, &ctx)
         }
@@ -1596,9 +1599,9 @@ pub(super) fn emit_graph_op(
         | GraphOp::SetComputedStrict {
             object, key, value, ..
         } => properties::emit_set_computed(output, vid, op, object, key, value, &ctx),
-        GraphOp::DefineOwnComputed { object, key, value, .. } => {
-            properties::emit_define_own_computed(output, vid, object, key, value, &ctx)
-        }
+        GraphOp::DefineOwnComputed {
+            object, key, value, ..
+        } => properties::emit_define_own_computed(output, vid, object, key, value, &ctx),
         GraphOp::Phi { .. } => {
             // A phi is assigned on the edge into its block, by the predecessor's jump or
             // branch, or by the landing that comes in from the dispatch switch.

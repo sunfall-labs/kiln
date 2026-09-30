@@ -236,9 +236,12 @@ pub fn closed_world_function_liveness(
                                             (0..program.local_count).collect(),
                                         );
                                     };
-                                    let Some((binding_owner, slot)) =
-                                        captured_slot_owner(program, &parents, index, upvalue as usize)
-                                    else {
+                                    let Some((binding_owner, slot)) = captured_slot_owner(
+                                        program,
+                                        &parents,
+                                        index,
+                                        upvalue as usize,
+                                    ) else {
                                         return (
                                             (0..program.functions.len()).collect(),
                                             vec![HashSet::new(); program.functions.len() + 1],
@@ -287,7 +290,8 @@ pub fn closed_world_function_liveness(
                 continue;
             };
             for upvalue in 0..function.upvalues.len() {
-                let Some((owner, slot)) = captured_slot_owner(program, &parents, index, upvalue as usize)
+                let Some((owner, slot)) =
+                    captured_slot_owner(program, &parents, index, upvalue as usize)
                 else {
                     return (
                         (0..program.functions.len()).collect(),
