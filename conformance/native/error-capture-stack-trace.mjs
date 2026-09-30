@@ -42,4 +42,6 @@ Error.captureStackTrace = (target) => {
 const customTarget = {};
 Error.captureStackTrace(customTarget);
 Error.captureStackTrace = nativeCaptureStackTrace;
-console.log(overrideCalls, customTarget.stack);
+const restoredTarget = {};
+Error.captureStackTrace(restoredTarget);
+console.log(overrideCalls, customTarget.stack, typeof restoredTarget.stack);
