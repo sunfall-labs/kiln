@@ -553,6 +553,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak);
 static const char *kiln_c99_error_name(uint64_t builtin);
 /* Defined beside the surface table it reads, which the assembled prelude places after this file. */
 static const char *kiln_c99_surface_method_name(uint64_t code);
+static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len);
 static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
                                     int depth, kiln_value *thrown);
