@@ -30,3 +30,17 @@ const rendered = new Function(
   'return {root: root};',
 )();
 console.log("dynamic try catch", rendered.root().value);
+
+// Template packages such as Underscore, Eta, and EJS build functions with `new Function`,
+// multiple declarators, and a `with` environment whose names fall back behind function locals.
+const renderTemplate = new Function(
+  "locals",
+  "var __t, __p = '', print = function(value) { __p += value; }; " +
+    "with (locals || {}) { __p += 'Hello ' + name; print('!'); } return __p;",
+);
+console.log("dynamic with", renderTemplate({ name: "Ada" }));
+const dynamicArrow = new Function(
+  "items",
+  "let total = 0; items.forEach(i => { total += i; }); return total;",
+);
+console.log("dynamic arrow", dynamicArrow([1, 2, 3]));
