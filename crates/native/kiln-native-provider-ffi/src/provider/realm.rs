@@ -795,6 +795,9 @@ struct NativeRealm {
     http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
     #[cfg(feature = "realm-http")]
     next_http_client_request_id: Cell<u64>,
+    /// First language failure raised by an HTTP task while the realm drive is parked.
+    #[cfg(feature = "realm-http")]
+    http_callback_failure: Cell<i32>,
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
     queued: Rc<RefCell<HashSet<RequestId>>>,
     symbols: RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
@@ -1264,6 +1267,16 @@ impl Drop for CallableStore {
 }
 
 impl NativeRealm {
+    #[cfg(feature = "realm-http")]
+    fn record_http_callback_failure(&self, status: i32) {
+        if status != 0 {
+            if self.http_callback_failure.get() == 0 {
+                self.http_callback_failure.set(status);
+            }
+            self.runtime.state.borrow().wake_drive();
+        }
+    }
+
     fn pin(&self, reason: u32) {
         self.affinity.set(self.affinity.get() | reason);
     }
@@ -1297,6 +1310,8 @@ impl NativeRealm {
             http_connections: RefCell::new(HashMap::new()),
             #[cfg(feature = "realm-http")]
             next_http_client_request_id: Cell::new(1),
+            #[cfg(feature = "realm-http")]
+            http_callback_failure: Cell::new(0),
             cancelled: Rc::new(RefCell::new(HashSet::new())),
             queued: Rc::new(RefCell::new(HashSet::new())),
             symbols: RefCell::new(hashbrown::HashMap::with_hasher(
@@ -2052,6 +2067,12 @@ fn run_one_timer(realm: &NativeRealm) -> i32 {
 }
 
 fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
+    // HTTP tasks enter generated code while this drive is parked. Propagate their language
+    // failure before another collection or callback can overwrite the drive's thrown slot.
+    #[cfg(feature = "realm-http")]
+    if realm.http_callback_failure.get() != 0 {
+        return DriveStep::Done(realm.http_callback_failure.get());
+    }
     // A turn boundary: no generated frame is on this thread's stack.
     reclaim::quiescent();
     if let Some(gate) = realm.dedicated_gate.borrow().clone() {
@@ -4319,6 +4340,7 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         // SAFETY: the engine keeps every span live for this synchronous call, and the
         // owner's adapter allocation lives until the connection is removed below.
         let status = unsafe { (self.owner.run)(self.owner.pointer, &raw const view, host, thrown) };
+        realm.record_http_callback_failure(status);
         if matches!(
             event.kind,
             HttpEventKind::Finish
@@ -4354,7 +4376,9 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             return 0;
         }
         let _online = reclaim::online();
-        drain_realm_queues(&realm)
+        let status = drain_realm_queues(&realm);
+        realm.record_http_callback_failure(status);
+        status
     }
 
     fn whole_requests(&self) -> bool {

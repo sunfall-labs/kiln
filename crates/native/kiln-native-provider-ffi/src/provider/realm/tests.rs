@@ -3564,3 +3564,39 @@ mod realm_ffi {
         assert_eq!(kiln_realm_destroy(second), 0);
     }
 }
+
+#[cfg(feature = "realm-http")]
+#[test]
+fn http_callback_failure_terminates_the_parked_realm_drive() {
+    use kiln_runtime::HttpDispatch;
+
+    unsafe extern "C" fn fail_http_event(
+        status: *mut c_void,
+        _event: *const HttpEventView,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        // The stack status stays alive for the complete synchronous event dispatch.
+        unsafe { *status.cast::<i32>() }
+    }
+    unsafe extern "C" fn leave_borrowed_status(_status: *mut c_void) {}
+
+    let realm = Rc::new(NativeRealm::new().expect("create realm"));
+    let mut status = -7_i32;
+    let dispatch = NativeHttpDispatch {
+        realm: Rc::downgrade(&realm),
+        resource: kiln_host_abi::ResourceId::new(1),
+        owner: Rc::new(HttpEventOwner {
+            pointer: (&raw mut status).cast(),
+            run: fail_http_event,
+            drop: leave_borrowed_status,
+        }),
+        whole_requests: false,
+    };
+    let event = kiln_runtime::HttpEvent::bare(kiln_runtime::HttpEventKind::UpgradeResponse, 1);
+    assert_eq!(dispatch.event(&event), -7);
+    // Another connection's callback cannot replace the first language failure.
+    status = -2;
+    assert_eq!(dispatch.event(&event), -2);
+    assert!(matches!(drive_one_ready_turn(&realm), DriveStep::Done(-7)));
+}
