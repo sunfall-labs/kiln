@@ -59,13 +59,7 @@ export function createServer(...args: any[]): any {
       };
       return nativeModule.createServer(...forwarded);
     }
-    const server = nativeModule.createServer(...args);
-    // Install before callers can add listeners so accepted sockets always receive the same
-    // TypeScript-owned methods, including sockets created by HTTP/TLS host projections.
-    if (server && typeof server.on === "function") {
-      server.on("connection", (socket: any) => decorateSocket(socket));
-    }
-    return server;
+    return nativeModule.createServer(...args);
   }
   throw new Error("node:net requires a net host capability that this realm does not provide");
 }
@@ -78,9 +72,6 @@ export function connect(...args: any[]): any {
 }
 
 export function createConnection(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.createConnection === "function") {
-    return nativeModule.createConnection(...args);
-  }
   return connect(...args);
 }
 
