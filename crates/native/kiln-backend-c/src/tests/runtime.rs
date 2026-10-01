@@ -2128,8 +2128,8 @@ int main(void) {{
     if (kiln_c99_get(NULL, wrapped, "length", 6, &length, 0, &thrown) != KILN_C99_OK ||
         length.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(length) != 0) return 5;
     kiln_value primitive;
-    if (!kiln_c99_primitive_wrapper_value(wrapped, KILN_C99_WRAPPER_STRING, &primitive) ||
-        !kiln_c99_same_value(empty, primitive)) return 6;
+    if (!kiln_c99_unwrap_primitive_wrapper(wrapped, KILN_C99_WRAPPER_STRING, &primitive) ||
+        !kiln_c99_same_value_zero(empty, primitive)) return 6;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
 }}
