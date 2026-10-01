@@ -44,8 +44,9 @@ TIMEOUT_S="${TIMEOUT_S:-600}"
 OUT="$HERE/results"
 RAW="$OUT/raw"
 
-mkdir -p "$RAW" "$HERE/tmp"
-export TMPDIR="$HERE/tmp"
+NPM_TMP="${KILN_NPM_TMPDIR:-$HOME/.cache/kiln/npm-tmp}"
+mkdir -p "$RAW" "$NPM_TMP"
+export TMPDIR="$NPM_TMP"
 export CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 export RUSTC="${RUSTC:-$HOME/.cargo/bin/rustc}"
 
