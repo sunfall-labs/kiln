@@ -1104,6 +1104,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             size_t integer_digits = 0;
             size_t fraction_digits = 0;
             size_t integer_end = num_start;
+            int integer_has_separator = 0;
             int has_fraction_or_exponent = 0;
             if (leading_dot) {
                 lex->pos++;
@@ -1114,7 +1115,9 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                 valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, 10,
                                              &integer_digits, &has_separator);
                 integer_end = lex->pos;
-                if (num_start < lex->len && lex->src[num_start] == '0' && has_separator)
+                integer_has_separator = has_separator;
+                if (num_start < lex->len && lex->src[num_start] == '0' &&
+                    integer_has_separator)
                     valid = 0;
                 if (valid && lex->pos < lex->len && lex->src[lex->pos] == '.') {
                     has_fraction_or_exponent = 1;
@@ -1137,8 +1140,8 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             }
             if (valid && num_start < lex->len && lex->src[num_start] == '0' &&
                 integer_digits > 1) {
-                if (lex->strict || has_separator || has_fraction_or_exponent) {
-                    if (lex->strict || has_separator) {
+                if (lex->strict || integer_has_separator || has_fraction_or_exponent) {
+                    if (lex->strict || integer_has_separator) {
                         valid = 0;
                     } else {
                         int octal = 1;
