@@ -239,16 +239,39 @@ pub(crate) fn node_listen_arguments(
 pub(crate) fn node_connect_arguments(
     arguments: &[Value],
 ) -> Result<(u16, String, Option<Value>), ExecutionError> {
-    let port = arguments.first().map(Value::as_number).unwrap_or(f64::NAN);
+    let options = matches!(arguments.first(), Some(Value::Object(_)));
+    let port = if options {
+        arguments
+            .first()
+            .and_then(|options| own_data_property(options, "port"))
+            .map_or(f64::NAN, |port| port.as_number())
+    } else {
+        arguments.first().map(Value::as_number).unwrap_or(f64::NAN)
+    };
     if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
         return Err(ExecutionError::InvalidPort);
     }
-    let mut host = "localhost".to_owned();
+    let mut host = if options {
+        arguments
+            .first()
+            .and_then(|options| own_data_property(options, "host"))
+            .filter(|host| !matches!(host, Value::Undefined | Value::Null))
+            .or_else(|| {
+                arguments
+                    .first()
+                    .and_then(|options| own_data_property(options, "hostname"))
+                    .filter(|host| !matches!(host, Value::Undefined | Value::Null))
+            })
+            .map(|host| host.to_display_string())
+            .unwrap_or_else(|| "localhost".to_owned())
+    } else {
+        "localhost".to_owned()
+    };
     let mut callback = None;
     for argument in arguments.iter().skip(1) {
         if is_callable(argument) {
             callback = Some(argument.clone());
-        } else if let Value::String(value) = argument {
+        } else if !options && let Value::String(value) = argument {
             host = value.to_lossy_string();
         }
     }
