@@ -15,6 +15,7 @@ server.listen(0, '127.0.0.1', () => {
     });
     socket.on('close', () => {
       closeCount++;
+      if (closeCount !== 1) throw new Error('socket close must be emitted once');
       console.log('socket close count', closeCount);
     });
   });
