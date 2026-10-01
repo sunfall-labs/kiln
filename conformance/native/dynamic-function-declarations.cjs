@@ -62,6 +62,29 @@ const labeledWhileContinue = Function(
 );
 console.log("labeled while continue:", labeledWhileContinue());
 
+const stackedWhileLabels = Function(
+  "var count = 0; outer: inner: while (count < 3) { count++; " +
+    "if (count === 1) continue outer; break inner; } return count;",
+);
+console.log("stacked while labels:", stackedWhileLabels());
+
+const stackedForLabels = Function(
+  "var index = 0; outer: inner: for (index = 0; index < 4; index++) { " +
+    "if (index === 0) continue outer; break inner; } return index;",
+);
+console.log("stacked for labels:", stackedForLabels());
+
+const labeledLoopBody = Function(
+  "var rounds = 0; while (rounds < 2) outer: inner: for (var i = 0; i < 2; i++) { " +
+    "rounds++; if (i === 0) continue outer; break inner; } return rounds;",
+);
+console.log("stacked labels as loop body:", labeledLoopBody());
+
+const labeledBlockBreak = Function(
+  "var count = 0; outer: { count++; break outer; count = 99; } return count;",
+);
+console.log("labeled block break:", labeledBlockBreak());
+
 const nestedVarDoesNotLeak = Function(
   "function inner() { var hidden = 43; } inner(); " +
     "try { return hidden; } catch (error) { return error.name; }",
