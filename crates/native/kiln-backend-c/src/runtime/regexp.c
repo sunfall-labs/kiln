@@ -204,9 +204,6 @@ int kiln_c99_regexp_publish_deferred(kiln_value match) {
 
 int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out) {
     kiln_c99_realm_state *realm = kiln_c99_realm();
-    uint16_t *units = NULL;
-    size_t count = 0;
-    int status;
     if (realm == NULL) return KILN_C99_OUT_OF_MEMORY;
     if (realm->regexp_legacy_empty.tag == KILN_VALUE_UNDEFINED) {
         kiln_value empty = kiln_c99_from_units(NULL, 0);
@@ -218,15 +215,13 @@ int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out) {
         *out = realm->regexp_legacy_empty;
         return KILN_C99_OK;
     }
-    status = kiln_c99_to_units(realm->regexp_legacy_subject, &units, &count);
-    if (status != KILN_C99_OK) return status;
+    const kiln_string *subject = (const kiln_string *)realm->regexp_legacy_subject.ptr;
     int64_t from = realm->regexp_legacy_ranges[index * 2];
     int64_t to = realm->regexp_legacy_ranges[index * 2 + 1];
-    *out = from < 0 || to < from || (uint64_t)to > count
+    *out = subject == NULL || from < 0 || to < from || (uint64_t)to > subject->unit_len
                ? realm->regexp_legacy_empty
-               : kiln_c99_from_units(units == NULL ? NULL : units + (size_t)from,
-                                     (size_t)(to - from));
-    free(units);
+               : kiln_val_to_boundary(kiln_c99_val_slice_string(subject, (size_t)from,
+                                                               (size_t)(to - from)));
     return out->tag == KILN_VALUE_UNDEFINED ? KILN_C99_OUT_OF_MEMORY : KILN_C99_OK;
 }
 

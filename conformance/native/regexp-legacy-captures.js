@@ -10,3 +10,7 @@ const legacy = Object.getOwnPropertyDescriptor(RegExp, "$1");
 console.log(legacy.get.name, legacy.set.name, legacy.enumerable, legacy.configurable);
 RegExp.$1 = "ignored";
 console.log(JSON.stringify(RegExp.$1));
+/(\u00e9)(\u03bb)/.test("\u00e9\u03bb");
+console.log(JSON.stringify([RegExp.$1, RegExp.$2]));
+/(\ud83d)(\ude00)/.test("\ud83d\ude00");
+console.log(JSON.stringify([RegExp.$1, RegExp.$2]));
