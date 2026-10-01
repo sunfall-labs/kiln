@@ -1496,7 +1496,15 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         return kiln_c99_own_property_present(host, store, key, found, depth, thrown);
     }
     case KILN_VALUE_COLLECTION:
-    case KILN_VALUE_PROMISE:
+    case KILN_VALUE_PROMISE: {
+        /* Maps, Sets and promises can carry ordinary user properties alongside their
+         * built-in surface. Their writes and reads already share this exotic store; presence
+         * must consult it too instead of claiming every custom property is absent. */
+        kiln_value *store = kiln_c99_exotic_store(target);
+        if (store != NULL && store->tag == KILN_VALUE_OBJECT)
+            *found = kiln_c99_property_read_own_value(*store, view, canonical, &projected);
+        return KILN_C99_OK;
+    }
     case KILN_VALUE_TEMPORAL:
     case KILN_VALUE_NUMBER:
     case KILN_VALUE_BOOLEAN:
