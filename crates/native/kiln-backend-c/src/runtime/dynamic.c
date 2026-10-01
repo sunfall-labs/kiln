@@ -2321,8 +2321,7 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
                                                   kiln_value *thrown) {
     const char *site = lex->curr.start;
     if (!kiln_dyn_scope_has_function_declaration(scope, site))
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                    "Block-level function declarations are not supported");
+        KILN_C99_REFUSE("block-level function declarations in a dynamic Function body");
     kiln_dyn_lexer_next(lex);
     if (lex->curr.kind == KILN_DYN_STAR) kiln_dyn_lexer_next(lex);
     if (lex->curr.kind != KILN_DYN_IDENT)
