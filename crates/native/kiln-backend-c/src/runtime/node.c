@@ -1512,7 +1512,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
     client = kiln_c99_node_client_for_id(socket, event->id);
     if (event->kind == 11 && socket->server != NULL) {
-        const kiln_c99_node_http_layout *layout;
+        const kiln_node_http_layout *layout;
         kiln_value prototype, request, headers, arguments[4], ignored;
         kiln_node_response *header_owner;
         int emitted;
