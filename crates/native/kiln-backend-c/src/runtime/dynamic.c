@@ -2519,11 +2519,13 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
     kiln_value numeric = kiln_c99_undefined();
     status = kiln_c99_unary_checked(7, host, current, &numeric, depth, thrown);
     kiln_c99_gc_keep_alive(&current);
+    kiln_c99_gc_keep_alive(&with_target);
     if (status != KILN_C99_OK) return status;
     kiln_c99_gc_keep_alive(&numeric);
     kiln_value next = kiln_c99_undefined();
     status = kiln_c99_unary_checked(increment ? 8 : 9, host, numeric, &next, depth, thrown);
     kiln_c99_gc_keep_alive(&numeric);
+    kiln_c99_gc_keep_alive(&with_target);
     if (status != KILN_C99_OK) return status;
     kiln_c99_gc_keep_alive(&next);
 
@@ -2532,19 +2534,10 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
         status = kiln_dyn_scope_check_write(binding_scope, name, name_len, &ignore_write, thrown);
         if (status != KILN_C99_OK) return status;
     } else if (reference == KILN_DYN_UPDATE_WITH) {
-        /* A with-environment reference is resolved again when its mutable binding is written.
-         * The value's ToPrimitive may have deleted the matching property, allowing an outer
-         * with/global/lexical environment to supply SetMutableBinding. */
-        status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 1, 0,
-                                                   &current, &reference, &binding_scope,
-                                                   &with_target, &global_target, &unresolvable,
-                                                   thrown);
-        if (status != KILN_C99_OK) return status;
-        if (reference == KILN_DYN_UPDATE_BINDING) {
-            status = kiln_dyn_scope_check_write(binding_scope, name, name_len, &ignore_write,
-                                                thrown);
-            if (status != KILN_C99_OK) return status;
-        }
+        /* Keep the object environment selected by initial resolution. PutValue invokes
+         * SetMutableBinding on that same environment after ToNumeric, even if the getter removed
+         * the property; it must not walk outward to a different `with` or global binding. */
+        kiln_c99_gc_keep_alive(&with_target);
     }
     if (!ignore_write) {
         if (reference == KILN_DYN_UPDATE_BINDING) {
@@ -4033,6 +4026,7 @@ typedef struct {
     size_t name_len;
     int is_const;
     int is_function;
+    int is_annex_b;
     const char *function_site;
     size_t clause_index;
     int annex_b_alias;
@@ -4279,9 +4273,11 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
             }
             if (direct_function) {
                 const char *site = function_site;
-                if (scan.curr.kind == KILN_DYN_KW_ASYNC) kiln_dyn_lexer_next(&scan);
+                int async_declaration = scan.curr.kind == KILN_DYN_KW_ASYNC;
+                if (async_declaration) kiln_dyn_lexer_next(&scan);
                 kiln_dyn_lexer_next(&scan);
-                if (scan.curr.kind == KILN_DYN_STAR) kiln_dyn_lexer_next(&scan);
+                int generator = scan.curr.kind == KILN_DYN_STAR;
+                if (generator) kiln_dyn_lexer_next(&scan);
                 if (scan.curr.kind != KILN_DYN_IDENT) {
                     kiln_dyn_token_free(&scan.curr);
                     free(*out); free(vars); *out = NULL; *out_count = 0;
@@ -4318,7 +4314,8 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                 }
                 (*out)[(*out_count)++] = (kiln_dyn_switch_binding){
                     .name = name, .name_len = name_len, .is_const = 0,
-                    .is_function = 1, .function_site = site,
+                    .is_function = 1, .is_annex_b = !async_declaration && !generator,
+                    .function_site = site,
                     .clause_index = clause,
                     .annex_b_alias = 0,
                 };
@@ -4427,7 +4424,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                     }
                     (*out)[(*out_count)++] = (kiln_dyn_switch_binding){
                         .name = name, .name_len = name_len, .is_const = is_const,
-                        .is_function = 0, .function_site = NULL,
+                        .is_function = 0, .is_annex_b = 0, .function_site = NULL,
                         .clause_index = clause,
                         .annex_b_alias = 0,
                     };
@@ -4532,7 +4529,8 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
                 bindings[index].is_const ? KILN_DYN_BINDING_READ_ONLY
                                          : KILN_DYN_BINDING_LEXICAL))
             return KILN_C99_OUT_OF_MEMORY;
-        if (bindings[index].is_function && scope->var_target != NULL && !scope->strict) {
+        if (bindings[index].is_function && bindings[index].is_annex_b &&
+            scope->var_target != NULL && !scope->strict) {
             int has_local = 0;
             size_t slot = 0;
             for (; slot < scope->var_target->count; ++slot) {
@@ -4582,9 +4580,9 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
     return KILN_C99_OK;
 }
 
-/* CaseBlock function declarations are initialized with the lexical scope before case tests run,
- * even when their clause is not selected. Reuse the ordinary dynamic function parser and
- * closure capture path, keyed by the declaration's source position. */
+/* Lexical block function declarations are initialized when their scope is entered, before
+ * statements or case tests run. Reuse the ordinary dynamic function parser and closure capture
+ * path, keyed by the declaration's source position. */
 static int kiln_dyn_switch_initialize_functions(kiln_host *host,
                                                 kiln_dyn_scope *scope,
                                                 const kiln_dyn_switch_clause *clauses,
@@ -5783,6 +5781,42 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         kiln_dyn_scope_init(&block_scope, scope);
         block_scope.var_target = scope->var_target != NULL ? scope->var_target : scope;
         int status = kiln_dyn_scope_predeclare_lexicals(&block_scope, body, body_len, SIZE_MAX);
+        if (status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&block_scope);
+            return status;
+        }
+        kiln_dyn_switch_clause block_clause = {
+            .test = NULL, .test_len = 0, .body = body, .body_len = body_len,
+            .is_default = 0,
+        };
+        kiln_dyn_switch_binding *block_bindings = NULL;
+        size_t block_binding_count = 0;
+        int binding_status = kiln_dyn_switch_bindings(&block_clause, 1,
+                                                       &block_bindings,
+                                                       &block_binding_count);
+        if (binding_status <= 0) {
+            free(block_bindings);
+            kiln_dyn_scope_destroy(&block_scope);
+            return binding_status < 0
+                       ? KILN_C99_OUT_OF_MEMORY
+                       : kiln_dyn_throw_parse_error(
+                             lex, thrown, "Invalid or duplicate block lexical declaration");
+        }
+        size_t function_count = 0;
+        for (size_t index = 0; index < block_binding_count; ++index) {
+            if (!block_bindings[index].is_function) continue;
+            if (function_count != index)
+                block_bindings[function_count] = block_bindings[index];
+            function_count++;
+        }
+        if (function_count != 0) {
+            status = kiln_dyn_switch_predeclare(&block_scope, block_bindings, function_count);
+            if (status == KILN_C99_OK)
+                status = kiln_dyn_switch_initialize_functions(
+                    host, &block_scope, &block_clause, 1, block_bindings, function_count,
+                    receiver, args, argc, depth, thrown);
+        }
+        free(block_bindings);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&block_scope);
             return status;
