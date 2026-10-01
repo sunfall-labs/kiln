@@ -692,11 +692,11 @@ fn generated_numeric_conversion_ignores_the_embedding_process_locale() {
     );
     let formatter = generated
         .source
-        .split("static size_t kiln_c99_double_to_js")
+        .split("static size_t kiln_c99_double_to_js(double value, char out[32]) {")
         .nth(1)
-        .expect("the generated numeric formatter is present");
+        .expect("the generated numeric formatter definition is present");
     let formatter = formatter
-        .split("\nstatic ")
+        .split("\nstatic size_t kiln_c99_exact_digits")
         .next()
         .expect("the numeric formatter has a body");
     assert!(
