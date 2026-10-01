@@ -3508,7 +3508,7 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
  * expression); statement eval still needs declaration-instantiation and is not approximated here.
  * Names arrive in EvalSite order, innermost first; duplicate spellings are ignored after their
  * first binding. */
-int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source,
+int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
                                               const char *const *names,
                                               const size_t *name_lengths,
                                               const kiln_value *values,
@@ -3577,7 +3577,7 @@ direct_eval_unsupported:
     kiln_dyn_token_free(&lex.curr);
     kiln_dyn_scope_destroy(&scope);
     free(source_owned);
-    KILN_C99_REFUSE("unsupported direct eval source (expected function expression)");
+    KILN_C99_REFUSE("unsupported direct eval source (expected supported single expression)");
 direct_eval_done:
     kiln_dyn_scope_destroy(&scope);
     free(source_owned);
