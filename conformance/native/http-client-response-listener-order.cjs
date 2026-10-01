@@ -24,7 +24,19 @@ server.listen(0, "127.0.0.1", () => {
     response.on("end", () => {
       assert(order.join(",") === "callback,event", "callback precedes later response listeners");
       assert(response.socket === request.socket, "response exposes the assigned socket");
-      server.close(() => console.log("HTTP response callback and event share one ordered emission"));
+      let removedCallbackRan = false;
+      function removedCallback() { removedCallbackRan = true; }
+      const second = http.get(
+        { host: "127.0.0.1", port: server.address().port }, removedCallback,
+      );
+      second.removeListener("response", removedCallback);
+      second.on("response", (incoming) => {
+        assert(!removedCallbackRan, "removing the optional callback removes its event listener");
+        incoming.resume();
+        incoming.on("end", () => server.close(() =>
+          console.log("HTTP response callback and event share one ordered emission")));
+      });
+      second.on("error", (error) => { throw error; });
     });
   });
   request.on("error", (error) => { throw error; });
