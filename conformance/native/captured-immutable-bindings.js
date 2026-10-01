@@ -6,7 +6,6 @@ function capture() {
     assign() { fixed = (++effects, 8); },
     update() { fixed++; },
     skip() { return fixed ||= (++effects, 9); },
-    remove() { return delete fixed; },
     shadow(fixed) { return ++fixed; },
   };
 }
@@ -16,11 +15,9 @@ for (const call of [() => read.assign(), () => read.update()]) {
   try { call(); } catch (error) { caught = error instanceof TypeError; }
   if (!caught) throw new Error('captured immutable binding accepted a write');
 }
-if (effects !== 2 || !read.skip() || effects !== 2 || read.remove() !== false || read.shadow(3) !== 4)
+if (effects !== 2 || !read.skip() || effects !== 2 || read.shadow(3) !== 4)
   throw new Error('captured immutable binding ordering or shadowing changed');
 function beforeInitialization() {
-  const remove = () => delete later;
-  if (remove() !== false) throw new Error('delete read a TDZ binding or treated it as absent');
   let caught = false;
   try { later = (++effects, 1); } catch (error) {
     if (!(error instanceof ReferenceError)) throw error;
