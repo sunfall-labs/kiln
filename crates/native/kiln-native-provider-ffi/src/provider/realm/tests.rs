@@ -3603,7 +3603,8 @@ fn http_callback_failure_terminates_the_parked_realm_drive() {
         whole_requests: false,
     };
     let event = kiln_runtime::HttpEvent {
-        kind: kiln_runtime::HttpEventKind::UpgradeResponse,
+        // A head event reaches the language without needing a real upgrade transport.
+        kind: kiln_runtime::HttpEventKind::ResponseHead,
         id: 1,
         keep_alive: false,
         version_minor: 1,
