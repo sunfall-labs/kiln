@@ -58,30 +58,40 @@ if (incomingMessagePrototype && typeof Readable === "function") {
   if (IncomingMessage.prototype !== incomingMessagePrototype) {
     IncomingMessage.prototype = incomingMessagePrototype;
   }
+  // Native EventEmitter methods own listener storage for HTTP host objects. Keep that storage
+  // authoritative, while applying Readable's data-listener transition through the shared state.
+  for (const name of ["on", "addListener", "once"]) {
+    const nativeRegister = incomingMessagePrototype[name];
+    if (typeof nativeRegister !== "function") continue;
+    Object.defineProperty(incomingMessagePrototype, name, {
+      configurable: true,
+      writable: true,
+      value: function (this: any, event: any, listener: any): any {
+        const result = nativeRegister.call(this, event, listener);
+        if (event === "data" && this._readableState.flowing !== false) this.resume();
+        return result;
+      },
+    });
+  }
   // Native IncomingMessage objects are allocated by the HTTP host rather than by the
-  // TypeScript Readable constructor. Give the shared Readable methods their normal per-instance
-  // state without installing a second set of stream methods on each response/request object.
-  const incomingReadableStates = new WeakMap<object, any>();
+  // TypeScript Readable constructor. Run that constructor's existing initializer lazily so
+  // native-created instances get the same state and public flags as ordinary Readables.
   Object.defineProperty(incomingMessagePrototype, "_readableState", {
     configurable: true,
     get: function (this: object): any {
-      let state = incomingReadableStates.get(this);
-      if (!state) {
-        state = {
-          buffer: [],
-          length: 0,
-          pipes: [],
-          flowing: null,
-          ended: false,
-          endEmitted: false,
-          reading: false,
-          destroyed: false,
-          highWaterMark: 16 * 1024,
-          encoding: null,
-          objectMode: false,
-        };
-        incomingReadableStates.set(this, state);
-      }
+      const initialized: any = {};
+      Readable.call(initialized);
+      const state = initialized._readableState;
+      Object.defineProperty(this, "_readableState", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: state,
+      });
+      const incoming: any = this;
+      if (incoming.readable === undefined) incoming.readable = initialized.readable;
+      if (incoming.readableEnded === undefined) incoming.readableEnded = initialized.readableEnded;
+      if (incoming.destroyed === undefined) incoming.destroyed = initialized.destroyed;
       return state;
     },
   });

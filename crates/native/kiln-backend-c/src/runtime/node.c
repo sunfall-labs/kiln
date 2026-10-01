@@ -1153,6 +1153,27 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
                                has_argument ? 2 : 1, depth, thrown);
 }
 
+/* HTTP body delivery is a Readable operation, not an EventEmitter shortcut. Going through the
+ * instance's current `push` property keeps buffering, pause/resume and delayed `end` under the
+ * shared TypeScript Readable implementation, including a user override of that method. */
+static int kiln_c99_node_readable_push(kiln_host *host, kiln_value receiver,
+                                       kiln_value chunk, int depth, kiln_value *thrown) {
+    kiln_value push = kiln_c99_undefined();
+    kiln_value ignored = kiln_c99_undefined();
+    kiln_c99_gc_keep_alive(&receiver);
+    kiln_c99_gc_keep_alive(&chunk);
+    int status = kiln_c99_get(host, receiver, "push", 4, &push, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&receiver);
+    kiln_c99_gc_keep_alive(&push);
+    status = kiln_c99_call(host, &ignored, push, receiver, &chunk, 1, depth, thrown);
+    kiln_c99_gc_keep_alive(&receiver);
+    kiln_c99_gc_keep_alive(&push);
+    kiln_c99_gc_keep_alive(&chunk);
+    kiln_c99_gc_keep_alive(&ignored);
+    return status;
+}
+
 /* Transport errors use the same Error value authority as ordinary exceptions. Passing the
  * provider's message string directly loses instanceof/message semantics at every Node seam. */
 static int kiln_c99_node_emit_transport_error(kiln_host *host, kiln_value object,
@@ -2297,8 +2318,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     kiln_value data;
                     status = kiln_c99_buffer_from_bytes(&data, event->data, event->data_len);
                     if (status != KILN_C99_OK) return status;
-                    return kiln_c99_node_emit(socket->host, response->request, "data", data, 1,
-                                              0, exception);
+                    return kiln_c99_node_readable_push(socket->host, response->request, data,
+                                                       0, exception);
                 }
                 status = kiln_c99_node_http_layout_ready(&layout);
                 if (status == KILN_C99_OK)
@@ -2306,8 +2327,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                         response->request, KILN_C99_NODE_REQ_COMPLETE,
                         layout->request_keys[KILN_C99_NODE_REQ_COMPLETE], kiln_c99_boolean(1));
                 if (status != KILN_C99_OK) return status;
-                return kiln_c99_node_emit(socket->host, response->request, "end",
-                                          kiln_c99_undefined(), 0, 0, exception);
+                return kiln_c99_node_readable_push(socket->host, response->request,
+                                                   kiln_c99_null(), 0, exception);
             }
         }
         return KILN_C99_OK;
@@ -2437,8 +2458,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             status = kiln_c99_buffer_from_bytes(&data_value, event->data, event->data_len);
             if (status != KILN_C99_OK) return status;
         }
-        return kiln_c99_node_emit(client->host, client->response, "data", data_value, 1,
-                                  0, exception);
+        return kiln_c99_node_readable_push(client->host, client->response, data_value,
+                                           0, exception);
     }
     if (client != NULL && event->kind == 8) {
         uint64_t next_request_id = 0;
@@ -2460,8 +2481,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                       kiln_c99_null(), 0, NULL);
             if (status != KILN_C99_OK) return status;
         }
-        end_status = kiln_c99_node_emit(client->host, client->response, "end",
-                                        kiln_c99_undefined(), 0, 0, exception);
+        end_status = kiln_c99_node_readable_push(client->host, client->response,
+                                                 kiln_c99_null(), 0, exception);
         kiln_c99_node_client_request_unlink_socket(client);
         kiln_c99_node_client_request_unregister(client);
         release = kiln_realm_http_agent_release_active(socket->resource,

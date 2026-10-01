@@ -406,7 +406,8 @@ class ReadableImplementation extends Stream {
     state.buffer.push(chunk);
     state.length += (chunk && chunk.length) || 0;
     state.reading = state.length < state.highWaterMark;
-    this.emit("data", chunk);
+    // A paused or explicitly non-flowing stream retains chunks until read() or resume().
+    // Emitting data here would both leak paused data and deliver it a second time on resume.
     this.emit("readable");
     return state.length < state.highWaterMark;
   }
