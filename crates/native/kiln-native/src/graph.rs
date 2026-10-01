@@ -3379,6 +3379,7 @@ extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
+extern int kiln_realm_argv_at(uint64_t index, const uint8_t **bytes, uint64_t *length);
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,
