@@ -1,0 +1,46 @@
+// Dynamic Function string literals use the same escape and UTF-16 rules as ordinary source.
+const makeValues = Function(String.raw`return [
+  "\u2028", "\u2029", "\u{0000000000000041}", "\u{1F600}",
+  "\uD83D\uDE00", "\uD800", "\x41", "\b\f\n\r\t\v\0"
+]`);
+const values = makeValues();
+const units = value => Array.from({ length: value.length }, (_, index) =>
+  value.charCodeAt(index).toString(16)).join(",");
+
+const line = "\u2028";
+const paragraph = "\u2029";
+const rawSeparators = [
+  Function("return \"a" + line + "b\"")(),
+  Function("return \"a" + paragraph + "b\"")(),
+];
+const escapedSeparators = [
+  Function("return \"a\\" + line + "b\"")(),
+  Function("return \"a\\" + paragraph + "b\"")(),
+];
+const continued = Function("return \"a\\" + "\n" + "b\"")();
+const template = Function("return `a\nb`")();
+const named = Function(String.raw`return ({ "\uD800"() { return 1; } })`)()["\uD800"];
+
+const syntaxErrors = [
+  String.raw`return "\xZ"`,
+  String.raw`return "\u{110000}"`,
+  String.raw`"use strict"; return "\141";`,
+].map(source => {
+  try {
+    Function(source);
+    return false;
+  } catch (error) {
+    return error instanceof SyntaxError;
+  }
+});
+
+console.log(JSON.stringify({
+  units: values.map(units),
+  rawSeparators: rawSeparators.map(value => [value.length, units(value)]),
+  escapedSeparators,
+  continued: units(continued),
+  template: units(template),
+  named: [units(named.name), named()],
+  sloppyOctal: units(Function(String.raw`return "\141"`)()),
+  syntaxErrors,
+}));

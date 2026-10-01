@@ -513,6 +513,10 @@ typedef struct {
     double num_val;
     char *str_val;
     size_t str_len;
+    /* String tokens keep their actual UTF-16 code units. `str_val` is a UTF-8 view used only
+     * where this small evaluator still needs a C property-name spelling. */
+    uint16_t *str_units;
+    size_t str_unit_len;
 } kiln_dyn_token;
 
 typedef struct kiln_dyn_active_label {
@@ -527,6 +531,7 @@ typedef struct {
     size_t len;
     size_t pos;
     int dynamic_function_body;
+    int strict;
     kiln_dyn_token curr;
     kiln_dyn_token_kind prev_kind;
     kiln_dyn_active_label *active_labels;
@@ -615,15 +620,122 @@ static int kiln_dyn_throw_unexpected_token(kiln_dyn_lexer *lex, kiln_value *thro
     return kiln_dyn_throw_parse_error(lex, thrown, "Unexpected token");
 }
 
+/* The dynamic executor parses lazily while running a body, but JavaScript validates escapes
+ * when the Function constructor is called. Tokenize the source once up front so malformed
+ * escapes are reported at construction time, including in an unreachable branch. */
+static int kiln_dyn_validate_source(const char *source, size_t length, int strict,
+                                    kiln_value *thrown) {
+    kiln_dyn_lexer scan;
+    memset(&scan, 0, sizeof(scan));
+    scan.src = source;
+    scan.len = length;
+    scan.dynamic_function_body = 1;
+    scan.strict = strict;
+    kiln_dyn_lexer_next(&scan);
+    while (scan.curr.kind != KILN_DYN_EOF && scan.curr.kind != KILN_DYN_ERROR)
+        kiln_dyn_lexer_next(&scan);
+    int status = scan.curr.kind == KILN_DYN_ERROR
+        ? kiln_dyn_throw_parse_error(&scan, thrown, "Invalid string escape")
+        : KILN_C99_OK;
+    kiln_dyn_token_free(&scan.curr);
+    return status;
+}
+
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
     if ((tok->kind == KILN_DYN_STR || tok->kind == KILN_DYN_REGEX) && tok->str_val != NULL) {
         free(tok->str_val);
         tok->str_val = NULL;
     }
+    free(tok->str_units);
+    tok->str_units = NULL;
+    tok->str_unit_len = 0;
 }
 
 static int kiln_dyn_is_ident_name(kiln_dyn_token_kind kind) {
     return kind == KILN_DYN_IDENT || (kind >= KILN_DYN_KW_RETURN && kind <= KILN_DYN_KW_DEFAULT);
+}
+
+static int kiln_dyn_hex_digit(unsigned char ch) {
+    if (ch >= '0' && ch <= '9') return (int)(ch - '0');
+    if (ch >= 'a' && ch <= 'f') return (int)(ch - 'a') + 10;
+    if (ch >= 'A' && ch <= 'F') return (int)(ch - 'A') + 10;
+    return -1;
+}
+
+static int kiln_dyn_read_hex(const char *source, size_t length, size_t *position,
+                             size_t digits, uint32_t *value) {
+    uint32_t result = 0;
+    if (digits > length - *position) return 0;
+    for (size_t i = 0; i < digits; ++i) {
+        int digit = kiln_dyn_hex_digit((unsigned char)source[*position + i]);
+        if (digit < 0) return 0;
+        result = (result << 4) | (uint32_t)digit;
+    }
+    *position += digits;
+    *value = result;
+    return 1;
+}
+
+static int kiln_dyn_append_codepoint(uint16_t **units, size_t *capacity, size_t *length,
+                                     uint32_t codepoint) {
+    if (codepoint > UINT32_C(0x10FFFF)) return 0;
+    size_t needed = *length + (codepoint > UINT32_C(0xFFFF) ? 2 : 1);
+    if (needed < *length) return 0;
+    if (needed > *capacity) {
+        size_t next = *capacity == 0 ? 16 : *capacity;
+        while (next < needed) {
+            if (next > SIZE_MAX / 2) { next = needed; break; }
+            next *= 2;
+        }
+        if (next > SIZE_MAX / sizeof(uint16_t)) return 0;
+        uint16_t *grown = (uint16_t *)realloc(*units, next * sizeof(uint16_t));
+        if (grown == NULL) return 0;
+        *units = grown;
+        *capacity = next;
+    }
+    if (codepoint <= UINT32_C(0xFFFF)) {
+        (*units)[(*length)++] = (uint16_t)codepoint;
+        return 1;
+    }
+    codepoint -= UINT32_C(0x10000);
+    (*units)[(*length)++] = (uint16_t)(UINT32_C(0xD800) | (codepoint >> 10));
+    (*units)[(*length)++] = (uint16_t)(UINT32_C(0xDC00) | (codepoint & UINT32_C(0x3FF)));
+    return 1;
+}
+
+static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_t *byte_len) {
+    if (count > (SIZE_MAX - 1) / 3) return NULL;
+    size_t capacity = count * 3 + 1;
+    char *bytes = (char *)malloc(capacity);
+    if (bytes == NULL) return NULL;
+    size_t used = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t cp = units[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < count &&
+            units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
+            cp = UINT32_C(0x10000) + ((cp - 0xD800) << 10) + (units[++i] - 0xDC00);
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            cp = UINT32_C(0xFFFD);
+        }
+        if (cp < 0x80) {
+            bytes[used++] = (char)cp;
+        } else if (cp < 0x800) {
+            bytes[used++] = (char)(0xC0u | (cp >> 6));
+            bytes[used++] = (char)(0x80u | (cp & 0x3Fu));
+        } else if (cp < 0x10000) {
+            bytes[used++] = (char)(0xE0u | (cp >> 12));
+            bytes[used++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            bytes[used++] = (char)(0x80u | (cp & 0x3Fu));
+        } else {
+            bytes[used++] = (char)(0xF0u | (cp >> 18));
+            bytes[used++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+            bytes[used++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            bytes[used++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+    }
+    bytes[used] = '\0';
+    *byte_len = used;
+    return bytes;
 }
 
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
@@ -694,36 +806,156 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 
     if (c == '\'' || c == '"' || c == '`') {
         char quote = c;
-        lex->pos++;
-        size_t str_start = lex->pos;
-        size_t cap = 16;
-        size_t out_len = 0;
-        char *buf = (char *)malloc(cap);
-        while (lex->pos < lex->len && lex->src[lex->pos] != quote) {
-            char sc = lex->src[lex->pos];
-            if (sc == '\\' && lex->pos + 1 < lex->len) {
+        size_t literal_start = lex->pos++;
+        size_t unit_capacity = 16;
+        size_t unit_count = 0;
+        uint16_t *units = (uint16_t *)malloc(unit_capacity * sizeof(uint16_t));
+        int closed = 0;
+        int valid = units != NULL;
+        while (valid && lex->pos < lex->len) {
+            unsigned char sc = (unsigned char)lex->src[lex->pos];
+            if (sc == (unsigned char)quote) {
                 lex->pos++;
-                sc = lex->src[lex->pos];
-                if (sc == 'n') sc = '\n';
-                else if (sc == 'r') sc = '\r';
-                else if (sc == 't') sc = '\t';
+                closed = 1;
+                break;
             }
-            if (out_len + 2 > cap) {
-                cap *= 2;
-                buf = (char *)realloc(buf, cap);
+            if (quote != '`' && (sc == '\n' || sc == '\r')) {
+                valid = 0;
+                break;
             }
-            buf[out_len++] = sc;
-            lex->pos++;
+            uint32_t cp;
+            if (sc != '\\') {
+                if (quote == '`' && sc == '\r') {
+                    lex->pos++;
+                    if (lex->pos < lex->len && lex->src[lex->pos] == '\n') lex->pos++;
+                    cp = '\n';
+                } else {
+                    cp = kiln_c99_utf8_next(lex->src, lex->len, &lex->pos);
+                }
+            } else {
+                lex->pos++;
+                if (lex->pos >= lex->len) {
+                    valid = 0;
+                    break;
+                }
+                unsigned char escape = (unsigned char)lex->src[lex->pos++];
+                switch (escape) {
+                case '\n': continue;
+                case '\r':
+                    if (lex->pos < lex->len && lex->src[lex->pos] == '\n') lex->pos++;
+                    continue;
+                case 0xE2:
+                    if (lex->pos + 1 < lex->len &&
+                        (unsigned char)lex->src[lex->pos] == 0x80 &&
+                        ((unsigned char)lex->src[lex->pos + 1] == 0xA8 ||
+                         (unsigned char)lex->src[lex->pos + 1] == 0xA9)) {
+                        lex->pos += 2;
+                        continue;
+                    }
+                    cp = kiln_c99_utf8_next(lex->src, lex->len, &lex->pos);
+                    break;
+                case 'b': cp = '\b'; break;
+                case 'f': cp = '\f'; break;
+                case 'n': cp = '\n'; break;
+                case 'r': cp = '\r'; break;
+                case 't': cp = '\t'; break;
+                case 'v': cp = '\v'; break;
+                case '0':
+                    if (lex->pos < lex->len && lex->src[lex->pos] >= '0' &&
+                        lex->src[lex->pos] <= '9') {
+                        if (lex->strict || quote == '`') { valid = 0; break; }
+                        unsigned value = 0;
+                        size_t digits = 0;
+                        while (digits < 2 && lex->pos < lex->len &&
+                               lex->src[lex->pos] >= '0' && lex->src[lex->pos] <= '7') {
+                            value = value * 8 + (unsigned)(lex->src[lex->pos++] - '0');
+                            digits++;
+                        }
+                        cp = value;
+                    } else cp = 0;
+                    break;
+                case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+                    if (lex->strict || quote == '`') { valid = 0; break; }
+                    cp = (uint32_t)(escape - '0');
+                    for (size_t digits = 1; digits < (escape <= '3' ? 3u : 2u) &&
+                         lex->pos < lex->len && lex->src[lex->pos] >= '0' &&
+                         lex->src[lex->pos] <= '7'; ++digits) {
+                        cp = cp * 8 + (uint32_t)(lex->src[lex->pos++] - '0');
+                    }
+                    if (cp > 0xFF && lex->pos > 0) {
+                        /* A three-digit legacy escape is capped at 0377; the last digit remains
+                         * ordinary source when consuming it would exceed that range. */
+                        lex->pos--;
+                        cp >>= 3;
+                    }
+                    break;
+                case '8': case '9':
+                    if (lex->strict || quote == '`') { valid = 0; break; }
+                    cp = escape;
+                    break;
+                case 'x':
+                    if (!kiln_dyn_read_hex(lex->src, lex->len, &lex->pos, 2, &cp)) valid = 0;
+                    break;
+                case 'u':
+                    if (lex->pos < lex->len && lex->src[lex->pos] == '{') {
+                        lex->pos++;
+                        cp = 0;
+                        size_t digits = 0;
+                        while (lex->pos < lex->len && lex->src[lex->pos] != '}') {
+                            int digit = kiln_dyn_hex_digit((unsigned char)lex->src[lex->pos]);
+                            if (digit < 0 || cp > ((UINT32_C(0x10FFFF) -
+                                                    (uint32_t)(digit < 0 ? 0 : digit)) / 16)) {
+                                valid = 0;
+                                break;
+                            }
+                            cp = cp * 16 + (uint32_t)digit;
+                            lex->pos++;
+                            digits++;
+                        }
+                        if (valid && (digits == 0 || lex->pos >= lex->len ||
+                                      lex->src[lex->pos] != '}' || cp > UINT32_C(0x10FFFF)))
+                            valid = 0;
+                        if (valid) lex->pos++;
+                    } else if (!kiln_dyn_read_hex(lex->src, lex->len, &lex->pos, 4, &cp)) {
+                        valid = 0;
+                    }
+                    break;
+                default:
+                    if (escape < 0x80) cp = escape;
+                    else {
+                        size_t back = lex->pos - 1;
+                        cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &back);
+                        lex->pos = back;
+                    }
+                    break;
+                }
+            }
+            if (valid && !kiln_dyn_append_codepoint(&units, &unit_capacity, &unit_count, cp))
+                valid = 0;
         }
-        if (lex->pos < lex->len && lex->src[lex->pos] == quote) {
-            lex->pos++;
+        if (!closed) valid = 0;
+        if (!valid) {
+            free(units);
+            lex->curr.kind = KILN_DYN_ERROR;
+            lex->curr.start = start;
+            lex->curr.len = lex->pos - literal_start;
+            return;
         }
-        buf[out_len] = '\0';
+        size_t byte_count = 0;
+        char *bytes = kiln_dyn_utf8_from_units(units, unit_count, &byte_count);
+        if (bytes == NULL) {
+            free(units);
+            lex->curr.kind = KILN_DYN_ERROR;
+            lex->curr.start = start;
+            return;
+        }
         lex->curr.kind = KILN_DYN_STR;
         lex->curr.start = start;
-        lex->curr.len = lex->pos - (str_start - 1);
-        lex->curr.str_val = buf;
-        lex->curr.str_len = out_len;
+        lex->curr.len = lex->pos - literal_start;
+        lex->curr.str_val = bytes;
+        lex->curr.str_len = byte_count;
+        lex->curr.str_units = units;
+        lex->curr.str_unit_len = unit_count;
         return;
     }
 
@@ -1181,7 +1413,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_STR) {
-        *out = kiln_c99_copy_text(lex->curr.str_val, lex->curr.str_len);
+        *out = kiln_c99_from_units(lex->curr.str_units, lex->curr.str_unit_len);
         kiln_dyn_lexer_next(lex);
         return KILN_C99_OK;
     }
@@ -1395,6 +1627,8 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             const char *key_name = NULL;
             size_t key_len = 0;
             char *owned_key = NULL;
+            int string_key = 0;
+            kiln_value string_key_value = kiln_c99_undefined();
             if (kiln_dyn_is_ident_name(lex->curr.kind) || lex->curr.kind == KILN_DYN_STR) {
                 if (lex->curr.kind == KILN_DYN_STR) {
                     /* The lexer frees decoded string storage on its next advance. Object
@@ -1403,6 +1637,14 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     owned_key = lex->curr.str_val;
                     lex->curr.str_val = NULL;
                     key_name = owned_key;
+                    string_key = 1;
+                    string_key_value = kiln_c99_from_units(lex->curr.str_units,
+                                                            lex->curr.str_unit_len);
+                    if (string_key_value.tag != KILN_VALUE_STRING) {
+                        free(owned_key);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    kiln_c99_gc_keep_alive(&string_key_value);
                 } else {
                     key_name = lex->curr.start;
                 }
@@ -1454,6 +1696,13 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     return status;
                 }
                 kiln_c99_gc_keep_alive(&val);
+                if (string_key) {
+                    status = kiln_c99_set_function_name(val, string_key_value, NULL);
+                    if (status != KILN_C99_OK) {
+                        free(owned_key);
+                        return status;
+                    }
+                }
             } else if (lex->curr.kind == KILN_DYN_COLON) {
                 kiln_dyn_lexer_next(lex);
                 status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &val, thrown);
@@ -1462,6 +1711,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     return status;
                 }
             } else {
+                if (string_key) {
+                    free(owned_key);
+                    return kiln_dyn_throw_parse_error(lex, thrown,
+                                                      "String property key needs a value");
+                }
                 int scope_found = 0;
                 status = kiln_dyn_scope_get(scope, key_name, key_len, &val, &scope_found,
                                             thrown);
@@ -1494,7 +1748,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     break;
                 }
             }
-            if (non_ascii_key) {
+            if (string_key) {
+                status = kiln_c99_define_computed(*out, string_key_value, val);
+            } else if (non_ascii_key) {
                 /* Fixed C names are Latin-1 byte views; a UTF-8 source key must become an
                  * actual JS string before property-key conversion or its bytes become two
                  * unrelated code points. */
@@ -2599,6 +2855,7 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
     memset(&lex, 0, sizeof(lex));
     lex.src = (const char *)source_owned;
     lex.len = source_len;
+    lex.strict = scope.strict;
     kiln_dyn_lexer_next(&lex);
     /* This seam is for a function expression only, not a general side-effecting expression that
      * happens to produce a function. Koa/depd constructs exactly this shape at run time. */
@@ -2611,6 +2868,7 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
         memset(&lex, 0, sizeof(lex));
         lex.src = (const char *)source_owned;
         lex.len = source_len;
+        lex.strict = scope.strict;
         kiln_dyn_lexer_next(&lex);
     } else if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
         goto direct_eval_unsupported;
@@ -3576,6 +3834,7 @@ static int kiln_dyn_switch_initialize_functions(kiln_host *host,
         function_lex.len = clauses[clause].body_len;
         function_lex.pos = (size_t)(bindings[index].function_site - function_lex.src);
         function_lex.function_declaration = 1;
+        function_lex.strict = scope->strict;
         kiln_dyn_lexer_next(&function_lex);
         kiln_value function = kiln_c99_undefined();
         int status = kiln_dyn_eval_primary(host, &function_lex, scope, receiver, args, argc,
@@ -3714,6 +3973,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         memset(&block, 0, sizeof(block));
         block.src = try_body;
         block.len = try_len;
+        block.strict = scope->strict;
         kiln_dyn_lexer_next(&block);
         int status = KILN_C99_OK;
         while (block.curr.kind != KILN_DYN_EOF) {
@@ -3766,6 +4026,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 memset(&block, 0, sizeof(block));
                 block.src = catch_body;
                 block.len = catch_len;
+                block.strict = catch_scope.strict;
                 kiln_dyn_lexer_next(&block);
                 while (block.curr.kind != KILN_DYN_EOF) {
                     status = kiln_dyn_eval_stmt(host, &block, &catch_scope, receiver, args,
@@ -3970,6 +4231,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         memset(&discriminant_lex, 0, sizeof discriminant_lex);
         discriminant_lex.src = lex->src + discriminant_start;
         discriminant_lex.len = discriminant_end - discriminant_start;
+        discriminant_lex.strict = scope->strict;
         kiln_dyn_lexer_next(&discriminant_lex);
         kiln_value discriminant;
         /* The switch discriminant runs before entering the CaseBlock lexical environment.
@@ -4004,6 +4266,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&test_lex, 0, sizeof test_lex);
             test_lex.src = clauses[index].test;
             test_lex.len = clauses[index].test_len;
+            test_lex.strict = switch_scope.strict;
             kiln_dyn_lexer_next(&test_lex);
             kiln_value test_value;
             status = kiln_dyn_eval_expr(host, &test_lex, &switch_scope, receiver, args, argc,
@@ -4028,6 +4291,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&clause_lex, 0, sizeof clause_lex);
             clause_lex.src = clauses[index].body;
             clause_lex.len = clauses[index].body_len;
+            clause_lex.strict = switch_scope.strict;
             // The switch's label belongs to the switch, not to an inner loop in a case.
             // Labeled abrupt completions propagate to the enclosing label evaluator.
             clause_lex.break_label = lex->break_label;
@@ -4096,6 +4360,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&clex, 0, sizeof clex);
             clex.src = cond_src;
             clex.len = cond_len;
+            clex.strict = scope->strict;
             kiln_dyn_lexer_next(&clex);
             kiln_value condition;
             int status = kiln_dyn_eval_expr(host, &clex, scope, receiver, args, argc, depth,
@@ -4108,6 +4373,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&blex, 0, sizeof blex);
             blex.src = body_src;
             blex.len = body_len;
+            blex.strict = scope->strict;
             blex.break_label = lex->break_label;
             blex.break_label_len = lex->break_label_len;
             kiln_dyn_lexer_next(&blex);
@@ -4216,6 +4482,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                             memset(&blex, 0, sizeof(blex));
                             blex.src = body_src;
                             blex.len = body_len;
+                            blex.strict = scope->strict;
                             blex.pos = 0;
                             blex.break_label = lex->break_label;
                             blex.break_label_len = lex->break_label_len;
@@ -4276,6 +4543,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                             memset(&blex, 0, sizeof(blex));
                             blex.src = body_src;
                             blex.len = body_len;
+                            blex.strict = scope->strict;
                             blex.pos = 0;
                             blex.break_label = lex->break_label;
                             blex.break_label_len = lex->break_label_len;
@@ -4388,6 +4656,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 memset(&clex, 0, sizeof clex);
                 clex.src = cond_src;
                 clex.len = cond_len;
+                clex.strict = scope->strict;
                 kiln_dyn_lexer_next(&clex);
                 kiln_value cval;
                 int status = kiln_dyn_eval_expr(host, &clex, scope, receiver, args, argc, depth, &cval, thrown);
@@ -4400,6 +4669,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 memset(&blex, 0, sizeof blex);
                 blex.src = body_src;
                 blex.len = body_len;
+                blex.strict = scope->strict;
                 blex.pos = 0;
                 blex.break_label = lex->break_label;
                 blex.break_label_len = lex->break_label_len;
@@ -4452,6 +4722,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 memset(&slex, 0, sizeof slex);
                 slex.src = step_src;
                 slex.len = step_len;
+                slex.strict = scope->strict;
                 slex.pos = 0;
                 kiln_dyn_lexer_next(&slex);
                 while (slex.curr.kind != KILN_DYN_EOF) {
@@ -5195,6 +5466,7 @@ declaration_scan_done:
         function_lex.len = source_len;
         function_lex.pos = decls[index].offset;
         function_lex.function_declaration = 1;
+        function_lex.strict = scope->strict;
         kiln_dyn_lexer_next(&function_lex);
         status = kiln_dyn_eval_primary(host, &function_lex, scope, receiver, args, argc,
                                        depth, &function, thrown);
@@ -5394,6 +5666,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     lex.len = blen;
     lex.pos = 0;
     lex.dynamic_function_body = 1;
+    lex.strict = scope.strict;
     kiln_dyn_lexer_next(&lex);
 
     int returned = 0;
@@ -5504,7 +5777,10 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         return KILN_C99_OUT_OF_MEMORY;
     int body_strict = kiln_dyn_body_has_use_strict((const char *)body_source,
                                                    body_source_len);
+    int validation_status = kiln_dyn_validate_source((const char *)body_source,
+                                                     body_source_len, body_strict, thrown);
     free(body_source);
+    if (validation_status != KILN_C99_OK) return validation_status;
 
     int status = kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
                                        NULL, "", 0,
