@@ -42,7 +42,7 @@ server.listen(port, '127.0.0.1', () => {
   client.on('end', () => {
     const bytes = Buffer.concat(response);
     const text = bytes.toString('latin1');
-    const raw = bytes.lastIndexOf(Buffer.from([0x00, 0xa5, 0xff]));
+    const raw = bytes.indexOf(Buffer.from([0x00, 0xa5, 0xff]));
     const repeatedRaw = raw < 0 ? -1 : bytes.indexOf(Buffer.from([0x00, 0xa5, 0xff]), raw + 3);
     if (!text.includes('HTTP/1.1 200') || !text.includes('HTTP/1.1 101') || raw < 0 || repeatedRaw >= 0) {
       throw new Error('pipelined HTTP upgrade did not preserve both responses and raw head bytes');
