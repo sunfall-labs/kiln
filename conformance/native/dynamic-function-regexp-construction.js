@@ -1,6 +1,13 @@
 const lone = String.fromCharCode(0xd800);
 const slash = "\\";
 
+// Template interpolation invokes String conversion before Function sees its source.
+if (String(lone) !== lone || `${lone}` !== lone ||
+    String({toString() { return lone; }}) !== lone ||
+    String.prototype.concat.call({toString() { return lone; }}, "x") !== lone + "x") {
+  throw new Error("language string conversion preserves lone surrogate units");
+}
+
 for (const flags of ["u", "v"]) {
   let rejectedAtConstruction = false;
   try {

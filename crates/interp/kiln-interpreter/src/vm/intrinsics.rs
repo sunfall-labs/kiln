@@ -1127,7 +1127,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(primitive, Value::Symbol(_)) {
                     return Err(ExecutionError::SymbolIsNotAString);
                 }
-                coerced_receiver = Value::String(primitive.to_display_string().into());
+                coerced_receiver = Value::String(primitive.to_string_units_checked()?);
                 &coerced_receiver
             }
         } else {
@@ -1152,7 +1152,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(primitive, Value::Symbol(_)) {
                 return Err(ExecutionError::SymbolIsNotAString);
             }
-            let coerced = Value::String(primitive.to_display_string().into());
+            let coerced = Value::String(primitive.to_string_units_checked()?);
             return self.dispatch_native(native, &coerced, arguments, instruction);
         }
         // `ToPropertyKey` for every built-in that names a property with an argument. The
@@ -1699,7 +1699,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(primitive, Value::Symbol(_)) && !matches!(value, Value::Symbol(_)) {
                     return Err(ExecutionError::SymbolIsNotAString);
                 }
-                Ok(Value::String(primitive.to_display_string().into()))
+                Ok(Value::String(primitive.to_string_units_checked()?))
             }
             // `JSON.parse(text, reviver)`. The reviver is called on every value the text
             // produced, deepest first, with the holder as its `this` -- which is how a program
