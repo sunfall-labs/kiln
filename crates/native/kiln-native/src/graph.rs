@@ -1096,7 +1096,11 @@ pub(super) fn native_bootstrap_families(
             .iter()
             .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
     };
-    let mut selected = 0;
+    // WEB_BOOTSTRAP_SOURCE is emitted unconditionally and its MessagePort implementation
+    // captures structuredClone; structuredClone uses ArrayBuffer's transfer/detach support.
+    // These are bootstrap dependencies rather than user-code demands, so seed them here
+    // instead of retaining every native builtin family.
+    let mut selected = family::WEB_BOOTSTRAP_DEPENDENCIES;
     if builtin(&["JSON"]) || names(&["stringify"]) {
         selected |= family::JSON;
     }

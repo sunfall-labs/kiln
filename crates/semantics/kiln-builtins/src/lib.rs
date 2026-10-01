@@ -1486,6 +1486,12 @@ pub mod native_bootstrap_family {
     pub const INTL_DATETIME: u32 = 1 << 11;
     pub const JSON: u32 = 1 << 12;
     pub const ALL: u32 = (1 << 13) - 1;
+
+    /// The native web-global bootstrap is installed in every realm. MessagePort delivery
+    /// captures `__kilnStructuredClone`, whose transfer path in turn captures the ArrayBuffer
+    /// detach primitive. Keep these two families even when user-code liveness cannot see the
+    /// internal web-bootstrap references.
+    pub const WEB_BOOTSTRAP_DEPENDENCIES: u32 = ARRAY_BUFFER | STRUCTURED_CLONE;
 }
 
 /// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
