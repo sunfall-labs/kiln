@@ -3332,6 +3332,8 @@ typedef struct kiln_node_client_request {
     int sent;
     int response_started;
     int response_ended;
+    int response_released;
+    int response_reusable;
     int socket_published;
     int utf8;
     struct kiln_node_client_request *next;
@@ -3366,6 +3368,7 @@ typedef struct kiln_node_response {
     char *request_headers;
     size_t request_headers_len;
     int request_headers_owned;
+    int request_utf8;
     uint16_t status;
     int started;
     int ended;

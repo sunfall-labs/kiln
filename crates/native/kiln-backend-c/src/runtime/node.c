@@ -1302,6 +1302,46 @@ static void kiln_c99_node_client_request_unregister(kiln_node_client_request *re
     }
 }
 
+/* The runtime reaches HTTP EOF before a paused Readable necessarily emits `end`. Keep the
+ * ClientRequest linked to its Agent until the shared Readable has drained and run every end
+ * listener. This function is called by the private TS end bridge, after native EventEmitter
+ * delivery; `listener_failed` retires the socket while preserving the listener's exception. */
+static int kiln_c99_node_client_readable_ended(kiln_node_client_request *request,
+                                               int listener_failed, kiln_value *thrown) {
+    kiln_node_socket *socket;
+    uint64_t next_request_id = 0;
+    int release;
+    int status = KILN_C99_OK;
+    if (request == NULL || !request->response_ended || request->response_released)
+        return KILN_C99_OK;
+    request->response_released = 1;
+    socket = request->socket;
+    if (socket == NULL) {
+        kiln_c99_node_client_request_unregister(request);
+        return KILN_C99_OK;
+    }
+    kiln_c99_node_client_request_unlink_socket(request);
+    kiln_c99_node_client_request_unregister(request);
+    release = kiln_realm_http_agent_release_active(
+        socket->resource,
+        request->response_reusable && !socket->closing && !socket->closed && !listener_failed,
+        &next_request_id);
+    if (release < KILN_C99_OK) return release;
+    if (release == KILN_REALM_HTTP_AGENT_DISPATCH) {
+        kiln_node_client_request *next = kiln_c99_node_client_request_find(next_request_id);
+        if (next == NULL)
+            KILN_C99_REFUSE("the agent dispatched a queued request that is no longer on this "
+                            "socket");
+        status = kiln_c99_node_client_attach(next, socket, 0, thrown);
+    } else if (release != KILN_REALM_HTTP_AGENT_IDLE &&
+               release != KILN_REALM_HTTP_AGENT_RETIRE) {
+        KILN_C99_REFUSE("an HTTP agent release decision this backend does not model");
+    }
+    kiln_c99_gc_keep_alive(&request->object);
+    kiln_c99_gc_keep_alive(&request->response);
+    return status;
+}
+
 static int kiln_c99_node_validate_stream_chunk(kiln_value value, kiln_value *thrown) {
     if (value.tag == KILN_VALUE_STRING) return KILN_C99_OK;
     if (value.tag == KILN_VALUE_TYPED_ARRAY) {
@@ -2316,7 +2356,14 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 const kiln_node_http_layout *layout;
                 if (event->kind == 2) {
                     kiln_value data;
-                    status = kiln_c99_buffer_from_bytes(&data, event->data, event->data_len);
+                    if (response->request_utf8) {
+                        data = kiln_c99_copy_text((const char *)event->data,
+                                                  (size_t)event->data_len);
+                        status = KILN_C99_OK;
+                    } else {
+                        status = kiln_c99_buffer_from_bytes(&data, event->data,
+                                                            event->data_len);
+                    }
                     if (status != KILN_C99_OK) return status;
                     return kiln_c99_node_readable_push(socket->host, response->request, data,
                                                        0, exception);
@@ -2462,13 +2509,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                            0, exception);
     }
     if (client != NULL && event->kind == 8) {
-        uint64_t next_request_id = 0;
         int agent_retains;
-        int release;
         int end_status;
         int status;
         if (client->response_ended) return KILN_C99_OK;
         client->response_ended = 1;
+        client->response_reusable = event->flags != 0;
         agent_retains = kiln_realm_http_agent_can_retain_active(socket->resource,
                                                                  event->flags != 0);
         if (agent_retains < 0)
@@ -2483,25 +2529,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         }
         end_status = kiln_c99_node_readable_push(client->host, client->response,
                                                  kiln_c99_null(), 0, exception);
-        kiln_c99_node_client_request_unlink_socket(client);
-        kiln_c99_node_client_request_unregister(client);
-        release = kiln_realm_http_agent_release_active(socket->resource,
-                                                       event->flags != 0 &&
-                                                           !socket->closing && !socket->closed &&
-                                                           end_status == KILN_C99_OK,
-                                                       &next_request_id);
-        if (release == KILN_REALM_HTTP_AGENT_DISPATCH) {
-            kiln_node_client_request *next = kiln_c99_node_client_request_find(next_request_id);
-            if (next == NULL)
-                KILN_C99_REFUSE("the agent dispatched a queued request that is no longer on this "
-                                "socket");
-            status = kiln_c99_node_client_attach(next, socket, 0, exception);
-            if (status != KILN_C99_OK) return status;
-            return end_status;
-        }
-        if (release != KILN_REALM_HTTP_AGENT_IDLE &&
-            release != KILN_REALM_HTTP_AGENT_RETIRE)
-            KILN_C99_REFUSE("an HTTP agent release decision this backend does not model");
+        kiln_c99_gc_keep_alive(&client->object);
+        kiln_c99_gc_keep_alive(&client->response);
         return end_status;
     }
     if (event->kind == 9) {
@@ -6230,6 +6259,17 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown) {
     kiln_node_response *response;
+    if (code == KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED) {
+        kiln_node_client_request *request = argc > 0
+            ? (kiln_node_client_request *)kiln_c99_node_hidden_pointer(
+                  args[0], "@@node:client", 13)
+            : NULL;
+        int listener_failed = argc > 1 && kiln_c99_truthy(args[1]);
+        int status = kiln_c99_node_client_readable_ended(request, listener_failed, thrown);
+        if (status != KILN_C99_OK) return status;
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN) {
         kiln_node_client_request *request = argc > 0
             ? (kiln_node_client_request *)kiln_c99_node_hidden_pointer(
@@ -6386,10 +6426,15 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_node_client_request *request =
             (kiln_node_client_request *)kiln_c99_node_hidden_pointer(receiver,
                                                                      "@@node:client", 13);
+        kiln_node_response *incoming_response = NULL;
         if (request != NULL) {
             request->utf8 = 1;
-        } else if (kiln_c99_node_hidden_pointer(receiver, "@@node:response", 15) == NULL) {
-            return kiln_c99_throw_not_a(thrown, receiver, "IncomingMessage");
+        } else {
+            incoming_response = (kiln_node_response *)kiln_c99_node_hidden_pointer(
+                receiver, "@@node:response", 15);
+            if (incoming_response == NULL)
+                return kiln_c99_throw_not_a(thrown, receiver, "IncomingMessage");
+            incoming_response->request_utf8 = 1;
         }
         *result = receiver;
         return KILN_C99_OK;

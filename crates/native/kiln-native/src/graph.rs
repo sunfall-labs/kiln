@@ -4162,9 +4162,13 @@ static int kiln_install_native_modules(kiln_host *host) {
     /* The private host half of `serve()` (kiln-builtins web.ts). */
     kiln_value http_create_fetch_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 530 /* KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER */ };
     kiln_value http_fetch_respond = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 531 /* KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND */ };
+    kiln_value http_incoming_ended = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 571 /* KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED */ };
     status = kiln_c99_put(host, http_obj, "createFetchServer", 17, http_create_fetch_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, http_obj, "fetchRespond", 12, http_fetch_respond, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "__incomingMessageEnded", 22,
+                          http_incoming_ended, 0, NULL);
     if (status != KILN_C99_OK) return status;
     kiln_value incoming_message_prototype = kiln_c99_undefined();
     status = kiln_c99_node_incoming_message_prototype(&incoming_message_prototype);

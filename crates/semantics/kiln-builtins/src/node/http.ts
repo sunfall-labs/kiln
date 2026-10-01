@@ -73,6 +73,49 @@ if (incomingMessagePrototype && typeof Readable === "function") {
       },
     });
   }
+  const nativeEmit = incomingMessagePrototype.emit;
+  const finishNativeIncoming = nativeModule?.__incomingMessageEnded;
+  if (typeof nativeEmit === "function") {
+    Object.defineProperty(incomingMessagePrototype, "emit", {
+      configurable: true,
+      writable: true,
+      value: function (this: any, event: any, ...args: any[]): any {
+        let result: any;
+        let listenerError: any;
+        let listenerFailed = false;
+        try {
+          result = nativeEmit.call(this, event, ...args);
+        } catch (error) {
+          listenerFailed = true;
+          listenerError = error;
+        }
+        if (event === "end" && this._readableState.endEmitted &&
+            typeof finishNativeIncoming === "function") {
+          try {
+            finishNativeIncoming.call(nativeModule, this, listenerFailed);
+          } catch (completionError) {
+            if (!listenerFailed) throw completionError;
+          }
+        }
+        if (listenerFailed) throw listenerError;
+        return result;
+      },
+    });
+  }
+  const nativeSetEncoding = incomingMessagePrototype.setEncoding;
+  if (typeof nativeSetEncoding === "function") {
+    Object.defineProperty(incomingMessagePrototype, "setEncoding", {
+      configurable: true,
+      writable: true,
+      value: function (this: any, encoding: any): any {
+        const result = nativeSetEncoding.call(this, encoding);
+        const state = this._readableState;
+        const normalized = String(encoding).toLowerCase();
+        state.encoding = normalized === "utf-8" ? "utf-8" : "utf8";
+        return result;
+      },
+    });
+  }
   // Native IncomingMessage objects are allocated by the HTTP host rather than by the
   // TypeScript Readable constructor. Run that constructor's existing initializer lazily so
   // native-created instances get the same state and public flags as ordinary Readables.
