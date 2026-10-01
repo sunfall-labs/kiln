@@ -26,7 +26,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use kiln_host_abi::ResourceId;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
 use crate::HttpCloseMode;
@@ -1388,24 +1388,28 @@ async fn serve(
     shared.dispatcher.started();
     let sniff = detect_server_protocol(transport.0);
     tokio::pin!(sniff);
-    let (is_http2, io) = tokio::select! {
-        result = &mut sniff => match result {
-            Ok(protocol) => protocol,
-            Err(error) => {
-                let message = error.to_string();
-                let _ = shared.dispatch(&HttpEvent {
-                    message: message.as_bytes(),
-                    ..HttpEvent::bare(HttpEventKind::Error, 0)
-                });
+    let mut pump_done = false;
+    let (is_http2, io) = loop {
+        tokio::select! {
+            result = &mut sniff => match result {
+                Ok(protocol) => break protocol,
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = shared.dispatch(&HttpEvent {
+                        message: message.as_bytes(),
+                        ..HttpEvent::bare(HttpEventKind::Error, 0)
+                    });
+                    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    table.borrow_mut().remove(&shared.resource);
+                    return;
+                }
+            },
+            _ = shared.dispatcher.pump(), if !pump_done => { pump_done = true; },
+            _ = shared.shutdown.notified() => {
                 let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
                 table.borrow_mut().remove(&shared.resource);
                 return;
             }
-        },
-        _ = shared.shutdown.notified() => {
-            let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
-            table.borrow_mut().remove(&shared.resource);
-            return;
         }
     };
     let service = server_service(Rc::clone(&shared));
@@ -1419,7 +1423,7 @@ async fn serve(
         let result = tokio::select! {
             biased;
             result = &mut connection => result,
-            _ = shared.dispatcher.pump() => connection.await,
+            _ = shared.dispatcher.pump(), if !pump_done => connection.await,
             _ = shared.shutdown.notified() => {
                 connection.as_mut().graceful_shutdown();
                 connection.await
@@ -1442,12 +1446,14 @@ async fn serve(
             let progress = tokio::select! {
                 biased;
                 result = std::future::poll_fn(|cx| connection.poll_without_shutdown(cx)) => H1Progress::Complete(result),
-                _ = shared.dispatcher.pump() => H1Progress::Pump,
+                _ = shared.dispatcher.pump(), if !pump_done => H1Progress::Pump,
                 _ = shared.shutdown.notified(), if !graceful => H1Progress::Shutdown,
             };
             match progress {
                 H1Progress::Complete(result) => break result,
-                H1Progress::Pump => {}
+                H1Progress::Pump => {
+                    pump_done = true;
+                }
                 H1Progress::Shutdown => {
                     Pin::new(&mut connection).graceful_shutdown();
                     graceful = true;
