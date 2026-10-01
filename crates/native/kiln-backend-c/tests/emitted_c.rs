@@ -826,14 +826,24 @@ fn emitted_http_socket_close_is_runtime_owned_and_modeled() {
     let branch_start = source
         .find("if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded)")
         .expect("HTTP socket close branch is emitted");
-    let generic_start = source[branch_start..]
+    let client_start = source[branch_start..]
         .find("    if (socket->http_client_owned && !socket->http_upgraded)")
         .map(|offset| branch_start + offset)
         .expect("HTTP client close branch follows server branch");
-    let http_branch = &source[branch_start..generic_start];
+    let http_branch = &source[branch_start..client_start];
     assert!(http_branch.contains("kiln_realm_http_server_close_active("));
     assert!(http_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
     assert!(!http_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
+
+    let generic_start = source[client_start..]
+        .find("    if (socket->write_request != 0) {")
+        .map(|offset| client_start + offset)
+        .expect("generic socket close follows the HTTP client branch");
+    let client_branch = &source[client_start..generic_start];
+    assert!(client_branch.contains("kiln_realm_http_server_close_active("));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_GRACEFUL"));
+    assert!(!client_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
 
     let server_close = source
         .find("static int kiln_c99_node_server_maybe_emit_close(")
