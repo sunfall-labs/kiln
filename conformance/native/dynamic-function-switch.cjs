@@ -134,6 +134,17 @@ try { annexBFunctionBodyLexicalTdz(); } catch (error) {
 if (!lexicalTdzThrew) {
   throw new Error("function-body lexical bindings suppress Annex B aliases and retain TDZ");
 }
+const annexBCommaLexicalTdz = Function(
+  "switch (0) { case 0: function secondLexical() {} } " +
+    "return secondLexical; let firstLexical = 1, secondLexical;",
+);
+lexicalTdzThrew = false;
+try { annexBCommaLexicalTdz(); } catch (error) {
+  lexicalTdzThrew = error.name === "ReferenceError";
+}
+if (!lexicalTdzThrew) {
+  throw new Error("comma-separated lexical declarators participate in alias suppression and TDZ");
+}
 const annexBEnclosingBlockLexical = Function(
   "{ let blockName = 1; switch (0) { case 0: function blockName() {} } } " +
     "return typeof blockName;",
