@@ -1147,6 +1147,88 @@ exports.annotations = function (ast, values) { return values; };
                 .is_some_and(|slots| slots.contains(&answer_slot) && slots.contains(&unused_slot))
         );
     }
+
+    #[test]
+    fn named_reexport_chain_keeps_each_import_edge_live() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-named-reexport-{stamp}"));
+        fs::create_dir_all(&root).expect("create project fixture");
+        let root = fs::canonicalize(&root).expect("canonicalize root");
+        let _cleanup = TempProject(root.clone());
+        fs::write(
+            root.join("package.json"),
+            r#"{"type":"module","sideEffects":false}"#,
+        )
+        .expect("write package metadata");
+        fs::write(
+            root.join("entry.mjs"),
+            r#"import { publicName } from "./barrel.mjs"; publicName();"#,
+        )
+        .expect("write entry");
+        fs::write(
+            root.join("barrel.mjs"),
+            r#"import { implementation as localName } from "./provider.mjs"; export { localName as publicName };"#,
+        )
+        .expect("write barrel");
+        fs::write(
+            root.join("provider.mjs"),
+            r#"export function implementation() { return 42; }"#,
+        )
+        .expect("write provider");
+
+        let entry = root.join("entry.mjs");
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = kiln_module_graph::ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build ESM graph");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("select executable modules");
+        let demand = selection.demand();
+        let (reduced, reduced_demand) = graph
+            .reduce_to_live(&demand)
+            .expect("reduce graph with reexports");
+        for (path, local) in [("entry.mjs", "publicName"), ("barrel.mjs", "localName")] {
+            let path = fs::canonicalize(root.join(path)).expect("canonical module path");
+            let original = graph.module(&path).expect("original module node");
+            let original_index = original
+                .program
+                .imports
+                .iter()
+                .position(|import| import.local == local)
+                .expect("original named import");
+            assert!(
+                demand
+                    .live_imports
+                    .contains(&(path.clone(), original_index)),
+                "import {local} in {} should be selected live",
+                path.display()
+            );
+            let node = reduced.module(&path).expect("reduced module node");
+            let index = node
+                .program
+                .imports
+                .iter()
+                .position(|import| import.local == local)
+                .expect("named import");
+            assert!(
+                reduced_demand.live_imports.contains(&(path.clone(), index)),
+                "reduced import {local} in {} should remain live",
+                path.display()
+            );
+        }
+        let provider = fs::canonicalize(root.join("provider.mjs")).expect("provider path");
+        assert!(reduced.module(&provider).is_some());
+    }
 }
 
 /// Conservative capabilities required by a single module program.

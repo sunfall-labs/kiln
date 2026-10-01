@@ -601,6 +601,28 @@ fn debug_module_demands(stage: &str, graph: &ModuleGraph, demand: &kiln_module_g
             demand.slots.get(&node.path),
             exports
         );
+        for (index, import) in node.program.imports.iter().enumerate() {
+            let resolved = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .and_then(|dependency| {
+                    graph
+                        .resolved_export(&dependency.target, &import.imported)
+                        .map(|export| format!("{:?}", export))
+                })
+                .unwrap_or_else(|| "<unresolved-or-namespace>".to_owned());
+            eprintln!(
+                "kiln: module-demand-import stage={stage} path={} index={index} local={} local_slot={} source={} imported={} resolved={} live={}",
+                node.path.display(),
+                import.local,
+                import.local_slot,
+                import.source,
+                import.imported,
+                resolved,
+                demand.live_imports.contains(&(node.path.clone(), index)),
+            );
+        }
     }
 }
 
