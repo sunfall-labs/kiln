@@ -45,11 +45,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if native == Native::ShareRaw {
             return self.share_value(arguments.first().cloned().unwrap_or(Value::Undefined));
         }
-        // Node retains the callable form `Buffer(value)` as an alias for `Buffer.from(value)`.
-        // The public Buffer methods are TypeScript, but this constructor identity is an
-        // interpreter intrinsic, so route it through the same byte allocator as its static form.
+        // Node retains the callable form `Buffer(value)` as an alias for its public `from`
+        // method (and the numeric form as `alloc`). Resolve that method through the realm so
+        // string encodings and the rest of the TypeScript facade stay the single implementation.
         if native == Native::NodeBufferGlobal {
-            return crate::buffer::dispatch(Native::NodeBufferFrom, receiver, arguments);
+            let constructor = Value::Native(Native::NodeBufferGlobal, self.current_realm);
+            let method_name = if matches!(arguments.first(), Some(Value::Number(_))) {
+                "alloc"
+            } else {
+                "from"
+            };
+            let method = self.read_property(&constructor, method_name, instruction)?;
+            return self.call_value(&method, constructor, arguments.to_vec(), instruction);
         }
         // Ahead of the wrapper and proxy preambles below: a `Temporal` value is neither a boxed
         // primitive nor a shape-inspecting built-in, and its own dispatch decides which of the

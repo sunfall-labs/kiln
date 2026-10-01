@@ -81,6 +81,7 @@ typedef struct kiln_dyn_binding {
     /* Constants/imports always reject writes. A named function-expression binding ignores a
      * sloppy write but throws in strict code. */
     unsigned char restriction;
+    unsigned char function_var;
 } kiln_dyn_binding;
 
 enum {
@@ -174,8 +175,31 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
     scope->bindings[scope->count].name_len = name_len;
     scope->bindings[scope->count].value = val;
     scope->bindings[scope->count].restriction = KILN_DYN_BINDING_MUTABLE;
+    scope->bindings[scope->count].function_var = 0;
     scope->count++;
     return 1;
+}
+
+static void kiln_dyn_scope_mark_function_var(kiln_dyn_scope *scope, const char *name,
+                                             size_t name_len) {
+    for (size_t index = 0; index < scope->count; ++index) {
+        if (scope->bindings[index].name_len == name_len &&
+            memcmp(scope->bindings[index].name, name, name_len) == 0) {
+            scope->bindings[index].function_var = 1;
+            return;
+        }
+    }
+}
+
+static int kiln_dyn_scope_has_function_var(kiln_dyn_scope *scope, const char *name,
+                                           size_t name_len) {
+    for (size_t index = 0; index < scope->count; ++index) {
+        if (scope->bindings[index].function_var &&
+            scope->bindings[index].name_len == name_len &&
+            memcmp(scope->bindings[index].name, name, name_len) == 0)
+            return 1;
+    }
+    return 0;
 }
 
 static int kiln_dyn_scope_mark_restriction(kiln_dyn_scope *scope, const char *name,
@@ -2837,7 +2861,8 @@ typedef struct {
 
 /* Switch lexical declarations belong to one scope spanning every case body. Inventory only
  * their names here: initializers execute only if their declaration statement is reached. */
-static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
+static int kiln_dyn_switch_bindings(kiln_dyn_scope *var_scope,
+                                    const kiln_dyn_switch_clause *clauses,
                                     size_t clause_count,
                                     kiln_dyn_switch_binding **out,
                                     size_t *out_count) {
@@ -2868,6 +2893,13 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                     }
                     const char *name = scan.curr.start;
                     size_t name_len = scan.curr.len;
+                    if (kiln_dyn_scope_has_function_var(var_scope, name, name_len)) {
+                        kiln_dyn_token_free(&scan.curr);
+                        free(*out);
+                        *out = NULL;
+                        *out_count = 0;
+                        return 0;
+                    }
                     for (size_t index = 0; index < *out_count; ++index) {
                         if ((*out)[index].name_len == name_len &&
                             memcmp((*out)[index].name, name, name_len) == 0) {
@@ -2915,7 +2947,18 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             return 0;
                         }
                         int init_parens = 0, init_brackets = 0, init_braces = 0;
+                        size_t previous_end = (size_t)(scan.curr.start - scan.src) + scan.curr.len;
                         while (scan.curr.kind != KILN_DYN_EOF) {
+                            size_t token_start = scan.curr.start == NULL
+                                                     ? scan.pos
+                                                     : (size_t)(scan.curr.start - scan.src);
+                            if (init_parens == 0 && init_brackets == 0 && init_braces == 0 &&
+                                (scan.curr.kind == KILN_DYN_KW_LET ||
+                                 scan.curr.kind == KILN_DYN_KW_CONST ||
+                                 scan.curr.kind == KILN_DYN_KW_VAR) &&
+                                scan.prev_kind != KILN_DYN_DOT &&
+                                kiln_dyn_has_line_terminator(scan.src, previous_end, token_start))
+                                break;
                             if (init_parens == 0 && init_brackets == 0 && init_braces == 0 &&
                                 (scan.curr.kind == KILN_DYN_COMMA ||
                                  scan.curr.kind == KILN_DYN_SEMI))
@@ -2929,6 +2972,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             else if (scan.curr.kind == KILN_DYN_LBRACE) init_braces++;
                             else if (scan.curr.kind == KILN_DYN_RBRACE && init_braces > 0)
                                 init_braces--;
+                            previous_end = token_start + scan.curr.len;
                             kiln_dyn_lexer_next(&scan);
                         }
                     }
@@ -3318,7 +3362,8 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         }
         kiln_dyn_switch_binding *bindings = NULL;
         size_t binding_count = 0;
-        int binding_scan = kiln_dyn_switch_bindings(clauses, clause_count,
+        kiln_dyn_scope *var_scope = scope->var_target != NULL ? scope->var_target : scope;
+        int binding_scan = kiln_dyn_switch_bindings(var_scope, clauses, clause_count,
                                                     &bindings, &binding_count);
         if (binding_scan <= 0) {
             free(bindings);
@@ -4193,6 +4238,7 @@ declaration_scan_done:
             status = KILN_C99_OUT_OF_MEMORY;
             goto done;
         }
+        kiln_dyn_scope_mark_function_var(scope, vars[index].name, vars[index].name_len);
     }
 
     /* Allocate all local declaration cells before any closure captures the environment. */
@@ -4216,6 +4262,7 @@ declaration_scan_done:
             status = KILN_C99_OUT_OF_MEMORY;
             goto done;
         }
+        kiln_dyn_scope_mark_function_var(scope, decls[index].name, decls[index].name_len);
         for (size_t slot = 0; slot < scope->count; ++slot) {
             if (scope->bindings[slot].name_len == decls[index].name_len &&
                 memcmp(scope->bindings[slot].name, decls[index].name,

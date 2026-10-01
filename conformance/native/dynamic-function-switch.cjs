@@ -86,6 +86,24 @@ const switchVarStillFunctionScoped = Function(
 );
 if (switchVarStillFunctionScoped() !== 31) throw new Error("switch var remains function scoped");
 
+globalThis.__switchMixedDeclarationCount = 0;
+let mixedDeclarationThrew = false;
+try {
+  Function("switch ((globalThis.__switchMixedDeclarationCount++, 0)) { " +
+    "case 0: let mixed; { var mixed; } }")();
+} catch (error) { mixedDeclarationThrew = error.name === "SyntaxError"; }
+if (!mixedDeclarationThrew || globalThis.__switchMixedDeclarationCount !== 0) {
+  throw new Error("switch lexical declarations conflict with function-scoped var before evaluation");
+}
+delete globalThis.__switchMixedDeclarationCount;
+
+const asiDeclaredCaseBinding = Function(
+  "second", "switch (2) { case 0: let first = 1\n let second = 2; case second: break; } return 7;",
+);
+tdzThrew = false;
+try { asiDeclaredCaseBinding(9); } catch (error) { tdzThrew = error.name === "ReferenceError"; }
+if (!tdzThrew) throw new Error("ASI-separated switch declarations are predeclared in the case scope");
+
 globalThis.__switchDuplicateInitializerCount = 0;
 let duplicateThrew = false;
 try {
