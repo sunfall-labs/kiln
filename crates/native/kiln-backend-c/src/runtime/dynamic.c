@@ -1291,7 +1291,39 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 return kiln_dyn_throw_parse_error(lex, thrown, "Expected property key");
             }
             kiln_value val;
-            if (lex->curr.kind == KILN_DYN_COLON) {
+            if (lex->curr.kind == KILN_DYN_LPAREN) {
+                const char *params = lex->curr.start + 1;
+                kiln_dyn_lexer_next(lex);
+                int nesting = 1;
+                size_t params_len = 0;
+                while (lex->curr.kind != KILN_DYN_EOF && nesting != 0) {
+                    if (lex->curr.kind == KILN_DYN_LPAREN) nesting++;
+                    else if (lex->curr.kind == KILN_DYN_RPAREN) {
+                        nesting--;
+                        if (nesting == 0) {
+                            params_len = (size_t)(lex->curr.start - params);
+                            break;
+                        }
+                    }
+                    kiln_dyn_lexer_next(lex);
+                }
+                if (nesting != 0)
+                    return kiln_dyn_throw_parse_error(lex, thrown,
+                                                      "Expected ')' after method parameters");
+                kiln_dyn_lexer_next(lex);
+                if (lex->curr.kind != KILN_DYN_LBRACE)
+                    return kiln_dyn_throw_parse_error(lex, thrown,
+                                                      "Expected '{' for method body");
+                const char *body = NULL;
+                size_t body_len = 0;
+                if (!kiln_dyn_capture_block(lex, &body, &body_len))
+                    return kiln_dyn_throw_parse_error(lex, thrown,
+                                                      "Unterminated method body");
+                status = kiln_dyn_make_closure(host, scope, params, params_len, body,
+                                               body_len, receiver, 0, 0, &val, thrown);
+                if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(&val);
+            } else if (lex->curr.kind == KILN_DYN_COLON) {
                 kiln_dyn_lexer_next(lex);
                 status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &val, thrown);
                 if (status != KILN_C99_OK) return status;
@@ -3186,6 +3218,11 @@ typedef struct {
     size_t offset;
 } kiln_dyn_function_declaration;
 
+typedef struct {
+    const char *name;
+    size_t name_len;
+} kiln_dyn_var_declaration;
+
 static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
     return kind == KILN_DYN_EOF || kind == KILN_DYN_SEMI || kind == KILN_DYN_RBRACE;
 }
@@ -3202,6 +3239,9 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
     kiln_dyn_function_declaration *decls = NULL;
     size_t decl_count = 0;
     size_t decl_capacity = 0;
+    kiln_dyn_var_declaration *vars = NULL;
+    size_t var_count = 0;
+    size_t var_capacity = 0;
     kiln_dyn_lexer scan;
     int brace_depth = 0;
     int statement_start = 1;
@@ -3229,6 +3269,61 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
         int declaration_start = statement_start ||
                                 kiln_dyn_function_statement_boundary(previous) ||
                                 line_terminated;
+        /* `var` bindings exist before function declarations are closed over this scope. The
+         * dynamic evaluator executes declarations sequentially, so without this instantiation
+         * pass an earlier-created function misses a later `var` binding entirely. */
+        if (kind == KILN_DYN_KW_VAR && brace_depth == 0) {
+            kiln_dyn_lexer look;
+            memset(&look, 0, sizeof look);
+            look.src = source;
+            look.len = source_len;
+            look.pos = token_start;
+            kiln_dyn_lexer_next(&look);
+            kiln_dyn_lexer_next(&look);
+            int expect_name = 1;
+            int parens = 0, brackets = 0, braces = 0;
+            while (look.curr.kind != KILN_DYN_EOF) {
+                if (expect_name && look.curr.kind == KILN_DYN_IDENT) {
+                    if (var_count == var_capacity) {
+                        size_t capacity = var_capacity == 0 ? 8 : var_capacity * 2;
+                        kiln_dyn_var_declaration *next = (kiln_dyn_var_declaration *)realloc(
+                            vars, capacity * sizeof *next);
+                        if (next == NULL) {
+                            kiln_dyn_token_free(&look.curr);
+                            status = KILN_C99_OUT_OF_MEMORY;
+                            goto done;
+                        }
+                        vars = next;
+                        var_capacity = capacity;
+                    }
+                    vars[var_count++] = (kiln_dyn_var_declaration){
+                        .name = look.curr.start, .name_len = look.curr.len,
+                    };
+                    expect_name = 0;
+                    kiln_dyn_lexer_next(&look);
+                    continue;
+                }
+                if (parens == 0 && brackets == 0 && braces == 0) {
+                    if (look.curr.kind == KILN_DYN_COMMA) {
+                        expect_name = 1;
+                        kiln_dyn_lexer_next(&look);
+                        continue;
+                    }
+                    if (look.curr.kind == KILN_DYN_SEMI || look.curr.kind == KILN_DYN_RPAREN ||
+                        look.curr.kind == KILN_DYN_RBRACE || look.curr.kind == KILN_DYN_KW_IN ||
+                        look.curr.kind == KILN_DYN_KW_OF)
+                        break;
+                }
+                if (look.curr.kind == KILN_DYN_LPAREN) parens++;
+                else if (look.curr.kind == KILN_DYN_RPAREN && parens > 0) parens--;
+                else if (look.curr.kind == KILN_DYN_LBRACKET) brackets++;
+                else if (look.curr.kind == KILN_DYN_RBRACKET && brackets > 0) brackets--;
+                else if (look.curr.kind == KILN_DYN_LBRACE) braces++;
+                else if (look.curr.kind == KILN_DYN_RBRACE && braces > 0) braces--;
+                kiln_dyn_lexer_next(&look);
+            }
+            kiln_dyn_token_free(&look.curr);
+        }
         if (brace_depth == 0 && declaration_start &&
             (kind == KILN_DYN_KW_FUNCTION || kind == KILN_DYN_KW_ASYNC)) {
             kiln_dyn_lexer look;
@@ -3288,6 +3383,26 @@ declaration_scan_done:
         kiln_dyn_lexer_next(&scan);
     }
     kiln_dyn_token_free(&scan.curr);
+
+    /* Preserve parameters and existing local declarations. These bindings must exist before
+     * the declaration closures below capture the surrounding environment. */
+    for (size_t index = 0; index < var_count; ++index) {
+        int already_local = 0;
+        for (size_t slot = 0; slot < scope->count; ++slot) {
+            if (scope->bindings[slot].name_len == vars[index].name_len &&
+                memcmp(scope->bindings[slot].name, vars[index].name,
+                       vars[index].name_len) == 0) {
+                already_local = 1;
+                break;
+            }
+        }
+        if (!already_local &&
+            !kiln_dyn_scope_set(scope, vars[index].name, vars[index].name_len,
+                                kiln_c99_undefined())) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+    }
 
     /* Allocate all local declaration cells before any closure captures the environment. */
     for (size_t index = 0; index < decl_count; ++index) {
@@ -3353,6 +3468,7 @@ declaration_scan_done:
 
 done:
     if (scan.curr.kind != KILN_DYN_EOF) kiln_dyn_token_free(&scan.curr);
+    free(vars);
     free(decls);
     return status;
 }

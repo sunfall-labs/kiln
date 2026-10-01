@@ -18,6 +18,11 @@ console.log("declarations do not reinitialize:", assignmentBetween());
 const varPreserves = Function("var later; return typeof later; function later() { return 19; }");
 console.log("var does not erase declaration:", varPreserves());
 
+const capturedVar = Function(
+  "function read() { return later.value; } var later = { value: 29 }; return read();",
+);
+console.log("declaration captures later var:", capturedVar());
+
 const nested = Function(
   "function outer() { return inside(); function inside() { return 31; } } return outer();",
 );
