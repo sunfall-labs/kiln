@@ -1,4 +1,3 @@
-let value = 0;
 function assignAfterInitialization() {
   value = 1;
 }
@@ -38,6 +37,7 @@ function readAfterInitialization() {
   return later;
 }
 
+let value = 0;
 assignAfterInitialization();
 updateAfterInitialization();
 if (value !== 2) throw new Error('function compiled before module binding failed after init');
