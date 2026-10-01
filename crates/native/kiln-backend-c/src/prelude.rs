@@ -437,10 +437,12 @@ macro_rules! method_metadata_case {
 
 macro_rules! method_ids {
     ($(($name:ident, $value:literal, $first_group:ident $(, $group:ident)* ; $numeric:literal, $textual:literal)),* $(,)?) => {
-        macro_rules! emit_method_define {
-            $(($name) => {
-                concat!("#define ", stringify!($name), " ", stringify!($value), "\n")
-            };)*
+        // One registry owns the numeric IDs and every generated header definition. Keeping a
+        // second hand-written emission list allowed a valid registry row to be missing in C.
+        macro_rules! emit_method_defines {
+            () => {
+                concat!($("#define ", stringify!($name), " ", stringify!($value), "\n"),*)
+            };
         }
 
         macro_rules! method_value {
@@ -3506,81 +3508,27 @@ enum kiln_value_tag {
  * none of these codes reaches a cache key, but renumbering the block would still be a diff nobody
  * could review. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ARRAY_AT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_INDEX),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SOME),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_EVERY),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SORT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_KEYS),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_REVERSE),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SHIFT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_UNSHIFT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FILL),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_LAST_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SPLICE),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_COPY_WITHIN),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT_MAP),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_REDUCE_RIGHT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SORTED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_REVERSED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SPLICED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_WITH),
+    emit_method_defines!(),
     r#"
 /* String methods, part two, numbered above the array block for the same reason the array block is
  * numbered above the namespace one: the guard that routes a code to a receiver kind is a range,
  * and a new range is cheaper than renumbering an old one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_CODE_POINT_AT),
-    emit_method_define!(KILN_C99_METHOD_STRING_SUBSTR),
-    emit_method_define!(KILN_C99_METHOD_STRING_LOCALE_COMPARE),
-    emit_method_define!(KILN_C99_METHOD_STRING_NORMALIZE),
-    emit_method_define!(KILN_C99_METHOD_STRING_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_STRING_VALUE_OF),
     r#"/* These three only ever take a pattern, so they are intercepted before the string block: they
  * need to call back into the program, and the string block has no interpreter to call with. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_MATCH),
-    emit_method_define!(KILN_C99_METHOD_STRING_MATCH_ALL),
-    emit_method_define!(KILN_C99_METHOD_STRING_SEARCH),
     r#"
 /* `Error.prototype.toString`, which every error inherits and no other object does. Deliberately
  * past the end of every range `kiln_c99_lookup_method` searches: it is not reached by name from a
  * table but handed out by the object read that recognises an error, because an ordinary object
  * with a `toString` of its own must not find this one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ERROR_TO_STRING),
     r#"
 /* `DataView.prototype`, whose twenty accessors are one contiguous block so that a receiver check
  * and a name lookup are both a range test. The ten `get`s come first and the ten `set`s second,
  * with the BigInt pair at the end of each half, so that "is this a write" is one comparison
  * against the first `set` rather than a second table. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_INT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_UINT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64),
     r#"
 /* The block's endpoints are `..._GET_INT8` and `..._SET_BIG_UINT64`, spelled out at each of the
  * five range tests below rather than aliased to a shorter pair of names.
@@ -3701,335 +3649,98 @@ enum kiln_value_tag {
 /* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
  * tags, none of these reaches a cache key. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PUSH),
-    emit_method_define!(KILN_C99_METHOD_POP),
-    emit_method_define!(KILN_C99_METHOD_JOIN),
-    emit_method_define!(KILN_C99_METHOD_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_SLICE),
-    emit_method_define!(KILN_C99_METHOD_CONCAT),
-    emit_method_define!(KILN_C99_METHOD_MAP),
-    emit_method_define!(KILN_C99_METHOD_FILTER),
-    emit_method_define!(KILN_C99_METHOD_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_REDUCE),
     r#"
 /* String methods.  `slice` and `indexOf` are shared with the array table by name and told apart
  * by the receiver, exactly as the language does. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_SLICE),
-    emit_method_define!(KILN_C99_METHOD_SUBSTRING),
-    emit_method_define!(KILN_C99_METHOD_STRING_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_LAST_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_STRING_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_STARTS_WITH),
-    emit_method_define!(KILN_C99_METHOD_ENDS_WITH),
-    emit_method_define!(KILN_C99_METHOD_CHAR_AT),
-    emit_method_define!(KILN_C99_METHOD_CHAR_CODE_AT),
-    emit_method_define!(KILN_C99_METHOD_STRING_AT),
-    emit_method_define!(KILN_C99_METHOD_TRIM),
-    emit_method_define!(KILN_C99_METHOD_TRIM_START),
-    emit_method_define!(KILN_C99_METHOD_TRIM_END),
-    emit_method_define!(KILN_C99_METHOD_SPLIT),
-    emit_method_define!(KILN_C99_METHOD_REPEAT),
-    emit_method_define!(KILN_C99_METHOD_PAD_START),
-    emit_method_define!(KILN_C99_METHOD_PAD_END),
-    emit_method_define!(KILN_C99_METHOD_TO_UPPER_CASE),
-    emit_method_define!(KILN_C99_METHOD_TO_LOWER_CASE),
-    emit_method_define!(KILN_C99_METHOD_REPLACE),
-    emit_method_define!(KILN_C99_METHOD_REPLACE_ALL),
-    emit_method_define!(KILN_C99_METHOD_STRING_CONCAT),
     r#"
 /* Namespace methods.  Unlike the array and string tables these take no receiver: `Math.floor` is
  * reached through `Math`, but `Math` contributes nothing to the answer. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_MATH_FLOOR),
-    emit_method_define!(KILN_C99_METHOD_MATH_CEIL),
-    emit_method_define!(KILN_C99_METHOD_MATH_ROUND),
-    emit_method_define!(KILN_C99_METHOD_MATH_TRUNC),
-    emit_method_define!(KILN_C99_METHOD_MATH_ABS),
-    emit_method_define!(KILN_C99_METHOD_MATH_SIGN),
-    emit_method_define!(KILN_C99_METHOD_MATH_SQRT),
-    emit_method_define!(KILN_C99_METHOD_MATH_CBRT),
-    emit_method_define!(KILN_C99_METHOD_MATH_POW),
-    emit_method_define!(KILN_C99_METHOD_MATH_MIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_MAX),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG2),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG10),
-    emit_method_define!(KILN_C99_METHOD_MATH_EXP),
-    emit_method_define!(KILN_C99_METHOD_MATH_HYPOT),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATAN2),
-    emit_method_define!(KILN_C99_METHOD_MATH_SIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_COS),
-    emit_method_define!(KILN_C99_METHOD_MATH_TAN),
-    emit_method_define!(KILN_C99_METHOD_MATH_ASIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_ACOS),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATAN),
-    emit_method_define!(KILN_C99_METHOD_IS_INTEGER),
-    emit_method_define!(KILN_C99_METHOD_IS_SAFE_INTEGER),
-    emit_method_define!(KILN_C99_METHOD_IS_NAN),
-    emit_method_define!(KILN_C99_METHOD_IS_FINITE),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_KEYS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_ASSIGN),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE),
-    emit_method_define!(KILN_C99_METHOD_HAS_OWN),
-    emit_method_define!(KILN_C99_METHOD_IS_ARRAY),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_CREATE),
-    emit_method_define!(KILN_C99_METHOD_JSON_STRINGIFY),
-    emit_method_define!(KILN_C99_METHOD_JSON_PARSE),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_NEXT),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_RETURN),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_SELF),
     r#"
 /* Date readers. Every one of these is UTC, because the realm has one zone and it is UTC
  * (ADR 0015) -- so the local reader and the UTC reader are the same function rather than two
  * that happen to agree. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_GET_TIME),
-    emit_method_define!(KILN_C99_METHOD_DATE_NOW),
-    emit_method_define!(KILN_C99_METHOD_DATE_UTC),
-    emit_method_define!(KILN_C99_METHOD_DATE_PARSE),
     r#"
 /* The end of every chain is `Object.prototype`, and these are what it carries. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_HAS_OWN_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUE_OF),
     r#"
 /* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_GET),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_SET),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ADD),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_HAS),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_DELETE),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_CLEAR),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_KEYS),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_VALUES),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_SELF),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_NEXT),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_SELF),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_VALUES),
-    emit_method_define!(KILN_C99_METHOD_THROW_TYPE_ERROR),
     r#"
 /* Promise, and the two halves of driving an async function. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_THEN),
-    emit_method_define!(KILN_C99_METHOD_CATCH),
-    emit_method_define!(KILN_C99_METHOD_FINALLY),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_RESOLVE),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECT),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_RACE),
-    emit_method_define!(KILN_C99_METHOD_ASYNC_RESUME),
-    emit_method_define!(KILN_C99_METHOD_ASYNC_THROW),
-    emit_method_define!(KILN_C99_METHOD_ALL_STEP),
     r#"
 /* The global functions. They are namespace methods with no namespace: nothing is reached through
  * before them, so `LoadBuiltin` pushes the method value directly. Two of them share a name with a
  * `Number` method and not its behaviour -- `isNaN('x')` coerces where `Number.isNaN('x')` does
  * not -- so they are separate codes rather than the same one reached two ways. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PARSE_INT),
-    emit_method_define!(KILN_C99_METHOD_PARSE_FLOAT),
-    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_NAN),
-    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_FINITE),
     r#"
 /* Number methods. Read off the value rather than through a `Number.prototype` object, which is
  * what the interpreter does and for the same reason: there is no such object yet. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_FIXED),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_PRECISION),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_VALUE_OF),
     r#"
 /* The text-escaping globals. `escape`/`unescape` are Annex B and work in code units; the four URI
  * functions work in UTF-8 bytes and differ only in which characters they leave alone. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ESCAPE),
-    emit_method_define!(KILN_C99_METHOD_UNESCAPE),
-    emit_method_define!(KILN_C99_METHOD_ENCODE_URI),
-    emit_method_define!(KILN_C99_METHOD_ENCODE_URI_COMPONENT),
-    emit_method_define!(KILN_C99_METHOD_DECODE_URI),
-    emit_method_define!(KILN_C99_METHOD_DECODE_URI_COMPONENT),
     r#"
 /* `queueMicrotask(fn)`: the queue promises already drain, reached directly. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_QUEUE_MICROTASK),
     r#"
 /* The timer functions. `clearTimeout` and `clearInterval` do the same thing and are two codes
  * because they are two names: a program can print either one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SET_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_SET_INTERVAL),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_INTERVAL),
     r#"
 /* The two combinators that do not fail on the first rejection. Named outside the contiguous
  * `Promise` range because that range is how a namespace's methods are found, and it was already
  * closed. `@@rejectStep` is the rejection-side twin of `@@allStep`: `all` and `race` settle their
  * promise on any rejection and need no handler of their own, and these two do. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL_SETTLED),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ANY),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_WITH_RESOLVERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_TTY_ISATTY),
-    emit_method_define!(KILN_C99_METHOD_TYPED_TO_STRING_TAG),
-    emit_method_define!(KILN_C99_METHOD_REJECT_STEP),
     r#"
 /* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
  * they were passing through, which is the whole difference from `then(f, f)`. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FINALLY_PASS),
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RAISE),
     r#"/* ...and the two that put the outcome back once the handler's own result has settled. Bound to
  * the outcome, so the pair needs no state object either. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RESTORE),
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RERAISE),
     r#"
 /* Resolving a promise *with* a promise. The attach is a job of its own, which is a turn a program
  * can see -- so it is a step rather than something `settle` does on the spot. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ADOPT_STEP),
     r#"
 /* `Object.freeze` and `Object.isFrozen`, outside the contiguous `Object` range because it was
  * already closed. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_FREEZE),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS_FROZEN),
     r#"
 /* What every callable answers to, whatever kind of callable it is:
  * `Object.prototype.hasOwnProperty.call(x, k)` is how a transpiled module asks whether a key is
  * own, and `Array.prototype.slice.call(arguments)` is how it makes an array. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_CALL),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_APPLY),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_BIND),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW),
     r#"
 /* The reflective statics, and the one instance method that walks a chain. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_FROM_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FROM),
-    emit_method_define!(KILN_C99_METHOD_IS_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE),
     r#"
 /* `String.raw`, the one built-in written to be used as a template tag. Numbered with the
  * receiver-less statics because that is what it is: the template object arrives as an argument,
  * not as `this`. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_RAW),
-    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CHAR_CODE),
     r#"
 /* The descriptor half of the reflective statics: the operations that talk about a property
  * rather than through it. Numbered in the receiver-less range, because every one of them takes
  * its subject as an argument. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS),
     r#"
 /* The global symbol registry. `Symbol.for` is deliberately separate from `Symbol()` because
  * equal registry keys must return one identity across every module in the realm. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SYMBOL_FOR),
-    emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY),
-    emit_method_define!(KILN_C99_METHOD_ABORT_CONTROLLER_ABORT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ABORT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_LISTEN),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_THROW),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ANY),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
-    emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
-    emit_method_define!(KILN_C99_METHOD_TEXT_DECODER_DECODE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_GET_STORE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_RUN),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_ENTER_WITH),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_EXIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_DISABLE),
-    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CODE_POINT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_KILL),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOMEDIR),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_TMPDIR),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
-    emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
-    emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_PARSE_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_SET_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW),
-    emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
-    emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
-    emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
-    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW),
-    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW),
-    emit_method_define!(KILN_C99_METHOD_WORKER_OP_RAW),
-    emit_method_define!(KILN_C99_METHOD_PORT_WAIT_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
-    emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
-    emit_method_define!(KILN_C99_METHOD_FS_DESCRIPTOR_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARE_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_IS_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_WEAK_RAW),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_SIZE_RAW),
-    emit_method_define!(KILN_C99_METHOD_JSON_UNBOX_RAW),
-    emit_method_define!(KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW),
-    emit_method_define!(KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW),
-    emit_method_define!(KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW),
-    emit_method_define!(KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW),
-    emit_method_define!(KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR),
-    emit_method_define!(KILN_C99_METHOD_BOOLEAN_VALUE_OF),
-    emit_method_define!(KILN_C99_METHOD_SYMBOL_VALUE_OF),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_LSTAT_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_REALPATH_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_UNLINK_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_RMDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS),
     r#"
 /* Private frame-snapshot primitive captured by the TypeScript Error.captureStackTrace facade. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE),
     r#"
 /* `Reflect`: the operations a proxy handler forwards with, as ordinary functions.
  *
@@ -4039,193 +3750,38 @@ enum kiln_value_tag {
  * forms answer with the value; and none of them coerces a primitive target -- `Reflect.get(1, k)`
  * is a TypeError where `(1)[k]` is a read off the string prototype. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_REFLECT_OWN_KEYS),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_GET),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_SET),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_HAS),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_APPLY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_CONSTRUCT),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_THROW),
     r#"
 /* `Proxy.revocable(target, handler)` and the function it hands back. The second is reached only
  * through the first, as a bound method whose receiver is the proxy it retires -- which is what
  * gives the returned function the one capability it needs and nothing else. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PROXY_REVOCABLE),
-    emit_method_define!(KILN_C99_METHOD_PROXY_REVOKE),
     r#"
 /* `Math`, part two -- numbered here rather than beside the first range because that range ends
  * where `Number`'s begins. Still below the array boundary, because these take no receiver. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_MATH_RANDOM),
-    emit_method_define!(KILN_C99_METHOD_MATH_SINH),
-    emit_method_define!(KILN_C99_METHOD_MATH_COSH),
-    emit_method_define!(KILN_C99_METHOD_MATH_TANH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ASINH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ACOSH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATANH),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG1P),
-    emit_method_define!(KILN_C99_METHOD_MATH_EXPM1),
-    emit_method_define!(KILN_C99_METHOD_MATH_FROUND),
-    emit_method_define!(KILN_C99_METHOD_MATH_CLZ32),
-    emit_method_define!(KILN_C99_METHOD_MATH_IMUL),
     r#"
 /* What a regular expression answers to. Below the array boundary because they take a receiver
  * exactly as the number methods do. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_REGEXP_TEST),
-    emit_method_define!(KILN_C99_METHOD_REGEXP_EXEC),
-    emit_method_define!(KILN_C99_METHOD_REGEXP_TO_STRING),
     r#"/* A collection's own `next`, distinct from the array iterator's because it walks the collection
  * itself rather than a copy of it -- which is the only way a delete during a loop can be seen.
  * Numbered here rather than beside the collection block because the guard that routes a code to
  * a receiver kind is a range, and this has to land inside the one that answers a method reached
  * through an object. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT),
     r#"/* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
  * Library code reaches for it constantly on values it has already coerced. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PRIMITIVE_TO_STRING),
     r#"/* The two statics a concrete view constructor carries. Kept below the string block that
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TYPED_OF),
-    emit_method_define!(KILN_C99_METHOD_TYPED_FROM),
     r#"/* `Array.prototype.map/filter` keep their generic semantics when borrowed onto a typed array.
  * They need distinct codes from the intrinsic typed-array methods, which return a typed view. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_MAP),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_FILTER),
     r#"/* Runtime-module methods. They use the same canonical call path as language intrinsics while
  * keeping their state on ordinary backend objects. Appended outside every range-dispatch block
  * so adding a runtime facade never changes the meaning of an existing intrinsic code. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ON),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ONCE),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EVENT_NAMES),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMITTER),
-    emit_method_define!(KILN_C99_METHOD_NODE_NET_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_LISTEN),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_CLOSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_ADDRESS),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_GET),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_REQUEST),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND),
-    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
-    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING),
-    emit_method_define!(KILN_C99_METHOD_NODE_NET_CONNECT),
-    emit_method_define!(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_FROM),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_ALLOC),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_IS_BUFFER),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_BYTE_LENGTH),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_CONCAT),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING_RAW),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_NOOP),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEPRECATE),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INSPECT),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INHERITS),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_FORMAT),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_DNS_LOOKUP),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOSTNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_FINISHED),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PUSH),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_READ),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PAUSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_RESUME),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PIPE),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_UNPIPE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_PERFORMANCE_NOW),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_JOIN),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RESOLVE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_DIRNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_BASENAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_EXTNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RELATIVE),
-    emit_method_define!(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
-    emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
-    emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
-    emit_method_define!(KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE),
-    emit_method_define!(KILN_C99_METHOD_NODE_MODULE),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_DLOPEN),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_REGISTER_CALLBACK),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_CLOSE),
-    emit_method_define!(KILN_C99_METHOD_INTL_SEGMENT_RAW),
-    emit_method_define!(KILN_C99_METHOD_STRING_LOCALE_CASE_RAW),
-    emit_method_define!(KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_PARSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID),
-    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_NEXT_TICK),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_START_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
-    emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
-    emit_method_define!(KILN_C99_METHOD_CONSOLE_LOG),
-    emit_method_define!(KILN_C99_METHOD_CONSOLE_ERROR),
-    emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER),
     r#"/* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
 /* `from` and `compare` are one function per type in the language -- `Temporal.PlainDate.from`
@@ -4233,60 +3789,29 @@ enum kiln_value_tag {
  * method code, not the value the method was reached through. So the kind rides in the code: the
  * eight are contiguous and the base is subtracted to recover it. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM_LAST),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE_LAST),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_JSON),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_VALUE_OF),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID),
     r#"/* `Temporal.Now`'s five readers, contiguous so the kind rides in the code the way it does for
  * `from` and `compare`. The clock they read is the realm's, which ADR 0015 makes virtual and UTC.
  * The order is the eight-type order, restricted to the five the namespace offers. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST),
     r#"/* The arithmetic and conversion surface. One code per name, contiguous, because the call path
  * carries only the code -- and the provider is keyed by the name, so the two are the same table
  * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP_LAST),
     r#"/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
  * rather than a kind-bearing range, because only `Instant` has them: an epoch count names a point
  * on the timeline, and no other one of the eight is a point on a timeline by itself. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_LAST),
     r#"
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
  * is full. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SET_TIME),
     r#"
 /* The iterator helpers. 470..481 is a name range -- `kiln_c99_lookup_method` walks it to answer
  * `Iterator.prototype.map` -- and 470..484 is the dispatch range. A helper's own `next` and
  * `return` sit past the name range so that reading `Iterator.prototype.next` finds nothing, which
  * is correct: the helpers live on the table and `next` lives on the helper object. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_MAP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FILTER),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_TAKE),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_DROP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FLAT_MAP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_REDUCE),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_TO_ARRAY),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_SOME),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_EVERY),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FIND),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_NEXT),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_RETURN),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FROM),
     r#"
 /* Dispatch membership is generated from the Rust method registry.  Keep these predicates exact:
  * numeric adjacency is an implementation detail, not a category contract. */
