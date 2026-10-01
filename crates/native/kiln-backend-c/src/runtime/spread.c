@@ -1236,19 +1236,14 @@ static int kiln_c99_worker_post_plain(uint64_t port, kiln_value value, kiln_valu
     return KILN_C99_OK;
 }
 
-static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
-                                  int depth, kiln_value *thrown) {
+static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln_value source,
+                                        int depth, kiln_value *thrown) {
     kiln_value named = kiln_c99_undefined();
     kiln_object *object;
     size_t index;
     if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
         return KILN_C99_OK;
     }
-    /* CopyDataProperties can call source getters, allocate keys and invoke proxy traps. Keep
-     * both operands rooted across those calls; their raw object pointers are used by the fast
-     * shape and dictionary paths below. */
-    kiln_c99_gc_keep_alive(&target);
-    kiln_c99_gc_keep_alive(&source);
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("an object spread into something that is not an object");
     }
@@ -1317,9 +1312,6 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (status != KILN_C99_OK) {
                 return status;
             }
-            /* Formatting the index can allocate. Keep the value returned by [[Get]] rooted
-             * until CreateDataProperty has published it on the target. */
-            kiln_c99_gc_keep_alive(&element);
             /* The key has to outlive this frame -- a property stores the pointer rather than
              * copying the bytes -- which is why it is built as a value rather than sprintf'd
              * into a local buffer, exactly as a computed write builds one. */
@@ -1327,6 +1319,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            /* Formatting the index may collect: retain the just-read value until it is
+             * published. */
+            kiln_c99_gc_keep_alive(&element);
             /* CreateDataProperty keeps object spread from invoking an inherited setter on the
              * fresh target for a numeric index key. */
             status = kiln_c99_create_data_property(host, target, name, element, depth, thrown);
@@ -1358,6 +1353,45 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
     } else {
         /* Builtin values are handled above through their own-key and descriptor authority. */
+        const char *debug = getenv("KILN_DEBUG_SPREAD");
+        if (debug != NULL && debug[0] != '\0') {
+            const char *tag_name;
+            switch (source.tag) {
+            case KILN_VALUE_UNDEFINED: tag_name = "UNDEFINED"; break;
+            case KILN_VALUE_NULL: tag_name = "NULL"; break;
+            case KILN_VALUE_BOOLEAN: tag_name = "BOOLEAN"; break;
+            case KILN_VALUE_NUMBER: tag_name = "NUMBER"; break;
+            case KILN_VALUE_STRING: tag_name = "STRING"; break;
+            case KILN_VALUE_FUNCTION: tag_name = "FUNCTION"; break;
+            case KILN_VALUE_CELL: tag_name = "CELL"; break;
+            case KILN_VALUE_UNINITIALIZED: tag_name = "UNINITIALIZED"; break;
+            case KILN_VALUE_BUILTIN: tag_name = "BUILTIN"; break;
+            case KILN_VALUE_OBJECT: tag_name = "OBJECT"; break;
+            case KILN_VALUE_ARRAY: tag_name = "ARRAY"; break;
+            case KILN_VALUE_METHOD: tag_name = "METHOD"; break;
+            case KILN_VALUE_GENERATOR: tag_name = "GENERATOR"; break;
+            case KILN_VALUE_DATE: tag_name = "DATE"; break;
+            case KILN_VALUE_HOLE: tag_name = "HOLE"; break;
+            case KILN_VALUE_COLLECTION: tag_name = "COLLECTION"; break;
+            case KILN_VALUE_PROMISE: tag_name = "PROMISE"; break;
+            case KILN_VALUE_SETTLER: tag_name = "SETTLER"; break;
+            case KILN_VALUE_BOUND: tag_name = "BOUND"; break;
+            case KILN_VALUE_SYMBOL: tag_name = "SYMBOL"; break;
+            case KILN_VALUE_REGEXP: tag_name = "REGEXP"; break;
+            case KILN_VALUE_BIGINT: tag_name = "BIGINT"; break;
+            case KILN_VALUE_ARRAY_BUFFER: tag_name = "ARRAY_BUFFER"; break;
+            case KILN_VALUE_TYPED_ARRAY: tag_name = "TYPED_ARRAY"; break;
+            case KILN_VALUE_PROXY: tag_name = "PROXY"; break;
+            case KILN_VALUE_TEMPORAL: tag_name = "TEMPORAL"; break;
+            case KILN_VALUE_COMMONJS_REQUIRE: tag_name = "COMMONJS_REQUIRE"; break;
+            case KILN_VALUE_DATA_VIEW: tag_name = "DATA_VIEW"; break;
+            case KILN_VALUE_RETURN_SIGNAL: tag_name = "RETURN_SIGNAL"; break;
+            case KILN_VALUE_SHARED: tag_name = "SHARED"; break;
+            default: tag_name = "UNKNOWN"; break;
+            }
+            fprintf(stderr, "kiln: debug spread unsupported receiver tag=%d (%s)\n",
+                    (int)source.tag, tag_name);
+        }
         KILN_C99_REFUSE("an object spread of a value with no enumerable property store");
     }
     /* Both stores are created on first use, so a function that never carried a property and an
@@ -1483,9 +1517,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             for (index = 0; index < object->element_count; ++index) {
                 if (object->elements[index] == KILN_VAL_HOLE) continue;
                 kiln_value element = kiln_val_to_boundary(object->elements[index]);
-                kiln_c99_gc_keep_alive(&element);
                 kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
                 if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                kiln_c99_gc_keep_alive(&element);
                 int status = kiln_c99_create_data_property(
                     host, target, key, element, depth, thrown);
                 if (status != KILN_C99_OK) return status;
@@ -1591,6 +1625,18 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
     }
     return KILN_C99_OK;
+}
+
+/* Keep both operands live through the entire CopyDataProperties walk, including getter calls,
+ * proxy traps and key allocations. Placing the barriers after the implementation also covers
+ * every early return without relying on the optimizer to keep a last-used input across a later
+ * allocation inside one of the many branch-specific paths. */
+static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+                                  int depth, kiln_value *thrown) {
+    int status = kiln_c99_spread_object_inner(host, target, source, depth, thrown);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&source);
+    return status;
 }
 
 /* ---- Tier 3 of the parallel built-ins: building values on a pool thread (parallel issue 08) --
