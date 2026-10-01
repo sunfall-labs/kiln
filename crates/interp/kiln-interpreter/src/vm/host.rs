@@ -3247,6 +3247,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             keep_alive: false,
                         }),
                         instruction,
+                        false,
                     )?;
                 }
                 RuntimeHttpClientEvent::Upgrade {
@@ -3360,6 +3361,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         id,
                         HttpResponseEvent::Data(body),
                         instruction,
+                        false,
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseEnd { id, reusable } => {
@@ -3369,6 +3371,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         id,
                         HttpResponseEvent::End,
                         instruction,
+                        reusable,
                     )?;
                     if let Some(stream) = owner
                         .borrow_mut()
@@ -3513,6 +3516,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         request_id: u64,
         event: HttpResponseEvent,
         instruction: usize,
+        reusable: bool,
     ) -> Result<(), ExecutionError> {
         match event {
             HttpResponseEvent::Head(head) => {
@@ -3644,7 +3648,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                         message: "HTTP response ended before its head".into(),
                     })?;
-                if let Value::Object(object) = &incoming {
+                if reusable && let Value::Object(object) = &incoming {
                     let mut object = object.borrow_mut();
                     object.set("socket", Value::Null);
                     object.set("connection", Value::Null);
