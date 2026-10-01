@@ -1349,6 +1349,7 @@ pub(crate) fn call_native(
         Native::RegExpConstructor
         | Native::RegExpTest
         | Native::RegExpExec
+        | Native::RegExpLegacyCaptureRaw
         | Native::StringMatch
         | Native::StringMatchAll
         | Native::StringSearch => {

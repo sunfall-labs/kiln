@@ -52,7 +52,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Publish the captures from one successful RegExp execution. Module child VMs use the
     /// module session's realm-owned table so statics remain visible across module boundaries.
-    pub(super) fn publish_regexp_legacy_captures(
+    pub(crate) fn publish_regexp_legacy_captures(
         &mut self,
         subject: &[u16],
         groups: &[Option<std::ops::Range<usize>>],

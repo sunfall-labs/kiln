@@ -35,12 +35,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         subject: &str,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        self.regexp_exec_abstract_value(
+            target,
+            Value::String(subject.to_owned().into()),
+            instruction,
+        )
+    }
+
+    pub(super) fn regexp_exec_abstract_value(
+        &mut self,
+        target: &Value,
+        subject: Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         let exec = self.read_property(target, "exec", instruction)?;
         if is_callable(&exec) {
             let result = self.call_value(
                 &exec,
                 target.clone(),
-                vec![Value::String(subject.to_owned().into())],
+                vec![subject.clone()],
                 instruction,
             )?;
             // Null or an object and nothing else: a program whose `exec` answers a number has
@@ -63,7 +76,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.dispatch_native(
             Native::RegExpExec,
             target,
-            &[Value::String(subject.to_owned().into())],
+            &[subject],
             instruction,
         )
     }
@@ -131,12 +144,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ),
             });
         }
-        let subject = self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+        let subject_argument = arguments.first().unwrap_or(&Value::Undefined);
         let second = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        if method == RegExpSymbol::MatchAll {
+            let subject = self.as_text_units(subject_argument, instruction)?;
+            let units = subject.to_units();
+            return self.regexp_match_all_symbol(receiver, &units, instruction);
+        }
+        let subject = self.as_text(subject_argument, instruction)?;
         match method {
             RegExpSymbol::Match => self.regexp_match_symbol(receiver, &subject, instruction),
             RegExpSymbol::Search => self.regexp_search_symbol(receiver, &subject, instruction),
-            RegExpSymbol::MatchAll => self.regexp_match_all_symbol(receiver, &subject, instruction),
+            RegExpSymbol::MatchAll => unreachable!("handled with UTF-16 units above"),
             RegExpSymbol::Replace => {
                 self.regexp_replace_symbol(receiver, &subject, &second, instruction)
             }
@@ -227,7 +246,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn regexp_match_all_symbol(
         &mut self,
         target: &Value,
-        subject: &str,
+        subject: &[u16],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let flags = self.read_text(target, "flags", instruction)?;
@@ -236,7 +255,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.set_last_index(&matcher, index as f64, instruction)?;
         let mut iterator = ObjectData::default();
         iterator.set_non_enumerable(MATCH_ALL_REGEXP, matcher);
-        iterator.set_non_enumerable(MATCH_ALL_SUBJECT, Value::String(subject.to_owned().into()));
+        iterator.set_non_enumerable(
+            MATCH_ALL_SUBJECT,
+            Value::String(StringUnits::from_units(subject)),
+        );
         iterator.set_non_enumerable(MATCH_ALL_GLOBAL, Value::Boolean(flags.contains('g')));
         iterator.set_non_enumerable(
             MATCH_ALL_UNICODE,
@@ -267,14 +289,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(iteration_result(Value::Undefined, true));
         }
         let matcher = helper_slot(&state, MATCH_ALL_REGEXP);
-        let subject = helper_slot(&state, MATCH_ALL_SUBJECT).to_display_string();
+        let Value::String(subject) = helper_slot(&state, MATCH_ALL_SUBJECT) else {
+            return Err(ExecutionError::NotAnIterator);
+        };
         let finish = |state: &Rc<RefCell<ObjectData>>| {
             state
                 .borrow_mut()
                 .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
             Ok(iteration_result(Value::Undefined, true))
         };
-        let result = match self.regexp_exec_abstract(&matcher, &subject, instruction) {
+        let result = match self.regexp_exec_abstract_value(
+            &matcher,
+            Value::String(subject.clone()),
+            instruction,
+        ) {
             Ok(result) => result,
             // A failed step ends the walk as surely as a finished one: a second `next` must not
             // reach back into a matcher that has already thrown.
@@ -299,7 +327,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let matched = self.read_text(&result, "0", instruction)?;
         if matched.is_empty() {
-            let units: Vec<u16> = subject.encode_utf16().collect();
+            let units = subject.to_units();
             let index = self.read_length(&matcher, "lastIndex", instruction)?;
             let unicode = helper_slot(&state, MATCH_ALL_UNICODE).is_truthy();
             let next = advance_string_index(&units, index, unicode);
