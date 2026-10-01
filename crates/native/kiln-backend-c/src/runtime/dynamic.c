@@ -491,13 +491,17 @@ static int kiln_dyn_label_matches(const kiln_dyn_active_label *labels,
     return 0;
 }
 
+static void kiln_dyn_token_free(kiln_dyn_token *tok);
+static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex);
+
 static int kiln_dyn_labeled_statement_targets_iteration(const kiln_dyn_lexer *lex) {
     kiln_dyn_lexer look;
     memset(&look, 0, sizeof look);
     look.src = lex->src;
     look.len = lex->len;
     look.pos = lex->curr.start == NULL ? lex->pos
-                                       : (size_t)(lex->curr.start - lex->src);
+        : (size_t)(lex->curr.start - lex->src) +
+              (lex->curr.kind == KILN_DYN_COLON ? lex->curr.len : 0);
     kiln_dyn_lexer_next(&look);
     for (;;) {
         if (look.curr.kind == KILN_DYN_KW_FOR ||
@@ -2593,9 +2597,8 @@ static void kiln_dyn_skip_statement(kiln_dyn_lexer *lex) {
     look.len = lex->len;
     look.pos = lex->curr.start == NULL ? lex->pos
                                        : (size_t)(lex->curr.start - lex->src);
-    for (;;) {
-        kiln_dyn_lexer_next(&look);
-        if (look.curr.kind != KILN_DYN_IDENT) break;
+    kiln_dyn_lexer_next(&look);
+    while (look.curr.kind == KILN_DYN_IDENT) {
         kiln_dyn_lexer_next(&look);
         if (look.curr.kind != KILN_DYN_COLON) break;
         label_count++;
