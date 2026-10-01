@@ -542,6 +542,7 @@ typedef struct {
     size_t paren_overflow;
     int closed_control_paren;
     int regex_literal_error;
+    int numeric_literal_error;
     int allocation_error;
     kiln_dyn_token curr;
     kiln_dyn_token_kind prev_kind;
@@ -608,6 +609,7 @@ static int kiln_dyn_labeled_statement_targets_iteration(const kiln_dyn_lexer *le
  * The snippet is deliberately bounded and printable so diagnostics cannot dump a whole bundle. */
 static int kiln_dyn_throw_parse_error(kiln_dyn_lexer *lex, kiln_value *thrown,
                                       const char *reason) {
+    if (lex->allocation_error) return KILN_C99_OUT_OF_MEMORY;
     static const char function_label[] = " in dynamic Function body at byte ";
     static const char eval_label[] = " in dynamic eval source at byte ";
     static const char near_text[] = " near `";
@@ -752,7 +754,8 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
             status = kiln_dyn_throw_parse_error(
                 &scan, thrown, scan.regex_literal_error
                     ? "Invalid regular expression literal"
-                    : "Invalid string escape");
+                    : scan.numeric_literal_error ? "Invalid numeric literal"
+                                                 : "Invalid string escape");
         }
     }
     kiln_dyn_token_free(&scan.curr);
@@ -778,6 +781,44 @@ static int kiln_dyn_hex_digit(unsigned char ch) {
     if (ch >= 'a' && ch <= 'f') return (int)(ch - 'a') + 10;
     if (ch >= 'A' && ch <= 'F') return (int)(ch - 'A') + 10;
     return -1;
+}
+
+static int kiln_dyn_radix_digit(unsigned char ch, unsigned radix) {
+    int digit = kiln_dyn_hex_digit(ch);
+    return digit >= 0 && (unsigned)digit < radix ? digit : -1;
+}
+
+/* Scan one decimal digit run, allowing separators only between digits. */
+static int kiln_dyn_scan_digits(const char *source, size_t length, size_t *position,
+                               unsigned radix, size_t *digit_count, int *has_separator) {
+    size_t count = 0;
+    int previous_digit = 0;
+    while (*position < length) {
+        unsigned char ch = (unsigned char)source[*position];
+        int digit = kiln_dyn_radix_digit(ch, radix);
+        if (digit >= 0) {
+            count++;
+            previous_digit = 1;
+            (*position)++;
+        } else if (ch == '_') {
+            if (!previous_digit || *position + 1 >= length ||
+                kiln_dyn_radix_digit((unsigned char)source[*position + 1], radix) < 0) {
+                return 0;
+            }
+            *has_separator = 1;
+            previous_digit = 0;
+            (*position)++;
+        } else {
+            break;
+        }
+    }
+    *digit_count = count;
+    return 1;
+}
+
+static int kiln_dyn_number_suffix(unsigned char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '$' ||
+           ch >= 0x80;
 }
 
 /* Dynamic Function source is a JavaScript string, so a lone UTF-16 surrogate in its body must
@@ -1037,32 +1078,130 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
     char c = lex->src[lex->pos];
     const char *start = &lex->src[lex->pos];
 
-    if ((c >= '0' && c <= '9') || (c == '.' && lex->pos + 1 < lex->len && (lex->src[lex->pos + 1] >= '0' && lex->src[lex->pos + 1] <= '9'))) {
+    if ((c >= '0' && c <= '9') ||
+        (c == '.' && lex->pos + 1 < lex->len && lex->src[lex->pos + 1] >= '0' &&
+         lex->src[lex->pos + 1] <= '9')) {
         size_t num_start = lex->pos;
-        int has_dot = (c == '.');
-        lex->pos++;
-        while (lex->pos < lex->len) {
-            char nc = lex->src[lex->pos];
-            if (nc >= '0' && nc <= '9') {
+        size_t digit_count = 0;
+        int has_separator = 0;
+        int valid = 1;
+        double value = 0;
+        unsigned radix = 10;
+        size_t legacy_octal_start = 0;
+        int legacy_octal = 0;
+        if (c == '0' && lex->pos + 1 < lex->len &&
+            (lex->src[lex->pos + 1] == 'x' || lex->src[lex->pos + 1] == 'X' ||
+             lex->src[lex->pos + 1] == 'b' || lex->src[lex->pos + 1] == 'B' ||
+             lex->src[lex->pos + 1] == 'o' || lex->src[lex->pos + 1] == 'O')) {
+            char prefix = lex->src[lex->pos + 1];
+            radix = prefix == 'x' || prefix == 'X' ? 16 :
+                    prefix == 'b' || prefix == 'B' ? 2 : 8;
+            lex->pos += 2;
+            valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, radix,
+                                         &digit_count, &has_separator) && digit_count != 0;
+        } else {
+            int leading_dot = c == '.';
+            size_t integer_digits = 0;
+            size_t fraction_digits = 0;
+            int has_fraction_or_exponent = 0;
+            if (leading_dot) {
                 lex->pos++;
-            } else if (nc == '.' && !has_dot) {
-                has_dot = 1;
-                lex->pos++;
-            } else if ((nc == 'e' || nc == 'E') && lex->pos + 1 < lex->len) {
-                lex->pos++;
-                if (lex->src[lex->pos] == '+' || lex->src[lex->pos] == '-') {
-                    lex->pos++;
-                }
             } else {
-                break;
+                valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, 10,
+                                             &integer_digits, &has_separator);
+                if (num_start < lex->len && lex->src[num_start] == '0' && has_separator)
+                    valid = 0;
+            }
+            if (valid && lex->pos < lex->len && lex->src[lex->pos] == '.') {
+                has_fraction_or_exponent = 1;
+                lex->pos++;
+                valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, 10,
+                                             &fraction_digits, &has_separator);
+            } else if (leading_dot) {
+                valid = 0;
+            }
+            if (valid && integer_digits + fraction_digits == 0) valid = 0;
+            if (valid && lex->pos < lex->len &&
+                (lex->src[lex->pos] == 'e' || lex->src[lex->pos] == 'E')) {
+                has_fraction_or_exponent = 1;
+                lex->pos++;
+                if (lex->pos < lex->len &&
+                    (lex->src[lex->pos] == '+' || lex->src[lex->pos] == '-')) lex->pos++;
+                size_t exponent_digits = 0;
+                valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, 10,
+                                             &exponent_digits, &has_separator) &&
+                        exponent_digits != 0;
+            }
+            if (valid && num_start < lex->len && lex->src[num_start] == '0' &&
+                integer_digits > 1) {
+                if (lex->strict || has_separator || has_fraction_or_exponent) {
+                    valid = 0;
+                } else {
+                    int octal = 1;
+                    for (size_t i = num_start; i < lex->pos; ++i) {
+                        if (lex->src[i] < '0' || lex->src[i] > '7') octal = 0;
+                    }
+                    legacy_octal = octal;
+                    legacy_octal_start = num_start;
+                }
             }
         }
+        if (valid && lex->pos < lex->len) {
+            unsigned char next = (unsigned char)lex->src[lex->pos];
+            if (kiln_dyn_number_suffix(next) || (radix != 10 && next >= '0' && next <= '9'))
+                valid = 0;
+        }
+        if (valid) {
+            size_t length = lex->pos - num_start;
+            if (legacy_octal) {
+                if (length > SIZE_MAX - 3) {
+                    lex->allocation_error = 1;
+                    valid = 0;
+                } else {
+                    char *normalized = (char *)malloc(length + 3);
+                    if (normalized == NULL) {
+                        lex->allocation_error = 1;
+                        valid = 0;
+                    } else {
+                        normalized[0] = '0';
+                        normalized[1] = 'o';
+                        memcpy(normalized + 2, lex->src + legacy_octal_start, length);
+                        normalized[length + 2] = '\0';
+                        value = kiln_string_to_number(normalized, length + 2);
+                        free(normalized);
+                    }
+                }
+            } else if (!has_separator) {
+                value = kiln_string_to_number(start, length);
+            } else {
+                char *normalized = (char *)malloc(length + 1);
+                if (normalized == NULL) {
+                    lex->allocation_error = 1;
+                    valid = 0;
+                } else {
+                    size_t used = 0;
+                    for (size_t i = 0; i < length; ++i) {
+                        if (lex->src[num_start + i] != '_')
+                            normalized[used++] = lex->src[num_start + i];
+                    }
+                    normalized[used] = '\0';
+                    value = kiln_string_to_number(normalized, used);
+                    free(normalized);
+                }
+            }
+        }
+        if (!valid) {
+            lex->curr.kind = KILN_DYN_ERROR;
+            lex->numeric_literal_error = 1;
+            lex->curr.start = start;
+            lex->curr.len = lex->pos - num_start;
+            return;
+        }
         size_t num_len = lex->pos - num_start;
-        double val = kiln_string_to_number(start, num_len);
         lex->curr.kind = KILN_DYN_NUM;
         lex->curr.start = start;
         lex->curr.len = num_len;
-        lex->curr.num_val = val;
+        lex->curr.num_val = value;
         return;
     }
 
@@ -3535,7 +3674,13 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *out, kiln_value *thrown) {
-    return kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    int status = kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth,
+                                          out, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (lex->allocation_error) return KILN_C99_OUT_OF_MEMORY;
+    if (lex->curr.kind == KILN_DYN_ERROR)
+        return kiln_dyn_throw_unexpected_token(lex, thrown);
+    return KILN_C99_OK;
 }
 
 /* Direct eval cannot compile a new native body at run time. It can evaluate one expression with
