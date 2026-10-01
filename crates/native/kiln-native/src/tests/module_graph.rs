@@ -86,13 +86,13 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
     let entry = project.join("main.mjs");
     fs::write(
         &entry,
-        "import { publicName } from './barrel.mjs'; console.log(publicName());",
+        "import { publicName, aliasName, namespaceName } from './barrel.mjs'; console.log(publicName(), aliasName(), namespaceName.implementation());",
     )
     .expect("write entry");
     let barrel = project.join("barrel.mjs");
     fs::write(
         &barrel,
-        "import { implementation as localName } from './provider.mjs'; export { localName as publicName }; export const metadata = import.meta.url;",
+        "import { implementation as localName } from './provider.mjs'; export { localName as publicName, localName as aliasName }; export * as namespaceName from './provider.mjs'; export const metadata = import.meta.url;",
     )
     .expect("write barrel");
     let provider = project.join("provider.mjs");
@@ -109,41 +109,55 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
     let demand =
         kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
             .expect("compute demand");
-    let old_export = graph
-        .resolved_export(&barrel, "publicName")
-        .expect("original reexport origin");
+    let old_exports = ["publicName", "aliasName", "namespaceName"]
+        .map(|name| graph.resolved_export(&barrel, name).expect("original reexport origin").clone());
     assert!(matches!(
-        old_export,
+        &old_exports[0],
         ResolvedExport::Local { module, .. } if module == &provider
     ));
+    assert_eq!(old_exports[0], old_exports[1], "aliases share provider identity");
+    assert_eq!(old_exports[2], ResolvedExport::Namespace { module: provider.clone() });
 
     let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
-    let reparsed_export = reparsed
-        .resolved_export(&barrel, "publicName")
-        .expect("reparsed reexport origin");
-    assert_eq!(reparsed_export, old_export);
+    for (name, old_export) in ["publicName", "aliasName", "namespaceName"]
+        .into_iter()
+        .zip(old_exports.iter())
+    {
+        assert_eq!(
+            reparsed.resolved_export(&barrel, name),
+            Some(old_export),
+            "reparsed origin for {name}"
+        );
+    }
     let reparsed_barrel = reparsed.module(&barrel).expect("reparsed barrel");
-    let export_slot = reparsed_barrel
-        .program
-        .exports
-        .iter()
-        .find(|export| export.exported == "publicName")
-        .expect("reparsed export row")
-        .local_slot;
-    let import_index = reparsed_barrel
-        .program
-        .imports
-        .iter()
-        .position(|import| import.local_slot == export_slot)
-        .expect("reparsed synthetic import row");
-    let import = &reparsed_barrel.program.imports[import_index];
-    assert_eq!(import.source, "./provider.mjs");
-    assert_eq!(import.imported, "implementation");
-    assert!(
-        remapped
-            .live_imports
-            .contains(&(barrel.clone(), import_index))
-    );
+    for name in ["publicName", "aliasName", "namespaceName"] {
+        let export_slot = reparsed_barrel
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == name)
+            .expect("reparsed export row")
+            .local_slot;
+        let import_index = reparsed_barrel
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export_slot)
+            .expect("reparsed synthetic import row");
+        let import = &reparsed_barrel.program.imports[import_index];
+        assert_eq!(import.source, "./provider.mjs", "source for {name}");
+        assert_eq!(
+            import.imported,
+            if name == "namespaceName" { kiln_ir::NAMESPACE_IMPORT } else { "implementation" },
+            "imported binding for {name}"
+        );
+        assert!(
+            remapped
+                .live_imports
+                .contains(&(barrel.clone(), import_index)),
+            "demand retained for {name}"
+        );
+    }
 
     let reparsed_entry = reparsed.module(&entry).expect("reparsed entry");
     let entry_import_index = reparsed_entry
@@ -164,7 +178,7 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
         reparsed
             .resolved_export(&barrel_target, &entry_import.imported)
             .expect("reparsed entry resolution"),
-        old_export
+        old_exports[0]
     );
 }
 
