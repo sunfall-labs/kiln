@@ -236,7 +236,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 
     fn schedule_node_event_emit(&mut self, receiver: Value, event: &str) {
         let callback = Value::Bound(Rc::new(BoundFunction {
-            target: Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+            target: Value::Native(Native::NodeEventEmit, self.current_realm),
             this_value: receiver,
             arguments: vec![Value::String(event.into())],
             properties: RefCell::new(ObjectData::default()),

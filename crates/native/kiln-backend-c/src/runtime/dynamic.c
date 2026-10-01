@@ -1704,8 +1704,8 @@ typedef enum {
 } kiln_dyn_update_reference;
 
 /* Identifier updates share one reference path for prefix and postfix forms. In particular,
- * resolve the reference before ToNumeric so missing names throw and `with`/global writes target
- * the same binding whose value was read. */
+ * resolve the reference before ToNumeric so missing names throw, then preserve the environment's
+ * write rules when conversion has side effects. */
 static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
                                       const char *name, size_t name_len, int increment,
                                       int prefix, int depth, kiln_value *out,
