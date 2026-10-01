@@ -423,6 +423,7 @@ static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
 typedef enum {
     KILN_DYN_EOF,
     KILN_DYN_NUM,
+    KILN_DYN_BIGINT,
     KILN_DYN_STR,
     KILN_DYN_REGEX,
     KILN_DYN_IDENT,
@@ -1089,6 +1090,11 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         unsigned radix = 10;
         size_t legacy_octal_start = 0;
         int legacy_octal = 0;
+        size_t integer_digits = 0;
+        size_t integer_end = num_start;
+        int integer_has_separator = 0;
+        int has_fraction_or_exponent = 0;
+        int bigint_literal = 0;
         if (c == '0' && lex->pos + 1 < lex->len &&
             (lex->src[lex->pos + 1] == 'x' || lex->src[lex->pos + 1] == 'X' ||
              lex->src[lex->pos + 1] == 'b' || lex->src[lex->pos + 1] == 'B' ||
@@ -1101,13 +1107,10 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                                          &digit_count, &has_separator) && digit_count != 0;
         } else {
             int leading_dot = c == '.';
-            size_t integer_digits = 0;
             size_t fraction_digits = 0;
-            size_t integer_end = num_start;
-            int integer_has_separator = 0;
-            int has_fraction_or_exponent = 0;
             if (leading_dot) {
                 lex->pos++;
+                has_fraction_or_exponent = 1;
                 valid = kiln_dyn_scan_digits(lex->src, lex->len, &lex->pos, 10,
                                              &fraction_digits, &has_separator) &&
                         fraction_digits != 0;
@@ -1160,12 +1163,19 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                 }
             }
         }
+        if (valid && lex->pos < lex->len && lex->src[lex->pos] == 'n') {
+            bigint_literal = 1;
+            lex->pos++;
+            if (radix == 10 &&
+                (has_fraction_or_exponent ||
+                 (lex->src[num_start] == '0' && integer_digits > 1))) valid = 0;
+        }
         if (valid && lex->pos < lex->len) {
             unsigned char next = (unsigned char)lex->src[lex->pos];
             if (kiln_dyn_number_suffix(next) || (radix != 10 && next >= '0' && next <= '9'))
                 valid = 0;
         }
-        if (valid) {
+        if (valid && !bigint_literal) {
             size_t length = lex->pos - num_start;
             if (legacy_octal) {
                 if (length > SIZE_MAX - 3) {
@@ -1212,6 +1222,29 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             return;
         }
         size_t num_len = lex->pos - num_start;
+        if (bigint_literal) {
+            size_t literal_len = num_len - 1;
+            char *normalized = (char *)malloc(literal_len + 1);
+            if (normalized == NULL) {
+                lex->allocation_error = 1;
+                lex->curr.kind = KILN_DYN_ERROR;
+                lex->numeric_literal_error = 1;
+                lex->curr.start = start;
+                lex->curr.len = num_len;
+                return;
+            }
+            size_t used = 0;
+            for (size_t i = 0; i < literal_len; ++i) {
+                if (lex->src[num_start + i] != '_') normalized[used++] = lex->src[num_start + i];
+            }
+            normalized[used] = '\0';
+            lex->curr.kind = KILN_DYN_BIGINT;
+            lex->curr.start = start;
+            lex->curr.len = num_len;
+            lex->curr.str_val = normalized;
+            lex->curr.str_len = used;
+            return;
+        }
         lex->curr.kind = KILN_DYN_NUM;
         lex->curr.start = start;
         lex->curr.len = num_len;
@@ -1936,6 +1969,21 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         *out = kiln_c99_from_units(lex->curr.str_units, lex->curr.str_unit_len);
         kiln_dyn_lexer_next(lex);
         return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_BIGINT) {
+        kiln_value source = kiln_c99_copy_text(lex->curr.str_val, lex->curr.str_len);
+        if (source.tag != KILN_VALUE_STRING) {
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_gc_keep_alive(&source);
+        kiln_value bigint = kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT);
+        int status = kiln_c99_call(host, out, bigint, kiln_c99_undefined(), &source, 1,
+                                   depth, thrown);
+        kiln_c99_gc_keep_alive(&source);
+        if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(out);
+        kiln_dyn_lexer_next(lex);
+        return status;
     }
     if (lex->curr.kind == KILN_DYN_REGEX) {
         const char *pat = lex->curr.str_val;
@@ -4453,7 +4501,8 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
             int line_terminated = previous_end <= token_start && previous_end < scan.len &&
                 kiln_dyn_has_line_terminator(scan.src, previous_end, token_start);
             int previous_can_end_statement = scan.prev_kind == KILN_DYN_IDENT ||
-                scan.prev_kind == KILN_DYN_NUM || scan.prev_kind == KILN_DYN_STR ||
+                scan.prev_kind == KILN_DYN_NUM || scan.prev_kind == KILN_DYN_BIGINT ||
+                scan.prev_kind == KILN_DYN_STR ||
                 scan.prev_kind == KILN_DYN_RPAREN || scan.prev_kind == KILN_DYN_RBRACKET ||
                 scan.prev_kind == KILN_DYN_KW_RETURN ||
                 scan.prev_kind == KILN_DYN_KW_BREAK ||
@@ -6460,6 +6509,7 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
                               memchr(source + previous_end, '\n', token_start - previous_end) !=
                                   NULL &&
                               (previous == KILN_DYN_IDENT || previous == KILN_DYN_NUM ||
+                               previous == KILN_DYN_BIGINT ||
                                previous == KILN_DYN_STR || previous == KILN_DYN_RPAREN ||
                                previous == KILN_DYN_RBRACKET ||
                                previous == KILN_DYN_KW_RETURN ||

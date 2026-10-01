@@ -63,6 +63,13 @@ const parsedNumbers = parseNumbers();
 if (parsedNumbers.join(",") !== "56320,57343,10,15,63,8,1000,125,0.5,50,8.5,900,8.56,8000000000000") {
   throw new Error("dynamic source must parse radix, separated, and exponent number literals");
 }
+const parseBigInts = Function("return [1n, 9007199254740993n, 0xffn, 0b1010n, 0o17n, 1_000n];");
+const parsedBigInts = parseBigInts();
+if (parsedBigInts[0] !== 1n || parsedBigInts[1] !== 9007199254740993n ||
+    parsedBigInts[2] !== 255n || parsedBigInts[3] !== 10n ||
+    parsedBigInts[4] !== 15n || parsedBigInts[5] !== 1000n) {
+  throw new Error("dynamic source must preserve BigInt precision, radix, and separators");
+}
 let invalidNumberRejected = false;
 try {
   Function("return 0x;");
@@ -87,4 +94,14 @@ for (const body of ["return 00.5;", "return 01e2;", "return 09_0;", "return 00.0
   }
   if (!rejected) throw new Error("legacy-octal spellings must be rejected in this context");
 }
-console.log(result.join(","), shortCircuit.join(","), parsedNumbers.join(","));
+for (const body of ["return 0.1n;", "return .1n;", "return 1e2n;", "return 01n;", "return 08n;"]) {
+  let rejected = false;
+  try {
+    Function(body);
+  } catch (error) {
+    rejected = error instanceof SyntaxError;
+  }
+  if (!rejected) throw new Error("invalid BigInt literal must fail Function construction");
+}
+console.log(result.join(","), shortCircuit.join(","), parsedNumbers.join(","),
+  parsedBigInts.map(String).join(","));
