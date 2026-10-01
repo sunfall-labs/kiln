@@ -503,18 +503,25 @@ if (typeof JSON !== "undefined") {
     };
     Object.defineProperty(String.prototype, "length", { value: 0, writable: false,
                                                         configurable: false, enumerable: false });
+    // Preserve the low-level native algorithms before the public TypeScript protocol methods
+    // are installed. RegExp's @@ methods use these directly to avoid redispatching to themselves.
+    globalThis.__kilnRawStringProtocols = {
+        match: String.prototype.match,
+        matchAll: String.prototype.matchAll,
+        replace: String.prototype.replace,
+        replaceAll: String.prototype.replaceAll,
+        search: String.prototype.search,
+        split: String.prototype.split,
+    };
+    const rawStringProtocols = globalThis.__kilnRawStringProtocols;
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
     data(DataView.prototype, Symbol.toStringTag, "DataView");
-    // Capture the unwrapped native string method before the common TypeScript bootstrap adds
-    // String.prototype.matchAll's IsRegExp/global check. The RegExp protocol method itself is
-    // allowed on a non-global expression and must not recurse through that check.
-    const rawStringMatchAll = String.prototype.matchAll;
     const methods = {
-        [Symbol.match](string) { return String(string).match(this); },
-        [Symbol.matchAll](string) { return rawStringMatchAll.call(`${string}`, this); },
-        [Symbol.replace](string, replacement) { return String(string).replace(this, replacement); },
-        [Symbol.search](string) { return String(string).search(this); },
-        [Symbol.split](string, limit) { return String(string).split(this, limit); },
+        [Symbol.match](string) { return rawStringProtocols.match.call(string, this); },
+        [Symbol.matchAll](string) { return rawStringProtocols.matchAll.call(string, this); },
+        [Symbol.replace](string, replacement) { return rawStringProtocols.replace.call(string, this, replacement); },
+        [Symbol.search](string) { return rawStringProtocols.search.call(string, this); },
+        [Symbol.split](string, limit) { return rawStringProtocols.split.call(string, this, limit); },
     };
     data(RegExp.prototype, Symbol.match, methods[Symbol.match], true);
     data(RegExp.prototype, Symbol.matchAll, methods[Symbol.matchAll], true);

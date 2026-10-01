@@ -4,48 +4,111 @@
 (function installRegExp() {
   if (typeof RegExp === "undefined" || !RegExp.prototype) return;
   const Proto = RegExp.prototype as any;
-
-  // `String.prototype.matchAll` performs the IsRegExp/global check before dispatching to
-  // @@matchAll. The graph bootstrap's RegExp @@matchAll method captures the raw native method
-  // before this wrapper is installed.
-  const stringMatchAll = { matchAll(regexp: any): any {
+  const G = globalThis as any;
+  const rawString = G.__kilnRawStringProtocols || {
+    match: String.prototype.match,
+    matchAll: String.prototype.matchAll,
+    replace: String.prototype.replace,
+    replaceAll: String.prototype.replaceAll,
+    search: String.prototype.search,
+    split: String.prototype.split,
+  };
+  delete G.__kilnRawStringProtocols;
+  const IntrinsicRegExp = RegExp;
+  const isObject = (value: any): boolean => value !== null &&
+    (typeof value === "object" || typeof value === "function");
+  const requireReceiver = (receiver: any, name: string): void => {
+    if (receiver === null || receiver === undefined) {
+      throw new TypeError(`String.prototype.${name} called on null or undefined`);
+    }
+  };
+  const invokeRegExpProtocol = (regexp: any, key: symbol, args: any[]): any => {
+    const method = regexp[key];
+    return Reflect.apply(method, regexp, args);
+  };
+  const match = { match(this: any, regexp: any): any {
     "use strict";
-    if (this === null || this === undefined) {
-      throw new TypeError("String.prototype.matchAll called on null or undefined");
-    }
-
-    let isRegExp = false;
-    if (regexp !== null && (typeof regexp === "object" || typeof regexp === "function")) {
+    requireReceiver(this, "match");
+    if (isObject(regexp)) {
       const matcher = regexp[Symbol.match];
-      isRegExp = matcher === undefined ? regexp instanceof RegExp : !!matcher;
-      if (isRegExp) {
-        const flags = regexp.flags;
-        if (flags === null || flags === undefined) {
-          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
-        }
-        if (`${flags}`.indexOf("g") < 0) {
-          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
-        }
-      }
-    }
-
-    if (regexp !== null && regexp !== undefined) {
-      const matcher = regexp[Symbol.matchAll];
-      if (matcher !== null && matcher !== undefined) {
-        return Reflect.apply(matcher, regexp, [this]);
-      }
+      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
-    const created = new RegExp(regexp, "g");
-    const createdMatcher = (created as any)[Symbol.matchAll];
-    return Reflect.apply(createdMatcher, created, [subject]);
+    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.match, [subject]);
+  } }.match;
+  const matchAll = { matchAll(this: any, regexp: any): any {
+    "use strict";
+    requireReceiver(this, "matchAll");
+    let isRegExp = false;
+    if (isObject(regexp)) {
+      const matcher = regexp[Symbol.match];
+      isRegExp = matcher === undefined ? regexp instanceof IntrinsicRegExp : !!matcher;
+      if (isRegExp) {
+        const flags = regexp.flags;
+        if (flags === null || flags === undefined || `${flags}`.indexOf("g") < 0) {
+          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
+        }
+      }
+    }
+    if (isObject(regexp)) {
+      const matcher = regexp[Symbol.matchAll];
+      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
+    }
+    const subject = `${this}`;
+    const created = new IntrinsicRegExp(regexp, "g");
+    return invokeRegExpProtocol(created, Symbol.matchAll, [subject]);
   } }.matchAll;
-  Object.defineProperty(String.prototype, "matchAll", {
-    value: stringMatchAll,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
+  const replace = { replace(this: any, searchValue: any, replaceValue: any): any {
+    "use strict";
+    requireReceiver(this, "replace");
+    if (isObject(searchValue)) {
+      const replacer = searchValue[Symbol.replace];
+      if (replacer !== null && replacer !== undefined) return Reflect.apply(replacer, searchValue, [this, replaceValue]);
+    }
+    return Reflect.apply(rawString.replace, this, [searchValue, replaceValue]);
+  } }.replace;
+  const replaceAll = { replaceAll(this: any, searchValue: any, replaceValue: any): any {
+    "use strict";
+    requireReceiver(this, "replaceAll");
+    if (isObject(searchValue)) {
+      const matcher = searchValue[Symbol.match];
+      const isRegExp = matcher === undefined ? searchValue instanceof IntrinsicRegExp : !!matcher;
+      if (isRegExp) {
+        const flags = searchValue.flags;
+        if (flags === null || flags === undefined || `${flags}`.indexOf("g") < 0) {
+          throw new TypeError("String.prototype.replaceAll must be called with a global RegExp");
+        }
+      }
+      const replacer = searchValue[Symbol.replace];
+      if (replacer !== null && replacer !== undefined) return Reflect.apply(replacer, searchValue, [this, replaceValue]);
+    }
+    return Reflect.apply(rawString.replaceAll, this, [searchValue, replaceValue]);
+  } }.replaceAll;
+  const search = { search(this: any, regexp: any): any {
+    "use strict";
+    requireReceiver(this, "search");
+    if (isObject(regexp)) {
+      const matcher = regexp[Symbol.search];
+      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
+    }
+    const subject = `${this}`;
+    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.search, [subject]);
+  } }.search;
+  const split = { split(this: any, separator: any, limit: any): any {
+    "use strict";
+    requireReceiver(this, "split");
+    if (isObject(separator)) {
+      const splitter = separator[Symbol.split];
+      if (splitter !== null && splitter !== undefined) return Reflect.apply(splitter, separator, [this, limit]);
+    }
+    return Reflect.apply(rawString.split, this, [separator, limit]);
+  } }.split;
+  for (const [name, value] of [["match", match], ["matchAll", matchAll], ["replace", replace],
+                               ["replaceAll", replaceAll], ["search", search], ["split", split]] as any) {
+    Object.defineProperty(String.prototype, name, {
+      value, writable: true, enumerable: false, configurable: true,
+    });
+  }
 
   // Annex B legacy capture properties. Both engines keep this state per realm; keep the public
   // accessors in this TypeScript bootstrap so runtime C owns only the private capture bridge.
