@@ -1560,6 +1560,7 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     socket->paused_read_bytes = NULL;
     socket->paused_read_len = 0;
     socket->paused_read_capacity = 0;
+    socket->paused_read_eof = 0;
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
     if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded) {
@@ -4761,6 +4762,7 @@ static int kiln_c99_node_socket_resume(kiln_node_socket *socket, int depth,
     size_t paused_len = 0;
     int status = KILN_C99_OK;
     kiln_c99_gc_keep_alive(&socket->object);
+    if (socket->closing || socket->closed) return KILN_C99_OK;
     socket->read_paused = 0;
     if (socket->paused_read_len != 0) {
         /* Transfer ownership before emitting: a data handler may call resume recursively, and

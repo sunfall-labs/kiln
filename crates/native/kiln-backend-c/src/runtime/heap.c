@@ -8299,6 +8299,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_NODE_SOCKET:
         free(((kiln_node_socket *)payload)->pending_write_bytes);
         free(((kiln_node_socket *)payload)->corked_write_bytes);
+        free(((kiln_node_socket *)payload)->paused_read_bytes);
         break;
     case KILN_GC_NODE_RESPONSE: {
         kiln_node_response *response = (kiln_node_response *)payload;

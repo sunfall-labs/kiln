@@ -2094,14 +2094,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     {
                         connection.request = Some(socket.clone());
                     }
-                    self.emit_http_server(state, "connection", vec![socket], instruction)?;
+                    self.emit_http_server(state, "connection", vec![socket.clone()], instruction)?;
                 }
                 for action in net_actions {
-                    if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. }))
-                        && node_net_socket_state(&socket)
-                            .is_ok_and(|socket| socket.borrow().read_paused)
-                    {
-                        continue;
+                    if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. })) {
+                        let paused = node_net_socket_state(&socket)
+                            .is_ok_and(|socket| socket.borrow().read_paused);
+                        let already_started = state.borrow().streams.iter().any(|stream| {
+                            stream.resource() == accepted.resource.id
+                                && stream.driver.has_pending_read()
+                        });
+                        if paused || already_started {
+                            continue;
+                        }
                     }
                     self.start_http_stream_action(
                         state,
@@ -2547,7 +2552,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                 }
                 RuntimeHttpEvent::UpgradeReady { head } => {
-                    let (socket, actions) = {
+                    let (socket, paused, actions) = {
                         let mut server_state = server.borrow_mut();
                         let connection = server_state
                             .streams
@@ -2560,20 +2565,55 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         connection.runtime_http = false;
                         connection.upgrade_request_id = None;
                         connection.upgrading = false;
+                        let paused = connection
+                            .socket
+                            .as_ref()
+                            .is_some_and(|socket| socket.borrow().read_paused);
                         (
                             connection.socket_object.clone().unwrap_or(Value::Undefined),
-                            connection.driver.resume_reading(),
+                            paused,
+                            if paused {
+                                Vec::new()
+                            } else {
+                                connection.driver.resume_reading()
+                            },
                         )
                     };
                     if !head.is_empty() {
-                        self.dispatch_node_event(
-                            Native::NodeEventEmit,
-                            &socket,
-                            &[Value::String("data".into()), node_bytes_value(head)],
-                            instruction,
-                        )?;
+                        if paused {
+                            let readable =
+                                Rc::clone(&node_net_socket_state(&socket)?.borrow().readable);
+                            self.dispatch_readable_state(
+                                Native::NodeReadablePush,
+                                &socket,
+                                &[node_bytes_value(head)],
+                                instruction,
+                                &readable,
+                                false,
+                            )?;
+                        } else {
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &socket,
+                                &[Value::String("data".into()), node_bytes_value(head)],
+                                instruction,
+                            )?;
+                        }
                     }
                     for action in actions {
+                        if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. })) {
+                            let paused_or_destroyed =
+                                node_net_socket_state(&socket).is_ok_and(|socket| {
+                                    let socket = socket.borrow();
+                                    socket.read_paused || socket.destroyed
+                                });
+                            let already_started = server.borrow().streams.iter().any(|stream| {
+                                stream.resource() == resource && stream.driver.has_pending_read()
+                            });
+                            if paused_or_destroyed || already_started {
+                                continue;
+                            }
+                        }
                         self.start_http_stream_action(server, resource, action, instruction)?;
                     }
                 }
@@ -2814,10 +2854,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         connection.runtime_http = false;
                         connection.upgrade_request_id = None;
                         connection.upgrading = false;
+                        let paused = connection
+                            .socket
+                            .as_ref()
+                            .is_some_and(|socket| socket.borrow().read_paused);
                         (
                             request,
                             connection.socket_object.clone().unwrap_or(Value::Undefined),
-                            connection.driver.resume_reading(),
+                            if paused {
+                                Vec::new()
+                            } else {
+                                connection.driver.resume_reading()
+                            },
                         )
                     };
                     let mut response = ObjectData {
@@ -2865,6 +2913,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                     )?;
                     for action in actions {
+                        if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. })) {
+                            let paused_or_destroyed =
+                                node_net_socket_state(&socket).is_ok_and(|socket| {
+                                    let socket = socket.borrow();
+                                    socket.read_paused || socket.destroyed
+                                });
+                            let already_started = owner.borrow().streams.iter().any(|stream| {
+                                stream.resource() == resource && stream.driver.has_pending_read()
+                            });
+                            if paused_or_destroyed || already_started {
+                                continue;
+                            }
+                        }
                         self.start_http_stream_action(owner, resource, action, instruction)?;
                     }
                 }
@@ -4940,10 +5001,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             }
                         }
                         for action in net_actions {
-                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. }))
-                                && socket_state.borrow().read_paused
-                            {
-                                continue;
+                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. })) {
+                                let already_started = owner.borrow().streams.iter().any(|stream| {
+                                    stream.resource() == resource
+                                        && stream.driver.has_pending_read()
+                                });
+                                if socket_state.borrow().read_paused || already_started {
+                                    continue;
+                                }
                             }
                             if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. }))
                             {
