@@ -11,6 +11,67 @@ fn node_stream_write_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionEr
 }
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
+    fn take_node_socket_queued_state(
+        state: &Rc<RefCell<crate::net::NetSocketState>>,
+    ) -> (Vec<Value>, Vec<Value>) {
+        let mut state = state.borrow_mut();
+        let write_callbacks = std::mem::take(&mut state.corked_callbacks);
+        let end_callbacks = std::mem::take(&mut state.end_callbacks);
+        state.pending_write.clear();
+        state.corked_write.clear();
+        state.cork_depth = 0;
+        state.shutdown_after_upgrade_fence = None;
+        (write_callbacks, end_callbacks)
+    }
+
+    fn schedule_node_socket_queued_callbacks(
+        &mut self,
+        receiver: &Value,
+        write_callbacks: Vec<Value>,
+        end_callbacks: Vec<Value>,
+    ) {
+        if !write_callbacks.is_empty() {
+            let error = self.construct_error(
+                ErrorKind::Error,
+                &[Value::String("socket destroyed".into())],
+            );
+            if let Value::Object(object) = &error {
+                object
+                    .borrow_mut()
+                    .set_non_enumerable("code", Value::String("ERR_STREAM_DESTROYED".into()));
+            }
+            for callback in write_callbacks {
+                let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
+                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+            }
+        }
+        for callback in end_callbacks {
+            let callback = Value::Bound(Rc::new(BoundFunction {
+                target: callback,
+                this_value: receiver.clone(),
+                arguments: Vec::new(),
+                properties: RefCell::new(ObjectData::default()),
+            }));
+            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        }
+    }
+
+    fn call_node_socket_end_callbacks(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let callbacks = {
+            let state = node_net_socket_state(receiver)?;
+            std::mem::take(&mut state.borrow_mut().end_callbacks)
+        };
+        for callback in callbacks {
+            self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
+        }
+        Ok(())
+    }
+
     fn schedule_node_write_after_end(
         &mut self,
         receiver: &Value,
@@ -306,6 +367,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    end_callbacks: Vec::new(),
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -345,9 +407,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 self.dispatch_node_socket(native, receiver, arguments, instruction)
             }
             Native::NodeSocketCork | Native::NodeSocketUncork => {
-                let socket = arguments.first().ok_or_else(|| ExecutionError::TypeErrorMessage {
-                    message: "Socket cork operation requires a socket receiver".into(),
-                })?;
+                let socket = arguments
+                    .first()
+                    .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                        message: "Socket cork operation requires a socket receiver".into(),
+                    })?;
                 self.dispatch_node_socket(native, socket, &[], instruction)
             }
             _ => unreachable!("only node:net natives dispatch here"),
@@ -387,15 +451,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let _ = node_body_bytes(Some(chunk))?;
             }
         }
-        if native == Native::NodeSocketEnd
-            && let Some(callback) = arguments.iter().rev().find(|value| is_callable(value))
-        {
-            self.dispatch_node_event(
-                Native::NodeEventOnce,
-                receiver,
-                &[Value::String("finish".into()), callback.clone()],
-                instruction,
-            )?;
+        if native == Native::NodeSocketEnd {
+            if let Some(callback) = arguments.iter().rev().find(|value| is_callable(value)) {
+                state.borrow_mut().end_callbacks.push(callback.clone());
+            }
         }
         if native == Native::NodeSocketCork {
             let mut state = state.borrow_mut();
@@ -455,24 +514,35 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     if state.cork_depth != 0 {
                         state.corked_write.extend(bytes);
-                        if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                        if let Some(callback) = arguments
+                            .iter()
+                            .skip(1)
+                            .rev()
+                            .find(|value| is_callable(value))
+                        {
                             state.corked_callbacks.push(callback.clone());
                         }
                     } else {
                         state.pending_write.extend(bytes);
-                        if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                        if let Some(callback) = arguments
+                            .iter()
+                            .skip(1)
+                            .rev()
+                            .find(|value| is_callable(value))
+                        {
                             state.corked_callbacks.push(callback.clone());
                         }
                     }
-                    let buffered = state.pending_write.len().saturating_add(state.corked_write.len());
+                    let buffered = state
+                        .pending_write
+                        .len()
+                        .saturating_add(state.corked_write.len());
                     return Ok(Value::Boolean(buffered < DEFAULT_HIGH_WATER_MARK));
                 }
                 Native::NodeSocketEnd => {
                     let data = arguments
                         .first()
-                        .filter(|value| {
-                            !matches!(value, Value::Undefined) && !is_callable(value)
-                        })
+                        .filter(|value| !matches!(value, Value::Undefined) && !is_callable(value))
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
                     let mut state = state.borrow_mut();
@@ -495,34 +565,24 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if destroyed {
                         return Ok(receiver.clone());
                     }
-                    let queued_write_callbacks = {
+                    {
                         let mut state = state.borrow_mut();
                         state.destroyed = true;
                         state.connecting = false;
-                        std::mem::take(&mut state.corked_callbacks)
-                    };
+                    }
+                    let (queued_write_callbacks, end_callbacks) =
+                        Self::take_node_socket_queued_state(&state);
                     if let Value::Object(object) = receiver {
                         let mut object = object.borrow_mut();
                         object.set("connecting", Value::Boolean(false));
                         object.set("destroyed", Value::Boolean(true));
                         object.set("readyState", Value::String("closed".into()));
                     }
-                    if !queued_write_callbacks.is_empty() {
-                        let error = self.construct_error(
-                            ErrorKind::Error,
-                            &[Value::String("socket destroyed".into())],
-                        );
-                        if let Value::Object(object) = &error {
-                            object.borrow_mut().set(
-                                "code",
-                                Value::String("ERR_STREAM_DESTROYED".into()),
-                            );
-                        }
-                        for callback in queued_write_callbacks {
-                            let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
-                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
-                        }
-                    }
+                    self.schedule_node_socket_queued_callbacks(
+                        receiver,
+                        queued_write_callbacks,
+                        end_callbacks,
+                    );
                     if let Some(request) = connect_request {
                         let canceled = if let Some(host) = self.async_host {
                             unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) }
@@ -595,6 +655,23 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             })?;
             (server, resource)
         };
+        if native == Native::NodeSocketDestroy {
+            if destroyed {
+                return Ok(receiver.clone());
+            }
+            {
+                let mut socket_state = state.borrow_mut();
+                socket_state.destroyed = true;
+                socket_state.connecting = false;
+            }
+            let (write_callbacks, end_callbacks) = Self::take_node_socket_queued_state(&state);
+            self.schedule_node_socket_queued_callbacks(receiver, write_callbacks, end_callbacks);
+            if let Value::Object(object) = receiver {
+                let mut object = object.borrow_mut();
+                object.set("destroyed", Value::Boolean(true));
+                object.set("readyState", Value::String("closed".into()));
+            }
+        }
         if native == Native::NodeSocketDestroy
             && server.borrow().protocol != ServerProtocol::Net
             && server
@@ -635,20 +712,33 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let mut state = state.borrow_mut();
             if state.cork_depth != 0 {
                 state.corked_write.extend(bytes);
-                if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                if let Some(callback) = arguments
+                    .iter()
+                    .skip(1)
+                    .rev()
+                    .find(|value| is_callable(value))
+                {
                     state.corked_callbacks.push(callback.clone());
                 }
-                let buffered = state.pending_write.len().saturating_add(state.corked_write.len());
+                let buffered = state
+                    .pending_write
+                    .len()
+                    .saturating_add(state.corked_write.len());
                 return Ok(Value::Boolean(buffered < DEFAULT_HIGH_WATER_MARK));
             }
         }
-        let mut write_callbacks = if matches!(native, Native::NodeSocketWrite | Native::NodeSocketEnd) {
-            std::mem::take(&mut state.borrow_mut().corked_callbacks)
-        } else {
-            Vec::new()
-        };
+        let mut write_callbacks =
+            if matches!(native, Native::NodeSocketWrite | Native::NodeSocketEnd) {
+                std::mem::take(&mut state.borrow_mut().corked_callbacks)
+            } else {
+                Vec::new()
+            };
         if native == Native::NodeSocketWrite
-            && let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value))
+            && let Some(callback) = arguments
+                .iter()
+                .skip(1)
+                .rev()
+                .find(|value| is_callable(value))
         {
             write_callbacks.push(callback.clone());
         }
@@ -701,7 +791,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 socket_state.end_requested = true;
                 socket_state.shutdown_after_upgrade_fence = Some(receipt.fence);
                 if let Value::Object(object) = receiver {
-                    object.borrow_mut().set("readyState", Value::String("readOnly".into()));
+                    object
+                        .borrow_mut()
+                        .set("readyState", Value::String("readOnly".into()));
                     object.borrow_mut().set("writable", Value::Boolean(false));
                 }
                 return Ok(receiver.clone());
@@ -727,9 +819,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Native::NodeSocketEnd => {
                     let mut data = arguments
                         .first()
-                        .filter(|value| {
-                            !matches!(value, Value::Undefined) && !is_callable(value)
-                        })
+                        .filter(|value| !matches!(value, Value::Undefined) && !is_callable(value))
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
                     let corked = {
@@ -755,7 +845,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         for action in actions {
             if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
                 self.start_http_stream_action_with_callbacks(
-                    &server, resource, action, instruction, write_callbacks,
+                    &server,
+                    resource,
+                    action,
+                    instruction,
+                    write_callbacks,
                 )?;
                 write_callbacks = Vec::new();
             } else {
@@ -1669,6 +1763,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             cork_depth: 0,
             corked_write: Vec::new(),
             corked_callbacks: Vec::new(),
+            end_callbacks: Vec::new(),
             upgrade_write_callbacks: Default::default(),
             shutdown_after_upgrade_fence: None,
             end_requested: false,
@@ -1809,6 +1904,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    end_callbacks: Vec::new(),
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -1968,8 +2064,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         action: StreamAction,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        self.start_http_stream_action_with_callbacks(server, resource, action, instruction,
-                                                     Vec::new())
+        self.start_http_stream_action_with_callbacks(
+            server,
+            resource,
+            action,
+            instruction,
+            Vec::new(),
+        )
     }
 
     fn start_http_stream_action_with_callbacks(
@@ -2109,6 +2210,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &[Value::String("finish".into())],
                             instruction,
                         )?;
+                        self.call_node_socket_end_callbacks(&socket, instruction)?;
                     }
                     return Ok(());
                 }
@@ -2131,6 +2233,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     stream.closed = true;
                 }
                 if let Some(socket) = socket {
+                    if let Ok(socket_state) = node_net_socket_state(&socket) {
+                        let (write_callbacks, end_callbacks) =
+                            Self::take_node_socket_queued_state(&socket_state);
+                        self.schedule_node_socket_queued_callbacks(
+                            &socket,
+                            write_callbacks,
+                            Vec::new(),
+                        );
+                        for callback in end_callbacks {
+                            self.call_value(&callback, socket.clone(), Vec::new(), instruction)?;
+                        }
+                    }
                     // Node exposes the terminal stream state from inside the `close` listener.
                     // Event dispatch is synchronous, so projecting it after this branch returns
                     // lets user code observe the previous half-open state.
@@ -2267,15 +2381,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         let (callbacks, end_after_fence) = {
                             let mut state = socket_state.borrow_mut();
                             (
-                                state.upgrade_write_callbacks.remove(&fence).unwrap_or_default(),
+                                state
+                                    .upgrade_write_callbacks
+                                    .remove(&fence)
+                                    .unwrap_or_default(),
                                 state.shutdown_after_upgrade_fence == Some(fence),
                             )
                         };
                         let error = error.map(|message| {
-                            self.construct_error(
-                                ErrorKind::Error,
-                                &[Value::String(message.into())],
-                            )
+                            self.construct_error(ErrorKind::Error, &[Value::String(message.into())])
                         });
                         for callback in callbacks {
                             let arguments = error.clone().into_iter().collect();
@@ -2300,7 +2414,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             };
                             for action in actions {
                                 self.start_http_stream_action(
-                                    server, resource, action, instruction,
+                                    server,
+                                    resource,
+                                    action,
+                                    instruction,
                                 )?;
                             }
                         }
@@ -2435,6 +2552,44 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // The engine's last word: the transport is gone and the connection has
                     // left its table. Nothing remains to close; the realm's record goes
                     // unless a request or response object is still reachable from JavaScript.
+                    let socket = server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
+                        .and_then(|stream| stream.socket.clone());
+                    if let Some(socket) = socket {
+                        let (write_callbacks, end_callbacks) = {
+                            let mut state = socket.borrow_mut();
+                            let callbacks = std::mem::take(&mut state.corked_callbacks);
+                            let end_callbacks = std::mem::take(&mut state.end_callbacks);
+                            state.pending_write.clear();
+                            state.corked_write.clear();
+                            state.cork_depth = 0;
+                            state.shutdown_after_upgrade_fence = None;
+                            (callbacks, end_callbacks)
+                        };
+                        self.schedule_node_socket_queued_callbacks(
+                            &socket_value,
+                            write_callbacks,
+                            Vec::new(),
+                        );
+                        let socket_value = socket
+                            .borrow()
+                            .object
+                            .as_ref()
+                            .and_then(Weak::upgrade)
+                            .map(Value::Object)
+                            .unwrap_or(Value::Undefined);
+                        for callback in end_callbacks {
+                            self.call_value(
+                                &callback,
+                                socket_value.clone(),
+                                Vec::new(),
+                                instruction,
+                            )?;
+                        }
+                    }
                     let mut server_state = server.borrow_mut();
                     if let Some(stream) = server_state
                         .streams
@@ -4307,7 +4462,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Ok(())
                 }
                 PendingNodeRequest::Stream {
-                    server, resource, write_callbacks, ..
+                    server,
+                    resource,
+                    write_callbacks,
+                    ..
                 } => {
                     let callback_result = completion.result.clone();
                     // Only raw `node:net` sockets read and write through host operations;
@@ -4670,9 +4828,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             }
                         }
                         for action in net_actions {
-                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
+                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. }))
+                            {
                                 self.start_http_stream_action_with_callbacks(
-                                    &owner, resource, action, self.instruction,
+                                    &owner,
+                                    resource,
+                                    action,
+                                    self.instruction,
                                     pending_write_callbacks,
                                 )?;
                                 pending_write_callbacks = Vec::new();
@@ -4730,20 +4892,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 })
                             }
                         };
-                        let pending_write_callbacks = match &target {
+                        let (pending_write_callbacks, end_callbacks) = match &target {
                             PendingConnect::Net(state) => {
-                                std::mem::take(&mut state.borrow_mut().corked_callbacks)
+                                Self::take_node_socket_queued_state(state)
                             }
                             PendingConnect::Http(state) => state
                                 .borrow()
                                 .socket
                                 .as_ref()
-                                .map(|socket| {
-                                    std::mem::take(&mut socket.borrow_mut().corked_callbacks)
-                                })
+                                .map(Self::take_node_socket_queued_state)
                                 .unwrap_or_default(),
                         };
-                        if let Some(socket) = socket_value {
+                        if let Some(socket) = socket_value.as_ref() {
                             if let Value::Object(object) = &socket {
                                 object.borrow_mut().set("connecting", Value::Boolean(false));
                                 object.borrow_mut().set("destroyed", Value::Boolean(true));
@@ -4754,7 +4914,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             let emit = self.read_property(&socket, "emit", self.instruction)?;
                             let callback = Value::Bound(Rc::new(BoundFunction {
                                 target: emit,
-                                this_value: socket,
+                                this_value: (*socket).clone(),
                                 arguments: vec![Value::String("close".into())],
                                 properties: RefCell::new(ObjectData::default()),
                             }));
@@ -4784,6 +4944,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             None
                         };
                         let error = self.node_error_value(error);
+                        let end_this = socket_value.clone().unwrap_or(Value::Undefined);
+                        for callback in end_callbacks {
+                            self.call_value(
+                                &callback,
+                                end_this.clone(),
+                                Vec::new(),
+                                self.instruction,
+                            )?;
+                        }
                         for callback in pending_write_callbacks {
                             self.call_value(
                                 &callback,

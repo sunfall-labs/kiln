@@ -23,6 +23,7 @@ pub(crate) struct NetSocketState {
     pub(crate) cork_depth: usize,
     pub(crate) corked_write: Vec<u8>,
     pub(crate) corked_callbacks: Vec<Value>,
+    pub(crate) end_callbacks: Vec<Value>,
     /// Write callbacks retained until the HTTP upgrade engine confirms each append reached
     /// the transport. Fence values are private runtime sequence numbers.
     pub(crate) upgrade_write_callbacks: std::collections::BTreeMap<u64, Vec<Value>>,

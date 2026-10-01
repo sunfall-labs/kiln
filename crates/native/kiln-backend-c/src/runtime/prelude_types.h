@@ -3267,6 +3267,7 @@ struct kiln_node_socket {
     size_t corked_write_capacity;
     unsigned int cork_depth;
     kiln_value write_callbacks;
+    kiln_value end_callbacks;
     /* Upgrade callback batches are keyed by HTTP engine append-completion fences. */
     kiln_value upgrade_write_callbacks;
     int http_upgrade_pending;
