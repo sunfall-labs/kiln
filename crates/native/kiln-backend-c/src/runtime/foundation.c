@@ -3,6 +3,8 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
                                                                kiln_val value);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
+int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key,
+                                  kiln_value value, int depth, kiln_value *thrown);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);

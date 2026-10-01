@@ -1055,9 +1055,6 @@ static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_valu
         kiln_value descriptor;
         kiln_value enumerable;
         kiln_value copied;
-        kiln_value name;
-        const kiln_string *view;
-        const kiln_string *canonical;
         int found = 0;
 
         status = kiln_c99_describe_property_value(host, source, key, &descriptor, &found,
@@ -1072,13 +1069,7 @@ static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_valu
          * namespace bindings, this invokes any accessor with the builtin itself as receiver. */
         status = kiln_c99_get_computed(host, source, key, &copied, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        name = kiln_c99_property_key(key);
-        if (name.tag != KILN_VALUE_STRING || name.ptr == NULL) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        view = (const kiln_string *)name.ptr;
-        canonical = kiln_c99_property_ikey(key);
-        status = kiln_c99_put_mode_key(host, target, view, canonical, copied, 0, depth, thrown);
+        status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
         if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
