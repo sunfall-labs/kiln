@@ -95,6 +95,11 @@ def main():
     evidence['git_head'] = subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=HERE, text=True).strip()
     evidence['node_version'] = subprocess.check_output(['node', '--version'], text=True).strip()
+    def interrupt_run(signum, frame):
+        # SIGTERM from a supervising agent follows the same cleanup/evidence path as Ctrl-C.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt_run)
     try:
         for name, version, porffor, _, stem in selected:
             test = str(tests[name])
