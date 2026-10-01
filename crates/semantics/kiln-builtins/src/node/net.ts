@@ -35,7 +35,7 @@ function decorateSocket(socket: any): any {
   return socket;
 }
 
-if (typeof process !== "undefined") {
+if (typeof process !== "undefined" && typeof (process as any).__kilnSocketDecorator !== "function") {
   Object.defineProperty(process, "__kilnSocketDecorator", {
     configurable: false,
     value: decorateSocket,
