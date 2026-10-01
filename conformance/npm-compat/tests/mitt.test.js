@@ -1,24 +1,48 @@
-// kiln eval smoke test (authored for kiln, not from porffor).
 const mitt = require('mitt');
 
+console.log('--- Multi-listener ordering & Unsubscribing ---');
 const emitter = mitt();
-const seen = [];
-emitter.on('ping', (d) => seen.push('ping:' + d));
-emitter.emit('ping', 'one');
-emitter.emit('ping', 'two');
-console.log('seen:', JSON.stringify(seen));
+const events = [];
 
-const allSeen = [];
-emitter.on('*', (type, d) => allSeen.push(type + '=' + d));
-emitter.emit('other', 'x');
-console.log('wildcard:', JSON.stringify(allSeen));
+const h1 = (data) => events.push('h1:' + data);
+const h2 = (data) => events.push('h2:' + data);
+const h3 = (data) => events.push('h3:' + data);
 
-const fn = () => seen.push('removed');
-emitter.on('rm', fn);
-emitter.off('rm', fn);
-emitter.emit('rm');
-console.log('after off:', JSON.stringify(seen));
+emitter.on('data', h1);
+emitter.on('data', h2);
+emitter.on('data', h3);
+emitter.emit('data', 1);
 
-console.log('all handlers map:', typeof emitter.all === 'object');
+// remove middle handler h2
+emitter.off('data', h2);
+emitter.emit('data', 2);
+console.log('events:', JSON.stringify(events));
+
+console.log('--- Self-unsubscribing listener ---');
+const selfEvents = [];
+const onceHandler = (msg) => {
+  selfEvents.push('once:' + msg);
+  emitter.off('once', onceHandler);
+};
+emitter.on('once', onceHandler);
+emitter.emit('once', 'first');
+emitter.emit('once', 'second');
+console.log('selfEvents:', JSON.stringify(selfEvents));
+
+console.log('--- Wildcard listeners ---');
+const wildEvents = [];
+emitter.on('*', (type, payload) => wildEvents.push(type + '->' + payload));
+emitter.emit('user:login', 'alice');
+emitter.emit('user:logout', 'alice');
+console.log('wildEvents:', JSON.stringify(wildEvents));
+
+console.log('--- Custom Map & emitter.all.clear() ---');
+const customMap = new Map();
+const customEmitter = mitt(customMap);
+customEmitter.on('test', () => {});
+console.log('customMap has test:', customMap.has('test'));
+customEmitter.all.clear();
+console.log('customMap size after clear:', customMap.size);
+
 emitter.emit('no-listeners');
 console.log('emit with no listeners ok');
