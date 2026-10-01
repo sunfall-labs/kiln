@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-demand-remap");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { plugin } from './provider.mjs'; console.log(plugin());",
+    )
+    .expect("write entry");
+    let provider = project.join("provider.mjs");
+    fs::write(
+        &provider,
+        "const unusedA = 1; const unusedB = 2; export function plugin() { return import.meta.url; }",
+    )
+    .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute demand");
+    let old_slot = *demand
+        .slots
+        .get(&provider)
+        .and_then(|slots| slots.iter().next())
+        .expect("provider export is demanded");
+
+    let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
+    let new_slot = reparsed
+        .module(&provider)
+        .and_then(|node| {
+            node.program
+                .exports
+                .iter()
+                .find(|export| export.exported == "plugin")
+        })
+        .map(|export| export.local_slot)
+        .expect("reparsed provider retains its export");
+    assert_ne!(
+        old_slot, new_slot,
+        "the fixture must exercise slot renumbering"
+    );
+    assert_eq!(
+        remapped.slots.get(&provider),
+        Some(&BTreeSet::from([new_slot]))
+    );
+}
+
+#[test]
 fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
     let root = TestDirectory::new("kiln-native-loader-path");
     let real = root.path.join("real");

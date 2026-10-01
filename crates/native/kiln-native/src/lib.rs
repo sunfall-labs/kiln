@@ -357,6 +357,28 @@ fn reduced_graph(
     graph.reduce_to_live(demand).map_err(NativeError::Graph)
 }
 
+fn demanded_export_names(
+    exports: &[kiln_ir::ExportBinding],
+    slots: &BTreeSet<u32>,
+) -> BTreeSet<String> {
+    exports
+        .iter()
+        .filter(|export| slots.contains(&export.local_slot))
+        .map(|export| export.exported.clone())
+        .collect()
+}
+
+fn export_slots_for_names(
+    exports: &[kiln_ir::ExportBinding],
+    names: &BTreeSet<String>,
+) -> BTreeSet<u32> {
+    exports
+        .iter()
+        .filter(|export| names.contains(&export.exported))
+        .map(|export| export.local_slot)
+        .collect()
+}
+
 /// Specialize direct ESM exports to the closed-world demand, then let Oxc
 /// remove the newly unreferenced local declarations using its purity model.
 ///
@@ -379,13 +401,7 @@ fn dce_release_graph(
             continue;
         }
         let demanded_slots = demand.slots.get(&node.path).cloned().unwrap_or_default();
-        let demanded_names = node
-            .program
-            .exports
-            .iter()
-            .filter(|export| demanded_slots.contains(&export.local_slot))
-            .map(|export| export.exported.clone())
-            .collect::<BTreeSet<_>>();
+        let demanded_names = demanded_export_names(&node.program.exports, &demanded_slots);
         let Some(path) = node.path.to_str() else {
             continue;
         };
@@ -417,12 +433,7 @@ fn dce_release_graph(
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
 
-        let replacement_slots = program
-            .exports
-            .iter()
-            .filter(|export| demanded_names.contains(&export.exported))
-            .map(|export| export.local_slot)
-            .collect::<BTreeSet<_>>();
+        let replacement_slots = export_slots_for_names(&program.exports, &demanded_names);
         let replacement_names = program
             .exports
             .iter()
@@ -446,12 +457,16 @@ fn dce_release_graph(
     }
 }
 
-/// Re-parse modules with native `import.meta` (Node SEA semantics) without DCE.
-/// Used for non-release profiles where `dce_release_graph` doesn't run: the module
-/// graph is parsed once for both interpreter and native, so native dev builds need
-/// their own re-parse to get runtime `import.meta` values.
-fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
+/// Re-parse modules with native `import.meta` (Node SEA semantics), preserving their
+/// public export surface and remapping demanded local slots by export name. Recompilation
+/// can remove unused locals and renumber the surviving export bindings, so carrying the
+/// original slot numbers into emission is unsound even when every export remains present.
+fn native_import_meta_reparse(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
     let mut replacements = BTreeMap::new();
+    let mut remapped = demand.clone();
 
     for node in graph.modules() {
         if node.source != ModuleSource::Source {
@@ -497,13 +512,22 @@ fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
         }
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
+        let demanded_names = demand
+            .slots
+            .get(&node.path)
+            .map(|slots| demanded_export_names(&node.program.exports, slots))
+            .unwrap_or_default();
+        remapped.slots.insert(
+            node.path.clone(),
+            export_slots_for_names(&program.exports, &demanded_names),
+        );
 
         replacements.insert(node.path.clone(), program);
     }
 
     match graph.replace_programs_and_relink(replacements) {
-        Ok(graph) => graph,
-        Err(_) => graph.clone(),
+        Ok(graph) => (graph, remapped),
+        Err(_) => (graph.clone(), demand.clone()),
     }
 }
 
@@ -2494,7 +2518,7 @@ impl NativeBuilder {
             (reduced, demand)
         } else {
             // Non-release: re-parse for native import.meta without DCE.
-            let reduced = native_import_meta_reparse(&reduced);
+            let (reduced, demand) = native_import_meta_reparse(&reduced, &demand);
             debug_module_demands("import-meta", &reduced, &demand);
             (reduced, demand)
         };
