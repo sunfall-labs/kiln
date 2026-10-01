@@ -97,6 +97,54 @@ const strictSwitchFunction = Function(
 if (strictSwitchFunction() !== "undefined") {
   throw new Error("switch function declarations stay inside the CaseBlock environment");
 }
+const annexBFunctionBeforeStatement = Function(
+  "switch (0) { case 0: return typeof annexed; function annexed() {} }",
+);
+if (annexBFunctionBeforeStatement() !== "function") {
+  throw new Error("selected sloppy switch functions alias the var environment on clause entry");
+}
+const annexBUnselectedFunction = Function(
+  "switch (1) { case 0: function annexed() {} } return typeof annexed;",
+);
+if (annexBUnselectedFunction() !== "undefined") {
+  throw new Error("unselected sloppy switch functions do not initialize their var alias");
+}
+const annexBVarFunction = Function(
+  "var annexed; switch (0) { case 0: function annexed() { return 7; } } return annexed();",
+);
+if (annexBVarFunction() !== 7) {
+  throw new Error("sloppy switch function declarations update an existing var binding");
+}
+const annexBParameter = Function(
+  "annexed", "switch (0) { case 0: function annexed() { return 7; } } return annexed;",
+);
+if (annexBParameter(5) !== 5) {
+  throw new Error("sloppy switch function declarations do not overwrite a parameter alias");
+}
+const unselectedAnnexBParameter = Function(
+  "annexed", "switch (1) { case 0: function annexed() { return 7; } } return annexed;",
+);
+if (unselectedAnnexBParameter(5) !== 5) {
+  throw new Error("unselected sloppy switch functions do not overwrite a parameter alias");
+}
+const annexBLexical = Function(
+  "let annexed = 5; switch (0) { case 0: function annexed() { return 7; } } return annexed;",
+);
+if (annexBLexical() !== 5) {
+  throw new Error("sloppy switch functions do not replace an outer lexical binding");
+}
+const unselectedAnnexBLexical = Function(
+  "let annexed = 5; switch (1) { case 0: function annexed() { return 7; } } return annexed;",
+);
+if (unselectedAnnexBLexical() !== 5) {
+  throw new Error("unselected sloppy switch functions do not replace an outer lexical binding");
+}
+const asiSwitchFunction = Function(
+  "switch (0) { case 0: let captured = 2\n function afterAsi() { return captured; } return afterAsi(); }",
+);
+if (asiSwitchFunction() !== 2) {
+  throw new Error("ASI-separated switch function declarations capture the CaseBlock scope");
+}
 globalThis.__switchFunctionConflictCount = 0;
 let functionConflictThrew = false;
 try {

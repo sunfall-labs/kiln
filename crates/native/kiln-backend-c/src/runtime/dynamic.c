@@ -86,7 +86,10 @@ typedef struct kiln_dyn_binding {
 enum {
     KILN_DYN_BINDING_MUTABLE = 0,
     KILN_DYN_BINDING_READ_ONLY = 1,
-    KILN_DYN_BINDING_FUNCTION_NAME = 2
+    KILN_DYN_BINDING_FUNCTION_NAME = 2,
+    KILN_DYN_BINDING_PARAMETER = 3,
+    KILN_DYN_BINDING_ANNEX_B_VAR = 4,
+    KILN_DYN_BINDING_LEXICAL = 5
 };
 
 typedef struct kiln_dyn_scope {
@@ -239,7 +242,10 @@ static int kiln_dyn_scope_check_write(kiln_dyn_scope *scope, const char *name,
             *ignore_write = 1;
             return KILN_C99_OK;
         }
-    } else if (restriction == KILN_DYN_BINDING_MUTABLE) {
+    } else if (restriction == KILN_DYN_BINDING_MUTABLE ||
+               restriction == KILN_DYN_BINDING_PARAMETER ||
+               restriction == KILN_DYN_BINDING_ANNEX_B_VAR ||
+               restriction == KILN_DYN_BINDING_LEXICAL) {
         return KILN_C99_OK;
     }
     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
@@ -1061,7 +1067,10 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 char *marker = (char *)malloc(s->bindings[i].name_len + 1);
                 if (marker == NULL) return KILN_C99_OUT_OF_MEMORY;
                 marker[0] = s->bindings[i].restriction == KILN_DYN_BINDING_READ_ONLY
-                                ? '\001' : '\002';
+                                ? '\001'
+                                : s->bindings[i].restriction == KILN_DYN_BINDING_FUNCTION_NAME
+                                    ? '\002'
+                                    : (char)s->bindings[i].restriction;
                 memcpy(marker + 1, s->bindings[i].name, s->bindings[i].name_len);
                 status = kiln_c99_put(host, env_obj, marker, s->bindings[i].name_len + 1,
                                       kiln_c99_boolean(1), 0, thrown);
@@ -2954,6 +2963,8 @@ typedef struct {
     int is_const;
     int is_function;
     const char *function_site;
+    size_t clause_index;
+    int annex_b_alias;
 } kiln_dyn_switch_binding;
 
 /* Switch lexical declarations belong to one scope spanning every case body. Inventory only
@@ -3166,13 +3177,26 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
         scan.len = clauses[clause].body_len;
         kiln_dyn_lexer_next(&scan);
         int parens = 0, brackets = 0, braces = 0;
+        size_t previous_end = 0;
         while (scan.curr.kind != KILN_DYN_EOF) {
             const char *function_site = scan.curr.start;
+            size_t token_start = scan.curr.start == NULL
+                                     ? scan.pos
+                                     : (size_t)(scan.curr.start - scan.src);
+            int line_terminated = previous_end <= token_start && previous_end < scan.len &&
+                kiln_dyn_has_line_terminator(scan.src, previous_end, token_start);
+            int previous_can_end_statement = scan.prev_kind == KILN_DYN_IDENT ||
+                scan.prev_kind == KILN_DYN_NUM || scan.prev_kind == KILN_DYN_STR ||
+                scan.prev_kind == KILN_DYN_RPAREN || scan.prev_kind == KILN_DYN_RBRACKET ||
+                scan.prev_kind == KILN_DYN_KW_RETURN ||
+                scan.prev_kind == KILN_DYN_KW_BREAK ||
+                scan.prev_kind == KILN_DYN_KW_CONTINUE;
             int direct_function = parens == 0 && brackets == 0 && braces == 0 &&
                 (scan.curr.kind == KILN_DYN_KW_FUNCTION ||
                  scan.curr.kind == KILN_DYN_KW_ASYNC) &&
                 (scan.prev_kind == KILN_DYN_EOF || scan.prev_kind == KILN_DYN_SEMI ||
-                 scan.prev_kind == KILN_DYN_RBRACE);
+                 scan.prev_kind == KILN_DYN_RBRACE ||
+                 (line_terminated && previous_can_end_statement));
             if (direct_function && scan.curr.kind == KILN_DYN_KW_ASYNC) {
                 kiln_dyn_lexer look = scan;
                 size_t async_end = look.pos;
@@ -3224,6 +3248,8 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                 (*out)[(*out_count)++] = (kiln_dyn_switch_binding){
                     .name = name, .name_len = name_len, .is_const = 0,
                     .is_function = 1, .function_site = site,
+                    .clause_index = clause,
+                    .annex_b_alias = 0,
                 };
                 kiln_dyn_lexer_next(&scan);
                 if (scan.curr.kind != KILN_DYN_LPAREN) {
@@ -3331,6 +3357,8 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                     (*out)[(*out_count)++] = (kiln_dyn_switch_binding){
                         .name = name, .name_len = name_len, .is_const = is_const,
                         .is_function = 0, .function_site = NULL,
+                        .clause_index = clause,
+                        .annex_b_alias = 0,
                     };
                     if (has_initializer) {
                         kiln_dyn_lexer_next(&scan);
@@ -3345,7 +3373,8 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             return 0;
                         }
                         int init_parens = 0, init_brackets = 0, init_braces = 0;
-                        size_t previous_end = (size_t)(scan.curr.start - scan.src) + scan.curr.len;
+                        size_t initializer_previous_end =
+                            (size_t)(scan.curr.start - scan.src) + scan.curr.len;
                         while (scan.curr.kind != KILN_DYN_EOF) {
                             size_t token_start = scan.curr.start == NULL
                                                      ? scan.pos
@@ -3353,10 +3382,15 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             if (init_parens == 0 && init_brackets == 0 && init_braces == 0 &&
                                 (scan.curr.kind == KILN_DYN_KW_LET ||
                                  scan.curr.kind == KILN_DYN_KW_CONST ||
-                                 scan.curr.kind == KILN_DYN_KW_VAR) &&
+                                 scan.curr.kind == KILN_DYN_KW_VAR ||
+                                 scan.curr.kind == KILN_DYN_KW_FUNCTION ||
+                                 scan.curr.kind == KILN_DYN_KW_ASYNC) &&
                                 scan.prev_kind != KILN_DYN_DOT &&
-                                kiln_dyn_has_line_terminator(scan.src, previous_end, token_start))
+                                kiln_dyn_has_line_terminator(scan.src,
+                                    initializer_previous_end, token_start)) {
+                                previous_end = initializer_previous_end;
                                 break;
+                            }
                             if (init_parens == 0 && init_brackets == 0 && init_braces == 0 &&
                                 (scan.curr.kind == KILN_DYN_COMMA ||
                                  scan.curr.kind == KILN_DYN_SEMI))
@@ -3370,7 +3404,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             else if (scan.curr.kind == KILN_DYN_LBRACE) init_braces++;
                             else if (scan.curr.kind == KILN_DYN_RBRACE && init_braces > 0)
                                 init_braces--;
-                            previous_end = token_start + scan.curr.len;
+                            initializer_previous_end = token_start + scan.curr.len;
                             kiln_dyn_lexer_next(&scan);
                         }
                     }
@@ -3379,6 +3413,10 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                 }
                 continue;
             }
+            if (scan.curr.start != NULL)
+                previous_end = (size_t)(scan.curr.start - scan.src) + scan.curr.len;
+            else
+                previous_end = scan.pos;
             if (scan.curr.kind == KILN_DYN_LPAREN) parens++;
             else if (scan.curr.kind == KILN_DYN_RPAREN && parens > 0) parens--;
             else if (scan.curr.kind == KILN_DYN_LBRACKET) brackets++;
@@ -3394,7 +3432,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
 }
 
 static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
-                                     const kiln_dyn_switch_binding *bindings,
+                                     kiln_dyn_switch_binding *bindings,
                                      size_t count) {
     for (size_t index = 0; index < count; ++index) {
         if (!kiln_dyn_scope_set(scope, bindings[index].name, bindings[index].name_len,
@@ -3417,11 +3455,54 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
             if (status != KILN_C99_OK) return status;
             break;
         }
-        if (bindings[index].is_const &&
+        if (!bindings[index].is_function &&
             !kiln_dyn_scope_mark_restriction(scope, bindings[index].name,
-                                             bindings[index].name_len,
-                                             KILN_DYN_BINDING_READ_ONLY))
+                bindings[index].name_len,
+                bindings[index].is_const ? KILN_DYN_BINDING_READ_ONLY
+                                         : KILN_DYN_BINDING_LEXICAL))
             return KILN_C99_OUT_OF_MEMORY;
+        if (bindings[index].is_function && scope->var_target != NULL && !scope->strict) {
+            int has_local = 0;
+            size_t slot = 0;
+            for (; slot < scope->var_target->count; ++slot) {
+                if (scope->var_target->bindings[slot].name_len == bindings[index].name_len &&
+                    memcmp(scope->var_target->bindings[slot].name, bindings[index].name,
+                           bindings[index].name_len) == 0) {
+                    has_local = 1;
+                    break;
+                }
+            }
+            unsigned char restriction = has_local
+                ? scope->var_target->bindings[slot].restriction
+                : KILN_DYN_BINDING_MUTABLE;
+            int outer_lexical = 0;
+            for (kiln_dyn_scope *outer = scope->var_target->parent; outer != NULL;
+                 outer = outer->parent) {
+                for (size_t outer_slot = 0; outer_slot < outer->count; ++outer_slot) {
+                    if (outer->bindings[outer_slot].name_len == bindings[index].name_len &&
+                        memcmp(outer->bindings[outer_slot].name, bindings[index].name,
+                               bindings[index].name_len) == 0) {
+                        outer_lexical = 1;
+                        break;
+                    }
+                }
+                if (outer_lexical) break;
+            }
+            if (restriction != KILN_DYN_BINDING_PARAMETER &&
+                restriction != KILN_DYN_BINDING_READ_ONLY &&
+                restriction != KILN_DYN_BINDING_FUNCTION_NAME &&
+                restriction != KILN_DYN_BINDING_LEXICAL && !outer_lexical) {
+                if (!has_local &&
+                    !kiln_dyn_scope_set(scope->var_target, bindings[index].name,
+                                        bindings[index].name_len, kiln_c99_undefined()))
+                    return KILN_C99_OUT_OF_MEMORY;
+                if (!kiln_dyn_scope_mark_restriction(scope->var_target, bindings[index].name,
+                                                     bindings[index].name_len,
+                                                     KILN_DYN_BINDING_ANNEX_B_VAR))
+                    return KILN_C99_OUT_OF_MEMORY;
+                bindings[index].annex_b_alias = 1;
+            }
+        }
     }
     return KILN_C99_OK;
 }
@@ -3440,13 +3521,8 @@ static int kiln_dyn_switch_initialize_functions(kiln_host *host,
                                                 int depth, kiln_value *thrown) {
     for (size_t index = 0; index < binding_count; ++index) {
         if (!bindings[index].is_function) continue;
-        size_t clause = 0;
-        while (clause < clause_count &&
-               !(bindings[index].function_site >= clauses[clause].body &&
-                 bindings[index].function_site < clauses[clause].body +
-                                                     clauses[clause].body_len))
-            clause++;
-        if (clause == clause_count) return KILN_C99_INVALID_ARGUMENT;
+        size_t clause = bindings[index].clause_index;
+        if (clause >= clause_count) return KILN_C99_INVALID_ARGUMENT;
         kiln_dyn_lexer function_lex;
         memset(&function_lex, 0, sizeof function_lex);
         function_lex.src = clauses[clause].body;
@@ -3850,13 +3926,13 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         status = kiln_dyn_switch_initialize_functions(host, &switch_scope, clauses,
                                                       clause_count, bindings, binding_count,
                                                       receiver, args, argc, depth, thrown);
+        kiln_c99_gc_keep_alive(&discriminant);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&switch_scope);
             free(bindings);
             free(clauses);
             return status;
         }
-        free(bindings);
         for (size_t index = 0; index < clause_count; ++index) {
             if (clauses[index].is_default) continue;
             if (selected_clause != SIZE_MAX) continue;
@@ -3872,8 +3948,10 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 status = kiln_dyn_throw_parse_error(&test_lex, thrown,
                                                    "Unexpected token in switch case");
             kiln_dyn_token_free(&test_lex.curr);
+            kiln_c99_gc_keep_alive(&discriminant);
             if (status != KILN_C99_OK) {
                 kiln_dyn_scope_destroy(&switch_scope);
+                free(bindings);
                 free(clauses);
                 return status;
             }
@@ -3882,6 +3960,28 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         if (selected_clause == SIZE_MAX) selected_clause = default_clause;
         for (size_t index = selected_clause; index < clause_count && selected_clause != SIZE_MAX;
              ++index) {
+            for (size_t binding = 0; binding < binding_count; ++binding) {
+                if (!bindings[binding].annex_b_alias ||
+                    bindings[binding].clause_index != index)
+                    continue;
+                kiln_value function = kiln_c99_undefined();
+                int found = 0;
+                status = kiln_dyn_scope_get(&switch_scope, bindings[binding].name,
+                                            bindings[binding].name_len, &function, &found,
+                                            thrown);
+                if (status != KILN_C99_OK || !found) {
+                    if (status == KILN_C99_OK) status = KILN_C99_INVALID_ARGUMENT;
+                    break;
+                }
+                kiln_c99_gc_keep_alive(&function);
+                if (!kiln_dyn_scope_set(switch_scope.var_target, bindings[binding].name,
+                                        bindings[binding].name_len, function)) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                kiln_c99_gc_keep_alive(&function);
+            }
+            if (status != KILN_C99_OK) break;
             kiln_dyn_lexer clause_lex;
             memset(&clause_lex, 0, sizeof clause_lex);
             clause_lex.src = clauses[index].body;
@@ -3907,6 +4007,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (*returned != 0) break;
         }
         kiln_dyn_scope_destroy(&switch_scope);
+        free(bindings);
         free(clauses);
         kiln_c99_gc_keep_alive(&discriminant);
         return status;
@@ -4372,6 +4473,9 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (is_const)
                 (void)kiln_dyn_scope_mark_restriction(decl_scope, name, name_len,
                                                       KILN_DYN_BINDING_READ_ONLY);
+            else if (!is_var)
+                (void)kiln_dyn_scope_mark_restriction(decl_scope, name, name_len,
+                                                      KILN_DYN_BINDING_LEXICAL);
             if (lex->curr.kind != KILN_DYN_COMMA) break;
             kiln_dyn_lexer_next(lex);
         }
@@ -4744,11 +4848,16 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
             }
             if (key_len == 1 && key_bytes[0] == 3) {
                 captured_scope.strict = kiln_c99_truthy(pobj->properties[i].value);
-            } else if (key_len > 1 && (key_bytes[0] == 1 || key_bytes[0] == 2)) {
+            } else if (key_len > 1 &&
+                       (key_bytes[0] == 1 || key_bytes[0] == 2 ||
+                        key_bytes[0] == KILN_DYN_BINDING_PARAMETER ||
+                        key_bytes[0] == KILN_DYN_BINDING_ANNEX_B_VAR ||
+                        key_bytes[0] == KILN_DYN_BINDING_LEXICAL)) {
                 (void)kiln_dyn_scope_mark_restriction(
                     &captured_scope, (const char *)key_bytes + 1, key_len - 1,
                     key_bytes[0] == 1 ? KILN_DYN_BINDING_READ_ONLY
-                                      : KILN_DYN_BINDING_FUNCTION_NAME);
+                    : key_bytes[0] == 2 ? KILN_DYN_BINDING_FUNCTION_NAME
+                                        : key_bytes[0]);
             } else {
                 kiln_dyn_scope_set_key(&captured_scope, pobj->properties[i].key,
                                        pobj->properties[i].value);
@@ -4822,6 +4931,8 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                         actual_val = dval;
                     }
                     kiln_dyn_scope_set(&scope, &p[istart], iname_len, actual_val);
+                    (void)kiln_dyn_scope_mark_restriction(
+                        &scope, &p[istart], iname_len, KILN_DYN_BINDING_PARAMETER);
                     while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t')) ppos++;
                     if (ppos < plen && p[ppos] == ',') ppos++;
                 }
@@ -4834,6 +4945,8 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
             size_t pname_len = ppos - pstart;
             kiln_value arg_val = (arg_idx < argc) ? bargs[arg_idx] : kiln_c99_undefined();
             kiln_dyn_scope_set(&scope, &p[pstart], pname_len, arg_val);
+            (void)kiln_dyn_scope_mark_restriction(&scope, &p[pstart], pname_len,
+                                                  KILN_DYN_BINDING_PARAMETER);
             while (ppos < plen && p[ppos] != ',') ppos++;
             arg_idx++;
         }
