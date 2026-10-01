@@ -8,6 +8,12 @@ const GeneratorFunction = generator.constructor;
 const AsyncGeneratorFunction = asyncGenerator.constructor;
 AsyncFunction.prototype.kindMarker = 11;
 
+for (const prototype of [AsyncFunction.prototype, GeneratorFunction.prototype, AsyncGeneratorFunction.prototype]) {
+  let rejected = false;
+  try { prototype(); } catch (error) { rejected = error instanceof TypeError; }
+  if (!rejected) throw new Error('function kind prototype objects must not be callable');
+}
+
 const generatorObjectPrototype = GeneratorFunction.prototype.prototype;
 const asyncGeneratorObjectPrototype = AsyncGeneratorFunction.prototype.prototype;
 const generatorInstance = generator();
