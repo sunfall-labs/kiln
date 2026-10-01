@@ -1583,7 +1583,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         *result = collected;
         return status;
     }
-    if (code == KILN_C99_METHOD_STRING_MATCH_ALL && regexp->last_index > 0.0) {
+    if (code == KILN_C99_METHOD_STRING_MATCH_ALL && (regexp->global || regexp->sticky) &&
+        regexp->last_index > 0.0) {
         /* RegExp.prototype[Symbol.matchAll] clones the matcher at its current ToLength(lastIndex)
          * cursor. The clone advances while collecting results; the original stays untouched. */
         at = regexp->last_index > (double)count ? count + 1 : (size_t)regexp->last_index;

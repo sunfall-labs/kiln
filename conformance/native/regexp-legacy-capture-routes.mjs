@@ -39,6 +39,13 @@ const symbolIterator = RegExp.prototype[Symbol.matchAll].call(nonglobal, "x");
 if (symbolIterator.next().value[0] !== "x") {
   throw new Error("RegExp @@matchAll must accept a non-global RegExp");
 }
+const nonGlobalWithIndex = /x/;
+nonGlobalWithIndex.lastIndex = 2;
+const nonGlobalIndexedMatch = RegExp.prototype[Symbol.matchAll]
+  .call(nonGlobalWithIndex, "x").next().value;
+if (nonGlobalIndexedMatch.index !== 0 || nonGlobalWithIndex.lastIndex !== 2) {
+  throw new Error("non-global @@matchAll must ignore the cloned lastIndex during exec");
+}
 console.log("match-all-symbol-nonglobal", "ok");
 const stringPatternMatches = [..."x x".matchAll("x")];
 if (stringPatternMatches.length !== 2 || stringPatternMatches[1].index !== 2) {
