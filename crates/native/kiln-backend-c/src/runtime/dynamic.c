@@ -5440,13 +5440,13 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     if (lex->curr.kind != KILN_DYN_LPAREN)
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected '(' after function name");
-    int depth = 0;
+    int paren_depth = 0;
     do {
-        if (lex->curr.kind == KILN_DYN_LPAREN) depth++;
-        else if (lex->curr.kind == KILN_DYN_RPAREN) depth--;
+        if (lex->curr.kind == KILN_DYN_LPAREN) paren_depth++;
+        else if (lex->curr.kind == KILN_DYN_RPAREN) paren_depth--;
         kiln_dyn_lexer_next(lex);
-    } while (depth > 0 && lex->curr.kind != KILN_DYN_EOF);
-    if (depth != 0 || lex->curr.kind != KILN_DYN_LBRACE)
+    } while (paren_depth > 0 && lex->curr.kind != KILN_DYN_EOF);
+    if (paren_depth != 0 || lex->curr.kind != KILN_DYN_LBRACE)
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected function body");
     const char *body;
