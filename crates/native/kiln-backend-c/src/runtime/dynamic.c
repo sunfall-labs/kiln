@@ -359,7 +359,7 @@ static int kiln_dyn_scope_set_with(kiln_host *host, kiln_dyn_scope *scope, const
 
 static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
     size_t i;
-    kiln_c99_gc_keep_alive((const void *)scope->roots.ptr);
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->roots));
     for (i = 0; i < scope->count; ++i) {
         free(scope->bindings[i].name);
     }
@@ -892,7 +892,7 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 status = kiln_c99_make_cell(&s->bindings[i].value);
                 if (status != KILN_C99_OK) return status;
                 kiln_value rooted_cell = s->bindings[i].value;
-                kiln_c99_gc_keep_alive((const void *)rooted_cell.ptr);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(rooted_cell));
                 status = kiln_c99_put(NULL, s->roots, s->bindings[i].name,
                                       s->bindings[i].name_len, rooted_cell, 0, NULL);
                 if (status != KILN_C99_OK) return status;
@@ -3139,7 +3139,7 @@ declaration_scan_done:
                     status = kiln_c99_make_cell(&scope->bindings[slot].value);
                     if (status != KILN_C99_OK) goto done;
                     kiln_value rooted_cell = scope->bindings[slot].value;
-                    kiln_c99_gc_keep_alive((const void *)rooted_cell.ptr);
+                    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(rooted_cell));
                     status = kiln_c99_put(NULL, scope->roots, scope->bindings[slot].name,
                                           scope->bindings[slot].name_len,
                                           rooted_cell, 0, NULL);
