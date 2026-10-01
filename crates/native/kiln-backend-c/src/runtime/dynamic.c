@@ -1589,9 +1589,10 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
          * GC-owned canonical strings before handing them to the regexp, which retains their
          * headers for the lifetime of the object. Keep the values live across the regexp
          * allocation so GC stress cannot collect either header before it is retained. */
-        kiln_value source = kiln_c99_copy_text(pat, pat_len);
+        kiln_value source;
+        int reg_status = kiln_dyn_source_to_string(pat, pat_len, &source);
+        if (reg_status != KILN_C99_OK) return reg_status;
         kiln_value flag_value = kiln_c99_copy_text(flags, flags_len);
-        int reg_status;
         if (source.tag != KILN_VALUE_STRING || flag_value.tag != KILN_VALUE_STRING) {
             kiln_dyn_lexer_next(lex);
             return KILN_C99_OUT_OF_MEMORY;
