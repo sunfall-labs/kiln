@@ -3101,9 +3101,10 @@ mod dead_phi_tests {
 
     #[test]
     fn delegate_resume_and_completion_edges_supply_phi_inputs() {
-        // The post-YieldStar loop is intentionally tiny: block 3 is the ordinary resume path,
-        // while block 8 is both the ordinary done path and the delegate-completion path. Both
-        // targets must have complete phis before C emission is allowed to run.
+        // The post-YieldStar loop is intentionally tiny: the resume path stores and tests the
+        // sent value, looping back to the delegate when false. Its true path reaches pc 9 through
+        // an ordinary done edge, while YieldStar also has a synthetic completion edge to pc 9.
+        // Both targets must have complete phis before C emission is allowed to run.
         let proto = FunctionProto {
             inferred_name: None,
             span: Span::default(),
@@ -3123,11 +3124,12 @@ mod dead_phi_tests {
                 Instruction::Const(0),      // wrapped flag placeholder
                 Instruction::Const(0),      // iterator placeholder
                 Instruction::Const(0),      // yielded value
-                Instruction::YieldStar(8),  // synthetic edges to pc 4 and pc 8
+                Instruction::YieldStar(9),  // synthetic edges to pc 4 and pc 9
                 Instruction::StoreLocal(0), // resume sent value
-                Instruction::Jump(0),       // loop back to the delegate
+                Instruction::LoadLocal(0),  // sent value controls completion
+                Instruction::JumpIfFalse(0), // loop back while the delegate is incomplete
                 Instruction::Const(0),      // ordinary done value
-                Instruction::Jump(8),       // ordinary predecessor of the exit
+                Instruction::Jump(9),       // ordinary predecessor of the exit
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
