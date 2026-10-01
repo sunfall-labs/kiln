@@ -2332,11 +2332,8 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
     }
     // `new_compiler` is the cheap configuration: syntax checks on, the random-access node store
     // off.  Only the diagnostics are wanted; scope and symbol tables are discarded.
-    let mut diagnostics = SemanticBuilder::new_compiler()
-        .build(&parsed.program)
-        .diagnostics
-        .errors()
-        .collect::<Vec<_>>();
+    let semantic = SemanticBuilder::new_compiler().build(&parsed.program);
+    let mut diagnostics = semantic.diagnostics.errors().collect::<Vec<_>>();
 
     // Oxc models Annex B's switch-function var alias before checking a lexical declaration in
     // the enclosing function body. Annex B suppresses that alias when it would collide with the
@@ -2365,7 +2362,7 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
                 first.end,
             ))
     });
-    diagnostics.iter().map(lower_diagnostic).collect()
+    diagnostics.into_iter().map(lower_diagnostic).collect()
 }
 
 #[derive(Default)]
