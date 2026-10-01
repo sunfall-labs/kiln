@@ -1600,8 +1600,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_bound *bound = (kiln_bound *)(uintptr_t)target.bits;
             stored = kiln_c99_callable_store(target, &store, 0);
             if (stored != KILN_C99_OK) return stored;
-            if (kiln_c99_store_has(store, key, ikey))
-                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+            if (kiln_c99_store_has(store, key, ikey)) {
+                kiln_value property_key = kiln_c99_key_value(key, &ikey);
+                if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                return kiln_c99_get_with_receiver(host, store, property_key, target, out,
+                                                  depth, thrown);
+            }
             if (kiln_c99_same_name_key(key, "name")) {
                 kiln_value inner;
                 int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
@@ -1635,7 +1639,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 KILN_C99_ABSENT("the bound function own store has no matching property and its "
                                 "explicit null prototype ends the lookup", out);
             }
-            return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
+            /* Accessors on a callable subclass see the bound instance, just as accessors on
+             * an ordinary derived instance do. Reading directly from the parent invokes its
+             * getter with the prototype as `this`, before instance fields can be observed. */
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, parent, property_key, target, out,
+                                              depth, thrown);
         }
         if (target.tag == KILN_VALUE_METHOD &&
             target.bits == KILN_C99_METHOD_PROCESS_HRTIME &&
