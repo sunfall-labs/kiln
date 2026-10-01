@@ -2393,11 +2393,7 @@ pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> 
                 index += 1;
             }
         }
-        let normalized = if flags.contains('v') {
-            kiln_regexp::normalize_unicode_sets_pattern(&codepoints)
-        } else {
-            codepoints.clone()
-        };
+        let normalized = kiln_regexp::normalize_pattern_for_flags(&codepoints, flags)?;
         let compiled = Arc::new(regress::Regex::from_unicode(normalized.into_iter(), flags).ok()?);
         if cacheable {
             compiled_regexp_cache()
