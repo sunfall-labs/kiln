@@ -3105,7 +3105,6 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_SWITCH) {
-        kiln_dyn_active_label *my_labels = lex->active_labels;
         lex->active_labels = NULL;
         kiln_dyn_lexer_next(lex);
         if (lex->curr.kind != KILN_DYN_LPAREN)
@@ -3174,7 +3173,8 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&clause_lex, 0, sizeof clause_lex);
             clause_lex.src = clauses[index].body;
             clause_lex.len = clauses[index].body_len;
-            clause_lex.active_labels = my_labels;
+            // The switch's label belongs to the switch, not to an inner loop in a case.
+            // Labeled abrupt completions propagate to the enclosing label evaluator.
             clause_lex.break_label = lex->break_label;
             clause_lex.break_label_len = lex->break_label_len;
             kiln_dyn_lexer_next(&clause_lex);

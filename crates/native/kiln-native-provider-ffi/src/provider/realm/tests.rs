@@ -3033,7 +3033,7 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
                 }
             }
             1 => {
-                let mut peer = match TcpStream::connect((
+                let peer = match TcpStream::connect((
                     "127.0.0.1",
                     u16::try_from(exchange.listener.resource_port).expect("listener port fits u16"),
                 )) {
@@ -3042,7 +3042,7 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
                 };
                 let _ = peer.set_read_timeout(Some(Duration::from_secs(2)));
                 exchange.peer = Some(peer);
-                let mut state = HostOpView {
+                let state = HostOpView {
                     operation: OP_RESOURCE_STATE,
                     flags: 0,
                     resource: exchange.listener.resource,

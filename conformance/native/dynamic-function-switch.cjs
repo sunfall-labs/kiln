@@ -30,6 +30,16 @@ const labeled = Function(`
 if (labeled() !== 11) throw new Error("switch propagates continue to outer loop and consumes switch break");
 const labeledBreak = Function("outer: while (true) { switch (0) { default: break outer; } } return 3;");
 if (labeledBreak() !== 3) throw new Error("switch propagates labeled break to outer label");
+const switchLabel = Function(`
+  var result = 0;
+  done: switch (1) {
+    case 1:
+      while (true) { result = 1; break done; }
+      result = 99;
+  }
+  return result;
+`);
+if (switchLabel() !== 1) throw new Error("an inner loop must not consume the switch label");
 
 const nested = Function(`
   var value = 0;
