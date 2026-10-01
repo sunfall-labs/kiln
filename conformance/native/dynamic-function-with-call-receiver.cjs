@@ -26,8 +26,21 @@ if (callGrouped(object) !== object || callDoubleGrouped(object) !== object)
   throw new Error("parenthesized with reference lost its base object");
 if (callDetached(object) !== undefined)
   throw new Error("comma expression incorrectly retained the with reference");
+const asyncScope = { async: strictMethod };
+const callGroupedAsync = Function("scope", "with (scope) { return (async)(); }");
+const callDoubleGroupedAsync = Function("scope", "with (scope) { return ((async))(); }");
+const callDetachedAsync = Function("scope", "with (scope) { return (0, async)(); }");
+if (callGroupedAsync(asyncScope) !== asyncScope ||
+    callDoubleGroupedAsync(asyncScope) !== asyncScope ||
+    callDetachedAsync(asyncScope) !== undefined)
+  throw new Error("contextual async identifier lost or invented its with reference");
+const asyncExpressionFallback = Function("return (async function () { return 1; });")();
+if (typeof asyncExpressionFallback !== "function")
+  throw new Error("parenthesized async function expression was treated as an identifier");
 console.log("grouped-with-call", callGrouped(object) === object,
             callDoubleGrouped(object) === object, callDetached(object));
+console.log("grouped-async-with-call", callGroupedAsync(asyncScope) === asyncScope,
+            callDoubleGroupedAsync(asyncScope) === asyncScope, callDetachedAsync(asyncScope));
 
 const callGetter = Function("scope", "with (scope) { return fromGetter(); }");
 if (callGetter(object) !== "live" || object.getterReads !== 1)

@@ -2591,7 +2591,10 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             group_count++;
             kiln_dyn_lexer_next(&look);
         }
-        int grouped_identifier = look.curr.kind == KILN_DYN_IDENT;
+        /* `async` is contextual rather than reserved in this expression position, but the
+         * lexer gives it a dedicated token while checking for an async function expression. */
+        int grouped_identifier = look.curr.kind == KILN_DYN_IDENT ||
+                                 look.curr.kind == KILN_DYN_KW_ASYNC;
         if (grouped_identifier) {
             kiln_dyn_lexer_next(&look);
             for (size_t index = 0; index < group_count; ++index) {
