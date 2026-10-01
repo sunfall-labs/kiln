@@ -86,6 +86,22 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
     kiln_value built;
     uint64_t code;
     int status;
+    kiln_value callable_length;
+    int is_callable_builtin = 0;
+    int has_prototype = 0;
+    if (!kiln_c99_is_namespace(builtin) &&
+        kiln_c99_get(NULL, kiln_c99_builtin(builtin), "length", 6,
+                     &callable_length, 0, NULL) == KILN_C99_OK &&
+        callable_length.tag == KILN_VALUE_NUMBER) {
+        /* Callable constructors share the same own-key prefix even when they have no static
+         * rows in the surface table (Boolean and BigInt are examples). Detect that property via
+         * the same read authority used by ordinary property access instead of maintaining a
+         * second constructor inventory here. */
+        kiln_value prototype;
+        is_callable_builtin = 1;
+        has_prototype = kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9,
+                                     &prototype, 0, NULL) == KILN_C99_OK;
+    }
     if (builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
         status = kiln_c99_new_array(&built);
         if (status == KILN_C99_OK)
@@ -153,7 +169,7 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             return status;
         }
     }
-    if (kiln_c99_has_surface(builtin)) {
+    if (kiln_c99_has_surface(builtin) || is_callable_builtin) {
         /* A table-driven built-in can describe itself, which is the one thing the hand-written
          * chains could never do: the names it answers to *are* its rows. Refusing here is what
          * kept the native side from enumerating its own surface, so the two engines could only be
@@ -162,6 +178,14 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         status = kiln_c99_new_array(&built);
         if (status != KILN_C99_OK) {
             return status;
+        }
+        if (is_callable_builtin) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK && has_prototype)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            if (status != KILN_C99_OK) return status;
         }
         for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT && status == KILN_C99_OK; ++index) {
             const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
@@ -181,20 +205,6 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
                 continue;
             }
             status = kiln_c99_array_push(built, kiln_c99_copy_text(member->name, len));
-        }
-        if (status == KILN_C99_OK && !kiln_c99_is_namespace(builtin)) {
-            /* A constructor is a function, and these two are answered by the read path rather
-             * than held as slots. `length` is deliberately not listed: reading it refuses, and a
-             * name in this list that a read cannot answer is the same lie in the other
-             * direction. */
-            kiln_value prototype;
-            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
-            if (status == KILN_C99_OK &&
-                kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9, &prototype, 0,
-                             NULL) == KILN_C99_OK &&
-                prototype.tag == KILN_VALUE_BUILTIN) {
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
-            }
         }
         if (status == KILN_C99_OK) {
             status = kiln_c99_builtin_store_keys(builtin, built);
