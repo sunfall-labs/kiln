@@ -450,6 +450,7 @@ typedef struct {
     const char *src;
     size_t len;
     size_t pos;
+    int dynamic_function_body;
     kiln_dyn_token curr;
     kiln_dyn_token_kind prev_kind;
     const char *active_label;
@@ -460,6 +461,48 @@ typedef struct {
      * binding in its containing function scope rather than a named-expression self binding. */
     int function_declaration;
 } kiln_dyn_lexer;
+
+/* Keep parser failures useful when a Function constructor supplies an opaque generated body.
+ * The snippet is intentionally short and printable so an error cannot dump a whole bundle or
+ * inject control characters into the host diagnostic. */
+static int kiln_dyn_throw_unexpected_token(kiln_dyn_lexer *lex, kiln_value *thrown) {
+    static const char prefix[] = "Unexpected token in ";
+    static const char function_label[] = "dynamic Function body at byte ";
+    static const char eval_label[] = "dynamic eval source at byte ";
+    static const char near_text[] = " near `";
+    char message[160];
+    size_t used = 0;
+    const char *label = lex->dynamic_function_body ? function_label : eval_label;
+    size_t label_len = lex->dynamic_function_body ? sizeof function_label - 1
+                                                  : sizeof eval_label - 1;
+    memcpy(message + used, prefix, sizeof prefix - 1);
+    used += sizeof prefix - 1;
+    memcpy(message + used, label, label_len);
+    used += label_len;
+    size_t offset = lex->curr.start != NULL && lex->curr.start >= lex->src
+                        ? (size_t)(lex->curr.start - lex->src)
+                        : lex->pos;
+    char digits[3 * sizeof(size_t) + 1];
+    size_t digit_count = 0;
+    do {
+        digits[digit_count++] = (char)('0' + offset % 10);
+        offset /= 10;
+    } while (offset != 0 && digit_count < sizeof digits);
+    while (digit_count != 0) message[used++] = digits[--digit_count];
+    memcpy(message + used, near_text, sizeof near_text - 1);
+    used += sizeof near_text - 1;
+    const char *start = lex->curr.start != NULL ? lex->curr.start
+                                                 : lex->src + (lex->pos < lex->len ? lex->pos : lex->len);
+    size_t remaining = (size_t)(lex->src + lex->len - start);
+    size_t count = remaining < 32 ? remaining : 32;
+    for (size_t index = 0; index < count && used + 3 < sizeof message; ++index) {
+        unsigned char ch = (unsigned char)start[index];
+        message[used++] = ch >= 0x20 && ch <= 0x7e && ch != '`' ? (char)ch : '.';
+    }
+    message[used++] = '`';
+    message[used] = '\0';
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, message);
+}
 
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
     if ((tok->kind == KILN_DYN_STR || tok->kind == KILN_DYN_REGEX) && tok->str_val != NULL) {
@@ -1372,7 +1415,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                      thrown, 1);
     }
 
-    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in expression");
+    return kiln_dyn_throw_unexpected_token(lex, thrown);
 }
 
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -3346,6 +3389,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     lex.src = bsrc;
     lex.len = blen;
     lex.pos = 0;
+    lex.dynamic_function_body = 1;
     kiln_dyn_lexer_next(&lex);
 
     int returned = 0;
