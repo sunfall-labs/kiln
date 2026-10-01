@@ -2433,6 +2433,31 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         &[Value::String(event.into())],
                         instruction,
                     )?;
+                    if matches!(action, StreamAction::Event(StreamEvent::End))
+                        && server
+                            .borrow()
+                            .streams
+                            .iter()
+                            .any(|stream| stream.resource() == resource && !stream.runtime_http)
+                        && !self
+                            .read_property(&socket, "allowHalfOpen", instruction)?
+                            .is_truthy()
+                    {
+                        // Raw sockets close their writable half after EOF by default. Let end
+                        // listeners enqueue their final writes first, then use the same end
+                        // operation that drains the write queue before transport shutdown.
+                        let state = node_net_socket_state(&socket)?;
+                        if !state.borrow().destroyed {
+                            let callback = Value::Bound(Rc::new(BoundFunction {
+                                target: self.read_property(&socket, "end", instruction)?,
+                                this_value: socket.clone(),
+                                arguments: Vec::new(),
+                                properties: RefCell::new(ObjectData::default()),
+                            }));
+                            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                        }
+                    }
                 }
                 if matches!(action, StreamAction::Event(StreamEvent::Drain))
                     && server.borrow().protocol == ServerProtocol::Http
