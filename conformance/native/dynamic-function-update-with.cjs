@@ -37,15 +37,23 @@ function shortCircuitPrecedence() {
     "true || sideEffect() ? function() { return 3; } : function() { return 4; }"
   );
   const nestedConditional = eval("false ? true ? sideEffect() : sideEffect() : 5");
-  const makeFunction = Function("sideEffect", "return false && sideEffect() ? " +
-    "function() { return 6; } : function() { return 7; };");
-  const runtimeFunction = makeFunction(sideEffect);
+  const makeFunction = Function("sideEffect", "counter", [
+    "var andFn = false && sideEffect() ? function() { return 5; } : function() { return 6; };",
+    "var orFn = true || sideEffect() ? function() { return 7; } : function() { return 8; };",
+    "var nullishFn = 0 ?? sideEffect() ? function() { return 9; } : function() { return 10; };",
+    "var nested = false ? true ? sideEffect() : sideEffect() : 11;",
+    "return [andFn(), orFn(), nullishFn(), nested, counter.value];",
+  ].join("\n"));
+  const counter = { value: 0 };
+  function runtimeSideEffect() { counter.value++; return true; }
+  const runtimeResult = makeFunction(runtimeSideEffect, counter);
   return [andThenConditional(), orThenConditional(), nestedConditional,
-    runtimeFunction(), skipped];
+    runtimeResult, skipped];
 }
 const shortCircuit = shortCircuitPrecedence();
 if (shortCircuit[0] !== 2 || shortCircuit[1] !== 3 || shortCircuit[2] !== 5 ||
-    shortCircuit[3] !== 7 || shortCircuit[4] !== 0) {
+    shortCircuit[3][0] !== 6 || shortCircuit[3][1] !== 7 || shortCircuit[3][2] !== 10 ||
+    shortCircuit[3][3] !== 11 || shortCircuit[3][4] !== 0 || shortCircuit[4] !== 0) {
   throw new Error("short-circuit skipping must preserve conditional precedence and side effects");
 }
 console.log(result.join(","), shortCircuit.join(","));
