@@ -4757,6 +4757,23 @@ pub unsafe extern "C" fn kiln_realm_http_agent_cancel_connect_active(
 
 #[cfg(feature = "realm-http")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_agent_can_retain_active(
+    resource: u64,
+    reusable: i32,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        i32::from(runtime.client_connection_can_retain(ResourceId::new(resource), reusable != 0))
+    })
+}
+
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_realm_http_agent_release_active(
     resource: u64,
     reusable: i32,
@@ -5081,6 +5098,7 @@ mod http_stubs {
     http_stub!(kiln_realm_http_agent_connected_active(host: *const u8, host_len: u64, port: u16, resource: u64, request: u64) -> i32);
     http_stub!(kiln_realm_http_agent_connect_failed_active(host: *const u8, host_len: u64, port: u16, failed_request: u64, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_agent_cancel_connect_active(host: *const u8, host_len: u64, port: u16, request: u64, out_request: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_agent_can_retain_active(resource: u64, reusable: i32) -> i32);
     http_stub!(kiln_realm_http_agent_release_active(resource: u64, reusable: i32, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_client_start_active(resource: u64, id: u64, request: *const HttpRequestView, high_water_mark: u64) -> i32);
     http_stub!(kiln_realm_http_client_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
@@ -6891,6 +6909,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_http_agent_cancel_connect_active, realm_http_agent_cancel_connect) => {
             const _: unsafe extern "C" fn(*const u8, u64, u16, u64, *mut u64) -> i32 = kiln_realm_http_agent_cancel_connect_active;
+        };
+        (realm, kiln_realm_http_agent_can_retain_active, realm_http_agent_can_retain) => {
+            const _: unsafe extern "C" fn(u64, i32) -> i32 = kiln_realm_http_agent_can_retain_active;
         };
         (realm, kiln_realm_http_agent_release_active, realm_http_agent_release) => {
             const _: unsafe extern "C" fn(u64, i32, *mut u64) -> i32 = kiln_realm_http_agent_release_active;

@@ -982,6 +982,10 @@ int kiln_realm_http_agent_connected_active(const uint8_t *host, uint64_t host_le
     (void)host; (void)host_len; (void)port; (void)resource; (void)request;
     return 1;
 }
+int kiln_realm_http_agent_can_retain_active(uint64_t resource, int reusable) {
+    (void)resource;
+    return reusable != 0;
+}
 int kiln_realm_http_agent_release_active(uint64_t resource, int reusable,
                                          uint64_t *out_request) {
     (void)resource; (void)reusable;

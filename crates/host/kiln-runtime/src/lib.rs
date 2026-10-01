@@ -227,6 +227,8 @@ pub trait ActiveHttpRuntime {
         resource: ResourceId,
         request: u64,
     ) -> bool;
+    /// Inspect retention without releasing or reserving a connection across language callbacks.
+    fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool;
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
     fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure;
     fn cancel_client_connection(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation;
@@ -1760,6 +1762,12 @@ impl<H: RealmHostProvider> RealmState<H> {
         self.http_agent.connected(origin, resource, request)
     }
 
+    /// Whether completing this response can retain its Agent-owned connection. This is a pure
+    /// query: callbacks must run before release publishes the resource or reserves a waiter.
+    pub fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool {
+        !self.is_shutdown() && reusable && self.http_agent.has_active_request(resource)
+    }
+
     /// Return a client connection to the agent after its response.
     pub fn release_client_connection(
         &mut self,
@@ -2430,6 +2438,10 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     ) -> bool {
         self.state
             .client_connection_connected(origin, resource, request)
+    }
+
+    fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool {
+        self.state.client_connection_can_retain(resource, reusable)
     }
 
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {

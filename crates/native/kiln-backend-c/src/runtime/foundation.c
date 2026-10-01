@@ -26,6 +26,7 @@ int kiln_realm_http_agent_connect_failed_active(const uint8_t *host, uint64_t ho
 int kiln_realm_http_agent_cancel_connect_active(const uint8_t *host, uint64_t host_len,
                                                uint16_t port, uint64_t request,
                                                uint64_t *out_request);
+int kiln_realm_http_agent_can_retain_active(uint64_t resource, int reusable);
 int kiln_realm_http_agent_release_active(uint64_t resource, int reusable,
                                          uint64_t *out_request);
 int kiln_realm_http_client_start_active(uint64_t resource,
