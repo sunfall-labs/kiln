@@ -29,9 +29,9 @@ use kiln_host_abi::ResourceId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
-use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
+use crate::{HttpCloseMode, UpgradeWriteReceipt};
 
 fn configured_http3() -> bool {
     static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -175,9 +175,17 @@ pub struct UpgradeTransport {
     /// Bytes written after the 101 response head while Hyper still owned the stream. The host
     /// installs these as a prefix so they precede every later raw-socket write.
     pub pending_write: Vec<u8>,
+    /// Callback fences in raw-stream byte order. Offsets are relative to `pending_write`.
+    pub write_fences: Vec<UpgradeWriteFenceBoundary>,
     /// Completes when the host has written `pending_write`, allowing the engine to publish
     /// `Drain` only after those bytes have left the user-space queue.
     pub write_completion: Arc<UpgradeWriteCompletion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeWriteFenceBoundary {
+    pub fence: u64,
+    pub offset: usize,
 }
 
 #[derive(Clone)]
@@ -190,6 +198,7 @@ struct UpgradeWriteFailure {
 /// state is shared with the host writer; readers never wait on it, preserving full-duplex I/O.
 pub struct UpgradeWriteCompletion {
     result: Mutex<Option<Result<(), UpgradeWriteFailure>>>,
+    fences: Mutex<HashMap<u64, Option<Result<(), UpgradeWriteFailure>>>>,
     notify: Notify,
 }
 
@@ -197,8 +206,45 @@ impl UpgradeWriteCompletion {
     fn pending() -> Arc<Self> {
         Arc::new(Self {
             result: Mutex::new(None),
+            fences: Mutex::new(HashMap::new()),
             notify: Notify::new(),
         })
+    }
+
+    fn register_fence(&self, fence: u64) {
+        if let Ok(mut fences) = self.fences.lock() {
+            fences.entry(fence).or_insert(None);
+        }
+    }
+
+    pub(crate) fn complete_fence(&self, fence: u64, result: std::io::Result<()>) {
+        let result = result.map_err(|error| UpgradeWriteFailure {
+            kind: error.kind(),
+            message: error.to_string(),
+        });
+        if let Ok(mut fences) = self.fences.lock()
+            && let Some(slot) = fences.get_mut(&fence)
+            && slot.is_none()
+        {
+            *slot = Some(result.clone());
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait_fence(&self, fence: u64) -> std::io::Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            let result = self
+                .fences
+                .lock()
+                .ok()
+                .and_then(|fences| fences.get(&fence).cloned().flatten());
+            if let Some(result) = result {
+                return result
+                    .map_err(|failure| std::io::Error::new(failure.kind, failure.message));
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn complete(&self, result: std::io::Result<()>) {
@@ -210,6 +256,15 @@ impl UpgradeWriteCompletion {
             && slot.is_none()
         {
             *slot = Some(result);
+            if let Some(Err(failure)) = slot.as_ref() {
+                if let Ok(mut fences) = self.fences.lock() {
+                    for result in fences.values_mut() {
+                        if result.is_none() {
+                            *result = Some(Err(failure.clone()));
+                        }
+                    }
+                }
+            }
             self.notify.notify_waiters();
         }
     }
@@ -245,6 +300,8 @@ pub struct HttpEvent<'a> {
     pub kind: HttpEventKind,
     /// The request the event belongs to; zero for a connection-level event.
     pub id: u64,
+    /// Upgrade-write append sequence for `UpgradeWriteComplete`, otherwise zero.
+    pub write_fence: u64,
     /// `RequestHead`: the peer asked to keep the connection open. `ResponseEnd`: the connection
     /// can carry another request, which is the Agent's reuse decision.
     pub keep_alive: bool,
@@ -275,6 +332,8 @@ pub enum HttpEventKind {
     /// The HTTP parser has transferred an accepted upgrade transport back to the host. `data`
     /// contains bytes Hyper had already read beyond the request head.
     UpgradeReady,
+    /// One `socket.write` append reached its physical write boundary.
+    UpgradeWriteComplete,
     /// An HTTP client received a 101 and owns the raw upgraded stream after this event.
     UpgradeResponse,
     RequestData,
@@ -295,6 +354,7 @@ impl HttpEvent<'static> {
         Self {
             kind,
             id,
+            write_fence: 0,
             keep_alive: false,
             version_minor: 0,
             status: 0,
@@ -496,13 +556,13 @@ impl HttpServerEngine {
         resource: ResourceId,
         id: u64,
         data: &[u8],
-    ) -> Option<WriteDisposition> {
+    ) -> Option<UpgradeWriteReceipt> {
         let shared = self.connections.borrow().get(&resource)?.shared.clone();
         let writes = shared.upgrade_writes.borrow().get(&id)?.clone();
-        let Some(completed) = writes.append(data) else {
+        let Some((completed, fence)) = writes.append(data) else {
             return None;
         };
-        if let Some((status, headers, trailing)) = completed {
+        if let Some((status, headers)) = completed {
             let mut flattened = Vec::new();
             flatten_header_map(&headers, &mut flattened);
             if !self.start_response(resource, id, status, &flattened, 16 * 1024)
@@ -512,15 +572,17 @@ impl HttpServerEngine {
             {
                 return None;
             }
-            writes.add_trailing(&trailing);
         }
         let ready = writes.pending_bytes() < UpgradeWrite::HIGH_WATER_MARK;
         if !ready {
             writes.drain_needed.set(true);
         }
-        Some(WriteDisposition {
-            ready,
-            submit_now: true,
+        Some(UpgradeWriteReceipt {
+            disposition: WriteDisposition {
+                ready,
+                submit_now: true,
+            },
+            fence,
         })
     }
 
@@ -561,6 +623,10 @@ struct UpgradeWrite {
     parsed: Cell<bool>,
     drain_needed: Cell<bool>,
     completion: Arc<UpgradeWriteCompletion>,
+    total_received: Cell<usize>,
+    header_end: Cell<Option<usize>>,
+    next_fence: Cell<u64>,
+    fences: RefCell<Vec<UpgradeWriteFenceBoundary>>,
 }
 
 impl UpgradeWrite {
@@ -574,35 +640,70 @@ impl UpgradeWrite {
             parsed: Cell::new(false),
             drain_needed: Cell::new(false),
             completion: UpgradeWriteCompletion::pending(),
+            total_received: Cell::new(0),
+            header_end: Cell::new(None),
+            next_fence: Cell::new(1),
+            fences: RefCell::new(Vec::new()),
         }
     }
 
-    fn append(&self, data: &[u8]) -> Option<Option<(u16, HeaderMap, Vec<u8>)>> {
+    fn append(&self, data: &[u8]) -> Option<(Option<(u16, HeaderMap)>, u64)> {
         if self.pending_bytes().checked_add(data.len())? > Self::MAX_BUFFERED_BYTES {
             return None;
         }
+        let end_offset = self.total_received.get().checked_add(data.len())?;
         if self.parsed.get() {
             self.trailing.borrow_mut().extend_from_slice(data);
-            return Some(None);
+        } else {
+            let mut raw = self.raw_head.borrow_mut();
+            raw.extend_from_slice(data);
+            let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                if raw.len() > 64 * 1024 {
+                    return None;
+                }
+                self.total_received.set(end_offset);
+                return Some((None, self.register_fence(end_offset)));
+            };
+            let end = end + 4;
+            if end > 64 * 1024 {
+                return None;
+            }
+            let (status, headers) = parse_upgrade_response_head(&raw[..end])?;
+            let trailing = raw[end..].to_vec();
+            raw.clear();
+            self.parsed.set(true);
+            self.header_end.set(Some(end));
+            self.trailing.borrow_mut().extend_from_slice(&trailing);
+            self.total_received.set(end_offset);
+            return Some((Some((status, headers)), self.register_fence(end_offset)));
         }
-        let mut raw = self.raw_head.borrow_mut();
-        raw.extend_from_slice(data);
-        let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
-            return (raw.len() <= 64 * 1024).then_some(None);
-        };
-        let end = end + 4;
-        if end > 64 * 1024 {
-            return None;
-        }
-        let (status, headers) = parse_upgrade_response_head(&raw[..end])?;
-        let trailing = raw[end..].to_vec();
-        raw.clear();
-        self.parsed.set(true);
-        Some(Some((status, headers, trailing)))
+        self.total_received.set(end_offset);
+        Some((None, self.register_fence(end_offset)))
     }
 
-    fn add_trailing(&self, data: &[u8]) {
-        self.trailing.borrow_mut().extend_from_slice(data);
+    fn register_fence(&self, offset: usize) -> u64 {
+        let fence = self.next_fence.get();
+        self.next_fence.set(fence.saturating_add(1));
+        self.fences
+            .borrow_mut()
+            .push(UpgradeWriteFenceBoundary { fence, offset });
+        self.completion.register_fence(fence);
+        fence
+    }
+
+    fn take_fences(&self) -> (Vec<u64>, Vec<UpgradeWriteFenceBoundary>) {
+        let header_end = self.header_end.get().unwrap_or(0);
+        let mut header = Vec::new();
+        let mut trailing = Vec::new();
+        for mut boundary in std::mem::take(&mut *self.fences.borrow_mut()) {
+            if boundary.offset <= header_end {
+                header.push(boundary.fence);
+            } else {
+                boundary.offset -= header_end;
+                trailing.push(boundary);
+            }
+        }
+        (header, trailing)
     }
 
     fn take_trailing(&self) -> Vec<u8> {
@@ -1474,6 +1575,11 @@ async fn serve(
             let pending_write = writes
                 .as_ref()
                 .map_or_else(Vec::new, |writes| writes.take_trailing());
+            let (header_fences, write_fences) = writes
+                .as_ref()
+                .map_or_else(|| (Vec::new(), Vec::new()), |writes| writes.take_fences());
+            let mut fence_order = header_fences.clone();
+            fence_order.extend(write_fences.iter().map(|boundary| boundary.fence));
             let write_completion = writes
                 .as_ref()
                 .map_or_else(UpgradeWriteCompletion::completed, |writes| {
@@ -1485,9 +1591,15 @@ async fn serve(
                     transport: HostTransport(raw),
                     head: head.clone(),
                     pending_write,
+                    write_fences,
                     write_completion: Arc::clone(&write_completion),
                 },
             );
+            // Hyper has completed the 101 response before releasing this connection, so writes
+            // whose append ends in the response head have reached their physical boundary.
+            for fence in &header_fences {
+                write_completion.complete_fence(*fence, Ok(()));
+            }
             let upgrade_dispatched = shared.dispatch(&HttpEvent {
                 id: request_id,
                 data: &head,
@@ -1503,6 +1615,24 @@ async fn serve(
                     transferred = true;
                 }
             } else {
+                for fence in fence_order {
+                    match write_completion.wait_fence(fence).await {
+                        Ok(()) => {
+                            let _ = shared.dispatch(&HttpEvent {
+                                write_fence: fence,
+                                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, request_id)
+                            });
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            let _ = shared.dispatch(&HttpEvent {
+                                write_fence: fence,
+                                message: message.as_bytes(),
+                                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, request_id)
+                            });
+                        }
+                    }
+                }
                 match write_completion.wait().await {
                     Ok(())
                         if writes
@@ -1525,6 +1655,32 @@ async fn serve(
         }
         result.map_err(|error| error.to_string())
     };
+    if !transferred
+        && let Some(writes) = shared
+            .upgrade_writes
+            .borrow_mut()
+            .remove(&shared.upgrade_request_id.get())
+    {
+        let message = result
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| "HTTP upgrade did not transfer its stream".to_owned());
+        writes.completion.complete(Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            message.clone(),
+        )));
+        for fence in writes.fence_order() {
+            let _ = shared.dispatch(&HttpEvent {
+                write_fence: fence,
+                message: message.as_bytes(),
+                ..HttpEvent::bare(
+                    HttpEventKind::UpgradeWriteComplete,
+                    shared.upgrade_request_id.get(),
+                )
+            });
+        }
+    }
     trace!(
         "{:?} connection future ended: {:?}",
         shared.resource,

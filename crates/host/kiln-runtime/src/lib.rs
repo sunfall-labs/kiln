@@ -30,7 +30,7 @@ pub use http_client::HttpClientEngine;
 #[cfg(feature = "http")]
 pub use http_engine::{
     HostIo, HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine,
-    UpgradeWriteCompletion,
+    UpgradeWriteCompletion, UpgradeWriteFenceBoundary,
 };
 /// Hyper-free transport seam used when the `http` feature is off: the boxed Tokio
 /// socket a host hands over has no Hyper in it, so it lives here rather than in the
@@ -127,6 +127,11 @@ pub enum RuntimeHttpEvent {
     UpgradeReady {
         head: Vec<u8>,
     },
+    UpgradeWriteComplete {
+        id: u64,
+        fence: u64,
+        error: Option<String>,
+    },
     RequestData {
         id: u64,
         data: Vec<u8>,
@@ -145,6 +150,13 @@ pub enum RuntimeHttpEvent {
         message: String,
     },
     Closed,
+}
+
+/// Result of accepting one queued HTTP upgrade write, including its per-append completion key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeWriteReceipt {
+    pub disposition: node_stream::WriteDisposition,
+    pub fence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +258,7 @@ pub trait ActiveHttpRuntime {
         _resource: ResourceId,
         _id: u64,
         _data: &[u8],
-    ) -> Option<node_stream::WriteDisposition> {
+    ) -> Option<UpgradeWriteReceipt> {
         None
     }
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
@@ -574,6 +586,7 @@ pub trait RealmHostProvider: AsyncHostOps {
         _resource: ResourceId,
         _transport: HostTransport,
         _pending_write: Vec<u8>,
+        _write_fences: Vec<http_engine::UpgradeWriteFenceBoundary>,
         _write_completion: std::sync::Arc<UpgradeWriteCompletion>,
     ) -> bool {
         false
@@ -1568,6 +1581,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             resource,
             upgrade.transport,
             upgrade.pending_write,
+            upgrade.write_fences,
             Arc::clone(&completion),
         );
         if !adopted {
@@ -1589,6 +1603,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             resource,
             upgrade.transport,
             upgrade.pending_write,
+            upgrade.write_fences,
             Arc::clone(&completion),
         );
         if !adopted {
@@ -1884,6 +1899,7 @@ impl<H: RealmHostProvider> RealmState<H> {
                         resource,
                         upgrade.transport,
                         upgrade.pending_write,
+                        upgrade.write_fences,
                         Arc::clone(&completion),
                     );
                     if !adopted {
@@ -1928,6 +1944,7 @@ impl<H: RealmHostProvider> RealmState<H> {
                             *resource,
                             upgrade.transport,
                             upgrade.pending_write,
+                            upgrade.write_fences,
                             Arc::clone(&completion),
                         );
                         if !adopted {
@@ -2003,6 +2020,7 @@ impl<H: RealmHostProvider> RealmState<H> {
                         resource,
                         upgrade.transport,
                         upgrade.pending_write,
+                        upgrade.write_fences,
                         Arc::clone(&completion),
                     );
                     if !adopted {
@@ -2281,6 +2299,12 @@ impl HttpDispatch for QueuedDispatch {
                     HttpEventKind::UpgradeReady => RuntimeHttpEvent::UpgradeReady {
                         head: event.data.to_vec(),
                     },
+                    HttpEventKind::UpgradeWriteComplete => RuntimeHttpEvent::UpgradeWriteComplete {
+                        id: event.id,
+                        fence: event.write_fence,
+                        error: (!event.message.is_empty())
+                            .then(|| String::from_utf8_lossy(event.message).into_owned()),
+                    },
                     HttpEventKind::RequestData => RuntimeHttpEvent::RequestData {
                         id: event.id,
                         data: event.data.to_vec(),
@@ -2333,6 +2357,7 @@ impl HttpDispatch for QueuedDispatch {
                     HttpEventKind::RequestHead
                     | HttpEventKind::UpgradeRequest
                     | HttpEventKind::UpgradeReady
+                    | HttpEventKind::UpgradeWriteComplete
                     | HttpEventKind::RequestData
                     | HttpEventKind::RequestEnd => return 0,
                 };
@@ -2446,7 +2471,7 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         resource: ResourceId,
         id: u64,
         data: &[u8],
-    ) -> Option<node_stream::WriteDisposition> {
+    ) -> Option<UpgradeWriteReceipt> {
         #[cfg(feature = "http")]
         {
             return self.state.http_server.write_upgrade(resource, id, data);
@@ -4235,6 +4260,7 @@ impl RealmHostProvider for TokioHost {
         resource: ResourceId,
         transport: HostTransport,
         pending_write: Vec<u8>,
+        write_fences: Vec<http_engine::UpgradeWriteFenceBoundary>,
         write_completion: Arc<UpgradeWriteCompletion>,
     ) -> bool {
         let Some(HostResource::TcpTaken {
@@ -4258,7 +4284,26 @@ impl RealmHostProvider for TokioHost {
             let prefix_writer = Rc::clone(&writer);
             let prefix_completion = Arc::clone(&write_completion);
             let task = tokio::task::spawn_local(async move {
-                let result = prefix_writer.lock().await.write_all(&pending_write).await;
+                let result = async {
+                    let mut writer = prefix_writer.lock().await;
+                    let mut offset = 0usize;
+                    for boundary in write_fences {
+                        let end = boundary.offset;
+                        if end < offset || end > pending_write.len() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "HTTP upgrade write fence offsets are out of order",
+                            ));
+                        }
+                        writer.write_all(&pending_write[offset..end]).await?;
+                        writer.flush().await?;
+                        offset = end;
+                        prefix_completion.complete_fence(boundary.fence, Ok(()));
+                    }
+                    writer.write_all(&pending_write[offset..]).await?;
+                    writer.flush().await
+                }
+                .await;
                 prefix_completion.complete(result);
             });
             Some(task.abort_handle())

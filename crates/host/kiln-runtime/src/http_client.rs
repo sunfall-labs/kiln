@@ -598,6 +598,7 @@ async fn exchange(
                 transport: stream,
                 head: head.clone(),
                 pending_write: Vec::new(),
+                write_fences: Vec::new(),
                 write_completion: crate::http_engine::UpgradeWriteCompletion::completed(),
             },
         );
