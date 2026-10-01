@@ -43,52 +43,6 @@ pub(crate) struct HttpIncomingState {
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
 }
 
-pub(crate) fn node_http_socket_facade() -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        ..Default::default()
-    };
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeListener",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "off",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
-    );
-    // The HTTP transport owns this socket until an upgrade completes, but the facade already
-    // exposes the same write/end/destroy operations. Host dispatch resolves its owning
-    // connection by identity and handles pending-upgrade writes before raw TCP ownership.
-    data.set(
-        "write",
-        Value::Native(Native::NodeSocketWrite, RealmId::PRIMARY),
-    );
-    data.set(
-        "end",
-        Value::Native(Native::NodeSocketEnd, RealmId::PRIMARY),
-    );
-    data.set(
-        "destroy",
-        Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
-    );
-    data.set("destroyed", Value::Boolean(false));
-    data.set("encrypted", Value::Boolean(false));
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
 pub(crate) fn node_http_server(
     receiver: &Value,
 ) -> Result<Rc<RefCell<NodeServerState>>, ExecutionError> {

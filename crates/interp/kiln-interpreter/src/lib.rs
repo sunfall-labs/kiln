@@ -101,8 +101,7 @@ mod http;
 pub(crate) use http::{
     HttpClientRequestState, HttpIncomingState, HttpResponseState, node_body_bytes,
     node_http_client_request, node_http_client_request_object, node_http_incoming,
-    node_http_request_arguments, node_http_response, node_http_server, node_http_socket_facade,
-    readable_chunk_length,
+    node_http_request_arguments, node_http_response, node_http_server, readable_chunk_length,
 };
 // `fs` houses node:fs and node:fs/promises implementations.
 mod fs;

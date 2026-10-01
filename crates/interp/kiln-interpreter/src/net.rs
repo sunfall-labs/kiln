@@ -147,6 +147,9 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
     );
     data.set("readyState", Value::String("open".into()));
+    data.set("readable", Value::Boolean(true));
+    data.set("writable", Value::Boolean(true));
+    data.set("destroyed", Value::Boolean(false));
     data.set(
         "setEncoding",
         Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
@@ -165,12 +168,24 @@ pub(crate) fn sync_node_socket_ready_state(
         .streams
         .iter()
         .find(|stream| stream.resource() == resource)
-        .map(|stream| stream.driver.state().ready_state().as_str());
+        .map(|stream| {
+            let state = stream.driver.state();
+            (
+                state.ready_state().as_str(),
+                !state.read_closed() && !state.resource_closed(),
+                !state.write_closed() && !state.end_requested() && !state.resource_closed(),
+                stream.driver.is_closing() || state.resource_closed(),
+            )
+        });
     let socket = node_net_socket_value(server, resource);
-    if let (Some(ready_state), Some(Value::Object(socket))) = (ready_state, socket) {
-        socket
-            .borrow_mut()
-            .set("readyState", Value::String(ready_state.into()));
+    if let (Some((ready_state, readable, writable, destroyed)), Some(Value::Object(socket))) =
+        (ready_state, socket)
+    {
+        let mut object = socket.borrow_mut();
+        object.set("readyState", Value::String(ready_state.into()));
+        object.set("readable", Value::Boolean(readable));
+        object.set("writable", Value::Boolean(writable));
+        object.set("destroyed", Value::Boolean(destroyed));
     }
 }
 
@@ -183,7 +198,7 @@ pub(crate) fn node_net_socket_value(
         .streams
         .iter()
         .find(|stream| stream.resource() == resource)
-        .and_then(|stream| stream.request.clone())
+        .and_then(|stream| stream.socket_object.clone())
 }
 
 pub(crate) fn node_net_socket_state(

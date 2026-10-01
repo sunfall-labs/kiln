@@ -1298,18 +1298,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             ServerAction::Connection(accepted) => {
                 let protocol = state.borrow().protocol;
-                let (socket_state, socket) = if protocol == ServerProtocol::Http {
-                    (None, node_http_socket_facade())
-                } else {
-                    let socket_state = Rc::new(RefCell::new(NetSocketState {
-                        owner: Some(Rc::downgrade(state)),
-                        resource: Some(accepted.resource.id),
-                        object: None,
-                        readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
-                    }));
-                    let socket = node_socket_object(&socket_state);
-                    (Some(socket_state), socket)
-                };
+                // HTTP and raw TCP retain one socket identity and one transport owner. The
+                // parser owns reads until upgrade; socket writes already need that owner while
+                // the handshake is pending, and raw stream dispatch takes over after upgrade.
+                let socket_state = Rc::new(RefCell::new(NetSocketState {
+                    owner: Some(Rc::downgrade(state)),
+                    resource: Some(accepted.resource.id),
+                    object: None,
+                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                }));
+                let socket = node_socket_object(&socket_state);
+                if protocol == ServerProtocol::Http {
+                    if let Value::Object(object) = &socket {
+                        object.borrow_mut().set("encrypted", Value::Boolean(false));
+                    }
+                }
+                let socket_state = Some(socket_state);
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
@@ -1527,7 +1531,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(())
             }
             StreamAction::Data(bytes) => {
-                if server.borrow().protocol == ServerProtocol::Net {
+                if server
+                    .borrow()
+                    .streams
+                    .iter()
+                    .any(|stream| stream.resource() == resource && !stream.runtime_http)
+                {
                     let socket = node_net_socket_value(server, resource).ok_or_else(|| {
                         ExecutionError::Host {
                             instruction,
@@ -1561,7 +1570,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 })
             }
             StreamAction::Event(StreamEvent::Finish) => {
-                if server.borrow().protocol == ServerProtocol::Net {
+                if server
+                    .borrow()
+                    .streams
+                    .iter()
+                    .any(|stream| stream.resource() == resource && !stream.runtime_http)
+                {
                     if let Some(socket) = node_net_socket_value(server, resource) {
                         self.dispatch_node_event(
                             Native::NodeEventEmit,
@@ -1575,9 +1589,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Close) => {
-                let socket = (server.borrow().protocol == ServerProtocol::Net)
-                    .then(|| node_net_socket_value(server, resource))
-                    .flatten();
+                let socket = (server
+                    .borrow()
+                    .streams
+                    .iter()
+                    .any(|stream| stream.resource() == resource && !stream.runtime_http))
+                .then(|| node_net_socket_value(server, resource))
+                .flatten();
                 if let Some(stream) = server
                     .borrow_mut()
                     .streams
@@ -1601,7 +1619,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Drain | StreamEvent::End) => {
+                sync_node_socket_ready_state(server, resource);
                 if matches!(action, StreamAction::Event(StreamEvent::End))
+                    && server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .any(|stream| stream.resource() == resource && stream.runtime_http)
                     && matches!(
                         server.borrow().protocol,
                         ServerProtocol::Http | ServerProtocol::HttpClient

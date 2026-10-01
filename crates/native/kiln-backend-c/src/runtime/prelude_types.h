@@ -3267,6 +3267,8 @@ struct kiln_node_socket {
     int close_after_responses;
     int shutdown_after_write;
     int utf8;
+    int read_closed;
+    int write_closed;
     int closing;
     int closed;
 };
@@ -3301,6 +3303,8 @@ typedef struct kiln_node_client_request {
 
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown);
+static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
+                                            const char *state, size_t state_len);
 
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
                                                               uint64_t id) {

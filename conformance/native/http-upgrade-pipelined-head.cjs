@@ -7,6 +7,9 @@ const server = http.createServer((_request, response) => {
 });
 
 server.on('upgrade', (_request, socket, head) => {
+  if (!socket.readable || !socket.writable || socket.destroyed) {
+    throw new Error('an accepted upgrade socket must expose its live duplex state');
+  }
   const received = [head];
   let length = head.length;
   let replied = false;

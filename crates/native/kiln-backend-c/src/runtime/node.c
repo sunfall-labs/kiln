@@ -1297,15 +1297,36 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
     if (status == KILN_C99_OK)
         status = kiln_c99_node_set_hidden_pointer(socket->object, "@@node:socket", 13, socket);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, socket->object, "readyState", 10,
-                              kiln_c99_copy_text("open", 4), 0, NULL);
+        status = kiln_c99_node_socket_ready_state(socket, "open", 4);
     return status;
 }
 
 static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
                                             const char *state, size_t state_len) {
-    return kiln_c99_put(NULL, socket->object, "readyState", 10,
-                        kiln_c99_copy_text(state, state_len), 0, NULL);
+    int destroyed = state_len == 6 && memcmp(state, "closed", 6) == 0;
+    if (destroyed) socket->read_closed = socket->write_closed = 1;
+    else if (state_len == 9 && memcmp(state, "writeOnly", 9) == 0) socket->read_closed = 1;
+    else if (state_len == 8 && memcmp(state, "readOnly", 8) == 0) socket->write_closed = 1;
+    else socket->read_closed = socket->write_closed = 0;
+    int readable = !socket->read_closed;
+    int writable = !socket->write_closed;
+    /* Closing one half must never reopen the other half. Project every observable flag from
+     * the same transport close bits, including the combined closed state. */
+    const char *projected = readable ? (writable ? "open" : "readOnly")
+                                    : (writable ? "writeOnly" : "closed");
+    size_t projected_len = readable ? (writable ? 4 : 8) : (writable ? 9 : 6);
+    int status = kiln_c99_put(NULL, socket->object, "readyState", 10,
+                              kiln_c99_copy_text(projected, projected_len), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, socket->object, "readable", 8,
+                              kiln_c99_boolean(readable), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, socket->object, "writable", 8,
+                              kiln_c99_boolean(writable), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, socket->object, "destroyed", 9,
+                              kiln_c99_boolean(destroyed || socket->closed || socket->closing), 0, NULL);
+    return status;
 }
 
 static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
@@ -2047,7 +2068,9 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         if (work->kind == KILN_REALM_OP_TCP_READ) {
             socket->read_request = 0;
             if (completion->bytes_len == 0) {
-                int status = kiln_c99_node_emit(socket->host, socket->object, "end",
+                int status = kiln_c99_node_socket_ready_state(socket, "writeOnly", 9);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_node_emit(socket->host, socket->object, "end",
                                                 kiln_c99_undefined(), 0, 0, exception);
                 if (status != KILN_C99_OK) return status;
                 return kiln_c99_node_close_socket(socket, 1);
