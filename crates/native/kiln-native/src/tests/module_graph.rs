@@ -109,14 +109,26 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
     let demand =
         kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
             .expect("compute demand");
-    let old_exports = ["publicName", "aliasName", "namespaceName"]
-        .map(|name| graph.resolved_export(&barrel, name).expect("original reexport origin").clone());
+    let old_exports = ["publicName", "aliasName", "namespaceName"].map(|name| {
+        graph
+            .resolved_export(&barrel, name)
+            .expect("original reexport origin")
+            .clone()
+    });
     assert!(matches!(
         &old_exports[0],
         ResolvedExport::Local { module, .. } if module == &provider
     ));
-    assert_eq!(old_exports[0], old_exports[1], "aliases share provider identity");
-    assert_eq!(old_exports[2], ResolvedExport::Namespace { module: provider.clone() });
+    assert_eq!(
+        old_exports[0], old_exports[1],
+        "aliases share provider identity"
+    );
+    assert_eq!(
+        old_exports[2],
+        ResolvedExport::Namespace {
+            module: provider.clone()
+        }
+    );
 
     let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
     for (name, old_export) in ["publicName", "aliasName", "namespaceName"]
@@ -148,7 +160,11 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
         assert_eq!(import.source, "./provider.mjs", "source for {name}");
         assert_eq!(
             import.imported,
-            if name == "namespaceName" { kiln_ir::NAMESPACE_IMPORT } else { "implementation" },
+            if name == "namespaceName" {
+                kiln_ir::NAMESPACE_IMPORT
+            } else {
+                "implementation"
+            },
             "imported binding for {name}"
         );
         assert!(
@@ -178,7 +194,7 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
         reparsed
             .resolved_export(&barrel_target, &entry_import.imported)
             .expect("reparsed entry resolution"),
-        old_exports[0]
+        &old_exports[0]
     );
 }
 
@@ -4697,7 +4713,9 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
             .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
             .expect("re-export has a backing import");
         assert!(
-            selected.live_imports.contains(&(barrel.clone(), backing_import)),
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
             "named re-export backing import must be linked"
         );
         assert!(

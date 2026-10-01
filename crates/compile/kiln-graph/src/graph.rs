@@ -3121,15 +3121,15 @@ mod dead_phi_tests {
             mapped_arguments: false,
             local_count: 1,
             code: vec![
-                Instruction::Const(0),      // wrapped flag placeholder
-                Instruction::Const(0),      // iterator placeholder
-                Instruction::Const(0),      // yielded value
-                Instruction::YieldStar(9),  // synthetic edges to pc 4 and pc 9
-                Instruction::StoreLocal(0), // resume sent value
-                Instruction::LoadLocal(0),  // sent value controls completion
+                Instruction::Const(0),       // wrapped flag placeholder
+                Instruction::Const(0),       // iterator placeholder
+                Instruction::Const(0),       // yielded value
+                Instruction::YieldStar(9),   // synthetic edges to pc 4 and pc 9
+                Instruction::StoreLocal(0),  // resume sent value
+                Instruction::LoadLocal(0),   // sent value controls completion
                 Instruction::JumpIfFalse(0), // loop back while the delegate is incomplete
-                Instruction::Const(0),      // ordinary done value
-                Instruction::Jump(9),       // ordinary predecessor of the exit
+                Instruction::Const(0),       // ordinary done value
+                Instruction::Jump(9),        // ordinary predecessor of the exit
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
