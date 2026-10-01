@@ -2464,14 +2464,18 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
         kiln_val_from_boundary(upvals[1]),
         kiln_val_from_boundary(upvals[2])
     };
-    const kiln_string *closure_name = name == NULL
-        ? NULL : kiln_c99_intern_static(name, name_len);
-    if (name != NULL && closure_name == NULL) return KILN_C99_OUT_OF_MEMORY;
-    return kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline, closure_name,
-                                 "", 0, "eval", 0, 0, 0, asynchronous, 0,
-                                 method ? KILN_C99_FUNCTION_METHOD : 0, arrow, 0,
-                                 arrow ? kiln_val_from_boundary(receiver) : KILN_VAL_UNDEFINED,
-                                 KILN_VAL_UNDEFINED, 0, 16, 0, 0, val_upvals, 3);
+    kiln_value name_value = name == NULL ? kiln_c99_undefined()
+                                         : kiln_c99_copy_text(name, name_len);
+    if (name != NULL && name_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    if (name != NULL) kiln_c99_gc_keep_alive(&name_value);
+    const kiln_string *closure_name = name == NULL ? NULL : (const kiln_string *)name_value.ptr;
+    status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline, closure_name,
+                                   "", 0, "eval", 0, 0, 0, asynchronous, 0,
+                                   method ? KILN_C99_FUNCTION_METHOD : 0, arrow, 0,
+                                   arrow ? kiln_val_from_boundary(receiver) : KILN_VAL_UNDEFINED,
+                                   KILN_VAL_UNDEFINED, 0, 16, 0, 0, val_upvals, 3);
+    kiln_c99_gc_keep_alive(&name_value);
+    return status;
 }
 
 static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
