@@ -1120,10 +1120,9 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             *out = built;
             return status;
         }
-        if (closure != NULL && kiln_c99_same_name_key(view, "prototype")) {
+        if (closure != NULL && kiln_c99_same_name_key(view, "prototype") &&
+            kiln_c99_function_owns_prototype(closure)) {
             kiln_value prototype;
-            if (closure->arrow || (closure->asynchronous && !closure->async_generator) ||
-                (closure->is_method && !closure->generator)) return KILN_C99_OK;
             status = kiln_c99_prototype_object(target, &prototype);
             if (status == KILN_C99_OK) status = kiln_c99_new_object(&built);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "value", 5, prototype, 0, NULL);
