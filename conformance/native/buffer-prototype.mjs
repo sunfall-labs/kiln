@@ -11,6 +11,7 @@ const s = b.subarray(0, 2); s[0] = 65; console.log(b.toString().slice(0, 1), b.f
 console.log(Buffer.from(new Uint8Array([9, 8])).equals(Buffer.from([9, 8])), Buffer.from(b.buffer, 2, 3).length, Buffer.byteLength("aGk=", "base64"), Buffer.isEncoding("utf8"), Buffer.isEncoding("nope"), Buffer.from("x").write("yz", 0), Buffer.alloc(2).fill(0x41).toString());
 console.log(Buffer.from("hi", "utf16le").toString("hex"), Buffer.alloc(4, "ab").toString(), Buffer("xy").toString(), Buffer.from("ff", "hex").toString("hex"));
 const FastBuffer = Buffer[Symbol.species];
+const bufferSpeciesDescriptor = Object.getOwnPropertyDescriptor(Buffer, Symbol.species);
 if (typeof FastBuffer !== "function" || FastBuffer.name !== "FastBuffer" || FastBuffer === Buffer) throw new Error("Buffer species identity");
 const speciesPrototypeDescriptor = Object.getOwnPropertyDescriptor(FastBuffer, "prototype");
 if (FastBuffer.length !== 0 || speciesPrototypeDescriptor.writable || speciesPrototypeDescriptor.configurable || speciesPrototypeDescriptor.enumerable) throw new Error("FastBuffer class constructor metadata");
@@ -27,4 +28,25 @@ if (!Buffer.isBuffer(speciesSized) || speciesSized.length !== 2 || speciesCoerce
 class DerivedFastBuffer extends FastBuffer {}
 const derivedSpecies = new DerivedFastBuffer(1);
 if (!Buffer.isBuffer(derivedSpecies) || !(derivedSpecies instanceof DerivedFastBuffer)) throw new Error("FastBuffer subclass construction");
+
+Object.defineProperty(Buffer, Symbol.species, {
+  value: Uint8Array,
+  configurable: true,
+});
+const ordinarySpeciesMap = Buffer.from([1, 2]).map(value => value + 1);
+if (Object.getPrototypeOf(ordinarySpeciesMap) !== Uint8Array.prototype ||
+    Buffer.isBuffer(ordinarySpeciesMap) || ordinarySpeciesMap.join(",") !== "2,3") {
+  throw new Error("Buffer map must honor a replacement typed-array species");
+}
+class DerivedTypedArray extends Uint8Array {}
+Object.defineProperty(Buffer, Symbol.species, {
+  value: DerivedTypedArray,
+  configurable: true,
+});
+const derivedSpeciesMap = Buffer.from([3]).filter(() => true);
+if (!(derivedSpeciesMap instanceof DerivedTypedArray) || Buffer.isBuffer(derivedSpeciesMap) ||
+    derivedSpeciesMap[0] !== 3) {
+  throw new Error("Buffer filter must preserve custom species identity");
+}
+Object.defineProperty(Buffer, Symbol.species, bufferSpeciesDescriptor);
 function speciesBackingBytes(buffer) { return new Uint8Array(buffer); }

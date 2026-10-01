@@ -689,12 +689,10 @@
   // `%TypedArray%.prototype.map` and `filter` answer through the species constructor, which
   // for a Buffer is `Buffer`: the result is a Buffer too.
   define("map", function map(this: Uint8Array, callback: any, thisArg?: any): Uint8Array {
-    const out: Uint8Array = U8.prototype.map.call(this, callback, thisArg);
-    return wrap(out.buffer, out.byteOffset, out.length);
+    return U8.prototype.map.call(this, callback, thisArg);
   });
   define("filter", function filter(this: Uint8Array, callback: any, thisArg?: any): Uint8Array {
-    const out: Uint8Array = U8.prototype.filter.call(this, callback, thisArg);
-    return wrap(out.buffer, out.byteOffset, out.length);
+    return U8.prototype.filter.call(this, callback, thisArg);
   });
 
   define("inspect", function inspect(this: Uint8Array): string {

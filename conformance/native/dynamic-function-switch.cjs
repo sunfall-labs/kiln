@@ -27,7 +27,7 @@ const labeled = Function(`
   }
   return count;
 `);
-if (labeled() !== 11) throw new Error("switch propagates continue to outer loop and consumes switch break");
+if (labeled() !== 12) throw new Error("switch propagates continue to outer loop and consumes switch break");
 const labeledBreak = Function("outer: while (true) { switch (0) { default: break outer; } } return 3;");
 if (labeledBreak() !== 3) throw new Error("switch propagates labeled break to outer label");
 const switchLabel = Function(`
@@ -61,4 +61,42 @@ const varCapture = Function(`
 `);
 if (varCapture() !== 17) throw new Error("switch var declaration targets function scope");
 
-console.log("switch evaluation:", events.join(","), run(9, []), run(3, []), labeled(), labeledBreak(), nested());
+const switchTdz = Function(
+  "outer", "switch (outer) { case outer: let outer = 23; } return outer;",
+);
+let tdzThrew = false;
+try { switchTdz(0); } catch (error) { tdzThrew = error.name === "ReferenceError"; }
+if (!tdzThrew) throw new Error("switch lexical binding shadows the discriminant in its TDZ");
+
+const laterClauseTdz = Function(
+  "outer", "switch (0) { case 1: break; case outer: break; default: let outer = 29; } return outer;",
+);
+tdzThrew = false;
+try { laterClauseTdz(0); } catch (error) { tdzThrew = error.name === "ReferenceError"; }
+if (!tdzThrew) throw new Error("unselected switch clauses still instantiate lexical bindings");
+
+const switchVarStillFunctionScoped = Function(
+  "switch (0) { case 0: var switchVar = 31; } return switchVar;",
+);
+if (switchVarStillFunctionScoped() !== 31) throw new Error("switch var remains function scoped");
+
+globalThis.__switchDuplicateInitializerCount = 0;
+let duplicateThrew = false;
+try {
+  Function("switch ((globalThis.__switchDuplicateInitializerCount++, 0)) { " +
+    "case 0: let repeated; default: const repeated = 1; }")();
+} catch (error) { duplicateThrew = error.name === "SyntaxError"; }
+if (!duplicateThrew || globalThis.__switchDuplicateInitializerCount !== 0) {
+  throw new Error("duplicate switch lexical names are rejected before runtime evaluation");
+}
+delete globalThis.__switchDuplicateInitializerCount;
+
+const skippedInitializer = Function(
+  "switch (0) { case 0: break; default: let later = (globalThis.__switchInitializerRan = true); }",
+);
+globalThis.__switchInitializerRan = false;
+skippedInitializer();
+if (globalThis.__switchInitializerRan) throw new Error("unselected lexical initializer must not run");
+delete globalThis.__switchInitializerRan;
+
+console.log("switch evaluation:", events.join(","), run(9, []), run(3, []), labeled(), labeledBreak(), nested(), switchVarStillFunctionScoped());
