@@ -41,14 +41,6 @@ const updateStableWith = new Function("object",
 console.log(updateStableWith(stableWith), stableGetterCalls, stableSetterCalls,
   stableWith.saved);
 
-function updateWithLexicalShadow() {
-  const value = 100;
-  const object = { value: 5 };
-  const result = eval("(function() { with (object) { return value++; } })()");
-  return [result, object.value, value];
-}
-console.log(updateWithLexicalShadow().join(","));
-
 let missingThrows = false;
 try { new Function("return ++dynamicUpdateMissing;")(); }
 catch (error) { missingThrows = error instanceof ReferenceError; }

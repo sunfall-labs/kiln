@@ -749,6 +749,18 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
             return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_BOUND) {
+        /* User-defined properties on a bound function live in its ordinary callable store.
+         * Treat deletion just like deletion from the wrapped function's store; otherwise a
+         * configurable own property remains visible after delete, including with a null
+         * [[Prototype]]. */
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT)
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_OK;
     }
