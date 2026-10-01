@@ -1976,6 +1976,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
     }
 
     if (lex->curr.kind == KILN_DYN_KW_FUNCTION) {
+        const char *function_source = lex->curr.start;
         kiln_dyn_lexer_next(lex);
         const char *fn_name = "anonymous";
         size_t fn_name_len = 9;
@@ -2022,8 +2023,15 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (!kiln_dyn_capture_block(lex, &body_source, &blen))
             return kiln_dyn_throw_parse_error(lex, thrown,
                                         "Unterminated function body");
+        /* Keep the complete source-backed function expression for Function#toString. The
+         * trampoline's body upvalue below is intentionally only the executable body; using it
+         * as reflection text loses the parameter list and braces. Convert the exact parser slice
+         * through the WTF-8-aware helper so lone UTF-16 surrogates survive. */
+        const char *function_end = body_source + blen + 1; /* include the closing brace */
+        size_t function_source_len = (size_t)(function_end - function_source);
 
         kiln_value upvals[3];
+        kiln_value reflected_source;
         kiln_value name_value = kiln_c99_undefined();
         const kiln_string *closure_name = NULL;
         int status;
@@ -2040,6 +2048,10 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (status != KILN_C99_OK) return status;
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
+        status = kiln_dyn_source_to_string(function_source, function_source_len,
+                                           &reflected_source);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&reflected_source);
         int function_strict = scope->strict ||
                               kiln_dyn_body_has_use_strict(body_source, blen);
         kiln_dyn_scope function_scope;
@@ -2049,11 +2061,14 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (explicit_name) {
             status = kiln_c99_make_cell(&self_cell);
             if (status != KILN_C99_OK) {
+                kiln_c99_gc_keep_alive(&reflected_source);
                 kiln_dyn_scope_destroy(&function_scope);
                 return status;
             }
             kiln_c99_gc_keep_alive(&self_cell);
+            kiln_c99_gc_keep_alive(&reflected_source);
             if (!kiln_dyn_scope_set(&function_scope, fn_name, fn_name_len, self_cell)) {
+                kiln_c99_gc_keep_alive(&reflected_source);
                 kiln_dyn_scope_destroy(&function_scope);
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -2063,21 +2078,25 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_value env_obj;
         status = kiln_dyn_new_environment(&env_obj);
         if (status != KILN_C99_OK) {
+            kiln_c99_gc_keep_alive(&reflected_source);
             kiln_dyn_scope_destroy(&function_scope);
             return status;
         }
         kiln_c99_gc_keep_alive(&env_obj);
+        kiln_c99_gc_keep_alive(&reflected_source);
         status = kiln_dyn_capture_environment(host,
                                               explicit_name && !lex->function_declaration
                                                   ? &function_scope : scope,
                                               env_obj, 0, thrown);
         if (status != KILN_C99_OK) {
+            kiln_c99_gc_keep_alive(&reflected_source);
             kiln_dyn_scope_destroy(&function_scope);
             return status;
         }
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
         kiln_c99_gc_keep_alive(&env_obj);
+        kiln_c99_gc_keep_alive(&reflected_source);
         upvals[2] = env_obj;
         kiln_val val_upvals[3] = {
             kiln_val_from_boundary(upvals[0]),
@@ -2097,14 +2116,18 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) {
+            kiln_c99_gc_keep_alive(&reflected_source);
             kiln_dyn_scope_destroy(&function_scope);
             return status;
         }
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
         kiln_c99_gc_keep_alive(&env_obj);
+        kiln_c99_gc_keep_alive(&reflected_source);
         if (explicit_name) kiln_c99_gc_keep_alive(&self_cell);
-        kiln_c99_heap_store_value(kiln_c99_closure_of(*out), &kiln_c99_closure_of(*out)->source_value, upvals[1]);
+        kiln_c99_heap_store_value(kiln_c99_closure_of(*out),
+                                  &kiln_c99_closure_of(*out)->source_value,
+                                  reflected_source);
         if (explicit_name && !lex->function_declaration) {
             kiln_c99_val_store_cell(kiln_c99_cell_of(self_cell),
                                     kiln_val_from_boundary(*out));
