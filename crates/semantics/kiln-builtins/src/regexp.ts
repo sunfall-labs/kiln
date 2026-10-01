@@ -5,6 +5,47 @@
   if (typeof RegExp === "undefined" || !RegExp.prototype) return;
   const Proto = RegExp.prototype as any;
 
+  // `String.prototype.matchAll` performs the IsRegExp/global check before dispatching to
+  // @@matchAll. The graph bootstrap's RegExp @@matchAll method captures the raw native method
+  // before this wrapper is installed.
+  const stringMatchAll = { matchAll(regexp: any): any {
+    if (this === null || this === undefined) {
+      throw new TypeError("String.prototype.matchAll called on null or undefined");
+    }
+
+    let isRegExp = false;
+    if (regexp !== null && (typeof regexp === "object" || typeof regexp === "function")) {
+      const matcher = regexp[Symbol.match];
+      isRegExp = matcher === undefined ? regexp instanceof RegExp : !!matcher;
+      if (isRegExp) {
+        const flags = regexp.flags;
+        if (flags === null || flags === undefined) {
+          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
+        }
+        if (`${flags}`.indexOf("g") < 0) {
+          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
+        }
+      }
+    }
+
+    const subject = `${this}`;
+    if (regexp !== null && regexp !== undefined) {
+      const matcher = regexp[Symbol.matchAll];
+      if (matcher !== null && matcher !== undefined) {
+        return Reflect.apply(matcher, regexp, [subject]);
+      }
+    }
+    const created = new RegExp(regexp, "g");
+    const createdMatcher = (created as any)[Symbol.matchAll];
+    return Reflect.apply(createdMatcher, created, [subject]);
+  } }.matchAll;
+  Object.defineProperty(String.prototype, "matchAll", {
+    value: stringMatchAll,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
   // Annex B legacy capture properties. Both engines keep this state per realm; keep the public
   // accessors in this TypeScript bootstrap so runtime C owns only the private capture bridge.
   const legacyCapture = (globalThis as any).__kilnRegExpLegacyCapture;

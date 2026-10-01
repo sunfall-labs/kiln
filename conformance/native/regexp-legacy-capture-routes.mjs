@@ -22,6 +22,52 @@ console.log("ordinary-array-values", retainedValues[0][0], RegExp.$1, RegExp.$2)
 console.log("match-all-second", iterator.next().value[0], RegExp.$1, RegExp.$2);
 console.log("match-all-done", iterator.next().done, RegExp.$1, RegExp.$2);
 
+const indexedMatchAll = /(x)/g;
+indexedMatchAll.lastIndex = 1;
+const indexedIterator = "ax x".matchAll(indexedMatchAll);
+const indexedFirst = indexedIterator.next().value;
+if (indexedFirst.index !== 1 || indexedMatchAll.lastIndex !== 1) {
+  throw new Error("String.matchAll must begin at and preserve the original lastIndex");
+}
+console.log("match-all-last-index", indexedFirst.index, indexedMatchAll.lastIndex);
+
+const nonglobal = /x/;
+let directRejected = false;
+try { "x".matchAll(nonglobal); } catch (error) { directRejected = error instanceof TypeError; }
+if (!directRejected) throw new Error("String.matchAll must reject a non-global RegExp");
+const symbolIterator = RegExp.prototype[Symbol.matchAll].call(nonglobal, "x");
+if (symbolIterator.next().value[0] !== "x") {
+  throw new Error("RegExp @@matchAll must accept a non-global RegExp");
+}
+console.log("match-all-symbol-nonglobal", "ok");
+const stringPatternMatches = [..."x x".matchAll("x")];
+if (stringPatternMatches.length !== 2 || stringPatternMatches[1].index !== 2) {
+  throw new Error("String.matchAll must create a global RegExp for non-RegExp patterns");
+}
+
+let matchReads = 0;
+let flagReads = 0;
+const customMatchAll = {
+  get [Symbol.match]() { matchReads++; return true; },
+  get flags() { flagReads++; return "g"; },
+  [Symbol.matchAll](subject) { return { subject }; },
+};
+const customResult = "subject".matchAll(customMatchAll);
+if (customResult.subject !== "subject" || matchReads !== 1 || flagReads !== 1) {
+  throw new Error("String.matchAll must preserve custom hooks and observable IsRegExp checks");
+}
+const optedOut = /x/;
+optedOut[Symbol.match] = false;
+if ("x".matchAll(optedOut).next().value[0] !== "x") {
+  throw new Error("String.matchAll must honor Symbol.match=false");
+}
+
+const splitIndex = /(x)/g;
+splitIndex.lastIndex = 1;
+"ax".split(splitIndex);
+if (splitIndex.lastIndex !== 1) throw new Error("String.split must preserve lastIndex");
+console.log("split-last-index", splitIndex.lastIndex);
+
 import { makeModuleMatch, readModuleCaptures } from "./fixtures/regexp-legacy-capture-module.mjs";
 console.log("module-write", makeModuleMatch(), RegExp.$1, RegExp.$2);
 console.log("module-read", readModuleCaptures());

@@ -505,9 +505,13 @@ if (typeof JSON !== "undefined") {
                                                         configurable: false, enumerable: false });
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
     data(DataView.prototype, Symbol.toStringTag, "DataView");
+    // Capture the unwrapped native string method before the common TypeScript bootstrap adds
+    // String.prototype.matchAll's IsRegExp/global check. The RegExp protocol method itself is
+    // allowed on a non-global expression and must not recurse through that check.
+    const rawStringMatchAll = String.prototype.matchAll;
     const methods = {
         [Symbol.match](string) { return String(string).match(this); },
-        [Symbol.matchAll](string) { return String(string).matchAll(this); },
+        [Symbol.matchAll](string) { return rawStringMatchAll.call(`${string}`, this); },
         [Symbol.replace](string, replacement) { return String(string).replace(this, replacement); },
         [Symbol.search](string) { return String(string).search(this); },
         [Symbol.split](string, limit) { return String(string).split(this, limit); },

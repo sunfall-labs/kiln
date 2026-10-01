@@ -1541,7 +1541,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         }
     }
     every = regexp->global || code == KILN_C99_METHOD_REPLACE_ALL ||
-            code == KILN_C99_METHOD_STRING_MATCH_ALL || code == KILN_C99_METHOD_SPLIT;
+            code == KILN_C99_METHOD_SPLIT;
     if (code == KILN_C99_METHOD_SPLIT && argc > 1 &&
         args[1].tag != KILN_VALUE_UNDEFINED) {
         double number;
@@ -1582,6 +1582,11 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         free(units);
         *result = collected;
         return status;
+    }
+    if (code == KILN_C99_METHOD_STRING_MATCH_ALL && regexp->last_index > 0.0) {
+        /* RegExp.prototype[Symbol.matchAll] clones the matcher at its current ToLength(lastIndex)
+         * cursor. The clone advances while collecting results; the original stays untouched. */
+        at = regexp->last_index > (double)count ? count + 1 : (size_t)regexp->last_index;
     }
     if ((code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) &&
         !kiln_c99_is_callable(with)) {
@@ -1740,7 +1745,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             break;
         }
     }
-    if (regexp->global || regexp->sticky) {
+    if ((regexp->global || regexp->sticky) && code != KILN_C99_METHOD_STRING_MATCH_ALL &&
+        code != KILN_C99_METHOD_SPLIT) {
         /* Every one of these leaves the cursor where it found it, which `exec` relies on and
          * `match` deliberately resets. */
         regexp->last_index = 0.0;
