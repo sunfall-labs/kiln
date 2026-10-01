@@ -1956,6 +1956,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         if events.contains(&RuntimeHttpEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            #[cfg(feature = "http")]
             self.closing_http_resources.remove(&resource);
         }
         events
@@ -2002,6 +2003,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             }
             if events.contains(&RuntimeHttpEvent::Closed) {
                 let _ = self.host.release_transport(*resource);
+                #[cfg(feature = "http")]
                 self.closing_http_resources.remove(resource);
             }
         }
@@ -2090,6 +2092,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         if events.contains(&RuntimeHttpClientEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            #[cfg(feature = "http")]
             self.closing_http_resources.remove(&resource);
         }
         events
