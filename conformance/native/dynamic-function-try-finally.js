@@ -62,4 +62,28 @@ if (labeledFlow(flowEvents) !== 1 || flowEvents.join(",") !== "finally-0,finally
   throw new Error("finally preserves and propagates labeled continue/break completions");
 }
 
+const nestedFinallyFlow = Function(`
+  var reached = 0;
+  outer: {
+    try { break outer; }
+    finally { while (true) { reached++; break; } }
+  }
+  return reached;
+`);
+if (nestedFinallyFlow() !== 1) {
+  throw new Error("a nested loop break in normal finally preserves the pending labeled break");
+}
+
+const nestedFinallyContinue = Function(`
+  var count = 0;
+  outer: for (; count < 2; count++) {
+    try { continue outer; }
+    finally { while (true) { break; } }
+  }
+  return count;
+`);
+if (nestedFinallyContinue() !== 2) {
+  throw new Error("a nested loop break in normal finally preserves the pending continue");
+}
+
 console.log("dynamic try/finally:", log.join(","));

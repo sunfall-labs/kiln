@@ -4,11 +4,13 @@ const remove = Function("object", "key", `
   var second = delete object[key];
   var third = delete object.missing;
   var fourth = delete local;
+  var fifth = delete (local);
+  var sixth = delete ((local));
   return first + "," + second + "," + third + "," + fourth + "," +
-    ("value" in object) + "," + (key in object);
+    fifth + "," + sixth + "," + ("value" in object) + "," + (key in object);
 `);
 const object = { value: 1, computed: 2 };
-if (remove(object, "computed") !== "true,true,true,false,false,false") {
+if (remove(object, "computed") !== "true,true,true,false,false,false,false,false") {
   throw new Error("dynamic delete removes only the referenced own properties");
 }
 const parenthesized = { value: 1, nested: 2 };
@@ -36,10 +38,27 @@ const locked = {};
 Object.defineProperty(locked, "value", { value: 1, configurable: false });
 let strictDeleteThrew = false;
 try {
-  Function("object", '"use strict"; return delete object.value;')(locked);
+  Function("object", '"use strict"; return delete ((object.value));')(locked);
 } catch (error) {
   strictDeleteThrew = error instanceof TypeError;
 }
 if (!strictDeleteThrew) throw new Error("strict delete rejects a non-configurable property");
+if (Function("object", "return delete ((object.value));")(locked) !== false) {
+  throw new Error("nested parentheses preserve a failed member deletion result");
+}
+if (Function("value", "return delete (value);")(1) !== false ||
+    Function("value", "return delete ((value));")(1) !== false) {
+  throw new Error("parenthesized identifier deletion returns false for local bindings");
+}
+
+let strictIdentifierDeleteRejectedAtConstruction = false;
+try {
+  Function('"use strict"; if (false) delete neverDeclared;');
+} catch (error) {
+  strictIdentifierDeleteRejectedAtConstruction = error instanceof SyntaxError;
+}
+if (!strictIdentifierDeleteRejectedAtConstruction) {
+  throw new Error("strict delete of an identifier is rejected while constructing the function");
+}
 
 console.log("dynamic delete:", object.value, object.computed);
