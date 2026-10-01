@@ -2023,11 +2023,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // Namespace slots are snapshots of export cells for reflection. The
                         // language-visible value operation is [[Get]], which refreshes that
                         // snapshot from the live cell before returning it.
-                        self.read_property_key(
-                            &source,
-                            PropertyKeyRef::Units(&key),
-                            instruction,
-                        )?
+                        self.read_property_key(&source, PropertyKeyRef::Units(&key), instruction)?
                     } else {
                         match property {
                             Property::Value(value) => value,
