@@ -195,6 +195,23 @@ const path = createRequire(import.meta.url)('node:path');
 console.log(typeof path.basename);"#,
     )
     .expect("write escaped createRequire entry");
+    let identity_module = root.path.join("identity #%? ü.mjs");
+    fs::write(
+        &identity_module,
+        r#"import { createRequire } from "node:module";
+const fromUrl = createRequire(new URL(import.meta.url));
+const fromFilename = createRequire(import.meta.filename);
+export const identity = [import.meta.url, fromUrl('./dep.cjs').ok, fromFilename('./dep.cjs').ok].join('|');"#,
+    )
+    .expect("write special-character importer");
+    let entry_source = fs::read_to_string(&entry).expect("read entry source");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ identity }} from './identity%20%23%25%3F%20%C3%BC.mjs';\n{entry_source}\nconsole.log(identity);\n"
+        ),
+    )
+    .expect("import special-character module");
     fs::write(
         root.path.join("dep.cjs"),
         r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
@@ -218,11 +235,13 @@ module.exports = { loads: globalThis.__loads };"#,
         eprintln!("skipping escaped createRequire integration: no C compiler found");
         return;
     };
-    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let dev_output = root.path.join("program-dev");
+    let run = builder
         .run_graph(
             &graph,
             &NativeBuildOptions {
-                output: root.path.join("program"),
+                output: dev_output.clone(),
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
@@ -230,15 +249,43 @@ module.exports = { loads: globalThis.__loads };"#,
             },
         )
         .expect("native escaped createRequire graph builds and runs");
-    let expected_url = url::Url::from_file_path(&entry)
-        .expect("special-character entry path becomes a file URL")
+    let expected_url = url::Url::from_file_path(&dev_output)
+        .expect("special-character executable path becomes a file URL")
         .to_string();
-    let expected_stdout = format!("{expected_url}\nbefore:0\ntrue:1:1\nfunction\nfunction\n");
+    let expected_identity_url = url::Url::from_file_path(&identity_module)
+        .expect("special-character importer becomes a file URL")
+        .to_string();
+    let expected_tail =
+        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|true|true\n");
+    let expected_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
         run.stdout,
         expected_stdout.as_bytes(),
         "stderr={:?}",
         run.stderr
+    );
+    let release_output = root.path.join("program-release");
+    let release = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: release_output.clone(),
+                profile: NativeProfile::Release,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native release createRequire graph builds and runs");
+    let release_url = url::Url::from_file_path(&release_output)
+        .expect("release executable path becomes a file URL")
+        .to_string();
+    let expected_release_stdout = format!("{release_url}\n{expected_tail}");
+    assert_eq!(
+        release.stdout,
+        expected_release_stdout.as_bytes(),
+        "release stderr={:?}",
+        release.stderr
     );
 }
 

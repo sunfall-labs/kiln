@@ -381,9 +381,41 @@ pub(super) fn graph_shared_wrapper_source_with_failures(
     output.push_str(embedding_header());
     output.push('\n');
     output.push_str(
-        "static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_equals_ascii((const kiln_string *)value.ptr, ascii, length); }\n\
-         static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_starts_ascii((const kiln_string *)value.ptr, ascii, length); }\n\
-         static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) { if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0; const kiln_string *s = (const kiln_string *)value.ptr; if (s == NULL) return 0; if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1; if (s->unit_len >= 7 && kiln_string_starts_ascii(s, \"file://\", 7) && s->unit_len - 7 == path_len) { if (path_len == 0) return 1; for (size_t i = 0; i < path_len; ++i) { if (kiln_string_unit_at(s, i + 7) != (uint8_t)path[i]) return 0; } return 1; } return 0; }\n",
+        r#"static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_equals_ascii((const kiln_string *)value.ptr, ascii, length); }
+static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_starts_ascii((const kiln_string *)value.ptr, ascii, length); }
+static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *path, size_t path_len) {
+    static const char scheme[] = "file://";
+    if (url == NULL || path == NULL || url->unit_len < sizeof(scheme) - 1) return 0;
+    for (size_t i = 0; i < sizeof(scheme) - 1; ++i) if (kiln_string_unit_at(url, i) != (uint8_t)scheme[i]) return 0;
+    size_t unit = 7, byte = 0;
+    while (unit < url->unit_len && byte < path_len) {
+        uint16_t current = kiln_string_unit_at(url, unit++);
+        unsigned char decoded;
+        if (current == '%') {
+            if (unit + 1 >= url->unit_len) return 0;
+            uint16_t high = kiln_string_unit_at(url, unit++), low = kiln_string_unit_at(url, unit++);
+            int hi = high >= '0' && high <= '9' ? (int)(high - '0') : high >= 'A' && high <= 'F' ? (int)(high - 'A') + 10 : high >= 'a' && high <= 'f' ? (int)(high - 'a') + 10 : -1;
+            int lo = low >= '0' && low <= '9' ? (int)(low - '0') : low >= 'A' && low <= 'F' ? (int)(low - 'A') + 10 : low >= 'a' && low <= 'f' ? (int)(low - 'a') + 10 : -1;
+            if (hi < 0 || lo < 0) return 0;
+            decoded = (unsigned char)((hi << 4) | lo);
+        } else { if (current > 0x7f) return 0; decoded = (unsigned char)current; }
+        if ((unsigned char)path[byte++] != decoded) return 0;
+    }
+    return unit == url->unit_len && byte == path_len;
+}
+static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
+    if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
+    const kiln_string *s = (const kiln_string *)value.ptr;
+    if (s == NULL) return 0;
+    if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
+    if (s->unit_len >= 7 && kiln_c99_string_starts_ascii(value, "file://", 7)) return kiln_c99_file_url_matches_path(s, path, path_len);
+    uint8_t *encoded = NULL; size_t encoded_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len) != KILN_C99_OK) return 0;
+    int matches = encoded_len == path_len && (path_len == 0 || memcmp(encoded, path, path_len) == 0);
+    free(encoded);
+    return matches;
+}
+"#,
     );
     output.push_str(
         r#"typedef int (*kiln_realm_entry_fn)(void *context);
