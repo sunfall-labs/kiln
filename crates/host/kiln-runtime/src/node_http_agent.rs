@@ -244,7 +244,7 @@ mod tests {
         assert!(agent.connected(origin.clone(), resource, 1));
         assert_eq!(agent.acquire(origin, 2), AgentDecision::Queued);
         assert_eq!(agent.release(resource, false), AgentRelease::Retire);
-        assert_eq!(agent.closed(resource), None);
+        assert_eq!(agent.closed(resource), Some(2));
     }
 
     #[test]
