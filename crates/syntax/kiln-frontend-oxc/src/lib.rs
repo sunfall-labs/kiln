@@ -117,6 +117,29 @@ fn mapped_template_raw(
     StringUnits::from_units(&normalized)
 }
 
+fn mapped_regexp_pattern(
+    literal_span: oxc_span::Span,
+    flags_len: usize,
+    parsed_pattern: &str,
+    source_units: Option<&[u16]>,
+    source_map: Option<&[usize]>,
+) -> StringUnits {
+    let (Some(units), Some(map)) = (source_units, source_map) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    let start_byte = literal_span.start as usize + 1;
+    let Some(end_byte) = (literal_span.end as usize).checked_sub(flags_len + 1) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    let (Some(&start), Some(&end)) = (map.get(start_byte), map.get(end_byte)) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    units
+        .get(start..end)
+        .map(StringUnits::from_units)
+        .unwrap_or_else(|| StringUnits::from(parsed_pattern))
+}
+
 /// Lossless equivalent of Oxc's `PropertyKey::static_name()`. The latter intentionally exposes
 /// only `&str`, so it cannot carry the AST node's `lone_surrogates` bit for quoted or template
 /// property keys.
@@ -3378,7 +3401,13 @@ impl Lowerer<'_> {
             Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
                 // The source text, not a compiled program: `re.source` hands the pattern back to
                 // the program, and compiling belongs to whoever owns the engine.
-                pattern: literal.regex.pattern.text.to_string(),
+                pattern: mapped_regexp_pattern(
+                    literal.span,
+                    literal.regex.flags.to_string().len(),
+                    literal.regex.pattern.text.as_str(),
+                    self.source_units,
+                    self.source_map,
+                ),
                 flags: literal.regex.flags.to_string(),
             },
             Expression::Super(_) => {
@@ -6360,7 +6389,9 @@ mod tests {
         let units = [
             "const literal = \"a".encode_utf16().collect::<Vec<_>>(),
             vec![0xd800],
-            "b\"; const tagged = tag`x".encode_utf16().collect::<Vec<_>>(),
+            "b\"; const regexp = /x".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            "/; const tagged = tag`x".encode_utf16().collect::<Vec<_>>(),
             vec![0xdfff],
             "y`;".encode_utf16().collect::<Vec<_>>(),
         ]
@@ -6382,6 +6413,19 @@ mod tests {
         assert_eq!(literal.to_units().as_ref(), &[b'a' as u16, 0xd800, b'b' as u16]);
 
         let HirStatementKind::Variable { declarations, .. } = &module.body[1].kind else {
+            panic!("expected regexp declaration");
+        };
+        let HirExpressionKind::RegExp { pattern, .. } = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("regexp initializer")
+            .kind
+        else {
+            panic!("expected regexp literal");
+        };
+        assert_eq!(pattern.to_units().as_ref(), &[b'x' as u16, 0xd800]);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[2].kind else {
             panic!("expected tagged declaration");
         };
         let HirExpressionKind::Call { arguments, .. } = &declarations[0]

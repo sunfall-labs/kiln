@@ -191,8 +191,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<(), ExecutionError> {
-        let transport = source.to_lossy_string();
-        self.enter_eval_with_units(&transport, Some(source), site, script)
+        match source.to_scalar_cow() {
+            Ok(text) => self.enter_eval(text.as_ref(), site, script),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.enter_eval_with_units(&transport, Some(source), site, script)
+            }
+        }
     }
 
     pub(super) fn enter_eval(
@@ -204,7 +209,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.enter_eval_with_units(source, None, site, script)
     }
 
-    fn enter_eval_with_units(
+    pub(super) fn enter_eval_with_units(
         &mut self,
         source: &str,
         source_units: Option<&StringUnits>,
@@ -362,8 +367,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<Value, ExecutionError> {
-        let transport = source.to_lossy_string();
-        self.drive_eval_with_units(&transport, Some(source), site, script)
+        match source.to_scalar_cow() {
+            Ok(text) => self.drive_eval(text.as_ref(), site, script),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.drive_eval_with_units(&transport, Some(source), site, script)
+            }
+        }
     }
 
     pub(super) fn drive_eval(

@@ -499,7 +499,7 @@ impl super::Compiler {
                 self.code.push(Instruction::LoadTemplateObject(site_index));
             }
             ExpressionKind::RegExp { pattern, flags } => {
-                let pattern = self.constant_index(Constant::String(pattern.clone().into()));
+                let pattern = self.constant_index(Constant::String(pattern.clone()));
                 let flags = self.constant_index(Constant::String(flags.clone().into()));
                 self.code.push(Instruction::NewRegExp { pattern, flags });
             }

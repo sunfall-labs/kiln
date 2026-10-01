@@ -21,14 +21,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match op {
             AgentOp::Start => {
                 let source = self.as_text_units(&first, instruction)?;
-                let source = self.checked_dynamic_source(&source)?;
                 // The host's prelude first: a new realm has never heard of `$262`, and the
                 // source it was given assumes it has.
                 let prelude = self.host_agents.unwrap_or_default();
-                group.start(format!(
-                    "{prelude}
-{source}"
-                ))?;
+                let prelude = StringUnits::from(format!("{prelude}\n"));
+                group.start(prelude.concat(&source))?;
                 self.checkpoint = self.next_checkpoint();
                 Ok(Value::Undefined)
             }

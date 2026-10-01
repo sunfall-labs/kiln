@@ -418,13 +418,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         source: &StringUnits,
         realm: RealmId,
     ) -> Result<Result<Value, ()>, ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.shadow_realm_run(source.as_ref(), realm)
+        match source.to_scalar_cow() {
+            Ok(text) => self.shadow_realm_run(text.as_ref(), realm),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.shadow_realm_run_with_units(&transport, Some(source), realm)
+            }
+        }
     }
 
     pub(crate) fn shadow_realm_run(
         &mut self,
         source: &str,
+        realm: RealmId,
+    ) -> Result<Result<Value, ()>, ExecutionError> {
+        self.shadow_realm_run_with_units(source, None, realm)
+    }
+
+    fn shadow_realm_run_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         realm: RealmId,
     ) -> Result<Result<Value, ()>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
@@ -445,7 +459,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_height: self.stack.len(),
             native_depth: self.native_depth,
         });
-        let outcome = match self.enter_eval(source, None, true) {
+        let outcome = match self.enter_eval_with_units(source, source_units, None, true) {
             Ok(()) => match self.run_frames(depth) {
                 Ok(result) => Ok(Ok(result.value)),
                 Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {

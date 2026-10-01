@@ -906,7 +906,7 @@ pub enum ExpressionKind {
     /// pattern is a value the program can read back through `source`, and compiling it belongs to
     /// whoever owns the engine.
     RegExp {
-        pattern: String,
+        pattern: StringUnits,
         flags: String,
     },
     /// `delete name`, where `name` is an unqualified identifier rather than a property access.

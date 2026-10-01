@@ -1482,6 +1482,9 @@ impl Default for ExecutionLimits {
 /// scope. A direct eval fills it with the caller's visible bindings, in the slot order
 /// [`kiln_ir::compile_eval`] promises to bind them to.
 pub struct EvalSource<'a> {
+    /// Scalar UTF-8 view for compatibility with existing compiler callbacks. When
+    /// [`Self::source_units`] is `Some`, this may contain replacement characters; compilers must
+    /// treat the exact UTF-16 units as authoritative source.
     pub source: &'a str,
     /// Exact JavaScript UTF-16 source when the transport string cannot represent it (for example,
     /// a source body containing a lone surrogate). Compilers should prefer this when present.
