@@ -92,9 +92,9 @@ pub(crate) use stream::{
 // `net` houses node:net TCP server and socket implementations.
 mod net;
 pub(crate) use net::{
-    NetSocketState, NodeConnection, NodeServerState, ServerProtocol, node_connect_arguments,
-    node_listen_arguments, node_net_socket_state, node_net_socket_value, node_server_object,
-    node_socket_object, sync_node_socket_ready_state,
+    NetSocketState, NodeConnection, NodeServerState, ServerProtocol, node_listen_arguments,
+    node_net_socket_state, node_net_socket_value, node_server_object, node_socket_object,
+    sync_node_socket_ready_state,
 };
 // `http` houses node:http, node:https, and node:http2 implementations.
 mod http;

@@ -1,6 +1,51 @@
 use super::*;
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
+    fn node_connect_arguments(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<(u16, String, Option<Value>), ExecutionError> {
+        let options = matches!(arguments.first(), Some(Value::Object(_)));
+        let (port_value, host_value) = if options {
+            let bag = &arguments[0];
+            // Keep Node's observable Get order: port, host, then hostname only when host is
+            // nullish. These are ordinary Gets so inherited properties and accessors participate.
+            let port = self.read_property(bag, "port", instruction)?;
+            let mut host = self.read_property(bag, "host", instruction)?;
+            if matches!(host, Value::Undefined | Value::Null) {
+                host = self.read_property(bag, "hostname", instruction)?;
+            }
+            (port, host)
+        } else {
+            (
+                arguments.first().cloned().unwrap_or(Value::Undefined),
+                arguments.get(1).cloned().unwrap_or(Value::Undefined),
+            )
+        };
+        let port = self.as_number_argument(Some(&port_value), instruction)?;
+        if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
+            return Err(ExecutionError::InvalidPort);
+        }
+        let host = if matches!(host_value, Value::Undefined | Value::Null) {
+            "localhost".to_owned()
+        } else {
+            self.as_string(&host_value, instruction)?
+        };
+        let callback_index = if options {
+            1
+        } else if arguments.get(1).is_some_and(is_callable) {
+            1
+        } else {
+            2
+        };
+        let callback = arguments
+            .get(callback_index)
+            .filter(|value| is_callable(value))
+            .cloned();
+        Ok((port as u16, host, callback))
+    }
+
     /// Stamp a job with the context it is being queued in.
     pub(crate) fn scheduled(&self, job: Job) -> Scheduled {
         Scheduled {
@@ -165,7 +210,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(object)
             }
             Native::NodeNetConnect => {
-                let (port, host, callback) = node_connect_arguments(arguments)?;
+                let (port, host, callback) = self.node_connect_arguments(arguments, instruction)?;
                 let state = Rc::new(RefCell::new(NetSocketState {
                     owner: None,
                     resource: None,

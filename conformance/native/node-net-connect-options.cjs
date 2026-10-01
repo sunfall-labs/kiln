@@ -1,13 +1,19 @@
-const net = require('node:net');
-const server = net.createServer(socket => {
-  socket.on('data', data => socket.write(data));
+// Connect options use ordinary property access. Inherited accessors must run before any socket
+// is opened, and exceptions from them must remain observable.
+const net = require("node:net");
+
+const observed = [];
+const options = Object.create({
+  get port() {
+    observed.push("inherited port");
+    throw new Error("stop before connect");
+  },
 });
-server.listen(0, '127.0.0.1', () => {
-  const client = net.connect({ host: '127.0.0.1', port: server.address().port });
-  client.on('connect', () => client.write('options'));
-  client.on('data', data => {
-    console.log(data.toString());
-    client.end();
-    server.close();
-  });
-});
+
+try {
+  net.connect(options);
+  console.log("unexpected socket");
+} catch (error) {
+  console.log(error.message);
+}
+console.log(observed.join(","));
