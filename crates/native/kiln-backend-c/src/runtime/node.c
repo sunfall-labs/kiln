@@ -1542,7 +1542,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         if (status != KILN_C99_OK) return status;
         socket->upgrade_request_id = event->id;
         socket->http_upgrade_pending = 1;
-        kiln_c99_node_unlink_socket(socket);
         arguments[0] = kiln_c99_copy_text("upgrade", 7);
         arguments[1] = request;
         arguments[2] = socket->object;
@@ -1568,6 +1567,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         socket->http_upgraded = 1;
         socket->http_upgrade_pending = 0;
         socket->upgrade_request_id = 0;
+        /* Keep the pending socket rooted in the server's connection list until Hyper actually
+         * transfers it. A rejected/aborted handshake still follows HTTP close accounting; a
+         * successful transfer stops counting as an HTTP connection from this point onward. */
+        kiln_c99_node_unlink_socket(socket);
+        status = kiln_c99_node_server_maybe_emit_close(socket->server, exception);
+        if (status != KILN_C99_OK) return status;
         if (event->data_len != 0) {
             kiln_value head;
             status = kiln_c99_buffer_from_bytes(&head, event->data, (size_t)event->data_len);

@@ -87,12 +87,6 @@ const HTTP_EVENT_UPGRADE_READY: u32 = 12;
 #[cfg(feature = "realm-http")]
 const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
 #[cfg(feature = "realm-http")]
-const HTTP_EVENT_UPGRADE_REQUEST: u32 = 11;
-#[cfg(feature = "realm-http")]
-const HTTP_EVENT_UPGRADE_READY: u32 = 12;
-#[cfg(feature = "realm-http")]
-const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
-#[cfg(feature = "realm-http")]
 const HTTP_AGENT_CONNECT: i32 = 1;
 #[cfg(feature = "realm-http")]
 const HTTP_AGENT_REUSE: i32 = 2;
@@ -4230,9 +4224,6 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         }
         let kind = match event.kind {
             HttpEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
-            HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
-            HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
-            HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,
             HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
             HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
             HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,

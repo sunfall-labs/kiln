@@ -27,8 +27,9 @@ server.on('upgrade', (_request, socket, head) => {
   finish();
 });
 
-server.listen(0, '127.0.0.1', () => {
-  const client = net.connect({ host: '127.0.0.1', port: server.address().port });
+const port = 19838;
+server.listen(port, '127.0.0.1', () => {
+  const client = net.connect({ host: '127.0.0.1', port });
   const response = [];
   client.on('connect', () => {
     client.write(Buffer.from([
@@ -42,7 +43,8 @@ server.listen(0, '127.0.0.1', () => {
     const bytes = Buffer.concat(response);
     const text = bytes.toString('latin1');
     const raw = bytes.lastIndexOf(Buffer.from([0x00, 0xa5, 0xff]));
-    if (!text.includes('200') || !text.includes('101') || raw < 0) {
+    const repeatedRaw = raw < 0 ? -1 : bytes.indexOf(Buffer.from([0x00, 0xa5, 0xff]), raw + 3);
+    if (!text.includes('HTTP/1.1 200') || !text.includes('HTTP/1.1 101') || raw < 0 || repeatedRaw >= 0) {
       throw new Error('pipelined HTTP upgrade did not preserve both responses and raw head bytes');
     }
     console.log(`200,101,${bytes.subarray(raw, raw + 3).toString('hex')}`);
