@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -102,7 +103,7 @@ def parse_result(label: str, output: bytes, stderr: bytes, code: int) -> dict[st
         raise RuntimeError(f"{label} did not run the first call plus 24-call batch: {result!r}")
     for field in TIME_FIELDS:
         value = result.get(field)
-        if not isinstance(value, (int, float)) or value <= 0:
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise RuntimeError(f"{label} has no advancing host-clock measurement in {field}: {result!r}")
     return result
 
