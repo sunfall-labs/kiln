@@ -821,6 +821,10 @@ static int kiln_dyn_append_codepoint(uint16_t **units, size_t *capacity, size_t 
  * private surrogate encoding as invalid UTF-8 and replace the original code unit. */
 static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln_value *out) {
     if (out == NULL || (source_len != 0 && source == NULL)) return KILN_C99_INVALID_ARGUMENT;
+    if (source_len == 0 || kiln_c99_ascii_scan(source, source_len)) {
+        *out = kiln_c99_copy_text(source, source_len);
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
     if (source_len > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_OUT_OF_MEMORY;
     uint16_t *units = source_len == 0 ? NULL :
         (uint16_t *)malloc(source_len * sizeof(uint16_t));
