@@ -1344,57 +1344,6 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         break;
     }
-    case KILN_C99_METHOD_PAD_START:
-    case KILN_C99_METHOD_PAD_END: {
-        double target = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
-        static const uint16_t space[] = {0x20};
-        const uint16_t *filler = space;
-        size_t filler_count = 1;
-        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
-            kiln_value shown;
-            status = kiln_c99_to_text_argument(host, args[1], &shown, depth, thrown);
-            kiln_c99_gc_keep_alive(&receiver);
-            free(needle);
-            needle = NULL;
-            needle_count = 0;
-            if (status != KILN_C99_OK) {
-                break;
-            }
-            status = kiln_c99_to_units(shown, &needle, &needle_count);
-            kiln_c99_gc_keep_alive(&shown);
-            if (status != KILN_C99_OK) {
-                break;
-            }
-            filler = needle;
-            filler_count = needle_count;
-        }
-        if (!(target > (double)count) || filler_count == 0) {
-            *result = kiln_c99_from_units(units, count);
-        } else {
-            size_t wanted = (size_t)target;
-            uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
-            size_t fill = wanted - count;
-            size_t index;
-            if (padded == NULL) {
-                status = KILN_C99_OUT_OF_MEMORY;
-                break;
-            }
-            for (index = 0; index < fill; ++index) {
-                padded[code == KILN_C99_METHOD_PAD_START ? index : count + index] =
-                    filler[index % filler_count];
-            }
-            for (index = 0; index < count; ++index) {
-                padded[code == KILN_C99_METHOD_PAD_START ? fill + index : index] = units[index];
-            }
-            *result = kiln_c99_from_units(padded, wanted);
-            free(padded);
-        }
-        if (result->tag != KILN_VALUE_STRING && status == KILN_C99_OK) {
-            status = KILN_C99_OUT_OF_MEMORY;
-        }
-        kiln_c99_gc_keep_alive(&receiver);
-        break;
-    }
     case KILN_C99_METHOD_TO_UPPER_CASE:
     case KILN_C99_METHOD_TO_LOWER_CASE: {
         size_t index;
