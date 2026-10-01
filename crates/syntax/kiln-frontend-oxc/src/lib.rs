@@ -2361,8 +2361,8 @@ struct RawSurrogateRegExpVisitor<'a> {
     errors: Vec<Diagnostic>,
 }
 
-impl<'a> Visit<'a> for RawSurrogateRegExpVisitor<'_> {
-    fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'a>) {
+impl<'ast, 'source> Visit<'ast> for RawSurrogateRegExpVisitor<'source> {
+    fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'ast>) {
         use oxc_ast::ast::RegExpFlags;
 
         if !literal.regex.flags.intersects(RegExpFlags::U | RegExpFlags::V) {
