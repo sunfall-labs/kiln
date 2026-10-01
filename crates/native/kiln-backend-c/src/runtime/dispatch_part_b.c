@@ -672,8 +672,8 @@
             }
             {
                 kiln_property *marker = kiln_c99_own_private(receiver, "@@regexpMatchAll", 16);
-                regexp_match_all = marker != NULL && KILN_VAL_IS_BOOLEAN(marker->value) &&
-                                   marker->value == KILN_VAL_TRUE;
+                regexp_match_all = marker != NULL && marker->value.tag == KILN_VALUE_BOOLEAN &&
+                                   marker->value.bits != 0;
             }
             status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
             if (status != KILN_C99_OK) {
