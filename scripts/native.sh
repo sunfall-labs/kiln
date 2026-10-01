@@ -170,7 +170,7 @@ run_probe() {
 		return 0
 	fi
 	if [[ -f $interpreted_marker ]]; then
-		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.timedout"
+		printf 'interpreter invocation:\n%s\n' "$interpreted" > "$WORK_DIR/$name.timedout"
 		return 0
 	fi
 	if ((interpreted_status != 0)); then
@@ -237,7 +237,7 @@ run_probe() {
 			return 0
 		fi
 		if [[ -f $native_timeout_marker ]]; then
-			printf '%s\n' "$native" > "$WORK_DIR/$name.timedout"
+			printf 'native invocation (parallelism=%s):\n%s\n' "$threads" "$native" > "$WORK_DIR/$name.timedout"
 			return 0
 		fi
 		if [[ $native != "$interpreted" ]] || ((native_status != interpreted_status)); then
