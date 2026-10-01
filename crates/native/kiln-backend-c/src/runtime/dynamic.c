@@ -5474,49 +5474,11 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             return kiln_dyn_throw_parse_error(lex, thrown,
                                         "Expected block after try");
         }
-        kiln_dyn_scope_init(&try_scope, scope);
-        try_scope.var_target = scope->var_target != NULL ? scope->var_target : scope;
-        int status = kiln_dyn_scope_predeclare_lexicals(&try_scope, try_body, try_len, SIZE_MAX);
+        int status = kiln_dyn_prepare_block_scope(
+            host, scope, &try_scope, try_body, try_len, receiver, args, argc, depth, lex, thrown);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&try_scope);
             return status;
-        }
-        if (kiln_dyn_source_may_have_function_declaration(try_body, try_len)) {
-            kiln_dyn_switch_clause try_clause = {
-                .test = NULL, .test_len = 0, .body = try_body, .body_len = try_len,
-                .is_default = 0,
-            };
-            kiln_dyn_switch_binding *try_bindings = NULL;
-            size_t try_binding_count = 0;
-            int binding_status = kiln_dyn_switch_bindings(&try_clause, 1, &try_bindings,
-                                                          &try_binding_count);
-            if (binding_status <= 0) {
-                free(try_bindings);
-                kiln_dyn_scope_destroy(&try_scope);
-                return binding_status < 0
-                           ? KILN_C99_OUT_OF_MEMORY
-                           : kiln_dyn_throw_parse_error(
-                                 lex, thrown, "Invalid or duplicate try-block lexical declaration");
-            }
-            size_t function_count = 0;
-            for (size_t index = 0; index < try_binding_count; ++index) {
-                if (!try_bindings[index].is_function) continue;
-                if (function_count != index)
-                    try_bindings[function_count] = try_bindings[index];
-                function_count++;
-            }
-            if (function_count != 0) {
-                status = kiln_dyn_switch_predeclare(&try_scope, try_bindings, function_count);
-                if (status == KILN_C99_OK)
-                    status = kiln_dyn_switch_initialize_functions(
-                        host, &try_scope, &try_clause, 1, try_bindings, function_count,
-                        receiver, args, argc, depth, thrown);
-            }
-            free(try_bindings);
-            if (status != KILN_C99_OK) {
-                kiln_dyn_scope_destroy(&try_scope);
-                return status;
-            }
         }
         memset(&block, 0, sizeof(block));
         block.src = try_body;
@@ -5575,6 +5537,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (did_throw) {
                 kiln_dyn_scope catch_scope;
                 kiln_dyn_scope_init(&catch_scope, scope);
+                catch_scope.var_target = scope->var_target != NULL ? scope->var_target : scope;
                 if (catch_name != NULL &&
                     !kiln_dyn_scope_set(&catch_scope, catch_name, catch_name_len, exception)) {
                     kiln_dyn_scope_destroy(&catch_scope);
@@ -5626,15 +5589,12 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (!kiln_dyn_capture_block(lex, &finally_body, &finally_len))
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                                   "Expected finally block");
-            kiln_dyn_scope finally_scope;
-            kiln_dyn_scope_init(&finally_scope, scope);
             kiln_dyn_scope finally_block_scope;
             int finally_prepare_status = kiln_dyn_prepare_block_scope(
-                host, &finally_scope, &finally_block_scope, finally_body, finally_len, receiver,
+                host, scope, &finally_block_scope, finally_body, finally_len, receiver,
                 args, argc, depth, lex, thrown);
             if (finally_prepare_status != KILN_C99_OK) {
                 kiln_dyn_scope_destroy(&finally_block_scope);
-                kiln_dyn_scope_destroy(&finally_scope);
                 return finally_prepare_status;
             }
             int finally_returned = 0;
@@ -5667,7 +5627,6 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             }
             kiln_dyn_token_free(&block.curr);
             kiln_dyn_scope_destroy(&finally_block_scope);
-            kiln_dyn_scope_destroy(&finally_scope);
             if (finally_status != KILN_C99_OK || finally_returned) {
                 completion_status = finally_status;
                 completion_return = finally_returned;

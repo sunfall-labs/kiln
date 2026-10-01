@@ -27,3 +27,11 @@ const finallyFunction = Function(
 );
 if (finallyFunction() !== 4) throw new Error("finally-block function declaration was not initialized");
 console.log("finally-block-function", finallyFunction());
+
+const vars = Function("try { throw 1; } catch (error) { var fromCatch = error + 2; } finally { var fromFinally = 4; } return fromCatch + fromFinally;")();
+if (vars !== 7) throw new Error("catch/finally var declarations lost their function environment");
+const sloppy = Function("try { function local() { return 8; } } finally {} return local();")();
+if (sloppy !== 8) throw new Error("try block Annex B declaration lost its outer alias");
+const strict = Function("'use strict'; try { function local() {} } finally {} return typeof local;")();
+if (strict !== "undefined") throw new Error("strict try block function escaped its block");
+console.log("block-var-and-function-environments", vars, sloppy, strict);

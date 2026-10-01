@@ -53,6 +53,8 @@ def main():
     parser.add_argument('--kiln', required=True)
     parser.add_argument('--raw', type=Path, required=True)
     parser.add_argument('--timeout', type=float, default=600)
+    parser.add_argument('--profile', choices=('native-dev', 'native-release'), default='native-dev',
+                        help='native build profile; phase timings retain this policy explicitly')
     parser.add_argument('packages', nargs='*')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -92,6 +94,8 @@ def main():
                 'discovered': len(rows),
                 'timezone': os.environ.get('TZ'),
                 'host': 'node',
+                'execution_engine': 'native',
+                'native_profile': args.profile,
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
@@ -118,7 +122,7 @@ def main():
             if phases['node']['exit'] != 0 or phases['node']['timeout']:
                 status = 'node-baseline-failed'
             else:
-                phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--output', str(binary)], build, args.timeout)
+                phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--profile', args.profile, '--output', str(binary)], build, args.timeout)
                 summary = build.with_suffix('.stdout').read_text(errors='replace')
                 timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
                 if timing:
