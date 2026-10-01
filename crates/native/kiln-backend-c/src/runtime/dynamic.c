@@ -2837,8 +2837,100 @@ typedef struct {
 
 /* Switch lexical declarations belong to one scope spanning every case body. Inventory only
  * their names here: initializers execute only if their declaration statement is reached. */
-static int kiln_dyn_switch_has_var(const kiln_dyn_switch_clause *clauses,
-                                   size_t clause_count, const char *name, size_t name_len) {
+typedef struct {
+    const char *name;
+    size_t name_len;
+} kiln_dyn_switch_var;
+
+/* Shared callable-boundary state for declaration inventories. Both function hoisting and
+ * switch CaseBlock validation must ignore declarations in nested callable bodies. */
+static int kiln_dyn_callable_scan_advance(kiln_dyn_lexer *scan,
+                                           kiln_dyn_token_kind previous,
+                                           int *brace_depth, int *callable_depth,
+                                           int *paren_depth, int *function_header,
+                                           int *function_paren_depth,
+                                           int *pending_callable_body,
+                                           int *previous_previous_is_method_key,
+                                           int *previous_is_control_head,
+                                           int **callable_braces, size_t *callable_capacity,
+                                           unsigned char **callable_parens,
+                                           size_t *paren_capacity) {
+    kiln_dyn_token_kind kind = scan->curr.kind;
+    if (kind == KILN_DYN_KW_FUNCTION) {
+        *function_header = 1;
+        *function_paren_depth = -1;
+    } else if (kind == KILN_DYN_LPAREN) {
+        int method_candidate = *previous_previous_is_method_key && !*previous_is_control_head &&
+            previous != KILN_DYN_KW_IF && previous != KILN_DYN_KW_FOR &&
+            previous != KILN_DYN_KW_WITH;
+        if ((size_t)*paren_depth >= *paren_capacity) {
+            size_t capacity = *paren_capacity == 0 ? 16 : *paren_capacity * 2;
+            if (capacity <= (size_t)*paren_depth) return -1;
+            unsigned char *next = realloc(*callable_parens, capacity);
+            if (next == NULL) return -1;
+            memset(next + *paren_capacity, 0, capacity - *paren_capacity);
+            *callable_parens = next;
+            *paren_capacity = capacity;
+        }
+        (*callable_parens)[(*paren_depth)++] = (unsigned char)method_candidate;
+        if (*function_header && *function_paren_depth < 0)
+            *function_paren_depth = *paren_depth;
+    } else if (kind == KILN_DYN_RPAREN && *paren_depth > 0) {
+        int opener = --*paren_depth;
+        int method_candidate = (*callable_parens)[opener];
+        if (*function_paren_depth == *paren_depth + 1) {
+            *pending_callable_body = 1;
+            *function_header = 0;
+            *function_paren_depth = -1;
+        } else if (method_candidate && *paren_depth == 0) {
+            *pending_callable_body = 1;
+        }
+    } else if (kind == KILN_DYN_ARROW) {
+        *pending_callable_body = 1;
+        *function_header = 0;
+    } else if (kind != KILN_DYN_LBRACE) {
+        if (*pending_callable_body) *pending_callable_body = 0;
+        if (kind != KILN_DYN_KW_ASYNC && kind != KILN_DYN_KW_FUNCTION &&
+            kind != KILN_DYN_IDENT && kind != KILN_DYN_STAR)
+            *function_header = 0;
+    }
+    if (kind == KILN_DYN_LBRACE) {
+        (*brace_depth)++;
+        if (*pending_callable_body) {
+            if ((size_t)*callable_depth >= *callable_capacity) {
+                size_t capacity = *callable_capacity == 0 ? 16 : *callable_capacity * 2;
+                if (capacity <= (size_t)*callable_depth ||
+                    capacity > SIZE_MAX / sizeof **callable_braces) return -1;
+                int *next = realloc(*callable_braces, capacity * sizeof *next);
+                if (next == NULL) return -1;
+                *callable_braces = next;
+                *callable_capacity = capacity;
+            }
+            (*callable_braces)[(*callable_depth)++] = *brace_depth;
+        }
+        *pending_callable_body = 0;
+    } else if (kind == KILN_DYN_RBRACE) {
+        if (*callable_depth > 0 && (*callable_braces)[*callable_depth - 1] == *brace_depth)
+            (*callable_depth)--;
+        if (*brace_depth > 0) (*brace_depth)--;
+    }
+    *previous_previous_is_method_key = kind == KILN_DYN_IDENT || kind == KILN_DYN_STR ||
+                                       kind == KILN_DYN_RBRACKET;
+    *previous_is_control_head = kind == KILN_DYN_IDENT &&
+        ((scan->curr.len == 5 && memcmp(scan->curr.start, "while", 5) == 0) ||
+         (scan->curr.len == 6 && memcmp(scan->curr.start, "switch", 6) == 0) ||
+         (scan->curr.len == 5 && memcmp(scan->curr.start, "catch", 5) == 0);
+    return 1;
+}
+
+/* Collect CaseBlock VarDeclaredNames once, sharing one inventory across lexical-name checks.
+ * Callable-body tracking follows the function-hoist scanner below so nested functions and
+ * methods do not leak their var declarations into the surrounding CaseBlock. */
+static int kiln_dyn_switch_vars(const kiln_dyn_switch_clause *clauses, size_t clause_count,
+                                kiln_dyn_switch_var **out, size_t *out_count) {
+    size_t capacity_vars = 0;
+    *out = NULL;
+    *out_count = 0;
     for (size_t clause = 0; clause < clause_count; ++clause) {
         const char *source = clauses[clause].body;
         size_t source_len = clauses[clause].body_len;
@@ -2855,7 +2947,6 @@ static int kiln_dyn_switch_has_var(const kiln_dyn_switch_clause *clauses,
         size_t callable_capacity = 0;
         unsigned char *callable_parens = NULL;
         size_t paren_capacity = 0;
-        int found = 0;
         while (scan.curr.kind != KILN_DYN_EOF) {
             kiln_dyn_token_kind kind = scan.curr.kind;
             if (kind == KILN_DYN_KW_VAR && callable_depth == 0 &&
@@ -2871,8 +2962,27 @@ static int kiln_dyn_switch_has_var(const kiln_dyn_switch_clause *clauses,
                 int expect_name = 1, parens = 0, brackets = 0, braces = 0;
                 while (look.curr.kind != KILN_DYN_EOF) {
                     if (expect_name && look.curr.kind == KILN_DYN_IDENT) {
-                        if (look.curr.len == name_len &&
-                            memcmp(look.curr.start, name, name_len) == 0) found = 1;
+                        if (*out_count == capacity_vars) {
+                            size_t capacity = capacity_vars == 0 ? 8 : capacity_vars * 2;
+                            if (capacity <= capacity_vars || capacity > SIZE_MAX / sizeof **out) {
+                                kiln_dyn_token_free(&look.curr);
+                                free(callable_braces); free(callable_parens);
+                                kiln_dyn_token_free(&scan.curr); free(*out); *out = NULL;
+                                *out_count = 0; return -1;
+                            }
+                            kiln_dyn_switch_var *next = realloc(*out, capacity * sizeof *next);
+                            if (next == NULL) {
+                                kiln_dyn_token_free(&look.curr);
+                                free(callable_braces); free(callable_parens);
+                                kiln_dyn_token_free(&scan.curr); free(*out); *out = NULL;
+                                *out_count = 0; return -1;
+                            }
+                            *out = next;
+                            capacity_vars = capacity;
+                        }
+                        (*out)[(*out_count)++] = (kiln_dyn_switch_var){
+                            .name = look.curr.start, .name_len = look.curr.len,
+                        };
                         expect_name = 0;
                         kiln_dyn_lexer_next(&look);
                         continue;
@@ -2897,67 +3007,24 @@ static int kiln_dyn_switch_has_var(const kiln_dyn_switch_clause *clauses,
                     kiln_dyn_lexer_next(&look);
                 }
                 kiln_dyn_token_free(&look.curr);
-                if (found) break;
             }
-            if (kind == KILN_DYN_KW_FUNCTION) {
-                function_header = 1;
-                function_paren_depth = -1;
-            } else if (kind == KILN_DYN_LPAREN) {
-                int method_candidate = previous_previous_is_method_key && !previous_is_control_head &&
-                    previous != KILN_DYN_KW_IF && previous != KILN_DYN_KW_FOR &&
-                    previous != KILN_DYN_KW_WITH;
-                if ((size_t)paren_depth >= paren_capacity) {
-                    size_t capacity = paren_capacity == 0 ? 16 : paren_capacity * 2;
-                    unsigned char *next = realloc(callable_parens, capacity);
-                    if (next == NULL) { free(callable_braces); free(callable_parens); kiln_dyn_token_free(&scan.curr); return -1; }
-                    memset(next + paren_capacity, 0, capacity - paren_capacity);
-                    callable_parens = next; paren_capacity = capacity;
-                }
-                callable_parens[paren_depth++] = (unsigned char)method_candidate;
-                if (function_header && function_paren_depth < 0) function_paren_depth = paren_depth;
-            } else if (kind == KILN_DYN_RPAREN && paren_depth > 0) {
-                int opener = --paren_depth;
-                int method_candidate = callable_parens[opener];
-                if (function_paren_depth == paren_depth + 1) {
-                    pending_callable_body = 1; function_header = 0; function_paren_depth = -1;
-                } else if (method_candidate && paren_depth == 0) pending_callable_body = 1;
-            } else if (kind == KILN_DYN_ARROW) {
-                pending_callable_body = 1; function_header = 0;
-            } else if (kind != KILN_DYN_LBRACE && pending_callable_body) {
-                pending_callable_body = 0;
+            if (kiln_dyn_callable_scan_advance(
+                    &scan, previous, &brace_depth, &callable_depth, &paren_depth,
+                    &function_header, &function_paren_depth, &pending_callable_body,
+                    &previous_previous_is_method_key, &previous_is_control_head,
+                    &callable_braces, &callable_capacity, &callable_parens, &paren_capacity) < 0) {
+                free(callable_braces); free(callable_parens);
+                kiln_dyn_token_free(&scan.curr); free(*out); *out = NULL; *out_count = 0;
+                return -1;
             }
-            if (kind == KILN_DYN_LBRACE) {
-                brace_depth++;
-                if (pending_callable_body) {
-                    if ((size_t)callable_depth >= callable_capacity) {
-                        size_t capacity = callable_capacity == 0 ? 16 : callable_capacity * 2;
-                        int *next = realloc(callable_braces, capacity * sizeof *next);
-                        if (next == NULL) { free(callable_braces); free(callable_parens); kiln_dyn_token_free(&scan.curr); return -1; }
-                        callable_braces = next; callable_capacity = capacity;
-                    }
-                    callable_braces[callable_depth++] = brace_depth;
-                }
-                pending_callable_body = 0;
-            } else if (kind == KILN_DYN_RBRACE) {
-                if (callable_depth > 0 && callable_braces[callable_depth - 1] == brace_depth)
-                    callable_depth--;
-                if (brace_depth > 0) brace_depth--;
-            }
-            previous_previous_is_method_key = kind == KILN_DYN_IDENT || kind == KILN_DYN_STR ||
-                                               kind == KILN_DYN_RBRACKET;
-            previous_is_control_head = kind == KILN_DYN_IDENT &&
-                ((scan.curr.len == 5 && memcmp(scan.curr.start, "while", 5) == 0) ||
-                 (scan.curr.len == 6 && memcmp(scan.curr.start, "switch", 6) == 0) ||
-                 (scan.curr.len == 5 && memcmp(scan.curr.start, "catch", 5) == 0);
             previous = kind;
             kiln_dyn_lexer_next(&scan);
         }
         kiln_dyn_token_free(&scan.curr);
         free(callable_braces);
         free(callable_parens);
-        if (found) return 1;
     }
-    return 0;
+    return 1;
 }
 
 static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
@@ -2965,6 +3032,10 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                                     kiln_dyn_switch_binding **out,
                                     size_t *out_count) {
     size_t capacity = 0;
+    kiln_dyn_switch_var *vars = NULL;
+    size_t var_count = 0;
+    int vars_status = kiln_dyn_switch_vars(clauses, clause_count, &vars, &var_count);
+    if (vars_status < 0) return -1;
     *out = NULL;
     *out_count = 0;
     for (size_t clause = 0; clause < clause_count; ++clause) {
@@ -2985,26 +3056,35 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                     if (scan.curr.kind != KILN_DYN_IDENT) {
                         kiln_dyn_token_free(&scan.curr);
                         free(*out);
+                        free(vars);
                         *out = NULL;
                         *out_count = 0;
                         return 0;
                     }
                     const char *name = scan.curr.start;
                     size_t name_len = scan.curr.len;
-                    int conflicts_with_var = kiln_dyn_switch_has_var(
-                        clauses, clause_count, name, name_len);
-                    if (conflicts_with_var != 0) {
+                    int conflicts_with_var = 0;
+                    for (size_t var_index = 0; var_index < var_count; ++var_index) {
+                        if (vars[var_index].name_len == name_len &&
+                            memcmp(vars[var_index].name, name, name_len) == 0) {
+                            conflicts_with_var = 1;
+                            break;
+                        }
+                    }
+                    if (conflicts_with_var) {
                         kiln_dyn_token_free(&scan.curr);
                         free(*out);
+                        free(vars);
                         *out = NULL;
                         *out_count = 0;
-                        return conflicts_with_var < 0 ? -1 : 0;
+                        return 0;
                     }
                     for (size_t index = 0; index < *out_count; ++index) {
                         if ((*out)[index].name_len == name_len &&
                             memcmp((*out)[index].name, name, name_len) == 0) {
                             kiln_dyn_token_free(&scan.curr);
                             free(*out);
+                            free(vars);
                             *out = NULL;
                             *out_count = 0;
                             return 0;
@@ -3015,6 +3095,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                     if (is_const && !has_initializer) {
                         kiln_dyn_token_free(&scan.curr);
                         free(*out);
+                        free(vars);
                         *out = NULL;
                         *out_count = 0;
                         return 0;
@@ -3025,6 +3106,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                         if (grown == NULL) {
                             kiln_dyn_token_free(&scan.curr);
                             free(*out);
+                            free(vars);
                             *out = NULL;
                             *out_count = 0;
                             return -1;
@@ -3042,6 +3124,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
                             scan.curr.kind == KILN_DYN_SEMI) {
                             kiln_dyn_token_free(&scan.curr);
                             free(*out);
+                            free(vars);
                             *out = NULL;
                             *out_count = 0;
                             return 0;
@@ -3091,6 +3174,7 @@ static int kiln_dyn_switch_bindings(const kiln_dyn_switch_clause *clauses,
         }
         kiln_dyn_token_free(&scan.curr);
     }
+    free(vars);
     return 1;
 }
 
@@ -4231,88 +4315,24 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
             kiln_dyn_token_free(&look.curr);
         }
 declaration_scan_done:
-        if (kind == KILN_DYN_KW_FUNCTION) {
-            function_header = 1;
-            function_paren_depth = -1;
-        } else if (kind == KILN_DYN_LPAREN) {
-            int method_candidate = previous_previous_is_method_key && !previous_is_control_head &&
-                previous != KILN_DYN_KW_IF && previous != KILN_DYN_KW_FOR &&
-                previous != KILN_DYN_KW_WITH;
-            if ((size_t)paren_depth >= callable_paren_capacity) {
-                size_t capacity = callable_paren_capacity == 0 ? 16 : callable_paren_capacity * 2;
-                if (capacity <= (size_t)paren_depth || capacity > SIZE_MAX / sizeof *callable_parens) {
-                    status = KILN_C99_OUT_OF_MEMORY;
-                    goto done;
-                }
-                unsigned char *next = (unsigned char *)realloc(callable_parens, capacity);
-                if (next == NULL) {
-                    status = KILN_C99_OUT_OF_MEMORY;
-                    goto done;
-                }
-                memset(next + callable_paren_capacity, 0, capacity - callable_paren_capacity);
-                callable_parens = next;
-                callable_paren_capacity = capacity;
-            }
-            callable_parens[paren_depth] = method_candidate;
-            paren_depth++;
-            if (function_header && function_paren_depth < 0) function_paren_depth = paren_depth;
-        } else if (kind == KILN_DYN_RPAREN && paren_depth > 0) {
-            int opener = --paren_depth;
-            int method_candidate = (size_t)opener < callable_paren_capacity
-                ? callable_parens[opener] : 0;
-            if (function_paren_depth == paren_depth + 1) {
-                pending_callable_body = 1;
-                function_header = 0;
-                function_paren_depth = -1;
-            } else if (method_candidate && paren_depth == 0) {
-                pending_callable_body = 1;
-            }
-        } else if (kind == KILN_DYN_ARROW) {
-            pending_callable_body = 1;
-            function_header = 0;
-        } else if (kind != KILN_DYN_LBRACE) {
-            if (pending_callable_body) pending_callable_body = 0;
-            if (kind != KILN_DYN_KW_ASYNC && kind != KILN_DYN_KW_FUNCTION &&
-                kind != KILN_DYN_IDENT && kind != KILN_DYN_STAR)
-                function_header = 0;
+        if (kiln_dyn_callable_scan_advance(
+                &scan, previous, &brace_depth, &callable_depth, &paren_depth,
+                &function_header, &function_paren_depth, &pending_callable_body,
+                &previous_previous_is_method_key, &previous_is_control_head,
+                &callable_braces, &callable_brace_capacity,
+                &callable_parens, &callable_paren_capacity) < 0) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
         }
-        if (kind == KILN_DYN_LBRACE) {
-            brace_depth++;
-            if (pending_callable_body) {
-                if ((size_t)callable_depth >= callable_brace_capacity) {
-                    size_t capacity = callable_brace_capacity == 0 ? 16 : callable_brace_capacity * 2;
-                    if (capacity <= (size_t)callable_depth || capacity > SIZE_MAX / sizeof *callable_braces) {
-                        status = KILN_C99_OUT_OF_MEMORY;
-                        goto done;
-                    }
-                    int *next = (int *)realloc(callable_braces, capacity * sizeof *callable_braces);
-                    if (next == NULL) {
-                        status = KILN_C99_OUT_OF_MEMORY;
-                        goto done;
-                    }
-                    callable_braces = next;
-                    callable_brace_capacity = capacity;
-                }
-                callable_braces[callable_depth++] = brace_depth;
-            }
-            pending_callable_body = 0;
-            if (brace_depth == 1) statement_start = 0;
-        } else if (kind == KILN_DYN_RBRACE) {
-            if (callable_depth > 0 && callable_braces[callable_depth - 1] == brace_depth)
-                callable_depth--;
-            if (brace_depth > 0) brace_depth--;
-            if (brace_depth == 0) statement_start = 1;
+        if (kind == KILN_DYN_LBRACE && brace_depth == 1) {
+            statement_start = 0;
+        } else if (kind == KILN_DYN_RBRACE && brace_depth == 0) {
+            statement_start = 1;
         } else if (kind == KILN_DYN_SEMI && brace_depth == 0) {
             statement_start = 1;
         } else if (brace_depth == 0) {
             statement_start = 0;
         }
-        previous_previous_is_method_key = kind == KILN_DYN_IDENT || kind == KILN_DYN_STR ||
-                                          kind == KILN_DYN_RBRACKET;
-        previous_is_control_head = kind == KILN_DYN_IDENT &&
-            ((scan.curr.len == 5 && memcmp(scan.curr.start, "while", 5) == 0) ||
-             (scan.curr.len == 6 && memcmp(scan.curr.start, "switch", 6) == 0) ||
-             (scan.curr.len == 5 && memcmp(scan.curr.start, "catch", 5) == 0));
         previous = kind;
         previous_end = scan.pos;
         kiln_dyn_lexer_next(&scan);
