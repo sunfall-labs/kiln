@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
+use taffy::prelude::*;
 
 const NO: i8 = 0;
 const YES: i8 = 1;
@@ -291,6 +292,66 @@ fn get_or_create_flipped_clip_class() -> *const Class {
             );
         }
         decl.register()
+    }
+}
+
+fn get_or_create_flipped_view_class() -> &'static Class {
+    if let Some(cls) = Class::get("KilnFlippedView") {
+        cls
+    } else {
+        let superclass = class!(NSView);
+        let mut decl = ClassDecl::new("KilnFlippedView", superclass).unwrap();
+        extern "C" fn is_flipped(_this: &Object, _cmd: Sel) -> i8 {
+            1
+        }
+        unsafe {
+            decl.add_method(
+                sel!(isFlipped),
+                is_flipped as extern "C" fn(&Object, Sel) -> i8,
+            );
+        }
+        decl.register()
+    }
+}
+
+pub unsafe fn layout_taffy_children(parent_id: u64, parent_view: *mut Object) {
+    if parent_view.is_null() {
+        return;
+    }
+    let rect: CGRect = msg_send![parent_view, bounds];
+    if rect.size.width <= 0.0 && rect.size.height <= 0.0 {
+        return;
+    }
+    let child_layouts = crate::layout::with_layout_engine(|engine| {
+        engine.compute_layout(parent_id, rect.size.width as f32, rect.size.height as f32);
+        engine.get_child_layouts(parent_id)
+    });
+
+    let wids = WIDGETS.lock().unwrap();
+    if let Some(map) = wids.as_ref() {
+        for (child_id, lrect) in child_layouts {
+            if let Some(entry) = map.get(&child_id) {
+                let child_view = entry.view.0;
+                if !child_view.is_null() {
+                    let child_rect = CGRect {
+                        origin: CGPoint {
+                            x: lrect.x as f64,
+                            y: lrect.y as f64,
+                        },
+                        size: CGSize {
+                            width: lrect.width as f64,
+                            height: lrect.height as f64,
+                        },
+                    };
+                    let () = msg_send![child_view, setFrame: child_rect];
+                    if entry.tag == "box" || entry.tag == "grid" {
+                        unsafe {
+                            layout_taffy_children(child_id, child_view);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -629,7 +690,7 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                 let () = msg_send![stack, setWantsLayer: YES];
                 stack
             }
-            "card" | "box" => {
+            "card" => {
                 let alloc: *mut Object = msg_send![class!(NSBox), alloc];
                 let rect = CGRect {
                     origin: CGPoint { x: 0.0, y: 0.0 },
@@ -659,9 +720,75 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                     msg_send![box_view, setContentHuggingPriority: 250.0f32 forOrientation: 1isize];
                 let width_anchor: *mut Object = msg_send![box_view, widthAnchor];
                 let constraint: *mut Object =
-                    msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 480.0f64];
+                    msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 80.0f64];
                 let () = msg_send![constraint, setActive: YES];
                 box_view
+            }
+            "box" | "grid" => {
+                let flipped_cls = get_or_create_flipped_view_class();
+                let alloc: *mut Object = msg_send![flipped_cls, alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 520.0,
+                        height: 120.0,
+                    },
+                };
+                let view: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let () = msg_send![view, setWantsLayer: YES];
+                let () =
+                    msg_send![view, setContentHuggingPriority: 250.0f32 forOrientation: 0isize];
+                let () =
+                    msg_send![view, setContentHuggingPriority: 250.0f32 forOrientation: 1isize];
+
+                let mut style = Style {
+                    display: if tag == "grid" {
+                        Display::Grid
+                    } else {
+                        Display::Flex
+                    },
+                    size: Size {
+                        width: percent(1.0),
+                        height: auto(),
+                    },
+                    ..Default::default()
+                };
+
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                    if let Some(s) = parsed.get("style") {
+                        style = crate::layout::parse_style(s);
+                        if let Some(h) = s.get("height").and_then(|v| v.as_f64()) {
+                            let anchor: *mut Object = msg_send![view, heightAnchor];
+                            let constraint: *mut Object =
+                                msg_send![anchor, constraintEqualToConstant: h];
+                            let () = msg_send![constraint, setActive: YES];
+                        }
+                    }
+                    if tag == "grid" {
+                        style.display = Display::Grid;
+                        if let Some(cols) = parsed.get("columns").and_then(|v| v.as_str()) {
+                            style.grid_template_columns =
+                                crate::layout::parse_grid_template_tracks(cols);
+                        }
+                        if let Some(rows) = parsed.get("rows").and_then(|v| v.as_str()) {
+                            style.grid_template_rows =
+                                crate::layout::parse_grid_template_tracks(rows);
+                        }
+                        if let Some(g) = parsed.get("gap") {
+                            let lp = crate::layout::parse_length_percentage(g);
+                            style.gap = Size {
+                                width: lp,
+                                height: lp,
+                            };
+                        }
+                    }
+                }
+
+                crate::layout::with_layout_engine(|engine| {
+                    engine.get_or_create_node(id, style);
+                });
+
+                view
             }
             "divider" | "separator" => {
                 let alloc: *mut Object = msg_send![class!(NSBox), alloc];
@@ -929,6 +1056,25 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
             }
         };
 
+        if tag != "box" && tag != "grid" {
+            crate::layout::with_layout_engine(|engine| {
+                let mut style = Style::default();
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                    if let Some(s) = parsed.get("style") {
+                        style = crate::layout::parse_style(s);
+                    }
+                }
+                let intrinsic: CGSize = msg_send![view, intrinsicContentSize];
+                if intrinsic.width > 0.0 && style.size.width == auto() {
+                    style.size.width = length(intrinsic.width as f32);
+                }
+                if intrinsic.height > 0.0 && style.size.height == auto() {
+                    style.size.height = length(intrinsic.height as f32);
+                }
+                engine.get_or_create_node(id, style);
+            });
+        }
+
         let mut wids = WIDGETS.lock().unwrap();
         if let Some(map) = wids.as_mut() {
             map.insert(
@@ -1181,6 +1327,84 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         let () = msg_send![constraint, setActive: YES];
                     }
                 }
+                (_, "style") => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(val_str) {
+                        let mut new_style = crate::layout::parse_style(&json);
+                        if tag == "grid" {
+                            new_style.display = Display::Grid;
+                        }
+                        if let Some(h) = json.get("height").and_then(|v| v.as_f64()) {
+                            let anchor: *mut Object = msg_send![view, heightAnchor];
+                            let constraint: *mut Object =
+                                msg_send![anchor, constraintEqualToConstant: h];
+                            let () = msg_send![constraint, setActive: YES];
+                        }
+                        crate::layout::with_layout_engine(|engine| {
+                            engine.update_node_style(id, |style| {
+                                let old_cols = std::mem::take(&mut style.grid_template_columns);
+                                let old_rows = std::mem::take(&mut style.grid_template_rows);
+                                let old_gap = style.gap;
+                                *style = new_style;
+                                if tag == "grid" {
+                                    style.display = Display::Grid;
+                                    if style.grid_template_columns.is_empty() {
+                                        style.grid_template_columns = old_cols;
+                                    }
+                                    if style.grid_template_rows.is_empty() {
+                                        style.grid_template_rows = old_rows;
+                                    }
+                                }
+                                if style.gap.width == length(0.0) && style.gap.height == length(0.0)
+                                {
+                                    style.gap = old_gap;
+                                }
+                            });
+                        });
+                        layout_taffy_children(id, view);
+                        let () = msg_send![view, setNeedsDisplay: YES];
+                    }
+                }
+                ("grid", "columns") | ("grid", "gridTemplateColumns") => {
+                    let tracks = crate::layout::parse_grid_template_tracks(val_str);
+                    crate::layout::with_layout_engine(|engine| {
+                        engine.update_node_style(id, |style| {
+                            style.display = Display::Grid;
+                            style.grid_template_columns = tracks;
+                        });
+                    });
+                    layout_taffy_children(id, view);
+                    let () = msg_send![view, setNeedsDisplay: YES];
+                }
+                ("grid", "rows") | ("grid", "gridTemplateRows") => {
+                    let tracks = crate::layout::parse_grid_template_tracks(val_str);
+                    crate::layout::with_layout_engine(|engine| {
+                        engine.update_node_style(id, |style| {
+                            style.display = Display::Grid;
+                            style.grid_template_rows = tracks;
+                        });
+                    });
+                    layout_taffy_children(id, view);
+                    let () = msg_send![view, setNeedsDisplay: YES];
+                }
+                ("grid", "gap") | ("box", "gap") => {
+                    let lp = if val_num > 0.0 {
+                        length(val_num as f32)
+                    } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(val_str) {
+                        crate::layout::parse_length_percentage(&val)
+                    } else {
+                        length(0.0)
+                    };
+                    crate::layout::with_layout_engine(|engine| {
+                        engine.update_node_style(id, |style| {
+                            style.gap = Size {
+                                width: lp,
+                                height: lp,
+                            };
+                        });
+                    });
+                    layout_taffy_children(id, view);
+                    let () = msg_send![view, setNeedsDisplay: YES];
+                }
                 _ => {}
             }
         }
@@ -1198,7 +1422,15 @@ pub fn widget_add_child(parent_id: u64, child_id: u64) {
         unsafe {
             if parent_tag == "vstack" || parent_tag == "hstack" {
                 let () = msg_send![parent_view, addArrangedSubview: child_view];
-            } else if parent_tag == "card" || parent_tag == "box" {
+            } else if parent_tag == "box" || parent_tag == "grid" {
+                let () = msg_send![child_view, setTranslatesAutoresizingMaskIntoConstraints: YES];
+                let () = msg_send![parent_view, addSubview: child_view];
+                crate::layout::with_layout_engine(|engine| {
+                    engine.add_child(parent_id, child_id);
+                });
+                layout_taffy_children(parent_id, parent_view);
+                let () = msg_send![parent_view, setNeedsDisplay: YES];
+            } else if parent_tag == "card" {
                 let () = msg_send![child_view, setAutoresizingMask: 18usize];
                 let () = msg_send![parent_view, setContentView: child_view];
             } else if parent_tag == "scroll" || parent_tag == "scrollview" {
@@ -1229,6 +1461,9 @@ pub fn widget_add_child(parent_id: u64, child_id: u64) {
 }
 
 pub fn widget_remove_child(parent_id: u64, child_id: u64) {
+    crate::layout::with_layout_engine(|engine| {
+        engine.remove_child(parent_id, child_id);
+    });
     let pair = {
         let wids = WIDGETS.lock().unwrap();
         wids.as_ref()

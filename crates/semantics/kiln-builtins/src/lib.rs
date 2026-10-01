@@ -156,11 +156,13 @@ declare_ts_builtins! {
         presence_test: gui_builtin_source_is_present,
         compilation_test: gui_builtin_compiles_cleanly,
         exports: [
+            "Box",
             "Button",
             "Card",
             "Checkbox",
             "Divider",
             "Fragment",
+            "Grid",
             "HStack",
             "HostGuiBridge",
             "Icon",

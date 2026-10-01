@@ -746,11 +746,23 @@ export class AppKitDriver implements PlatformDriver {
           if (ind !== undefined) this.updateProperty(handle, node.tag, "indeterminate", ind);
         }
 
+        if (node.tag === "grid" || node.tag === "box") {
+          const style = node.getProperty("style");
+          if (style !== undefined) this.updateProperty(handle, node.tag, "style", style);
+          const columns = node.getProperty("columns");
+          if (columns !== undefined) this.updateProperty(handle, node.tag, "columns", columns);
+          const rows = node.getProperty("rows");
+          if (rows !== undefined) this.updateProperty(handle, node.tag, "rows", rows);
+          const gap = node.getProperty("gap");
+          if (gap !== undefined) this.updateProperty(handle, node.tag, "gap", gap);
+        }
+
         const isContainer =
           node.tag === "vstack" ||
           node.tag === "hstack" ||
           node.tag === "card" ||
           node.tag === "box" ||
+          node.tag === "grid" ||
           node.tag === "scroll" ||
           node.tag === "scrollview";
 
@@ -785,7 +797,12 @@ export class AppKitDriver implements PlatformDriver {
       if (tag === "window" && name === "title") {
         this.appkit.functions.kiln_gui_appkit_window_set_title(handle, toCStr(this.ffi, String(value)));
       } else {
-        const valStr = typeof value === "string" ? value : String(value ?? "");
+        const valStr =
+          typeof value === "object" && value !== null
+            ? JSON.stringify(value)
+            : typeof value === "string"
+            ? value
+            : String(value ?? "");
         const valNum = typeof value === "number" ? value : (typeof value === "boolean" ? (value ? 1 : 0) : 0);
         this.appkit.functions.kiln_gui_appkit_widget_set_property(
           handle,
@@ -1692,6 +1709,84 @@ export class Card extends Node {
   }
 }
 
+export class Box extends Node {
+  constructor(options?: { style?: any; width?: number; height?: number; children?: Node[] } | Node[]) {
+    super("box");
+    if (Array.isArray(options)) {
+      for (let i = 0; i < options.length; i++) {
+        this.appendChild(options[i]);
+      }
+    } else if (options) {
+      if (options.style !== undefined) this.setProperty("style", options.style);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+      if (options.children) {
+        for (let i = 0; i < options.children.length; i++) {
+          this.appendChild(options.children[i]);
+        }
+      }
+    }
+  }
+
+  get style(): any {
+    return this.properties.style;
+  }
+  set style(val: any) {
+    this.setProperty("style", val);
+  }
+}
+
+export class Grid extends Node {
+  constructor(options?: { columns?: string; rows?: string; gap?: number | string; style?: any; width?: number; height?: number; children?: Node[] } | Node[]) {
+    super("grid");
+    if (Array.isArray(options)) {
+      for (let i = 0; i < options.length; i++) {
+        this.appendChild(options[i]);
+      }
+    } else if (options) {
+      if (options.columns !== undefined) this.setProperty("columns", options.columns);
+      if (options.rows !== undefined) this.setProperty("rows", options.rows);
+      if (options.gap !== undefined) this.setProperty("gap", options.gap);
+      if (options.style !== undefined) this.setProperty("style", options.style);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+      if (options.children) {
+        for (let i = 0; i < options.children.length; i++) {
+          this.appendChild(options.children[i]);
+        }
+      }
+    }
+  }
+
+  get columns(): string {
+    return this.properties.columns || "";
+  }
+  set columns(val: string) {
+    this.setProperty("columns", val);
+  }
+
+  get rows(): string {
+    return this.properties.rows || "";
+  }
+  set rows(val: string) {
+    this.setProperty("rows", val);
+  }
+
+  get gap(): any {
+    return this.properties.gap;
+  }
+  set gap(val: any) {
+    this.setProperty("gap", val);
+  }
+
+  get style(): any {
+    return this.properties.style;
+  }
+  set style(val: any) {
+    this.setProperty("style", val);
+  }
+}
+
 export class Divider extends Node {
   constructor(options?: { width?: number }) {
     super("divider");
@@ -2042,7 +2137,8 @@ export const widgetConstructors: Record<string, new (...args: any[]) => Node> = 
   vstack: VStack,
   hstack: HStack,
   card: Card,
-  box: Card,
+  box: Box,
+  grid: Grid,
   divider: Divider,
   separator: Divider,
   button: Button,
@@ -2930,6 +3026,8 @@ export default {
   VStack,
   HStack,
   Card,
+  Box,
+  Grid,
   Divider,
   Spacer,
   ScrollView,

@@ -9,6 +9,7 @@ declare module "kiln:gui" {
     parent: Node | null;
     children: Node[];
     properties: Record<string, any>;
+    style?: BoxStyle;
     dispose(): void;
     appendChild(child: Node): void;
     removeChild(child: Node): void;
@@ -65,6 +66,81 @@ declare module "kiln:gui" {
   }
   export class Card extends Node {
     constructor(options?: CardOptions | Node[]);
+  }
+
+  export interface BoxStyle {
+    display?: "flex" | "grid" | "none";
+    flexDirection?: "row" | "column" | "row-reverse" | "column-reverse";
+    flexWrap?: "nowrap" | "wrap" | "wrap-reverse";
+    justifyContent?:
+      | "flex-start"
+      | "start"
+      | "flex-end"
+      | "end"
+      | "center"
+      | "space-between"
+      | "space-around"
+      | "space-evenly";
+    alignItems?:
+      | "flex-start"
+      | "start"
+      | "flex-end"
+      | "end"
+      | "center"
+      | "baseline"
+      | "stretch";
+    alignSelf?:
+      | "flex-start"
+      | "start"
+      | "flex-end"
+      | "end"
+      | "center"
+      | "baseline"
+      | "stretch";
+    gap?: number | string;
+    rowGap?: number | string;
+    columnGap?: number | string;
+    padding?: number | string | [number, number] | [number, number, number, number];
+    margin?: number | string;
+    width?: number | string;
+    height?: number | string;
+    minWidth?: number | string;
+    minHeight?: number | string;
+    maxWidth?: number | string;
+    maxHeight?: number | string;
+    flexGrow?: number;
+    flexShrink?: number;
+    flexBasis?: number | string;
+    gridTemplateColumns?: string;
+    gridTemplateRows?: string;
+  }
+
+  export interface BoxOptions {
+    style?: BoxStyle | Accessor<BoxStyle>;
+    width?: number | Accessor<number>;
+    height?: number | Accessor<number>;
+    children?: Node[];
+  }
+  export class Box extends Node {
+    constructor(options?: BoxOptions | Node[]);
+    style: BoxStyle;
+  }
+
+  export interface GridOptions {
+    columns?: string | Accessor<string>;
+    rows?: string | Accessor<string>;
+    gap?: number | string | Accessor<number | string>;
+    style?: BoxStyle | Accessor<BoxStyle>;
+    width?: number | Accessor<number>;
+    height?: number | Accessor<number>;
+    children?: Node[];
+  }
+  export class Grid extends Node {
+    constructor(options?: GridOptions | Node[]);
+    columns: string;
+    rows: string;
+    gap: number | string;
+    style: BoxStyle;
   }
 
   export interface DividerOptions {
@@ -250,33 +326,32 @@ declare module "kiln:gui" {
   export function getActiveDriver(): { name: string; [key: string]: any };
 }
 
-declare global {
-  namespace JSX {
-    interface Element extends import("kiln:gui").Node {}
-    interface IntrinsicElements {
-      window: import("kiln:gui").WindowOptions & { children?: any };
-      vstack: import("kiln:gui").StackOptions & { children?: any };
-      hstack: import("kiln:gui").StackOptions & { children?: any };
-      card: import("kiln:gui").CardOptions & { children?: any };
-      box: import("kiln:gui").CardOptions & { children?: any };
-      divider: import("kiln:gui").DividerOptions;
-      separator: import("kiln:gui").DividerOptions;
-      button: import("kiln:gui").ButtonOptions;
-      text: import("kiln:gui").TextOptions & { value?: string; children?: any };
-      textinput: import("kiln:gui").TextInputOptions;
-      slider: import("kiln:gui").SliderOptions;
-      toggle: import("kiln:gui").ToggleOptions;
-      spacer: {};
-      scroll: import("kiln:gui").ScrollViewOptions & { children?: any };
-      scrollview: import("kiln:gui").ScrollViewOptions & { children?: any };
-      segmented: import("kiln:gui").SegmentedControlOptions;
-      progressbar: import("kiln:gui").ProgressBarOptions;
-      progress: import("kiln:gui").ProgressBarOptions;
-      select: import("kiln:gui").SelectOptions;
-      dropdown: import("kiln:gui").SelectOptions;
-      checkbox: import("kiln:gui").CheckboxOptions;
-      icon: import("kiln:gui").IconOptions;
-      image: import("kiln:gui").IconOptions;
+declare namespace JSX {
+  type Element = import("kiln:gui").Node;
+  interface IntrinsicElements {
+      window: import("kiln:gui").WindowOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      vstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      hstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      card: import("kiln:gui").CardOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      box: import("kiln:gui").BoxOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      grid: import("kiln:gui").GridOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      divider: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
+      separator: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
+      button: import("kiln:gui").ButtonOptions & { style?: import("kiln:gui").BoxStyle | any };
+      text: import("kiln:gui").TextOptions & { value?: string; style?: import("kiln:gui").BoxStyle | any; children?: any };
+      textinput: import("kiln:gui").TextInputOptions & { style?: import("kiln:gui").BoxStyle | any };
+      slider: import("kiln:gui").SliderOptions & { style?: import("kiln:gui").BoxStyle | any };
+      toggle: import("kiln:gui").ToggleOptions & { style?: import("kiln:gui").BoxStyle | any };
+      spacer: { style?: import("kiln:gui").BoxStyle | any };
+      scroll: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      scrollview: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+      segmented: import("kiln:gui").SegmentedControlOptions & { style?: import("kiln:gui").BoxStyle | any };
+      progressbar: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
+      progress: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
+      select: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
+      dropdown: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
+      checkbox: import("kiln:gui").CheckboxOptions & { style?: import("kiln:gui").BoxStyle | any };
+      icon: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
+      image: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
     }
   }
-}

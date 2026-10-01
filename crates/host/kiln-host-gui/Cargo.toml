@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "4.0"
 global-hotkey = { version = "0.8", default-features = false }
+taffy = { version = "0.14", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.4", default-features = false, features = ["wayland-data-control"] }

@@ -96,5 +96,5 @@ description = "npm package compatibility corpus vs porffor's dashboard methodolo
 run = "./scripts/npm-compat.sh"
 
 [tools]
-rust = "latest"
+rust = "1.97.1"
 
