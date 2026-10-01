@@ -1,0 +1,54 @@
+const run = Function("value", "events", `
+  var result = 0;
+  switch (value) {
+    case (events.push("first"), 1): result += 10; break;
+    default: result += 100;
+    case (events.push("last"), 2): result += 20; break;
+    case 3: result += 30;
+  }
+  return result;
+`);
+const events = [];
+if (run(2, events) !== 20 || events.join(",") !== "first,last") {
+  throw new Error("switch evaluates case expressions in order and matches after default");
+}
+if (run(9, []) !== 120) throw new Error("switch enters default and falls through");
+if (run(3, []) !== 30) throw new Error("switch case matching is strict and fallthrough stops at break");
+
+const labeled = Function(`
+  var count = 0;
+  outer: while (count < 3) {
+    switch (count++) {
+      case 0: continue outer;
+      case 1: break;
+      default: break outer;
+    }
+    count += 10;
+  }
+  return count;
+`);
+if (labeled() !== 11) throw new Error("switch propagates continue to outer loop and consumes switch break");
+const labeledBreak = Function("outer: while (true) { switch (0) { default: break outer; } } return 3;");
+if (labeledBreak() !== 3) throw new Error("switch propagates labeled break to outer label");
+
+const nested = Function(`
+  var value = 0;
+  switch (1) {
+    case 1:
+      switch (2) { case 2: value = 7; break; default: value = 99; }
+      value += 1;
+      break;
+    default: value = 99;
+  }
+  return value;
+`);
+if (nested() !== 8) throw new Error("nested switch consumes only its own break");
+
+const varCapture = Function(`
+  function read() { return inside; }
+  switch (1) { case 1: var inside = 17; }
+  return read();
+`);
+if (varCapture() !== 17) throw new Error("switch var declaration targets function scope");
+
+console.log("switch evaluation:", events.join(","), run(9, []), run(3, []), labeled(), labeledBreak(), nested());
