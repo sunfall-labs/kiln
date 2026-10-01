@@ -37,7 +37,7 @@ use oxc_ast::{
         VariableDeclarationKind,
     },
 };
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{Visit, walk};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
@@ -2330,12 +2330,143 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
     }
     // `new_compiler` is the cheap configuration: syntax checks on, the random-access node store
     // off.  Only the diagnostics are wanted; scope and symbol tables are discarded.
-    SemanticBuilder::new_compiler()
+    let mut diagnostics = SemanticBuilder::new_compiler()
         .build(&parsed.program)
         .diagnostics
         .errors()
-        .map(lower_diagnostic)
-        .collect()
+        .collect::<Vec<_>>();
+
+    // Oxc models Annex B's switch-function var alias before checking a lexical declaration in
+    // the enclosing function body. Annex B suppresses that alias when it would collide with the
+    // function body's lexical names; our IR lowering applies that rule when it creates aliases.
+    // Discard only Oxc's matching redeclaration diagnostic for that exact pair of identifier
+    // spans, leaving real CaseBlock and other duplicate-name errors untouched.
+    let mut annex_b = AnnexBBlockedAliasVisitor::new();
+    annex_b.visit_program(&parsed.program);
+    diagnostics.retain(|diagnostic| {
+        let redeclaration = diagnostic
+            .message
+            .to_string()
+            .contains("has already been declared");
+        if !redeclaration || diagnostic.labels.len() < 2 {
+            return true;
+        }
+        let first = diagnostic.labels[0].span();
+        let second = diagnostic.labels[1].span();
+        !annex_b
+            .suppressed_pairs
+            .contains(&(first.start, first.end, second.start, second.end))
+            && !annex_b.suppressed_pairs.contains(&(
+                second.start,
+                second.end,
+                first.start,
+                first.end,
+            ))
+    });
+    diagnostics.iter().map(lower_diagnostic).collect()
+}
+
+#[derive(Default)]
+struct AnnexBFunctionScope {
+    sloppy: bool,
+    lexical_names: HashMap<String, oxc_span::Span>,
+}
+
+struct AnnexBBlockedAliasVisitor {
+    scopes: Vec<AnnexBFunctionScope>,
+    suppressed_pairs: HashSet<(u32, u32, u32, u32)>,
+}
+
+impl AnnexBBlockedAliasVisitor {
+    fn new() -> Self {
+        Self {
+            scopes: Vec::new(),
+            suppressed_pairs: HashSet::new(),
+        }
+    }
+
+    fn lexical_names<'a>(statements: &[Statement<'a>]) -> HashMap<String, oxc_span::Span> {
+        let mut names = HashMap::new();
+        for statement in statements {
+            match statement {
+                Statement::VariableDeclaration(declaration)
+                    if !matches!(declaration.kind, oxc_ast::ast::VariableDeclarationKind::Var) =>
+                {
+                    for declarator in &declaration.declarations {
+                        declarator.id.bound_names(&mut |identifier| {
+                            names.insert(identifier.name.to_string(), identifier.span);
+                        });
+                    }
+                }
+                Statement::ClassDeclaration(declaration) => {
+                    if let Some(identifier) = &declaration.id {
+                        names.insert(identifier.name.to_string(), identifier.span);
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn strict_directives(directives: &[oxc_ast::ast::Directive<'_>]) -> bool {
+        directives
+            .iter()
+            .any(|directive| directive.directive.as_str() == "use strict")
+    }
+}
+
+impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
+    fn visit_program(&mut self, program: &oxc_ast::ast::Program<'ast>) {
+        let sloppy =
+            program.source_type.is_script() && !Self::strict_directives(&program.directives);
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy,
+            lexical_names: Self::lexical_names(&program.body),
+        });
+        walk::walk_program(self, program);
+        self.scopes.pop();
+    }
+
+    fn visit_function(&mut self, function: &Function<'ast>, flags: oxc_ast_visit::ScopeFlags) {
+        let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
+        let Some(body) = &function.body else {
+            walk::walk_function(self, function, flags);
+            return;
+        };
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: inherited_sloppy && !Self::strict_directives(&body.directives),
+            lexical_names: Self::lexical_names(&body.statements),
+        });
+        walk::walk_function(self, function, flags);
+        self.scopes.pop();
+    }
+
+    fn visit_switch_statement(&mut self, statement: &oxc_ast::ast::SwitchStatement<'ast>) {
+        if let Some(scope) = self.scopes.last().filter(|scope| scope.sloppy) {
+            for case in &statement.cases {
+                for consequent in &case.consequent {
+                    let Statement::FunctionDeclaration(function) = consequent else {
+                        continue;
+                    };
+                    let Some(identifier) = &function.id else {
+                        continue;
+                    };
+                    let Some(lexical_span) = scope.lexical_names.get(identifier.name.as_str())
+                    else {
+                        continue;
+                    };
+                    self.suppressed_pairs.insert((
+                        lexical_span.start,
+                        lexical_span.end,
+                        identifier.span.start,
+                        identifier.span.end,
+                    ));
+                }
+            }
+        }
+        walk::walk_switch_statement(self, statement);
+    }
 }
 
 fn early_errors_with_source_units(
