@@ -124,15 +124,22 @@ def main(argv: list[str]) -> int:
         return TIMEOUT_EXIT
     except InvocationInterrupted as interruption:
         _stop_handling_interrupts()
-        marker.with_name(marker.name + ".interrupted").touch()
         output, drain_error = _terminate_owned_group(child)
+        marker_error = ""
+        try:
+            marker.with_name(marker.name + ".interrupted").touch()
+        except OSError as error:
+            # The native runner may remove its scratch directory as it exits. Cleanup owns the
+            # child group; recording the interruption is best effort and must never precede it.
+            marker_error = f"; could not record interruption marker: {error}"
         if output:
             sys.stdout.buffer.write(output)
             sys.stdout.buffer.flush()
         print(
             f"KILN_NATIVE_INTERRUPTED: received signal {interruption.signum}; "
             "its process group was terminated"
-            + ("; output drain was bounded and closed" if drain_error else ""),
+            + ("; output drain was bounded and closed" if drain_error else "")
+            + marker_error,
             file=sys.stderr,
         )
         return 128 + interruption.signum
