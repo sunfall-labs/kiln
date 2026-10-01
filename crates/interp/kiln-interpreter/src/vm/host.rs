@@ -11,6 +11,48 @@ fn node_stream_write_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionEr
 }
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
+    fn schedule_node_socket_auto_end(
+        &mut self,
+        socket: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if self
+            .read_property(socket, "allowHalfOpen", instruction)?
+            .is_truthy()
+        {
+            return Ok(());
+        }
+        let state = node_net_socket_state(socket)?;
+        let (owner, resource, destroyed, end_requested) = {
+            let state = state.borrow();
+            (
+                state.owner.as_ref().and_then(std::rc::Weak::upgrade),
+                state.resource,
+                state.destroyed,
+                state.end_requested,
+            )
+        };
+        let (Some(owner), Some(resource)) = (owner, resource) else {
+            return Ok(());
+        };
+        let already_ending = owner.borrow().streams.iter().any(|stream| {
+            stream.resource() == resource
+                && (stream.driver.state().end_requested() || stream.driver.state().write_closed())
+        });
+        if destroyed || end_requested || already_ending {
+            return Ok(());
+        }
+        let callback = Value::Bound(Rc::new(BoundFunction {
+            target: self.read_property(socket, "end", instruction)?,
+            this_value: socket.clone(),
+            arguments: Vec::new(),
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        Ok(())
+    }
+
     fn take_node_socket_queued_state(
         state: &Rc<RefCell<crate::net::NetSocketState>>,
     ) -> (Vec<Value>, Vec<Value>) {
@@ -1324,11 +1366,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     Some(number.floor() as usize)
                                 }
                                 Value::Undefined => None,
+                                Value::Number(number) if *number <= 0.0 => Some(0),
                                 _ => Some(0),
                             })
                             .unwrap_or(usize::MAX);
+                        let available = state.buffered_bytes;
+                        if requested > available && !state.ended {
+                            return Ok(Value::Null);
+                        }
+                        if requested == 0 && available != 0 {
+                            return Ok(Value::Null);
+                        }
                         let mut bytes = Vec::new();
-                        let mut remaining = requested;
+                        let mut remaining = requested.min(available);
                         while remaining > 0 {
                             let Some(chunk) = state.buffer.first().cloned() else {
                                 break;
@@ -1345,7 +1395,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             state.buffered_bytes = state.buffered_bytes.saturating_sub(take);
                             remaining = remaining.saturating_sub(take);
                         }
-                        let ended = state.ended && state.buffer.is_empty() && !state.end_emitted;
+                        // Node delays `end` after an exact-sized read until the next read. An
+                        // oversized or unbounded read that drains the final bytes observes EOF
+                        // in the same operation.
+                        let drained_past_end = requested == usize::MAX || requested > available;
+                        let ended = state.ended
+                            && state.buffer.is_empty()
+                            && !state.end_emitted
+                            && (bytes.is_empty() || drained_past_end);
                         if ended {
                             state.end_emitted = true;
                         }
@@ -1359,6 +1416,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &[Value::String("end".into())],
                             instruction,
                         )?;
+                        self.schedule_node_socket_auto_end(receiver, instruction)?;
                     }
                     let result = if bytes.is_empty() {
                         Value::Null
@@ -2804,25 +2862,41 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         let state = node_net_socket_state(&socket)?;
                         let readable = Rc::clone(&state.borrow().readable);
                         {
-                            let mut readable = readable.borrow_mut();
-                            readable.ended = true;
-                            readable.end_emitted = true;
-                            readable.reading = false;
+                            readable.borrow_mut().reading = false;
                         }
-                        sync_readable_public_state(&socket, &readable.borrow());
+                        self.dispatch_readable_state(
+                            Native::NodeReadablePush,
+                            &socket,
+                            &[Value::Null],
+                            instruction,
+                            &readable,
+                            false,
+                        )?;
                     }
-                    let event = match action {
-                        StreamAction::Event(StreamEvent::Drain) => "drain",
-                        StreamAction::Event(StreamEvent::End) => "end",
-                        _ => unreachable!(),
-                    };
-                    self.dispatch_node_event(
-                        Native::NodeEventEmit,
-                        &socket,
-                        &[Value::String(event.into())],
-                        instruction,
-                    )?;
+                    let raw_socket = !server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .any(|stream| stream.resource() == resource && stream.runtime_http);
+                    if !matches!(action, StreamAction::Event(StreamEvent::End)) || !raw_socket {
+                        let event = match action {
+                            StreamAction::Event(StreamEvent::Drain) => "drain",
+                            StreamAction::Event(StreamEvent::End) => "end",
+                            _ => unreachable!(),
+                        };
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &socket,
+                            &[Value::String(event.into())],
+                            instruction,
+                        )?;
+                    }
                     if matches!(action, StreamAction::Event(StreamEvent::End))
+                        && node_net_socket_state(&socket)?
+                            .borrow()
+                            .readable
+                            .borrow()
+                            .end_emitted
                         && server
                             .borrow()
                             .streams
@@ -2832,25 +2906,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             .read_property(&socket, "allowHalfOpen", instruction)?
                             .is_truthy()
                     {
-                        // Raw sockets close their writable half after EOF by default. Let end
-                        // listeners enqueue their final writes first, then use the same end
-                        // operation that drains the write queue before transport shutdown.
-                        let state = node_net_socket_state(&socket)?;
-                        let already_ending = server.borrow().streams.iter().any(|stream| {
-                            stream.resource() == resource
-                                && (stream.driver.state().end_requested()
-                                    || stream.driver.state().write_closed())
-                        });
-                        if !state.borrow().destroyed && !already_ending {
-                            let callback = Value::Bound(Rc::new(BoundFunction {
-                                target: self.read_property(&socket, "end", instruction)?,
-                                this_value: socket.clone(),
-                                arguments: Vec::new(),
-                                properties: RefCell::new(ObjectData::default()),
-                            }));
-                            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
-                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
-                        }
+                        self.schedule_node_socket_auto_end(&socket, instruction)?;
                     }
                 }
                 if matches!(action, StreamAction::Event(StreamEvent::Drain))

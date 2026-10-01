@@ -30,7 +30,9 @@ function socketResume(this: any): any {
 
 function socketRead(this: any, size?: number): any {
   if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
-  return nativeModule.__readSocket.call(this, size);
+  if (size === undefined) return nativeModule.__readSocket.call(this);
+  const parsedSize = parseInt(size as any, 10);
+  return nativeModule.__readSocket.call(this, Number.isNaN(parsedSize) ? undefined : parsedSize);
 }
 
 const socketPrototypes = new WeakMap<object, object>();
