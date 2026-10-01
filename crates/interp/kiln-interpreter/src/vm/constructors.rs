@@ -390,15 +390,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Symbol throws here. The call form `String(symbol)` has a deliberate special case
             // that returns its description instead.
             Value::Native(Native::StringConstructor, _) => {
-                let value = arguments.first().unwrap_or(&Value::Undefined);
-                let primitive = self.as_primitive(value, PrimitiveHint::String, current)?;
+                let primitive = match arguments.first() {
+                    Some(value) => self.as_primitive(value, PrimitiveHint::String, current)?,
+                    None => Value::String(StringUnits::default()),
+                };
                 if matches!(primitive, Value::Symbol(_)) {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "a symbol cannot be converted to a string".to_owned(),
                     });
                 }
                 self.stack.push(wrap_primitive(Value::String(
-                    primitive.to_display_string().into(),
+                    primitive.to_string_units_checked()?,
                 )));
             }
             Value::Native(native @ (Native::NumberConstructor | Native::BooleanConstructor), _) => {

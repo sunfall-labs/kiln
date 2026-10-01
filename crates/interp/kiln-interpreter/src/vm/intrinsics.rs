@@ -1200,8 +1200,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !needs_text_conversion(argument) {
                     continue;
                 }
-                let text = self.as_text(&argument.clone(), instruction)?;
-                converted[index] = Value::String(text.into());
+                let text = self.as_text_units(&argument.clone(), instruction)?;
+                converted[index] = Value::String(text);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
@@ -2836,7 +2836,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     converted.push(if numeric {
                         Value::Number(self.as_number_argument(Some(argument), instruction)?)
                     } else if convertible && string_coerced_argument(native, index) {
-                        Value::String(self.as_text(argument, instruction)?.into())
+                        Value::String(self.as_text_units(argument, instruction)?)
                     } else {
                         argument.clone()
                     });
