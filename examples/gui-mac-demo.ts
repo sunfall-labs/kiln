@@ -271,6 +271,7 @@ const metalPill = new Text({
 });
 
 createEffect(() => {
+  metalSwitch.checked = metalAccel();
   metalPill.text = metalAccel() ? '🟢 ACCELERATED' : '⚪ CPU RENDER';
   metalPill.setProperty('color', metalAccel() ? 'green' : 'secondary');
 });
@@ -297,6 +298,7 @@ const telemetryPill = new Text({
 });
 
 createEffect(() => {
+  telemetrySwitch.checked = telemetry();
   telemetryPill.text = telemetry() ? '🟢 STREAMING' : '⚪ PAUSED';
   telemetryPill.setProperty('color', telemetry() ? 'green' : 'secondary');
 });
@@ -313,6 +315,10 @@ const strictCheckbox = new Checkbox({
     setStrictChecks(checked);
     console.log(`Strict checks toggled: ${checked}`);
   },
+});
+
+createEffect(() => {
+  strictCheckbox.checked = strictChecks();
 });
 
 const subsystemsCard = new Card({
@@ -355,6 +361,8 @@ const resetAllBtn = new Button({
     setTelemetry(true);
     setStrictChecks(true);
     setCompileProgress(65);
+    setTargetArch('aarch64-apple-darwin');
+    archSelect.selectedIndex = 0;
   },
 });
 

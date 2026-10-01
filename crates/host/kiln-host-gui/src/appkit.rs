@@ -1103,6 +1103,7 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         0isize
                     };
                     let () = msg_send![view, setState: state];
+                    let () = msg_send![view, setNeedsDisplay: YES];
                 }
                 ("checkbox", "title") | ("checkbox", "label") | ("checkbox", "text") => {
                     let ns = ns_string(val_str);
@@ -1131,6 +1132,7 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         0isize
                     };
                     let () = msg_send![view, setState: state];
+                    let () = msg_send![view, setNeedsDisplay: YES];
                 }
                 ("vstack", "spacing") | ("hstack", "spacing") => {
                     let () = msg_send![view, setSpacing: val_num];

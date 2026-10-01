@@ -786,7 +786,7 @@ export class AppKitDriver implements PlatformDriver {
         this.appkit.functions.kiln_gui_appkit_window_set_title(handle, toCStr(this.ffi, String(value)));
       } else {
         const valStr = typeof value === "string" ? value : String(value ?? "");
-        const valNum = typeof value === "number" ? value : 0;
+        const valNum = typeof value === "number" ? value : (typeof value === "boolean" ? (value ? 1 : 0) : 0);
         this.appkit.functions.kiln_gui_appkit_widget_set_property(
           handle,
           toCStr(this.ffi, name),
@@ -1546,10 +1546,10 @@ export class Toggle extends Node {
   }
 
   get checked(): boolean {
-    return !!this.properties.checked;
+    return this.properties.checked === true || this.properties.checked === "true" || this.properties.checked === 1;
   }
   set checked(val: boolean) {
-    this.setProperty("checked", val);
+    this.setProperty("checked", Boolean(val));
   }
 }
 
@@ -1685,7 +1685,7 @@ export class Checkbox extends Node {
       if (labelOrOptions.width !== undefined) this.setProperty("width", labelOrOptions.width);
       if (labelOrOptions.onToggle) {
         this.on("toggle", (e: any) => {
-          const checked = typeof e === "string" ? e === "true" : Boolean(e?.checked ?? e?.value === "true");
+          const checked = typeof e === "boolean" ? e : (typeof e === "string" ? e === "true" : Boolean(e?.checked ?? e?.value === "true"));
           labelOrOptions.onToggle!(checked);
         });
       }
@@ -1693,10 +1693,10 @@ export class Checkbox extends Node {
   }
 
   get checked(): boolean {
-    return !!this.properties.checked;
+    return this.properties.checked === true || this.properties.checked === "true" || this.properties.checked === 1;
   }
   set checked(val: boolean) {
-    this.setProperty("checked", val ? "true" : "false");
+    this.setProperty("checked", Boolean(val));
   }
 }
 
