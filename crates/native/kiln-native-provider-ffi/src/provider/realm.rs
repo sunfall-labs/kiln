@@ -4322,14 +4322,16 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             event.reason
         });
         let (headers, headers_len) = event_bytes(event.headers);
-        let (data, data_len) = event_bytes(if matches!(
-            event.kind,
-            HttpEventKind::Error | HttpEventKind::UpgradeWriteComplete
-        ) {
-            event.message
-        } else {
-            event.data
-        });
+        let (data, data_len) = event_bytes(
+            if matches!(
+                event.kind,
+                HttpEventKind::Error | HttpEventKind::UpgradeWriteComplete
+            ) {
+                event.message
+            } else {
+                event.data
+            },
+        );
         let view = HttpEventView {
             kind,
             flags: u32::from(event.keep_alive),
@@ -4965,9 +4967,11 @@ pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active_with_fence(
         let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
             return INVALID_ARGUMENT;
         };
-        let Some(receipt) = runtime.http_server().write_upgrade(
-            kiln_host_abi::ResourceId::new(resource), id, data,
-        ) else {
+        let Some(receipt) =
+            runtime
+                .http_server()
+                .write_upgrade(kiln_host_abi::ResourceId::new(resource), id, data)
+        else {
             return RUNTIME_ERROR;
         };
         unsafe { *out_fence = receipt.fence };

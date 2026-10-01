@@ -1203,11 +1203,13 @@ static int kiln_c99_node_completion_error_value(const kiln_async_completion *com
 static int kiln_c99_node_connect_write_error_value(kiln_value *out) {
     int status = kiln_c99_new_error(
         out, KILN_C99_BUILTIN_ERROR,
-        kiln_c99_copy_text("Socket closed before the connection was established", 51));
+        kiln_c99_copy_text("Socket closed before the connection was established",
+                           sizeof "Socket closed before the connection was established" - 1));
     if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(out);
     if (status == KILN_C99_OK)
         status = kiln_c99_node_fs_error_property(
-            *out, "code", 4, (const uint8_t *)"ERR_SOCKET_CLOSED_BEFORE_CONNECTION", 35);
+            *out, "code", 4, (const uint8_t *)"ERR_SOCKET_CLOSED_BEFORE_CONNECTION",
+            sizeof "ERR_SOCKET_CLOSED_BEFORE_CONNECTION" - 1);
     return status;
 }
 
@@ -1365,6 +1367,7 @@ static int kiln_c99_node_socket_cancel_queued_write_callbacks(kiln_node_socket *
                                                               kiln_value callback_error);
 static int kiln_c99_node_socket_discard_queued_writes(kiln_node_socket *socket,
                                                        kiln_value callback_error);
+static int kiln_c99_node_socket_destroy_error(kiln_value *out);
 static int kiln_c99_node_socket_finish_end_callbacks(kiln_host *host,
                                                       kiln_node_socket *socket,
                                                       kiln_value callback_error,
