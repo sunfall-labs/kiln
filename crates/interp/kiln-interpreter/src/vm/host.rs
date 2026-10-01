@@ -1005,7 +1005,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         data = Some(bytes);
                     }
                     deferred_write = data.as_ref().is_some_and(|data| !data.is_empty());
-                    let (_, actions) = connection.driver.end(data);
+                    let mut actions = Vec::new();
+                    if !deferred_write && !write_callbacks.is_empty() {
+                        // `write('', callback)` is still an ordered write even though `end('')`
+                        // itself does not create a transport write. Keep callbacks for corked
+                        // empty writes behind earlier bytes by placing an empty write in the
+                        // driver's queue before requesting shutdown.
+                        let (_, empty_write) = connection.driver.write(Vec::new());
+                        actions.extend(empty_write);
+                        deferred_write = true;
+                    }
+                    let (_, end_actions) = connection.driver.end(data);
+                    actions.extend(end_actions);
                     (receiver.clone(), actions)
                 }
                 Native::NodeSocketDestroy => (receiver.clone(), connection.driver.close_actions()),
