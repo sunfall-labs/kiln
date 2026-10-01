@@ -66,6 +66,13 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     kiln_value saved_adopted;
     kiln_value adopted;
     int status;
+    /* Symbol and BigInt expose [[Construct]] for IsConstructor/newTarget checks, but their
+     * own constructor algorithms reject execution. Reflect.construct with either as newTarget
+     * is valid when another target performs the construction. */
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        (callee.bits == KILN_C99_BUILTIN_SYMBOL || callee.bits == KILN_C99_BUILTIN_BIGINT)) {
+        return kiln_c99_throw_not_a(thrown, callee, "constructor");
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Abstract class TypedArray not directly constructable");
@@ -943,8 +950,7 @@ static int kiln_c99_heritage_constructs(kiln_value value) {
                  closure->is_method);
     }
     if (value.tag == KILN_VALUE_BUILTIN)
-        return !kiln_c99_is_namespace(value.bits) && value.bits != KILN_C99_BUILTIN_SYMBOL &&
-               value.bits != KILN_C99_BUILTIN_BIGINT &&
+        return !kiln_c99_is_namespace(value.bits) &&
                value.bits != KILN_C99_BUILTIN_TYPED_ARRAY;
     if (value.tag == KILN_VALUE_METHOD) {
         for (size_t i = 0; i < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors; ++i)
