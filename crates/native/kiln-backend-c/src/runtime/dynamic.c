@@ -816,6 +816,30 @@ static int kiln_dyn_append_codepoint(uint16_t **units, size_t *capacity, size_t 
     return 1;
 }
 
+/* Source slices are kept in the private WTF-8 lexer buffer until a nested function closure is
+ * created. Materialize them back into canonical UTF-16 strings here; copy_text would decode the
+ * private surrogate encoding as invalid UTF-8 and replace the original code unit. */
+static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln_value *out) {
+    if (out == NULL || (source_len != 0 && source == NULL)) return KILN_C99_INVALID_ARGUMENT;
+    if (source_len > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_OUT_OF_MEMORY;
+    uint16_t *units = source_len == 0 ? NULL :
+        (uint16_t *)malloc(source_len * sizeof(uint16_t));
+    if (source_len != 0 && units == NULL) return KILN_C99_OUT_OF_MEMORY;
+    size_t capacity = source_len;
+    size_t count = 0;
+    size_t position = 0;
+    while (position < source_len) {
+        uint32_t cp = kiln_dyn_read_source_codepoint(source, source_len, &position);
+        if (!kiln_dyn_append_codepoint(&units, &capacity, &count, cp)) {
+            free(units);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    *out = kiln_c99_from_units(units, count);
+    free(units);
+    return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+
 static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_t *byte_len) {
     if (count > (SIZE_MAX - 1) / 3) return NULL;
     size_t capacity = count * 3 + 1;
@@ -1939,18 +1963,20 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_value upvals[3];
         kiln_value name_value = kiln_c99_undefined();
         const kiln_string *closure_name = NULL;
+        int status;
         if (explicit_name && !lex->function_declaration) {
             name_value = kiln_c99_copy_text(fn_name, fn_name_len);
             if (name_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
             kiln_c99_gc_keep_alive(&name_value);
             closure_name = (const kiln_string *)name_value.ptr;
         }
-        upvals[0] = kiln_c99_copy_text(&lex->src[pstart], plen);
+        status = kiln_dyn_source_to_string(&lex->src[pstart], plen, &upvals[0]);
+        if (status != KILN_C99_OK) return status;
         kiln_c99_gc_keep_alive(&upvals[0]);
-        upvals[1] = kiln_c99_copy_text(body_source, blen);
+        status = kiln_dyn_source_to_string(body_source, blen, &upvals[1]);
+        if (status != KILN_C99_OK) return status;
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
-        int status;
         int function_strict = scope->strict ||
                               kiln_dyn_body_has_use_strict(body_source, blen);
         kiln_dyn_scope function_scope;
@@ -3103,8 +3129,11 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
     kiln_c99_gc_keep_alive(&env_obj);
     status = kiln_dyn_capture_environment(host, scope, env_obj, 0, thrown);
     if (status != KILN_C99_OK) return status;
-    upvals[0] = kiln_c99_copy_text(params, params_len);
-    upvals[1] = kiln_c99_copy_text(body, body_len);
+    status = kiln_dyn_source_to_string(params, params_len, &upvals[0]);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&upvals[0]);
+    status = kiln_dyn_source_to_string(body, body_len, &upvals[1]);
+    if (status != KILN_C99_OK) return status;
     upvals[2] = env_obj;
     if (upvals[0].tag != KILN_VALUE_STRING || upvals[1].tag != KILN_VALUE_STRING)
         return KILN_C99_OUT_OF_MEMORY;
