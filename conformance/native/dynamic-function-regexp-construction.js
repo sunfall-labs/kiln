@@ -32,6 +32,8 @@ for (const source of [
   "for (; false;) /[/u;",
   "return /unterminated",
   "return /line\nfeed/;",
+  "return /a\\" + "\nb/;",
+  "return /a\\" + String.fromCharCode(0x2028) + "b/;",
 ]) {
   let rejectedAtConstruction = false;
   try {

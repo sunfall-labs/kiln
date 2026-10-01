@@ -1247,10 +1247,12 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             int closed = 0;
             while (lex->pos < lex->len) {
                 char rc = lex->src[lex->pos];
-                size_t line_pos = lex->pos;
-                uint32_t line_cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &line_pos);
-                if (line_cp == '\n' || line_cp == '\r' || line_cp == 0x2028 || line_cp == 0x2029) {
-                    lex->pos = line_pos;
+                if (rc == '\n' || rc == '\r' ||
+                    ((unsigned char)rc == 0xE2 && lex->pos + 2 < lex->len &&
+                     (unsigned char)lex->src[lex->pos + 1] == 0x80 &&
+                     ((unsigned char)lex->src[lex->pos + 2] == 0xA8 ||
+                      (unsigned char)lex->src[lex->pos + 2] == 0xA9))) {
+                    lex->pos += (rc == '\n' || rc == '\r') ? 1 : 3;
                     lex->regex_literal_error = 1;
                     lex->curr.kind = KILN_DYN_ERROR;
                     lex->curr.start = &lex->src[reg_start];
@@ -1258,7 +1260,19 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                     return;
                 }
                 if (rc == '\\' && lex->pos + 1 < lex->len) {
-                    lex->pos += 2;
+                    size_t escaped_pos = lex->pos + 1;
+                    uint32_t escaped_cp = kiln_dyn_read_source_codepoint(
+                        lex->src, lex->len, &escaped_pos);
+                    if (escaped_cp == '\n' || escaped_cp == '\r' ||
+                        escaped_cp == 0x2028 || escaped_cp == 0x2029) {
+                        lex->pos = escaped_pos;
+                        lex->regex_literal_error = 1;
+                        lex->curr.kind = KILN_DYN_ERROR;
+                        lex->curr.start = &lex->src[reg_start];
+                        lex->curr.len = lex->pos - reg_start;
+                        return;
+                    }
+                    lex->pos = escaped_pos;
                     continue;
                 }
                 if (rc == '[') in_class = 1;
