@@ -28,13 +28,13 @@
       }
     }
 
-    const subject = `${this}`;
     if (regexp !== null && regexp !== undefined) {
       const matcher = regexp[Symbol.matchAll];
       if (matcher !== null && matcher !== undefined) {
-        return Reflect.apply(matcher, regexp, [subject]);
+        return Reflect.apply(matcher, regexp, [this]);
       }
     }
+    const subject = `${this}`;
     const created = new RegExp(regexp, "g");
     const createdMatcher = (created as any)[Symbol.matchAll];
     return Reflect.apply(createdMatcher, created, [subject]);
