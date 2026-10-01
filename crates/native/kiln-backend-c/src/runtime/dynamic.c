@@ -638,9 +638,12 @@ static int kiln_dyn_throw_unresolvable_reference(kiln_value *thrown,
     return status;
 }
 
+static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln_value *out);
+
 /* The dynamic executor parses lazily while running a body, but JavaScript validates escapes
  * when the Function constructor is called. Tokenize the source once up front so malformed
- * escapes are reported at construction time, including in an unreachable branch. */
+ * escapes and regexp literals are reported at construction time, including in an unreachable
+ * branch. Regexp grammar is delegated to the shared provider rather than duplicated here. */
 static int kiln_dyn_validate_source(const char *source, size_t length, int strict,
                                     kiln_value *thrown) {
     kiln_dyn_lexer scan;
@@ -650,8 +653,41 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
     scan.dynamic_function_body = 1;
     scan.strict = strict;
     kiln_dyn_lexer_next(&scan);
-    while (scan.curr.kind != KILN_DYN_EOF && scan.curr.kind != KILN_DYN_ERROR)
+    while (scan.curr.kind != KILN_DYN_EOF && scan.curr.kind != KILN_DYN_ERROR) {
+        if (scan.curr.kind == KILN_DYN_REGEX) {
+            const char *pattern_text = scan.curr.str_val;
+            size_t pattern_len = scan.curr.str_len;
+            const char *flags_text = pattern_text + pattern_len + 1;
+            size_t flags_len = strlen(flags_text);
+            kiln_value pattern = kiln_c99_undefined();
+            kiln_value flags = kiln_c99_undefined();
+            int status = kiln_dyn_source_to_string(pattern_text, pattern_len, &pattern);
+            if (status != KILN_C99_OK) {
+                kiln_dyn_token_free(&scan.curr);
+                return status;
+            }
+            kiln_c99_gc_keep_alive(&pattern);
+            flags = kiln_c99_copy_text(flags_text, flags_len);
+            if (flags.tag != KILN_VALUE_STRING) {
+                kiln_dyn_token_free(&scan.curr);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            kiln_c99_gc_keep_alive(&pattern);
+            kiln_c99_gc_keep_alive(&flags);
+            void *handle = NULL;
+            if (kiln_regexp_compile((const kiln_string *)pattern.ptr,
+                                    (const kiln_string *)flags.ptr, &handle) != 0) {
+                int error_status = kiln_dyn_throw_parse_error(
+                    &scan, thrown, "Invalid regular expression");
+                kiln_dyn_token_free(&scan.curr);
+                return error_status;
+            }
+            kiln_regexp_free(handle);
+            kiln_c99_gc_keep_alive(&pattern);
+            kiln_c99_gc_keep_alive(&flags);
+        }
         kiln_dyn_lexer_next(&scan);
+    }
     int status = scan.curr.kind == KILN_DYN_ERROR
         ? kiln_dyn_throw_parse_error(&scan, thrown, "Invalid string escape")
         : KILN_C99_OK;
