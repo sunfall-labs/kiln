@@ -328,16 +328,34 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     ) -> Result<Value, ExecutionError> {
         match native {
             Native::NodeNetCreateServer => {
-                let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
-                if !matches!(handler, Value::Undefined) && !is_callable(&handler) {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The connection listener must be a function".into(),
-                    });
-                }
+                let first = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let (options, handler) = if is_callable(&first) {
+                    (None, first)
+                } else {
+                    if !matches!(first, Value::Undefined | Value::Null | Value::Object(_)) {
+                        return self.throw_node_invalid_arg_type(&format!(
+                            "The \"options\" argument must be of type object. Received type {}",
+                            first.type_name()
+                        ));
+                    }
+                    let handler = arguments
+                        .get(1)
+                        .filter(|value| is_callable(value))
+                        .cloned()
+                        .unwrap_or(Value::Undefined);
+                    (matches!(first, Value::Object(_)).then_some(first), handler)
+                };
+                let allow_half_open = if let Some(options) = options {
+                    self.read_property(&options, "allowHalfOpen", instruction)?
+                        .is_truthy()
+                } else {
+                    false
+                };
                 let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
                     handler: handler.clone(),
                     protocol: ServerProtocol::Net,
+                    allow_half_open,
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
@@ -1639,6 +1657,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     driver: TcpServerDriver::default(),
                     handler: handler.clone(),
                     protocol: ServerProtocol::Http,
+                    allow_half_open: false,
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
@@ -2018,6 +2037,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     http_agent_request: None,
                 }));
                 let socket = node_socket_object(&socket_state);
+                if let Value::Object(object) = &socket {
+                    let allow_half_open = if protocol == ServerProtocol::Http {
+                        true
+                    } else {
+                        state
+                            .borrow()
+                            .object
+                            .as_ref()
+                            .and_then(Weak::upgrade)
+                            .and_then(|server| server.borrow().get("allowHalfOpen"))
+                            .is_some_and(|value| value.is_truthy())
+                    };
+                    object
+                        .borrow_mut()
+                        .set("allowHalfOpen", Value::Boolean(allow_half_open));
+                }
                 self.decorate_node_socket(&socket, self.instruction)?;
                 if protocol == ServerProtocol::Http {
                     if let Value::Object(object) = &socket {
@@ -4961,6 +4996,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             driver: TcpServerDriver::default(),
                             handler: Value::Undefined,
                             protocol,
+                            allow_half_open: false,
                             timeout_milliseconds: 0.0,
                             streams: vec![connection],
                             object: None,

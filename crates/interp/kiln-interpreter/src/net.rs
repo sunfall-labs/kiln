@@ -40,6 +40,9 @@ pub(crate) struct NodeServerState {
     pub(crate) driver: TcpServerDriver,
     pub(crate) handler: Value,
     pub(crate) protocol: ServerProtocol,
+    /// The public raw-net socket EOF policy selected by `createServer({ allowHalfOpen })`.
+    /// HTTP uses its separate `httpAllowHalfOpen` protocol option.
+    pub(crate) allow_half_open: bool,
     pub(crate) timeout_milliseconds: f64,
     pub(crate) streams: Vec<NodeConnection>,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
@@ -108,6 +111,12 @@ pub(crate) fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value 
     data.set("keepAliveTimeout", Value::Number(5_000.0));
     data.set("requestTimeout", Value::Number(300_000.0));
     data.set("httpAllowHalfOpen", Value::Boolean(false));
+    data.set(
+        "allowHalfOpen",
+        Value::Boolean(
+            state.borrow().protocol == ServerProtocol::Http || state.borrow().allow_half_open,
+        ),
+    );
     data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
     data.set(
         "once",
@@ -194,6 +203,7 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
     );
     data.set("readyState", Value::String("open".into()));
+    data.set("allowHalfOpen", Value::Boolean(false));
     data.set("connecting", Value::Boolean(state.borrow().connecting));
     if state.borrow().connecting {
         data.set("readyState", Value::String("opening".into()));

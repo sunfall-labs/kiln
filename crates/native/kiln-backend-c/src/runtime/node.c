@@ -1631,6 +1631,20 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
     if (status == KILN_C99_OK && socket->connecting)
         status = kiln_c99_put(NULL, socket->object, "readyState", 10,
                               kiln_c99_copy_text("opening", 7), 0, NULL);
+    if (status == KILN_C99_OK) {
+        kiln_value allow_half_open = kiln_c99_boolean(0);
+        if (socket->server != NULL) {
+            if (socket->server->protocol_http) {
+                allow_half_open = kiln_c99_boolean(1);
+            } else {
+                status = kiln_c99_get(socket->host, socket->server->object, "allowHalfOpen", 13,
+                                      &allow_half_open, 0, thrown);
+            }
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(socket->host, socket->object, "allowHalfOpen", 13,
+                                  allow_half_open, 0, thrown);
+    }
     if (status == KILN_C99_OK)
         status = kiln_c99_process_object(&process);
     if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&process);
@@ -2115,14 +2129,13 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         kiln_c99_heap_store_pointer(response, &response->next, socket->responses);
         kiln_c99_heap_store_pointer(socket, &socket->responses, response);
         {
-            kiln_value arguments[2] = {request, response->object};
+            kiln_value arguments[3] = {
+                kiln_c99_copy_text("request", 7), request, response->object};
             int kept;
-            if (!kiln_c99_is_callable(socket->server->connection_listener)) {
-                return kiln_c99_node_request_headers_keep(response);
-            }
             kiln_c99_active_http_response = response;
-            status = kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
-                                  socket->server->object, arguments, 2, 0, exception);
+            status = kiln_c99_node_event(socket->host, &ignored,
+                                        KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                        socket->server->object, arguments, 3, 0, exception);
             kiln_c99_active_http_response = NULL;
             kept = kiln_c99_node_request_headers_keep(response);
             return status != KILN_C99_OK ? status : kept;
@@ -4939,11 +4952,20 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         kiln_value ignored;
         kiln_value listener = kiln_c99_undefined();
         int http = code != KILN_C99_METHOD_NODE_NET_CREATE_SERVER;
+        int allow_half_open = http;
         int status;
         if (!http) {
-            listener = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (listener.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(listener))
-                return kiln_c99_throw_not_a(thrown, listener, "function");
+            kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (kiln_c99_is_callable(first)) {
+                listener = first;
+            } else {
+                if (first.tag != KILN_VALUE_UNDEFINED && first.tag != KILN_VALUE_NULL &&
+                    first.tag != KILN_VALUE_OBJECT) {
+                    return kiln_c99_throw_node_invalid_arg_type(
+                        thrown, "The \"options\" argument must be of type object");
+                }
+                if (argc > 1 && kiln_c99_is_callable(args[1])) listener = args[1];
+            }
         } else {
             kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
             if (first.tag != KILN_VALUE_UNDEFINED && first.tag != KILN_VALUE_NULL &&
@@ -4961,16 +4983,27 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 }
             }
         }
+        if (!http && argc > 0 && args[0].tag == KILN_VALUE_OBJECT) {
+            kiln_value option;
+            status = kiln_c99_get(host, args[0], "allowHalfOpen", 13,
+                                  &option, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            allow_half_open = kiln_c99_truthy(option);
+        }
         server = (kiln_node_server *)kiln_c99_gc_calloc(KILN_GC_NODE_SERVER, sizeof *server);
         if (server == NULL) return KILN_C99_OUT_OF_MEMORY;
         server->host = host;
+        server->allow_half_open = allow_half_open;
         kiln_c99_heap_store_value(server, &server->connection_listener, listener);
         status = kiln_c99_new_object_for_owner(&server->object, server);
         if (status == KILN_C99_OK)
             status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
                                          server->object, NULL, 0, depth, thrown);
-        if (status == KILN_C99_OK && !http && kiln_c99_is_callable(listener)) {
-            kiln_value on_args[2] = {kiln_c99_copy_text("connection", 10), listener};
+        if (status == KILN_C99_OK && kiln_c99_is_callable(listener) &&
+            (!http || code != KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER)) {
+            const char *event = http ? "request" : "connection";
+            size_t event_len = http ? 7 : 10;
+            kiln_value on_args[2] = {kiln_c99_copy_text(event, event_len), listener};
             status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ON,
                                          server->object, on_args, 2, depth, thrown);
         }
@@ -5005,6 +5038,9 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 status = kiln_c99_put(host, server->object, "requestTimeout", 14,
                                       kiln_c99_number(300000.0), depth, thrown);
         }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, server->object, "allowHalfOpen", 13,
+                                  kiln_c99_boolean(server->allow_half_open), depth, thrown);
         if (status != KILN_C99_OK) { kiln_c99_gc_release(server); return status; }
         *result = server->object;
         return KILN_C99_OK;

@@ -3238,6 +3238,9 @@ struct kiln_node_server {
     uint32_t port;
     uint64_t timeout_milliseconds;
     int protocol_http;
+    /* Raw net servers default to half-close disabled; HTTP sockets expose true independently
+     * of the HTTP parser's `httpAllowHalfOpen` option. */
+    int allow_half_open;
     /* A fetch-style (`serve`) server: requests arrive whole and reach the listener as strings
      * and bytes, with no IncomingMessage or ServerResponse built (`kiln_c99_node_fetch_request`). */
     int fetch_mode;
