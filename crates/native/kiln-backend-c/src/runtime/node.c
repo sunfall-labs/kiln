@@ -1611,6 +1611,18 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
             if (status != KILN_C99_OK) return status;
             status = kiln_c99_node_socket_settle_cancelled_active_write(socket, cancel_error);
             if (status != KILN_C99_OK) return status;
+            kiln_value queued_error;
+            status = kiln_c99_node_socket_destroy_error(&queued_error);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_node_socket_cancel_queued_write_callbacks(socket, queued_error);
+            if (status != KILN_C99_OK) return status;
+            /* `end()` waits on the active write. Its callback receives that write's
+             * cancellation error; only writes discarded from the queued tail get
+             * ERR_STREAM_DESTROYED. Queue it after the active write callbacks above. */
+            status = kiln_c99_node_socket_finish_end_callbacks(
+                socket->host, socket, cancel_error, 1, NULL);
+            if (status != KILN_C99_OK) return status;
+            socket->destroy_after_write = 0;
         } else {
             socket->write_request = 0;
             socket->active_write_len = 0;
@@ -2512,17 +2524,14 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             }
         }
         if (work->socket != NULL && work->kind == KILN_REALM_OP_TCP_WRITE) {
+            /* End callbacks attached behind this failed write inherit its actual error. */
             kiln_value end_error = transport_error;
-            if (work->socket->destroy_after_write) {
-                status = kiln_c99_node_socket_destroy_error(&end_error);
-                if (status != KILN_C99_OK) return status;
-                work->socket->destroy_after_write = 0;
-            }
-            status = kiln_c99_node_socket_finish_end_callbacks(
-                (kiln_host *)host, work->socket, end_error, 1, exception);
-            if (status != KILN_C99_OK) return status;
+            work->socket->destroy_after_write = 0;
             status = kiln_c99_node_socket_discard_queued_writes(work->socket,
                                                                  transport_error);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_node_socket_finish_end_callbacks(
+                (kiln_host *)host, work->socket, end_error, 1, exception);
             if (status != KILN_C99_OK) return status;
         }
         if (work->socket != NULL) kiln_c99_gc_keep_alive(&transport_error);

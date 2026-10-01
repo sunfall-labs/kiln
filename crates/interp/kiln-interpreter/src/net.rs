@@ -33,6 +33,7 @@ pub(crate) struct NetSocketState {
     /// Destroy callbacks wait until an already-ready write completion reports its real result.
     pub(crate) deferred_destroy_callbacks: Option<(Vec<Value>, Vec<Value>)>,
     pub(crate) defer_destroy_callbacks: bool,
+    pub(crate) end_callbacks_use_cancel_error: bool,
     /// Write callbacks retained until the HTTP upgrade engine confirms each append reached
     /// the transport. Fence values are private runtime sequence numbers.
     pub(crate) upgrade_write_callbacks: std::collections::BTreeMap<u64, Vec<Value>>,

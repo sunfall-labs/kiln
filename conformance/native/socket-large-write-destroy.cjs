@@ -13,8 +13,8 @@ server.listen(0, '127.0.0.1', () => {
     if (accepted !== false) throw new Error('large write unexpectedly avoided backpressure');
     console.log('write ready', accepted);
     socket.end(function (error) {
-      if (arguments.length !== 1 || error?.code !== 'ERR_STREAM_DESTROYED') {
-        throw new Error(`wrong destroyed end callback: ${error?.code}`);
+      if (arguments.length !== 1 || error?.code !== 'ECANCELED') {
+        throw new Error(`wrong canceled end callback: ${error?.code}`);
       }
       console.log('end callback', error.code);
     });

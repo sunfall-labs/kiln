@@ -69,6 +69,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    fn schedule_node_socket_callbacks_with_error(&mut self, callbacks: Vec<Value>, error: Value) {
+        for callback in callbacks {
+            let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
+            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        }
+    }
+
     fn call_node_socket_end_callbacks(
         &mut self,
         state: &Rc<RefCell<crate::net::NetSocketState>>,
@@ -483,6 +490,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     end_callbacks: Vec::new(),
                     deferred_destroy_callbacks: None,
                     defer_destroy_callbacks: false,
+                    end_callbacks_use_cancel_error: false,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -1055,6 +1063,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // schedule those before callbacks for writes still held in the driver's queue. Keep
         // `end` callbacks after both groups, matching Writable's destroy ordering.
         if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks {
+            let use_cancel_error = {
+                let mut socket = state.borrow_mut();
+                std::mem::take(&mut socket.end_callbacks_use_cancel_error)
+            };
             let immediate = {
                 let mut socket = state.borrow_mut();
                 if socket.defer_destroy_callbacks {
@@ -1066,7 +1078,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 }
             };
             if let Some((write_callbacks, end_callbacks)) = immediate {
-                self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+                self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
+                if use_cancel_error && !end_callbacks.is_empty() {
+                    let error = self.construct_error(
+                        ErrorKind::Error,
+                        &[Value::String("operation canceled".into())],
+                    );
+                    if let Value::Object(object) = &error {
+                        object
+                            .borrow_mut()
+                            .set_non_enumerable("code", Value::String("ECANCELED".into()));
+                    }
+                    self.schedule_node_socket_callbacks_with_error(end_callbacks, error);
+                } else {
+                    self.schedule_node_socket_queued_callbacks(Vec::new(), end_callbacks);
+                }
             }
         }
         Ok(result)
@@ -2044,6 +2070,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             end_callbacks: Vec::new(),
             deferred_destroy_callbacks: None,
             defer_destroy_callbacks: false,
+            end_callbacks_use_cancel_error: false,
             upgrade_write_callbacks: Default::default(),
             shutdown_after_upgrade_fence: None,
             end_requested: false,
@@ -2193,6 +2220,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     end_callbacks: Vec::new(),
                     deferred_destroy_callbacks: None,
                     defer_destroy_callbacks: false,
+                    end_callbacks_use_cancel_error: false,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -2454,6 +2482,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 object
                                     .borrow_mut()
                                     .set_non_enumerable("code", Value::String("ECANCELED".into()));
+                            }
+                            if pending_is_write
+                                && let Some(socket) = node_net_socket_value(&server, resource)
+                                    .and_then(|socket| node_net_socket_state(&socket).ok())
+                                && socket.borrow().destroyed
+                            {
+                                socket.borrow_mut().end_callbacks_use_cancel_error = true;
                             }
                             for callback in write_callbacks {
                                 let callback = Value::Bound(Rc::new(BoundFunction {
