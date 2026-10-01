@@ -21,9 +21,12 @@ if (effects !== 2 || !read.skip() || effects !== 2 || read.remove() !== false ||
 function beforeInitialization() {
   const remove = () => delete later;
   if (remove() !== false) throw new Error('delete read a TDZ binding or treated it as absent');
+  let caught = false;
   try { later = (++effects, 1); } catch (error) {
     if (!(error instanceof ReferenceError)) throw error;
+    caught = true;
   }
+  if (!caught) throw new Error('TDZ assignment accepted a write');
   const later = 2;
 }
 beforeInitialization();
