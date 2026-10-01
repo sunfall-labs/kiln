@@ -4306,15 +4306,16 @@ impl RealmHostProvider for TokioHost {
                 tokio::pin!(writing);
                 tokio::select! {
                     biased;
-                    result = &mut writing => prefix_completion.complete(result),
                     // An abort can complete the shared fence state while this task is blocked
                     // on a raw write. Dropping that future prevents later append bytes from
-                    // escaping after their callbacks were failed.
+                    // escaping after their callbacks were failed. Check cancellation first,
+                    // including when it was recorded before this task's initial poll.
                     result = prefix_completion.wait() => {
                         if result.is_ok() {
                             prefix_completion.complete(Ok(()));
                         }
-                    }
+                    },
+                    result = &mut writing => prefix_completion.complete(result),
                 }
             });
             Some(task.abort_handle())
