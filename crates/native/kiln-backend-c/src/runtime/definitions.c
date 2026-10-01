@@ -1616,12 +1616,15 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         KILN_C99_REFUSE("an own-property question about a built-in member the surface table does "
                         "not list");
     }
-    default:
-        /* A string, a regular expression, a buffer and a view all have own properties -- indices,
-         * `lastIndex`, `byteLength` -- and the two engines do not yet answer alike about them.
-         * Refusing says so; answering would pick one of the two disagreements at random. */
-        KILN_C99_REFUSE("an own-property question about a value the two engines do not answer "
-                        "alike about");
+    default: {
+        /* The call frame's receiver can be hasOwnProperty.call rather than this queried target.
+         * Name the actual unsupported representation so a refusal identifies the missing seam. */
+        char subject[40];
+        int length = snprintf(subject, sizeof subject, "queried value tag %u", (unsigned)target.tag);
+        if (length < 0 || (size_t)length >= sizeof subject) return KILN_C99_INVALID_ARGUMENT;
+        KILN_C99_REFUSE_NAMED("an own-property question about a value the two engines do not answer "
+                              "alike about", subject, (size_t)length);
+    }
     }
 }
 
