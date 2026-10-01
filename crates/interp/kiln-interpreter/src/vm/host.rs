@@ -2955,6 +2955,38 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let (resource, started) = {
                     let mut state = state.borrow_mut();
                     if state.ended {
+                        let error = self.construct_error(
+                            ErrorKind::Error,
+                            &[Value::String("write after end".into())],
+                        );
+                        if let Value::Object(error_object) = &error {
+                            error_object
+                                .borrow_mut()
+                                .set_non_enumerable(
+                                    "code",
+                                    Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
+                                );
+                        }
+                        let callback = arguments.iter().rev().find(|value| is_callable(value));
+                        if let Some(callback) = callback {
+                            let callback = Value::Bound(Rc::new(BoundFunction {
+                                target: callback.clone(),
+                                this_value: Value::Undefined,
+                                arguments: vec![error.clone()],
+                                properties: RefCell::new(ObjectData::default()),
+                            }));
+                            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                        }
+                        let emit = self.read_property(receiver, "emit", instruction)?;
+                        let emit = Value::Bound(Rc::new(BoundFunction {
+                            target: emit,
+                            this_value: receiver.clone(),
+                            arguments: vec![Value::String("error".into()), error],
+                            properties: RefCell::new(ObjectData::default()),
+                        }));
+                        let scheduled = self.scheduled(Job::NextTick(emit, Vec::new()));
+                        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
                         return Ok(Value::Boolean(false));
                     }
                     let resource = state

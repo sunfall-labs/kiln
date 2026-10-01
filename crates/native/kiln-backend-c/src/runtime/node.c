@@ -1118,6 +1118,46 @@ static int kiln_c99_node_emit_transport_error(kiln_host *host, kiln_value object
     return kiln_c99_node_emit(host, object, "error", error, 1, 0, thrown);
 }
 
+static int kiln_c99_node_fs_error_property(kiln_value error, const char *key, size_t key_len,
+                                           const uint8_t *bytes, size_t length);
+
+/* A write attempted after ClientRequest.end() is reported on the next tick. Keep the callback
+ * and EventEmitter paths in the same order Node uses: the optional write callback, then the
+ * request's error event. */
+static int kiln_c99_node_client_write_after_end(kiln_node_client_request *request,
+                                                const kiln_value *args, size_t argc,
+                                                kiln_value *result) {
+    kiln_value error, callback = kiln_c99_undefined(), emit, job;
+    kiln_value error_args[1], event_args[2];
+    size_t callback_index;
+    int status;
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR,
+                                kiln_c99_copy_text("write after end", 15));
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_node_fs_error_property(error, "code", 4,
+                                             (const uint8_t *)"ERR_STREAM_WRITE_AFTER_END", 26);
+    if (status != KILN_C99_OK) return status;
+    if (argc > 2) callback_index = 2;
+    else callback_index = 1;
+    if (argc > callback_index && kiln_c99_is_callable(args[callback_index]))
+        callback = args[callback_index];
+    error_args[0] = error;
+    if (kiln_c99_is_callable(callback)) {
+        status = kiln_c99_bind_with(&job, callback, kiln_c99_undefined(), error_args, 1);
+        if (status == KILN_C99_OK) status = kiln_c99_enqueue_next_tick(job, NULL, 0);
+        if (status != KILN_C99_OK) return status;
+    }
+    status = kiln_c99_get(request->host, request->object, "emit", 4, &emit, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    event_args[0] = kiln_c99_copy_text("error", 5);
+    event_args[1] = error;
+    status = kiln_c99_bind_with(&job, emit, request->object, event_args, 2);
+    if (status == KILN_C99_OK) status = kiln_c99_enqueue_next_tick(job, NULL, 0);
+    if (status != KILN_C99_OK) return status;
+    *result = kiln_c99_boolean(0);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
                                                   kiln_value *thrown) {
     kiln_node_socket *socket;
@@ -4406,9 +4446,13 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_c99_node_byte_span span;
         int status;
         if (request == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ClientRequest");
-        if (request->ended)
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
-                                        "write after end");
+        if (request->ended) {
+            if (code == KILN_C99_METHOD_NODE_CLIENT_REQUEST_END) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
+            return kiln_c99_node_client_write_after_end(request, args, argc, result);
+        }
         status = kiln_c99_node_http_byte_span(
             argc > 0 ? args[0] : kiln_c99_undefined(), &span);
         if (status != KILN_C99_OK) return status;
