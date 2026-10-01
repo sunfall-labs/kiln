@@ -3788,6 +3788,7 @@ static int kiln_c99_clone_data_arena(kiln_value *out, kiln_value source,
 static int kiln_c99_clone_arena_prepare(kiln_c99_clone_arena *arena, kiln_gc_heap *sender,
 static int kiln_c99_clone_arena_adopt(kiln_c99_clone_arena *arena, kiln_gc_heap *receiver,
 static void kiln_c99_prepared_graph_drop(void *payload) {
+static int kiln_c99_spread_snapshot_keys(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
 static kiln_c99_clone_arena *kiln_c99_prepared_graph_find(kiln_gc_heap *heap,

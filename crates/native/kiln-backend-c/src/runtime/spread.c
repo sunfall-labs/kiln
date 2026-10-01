@@ -1038,9 +1038,8 @@ static void kiln_c99_prepared_graph_drop(void *payload) {
     free(arena);
 }
 
-/* Arrays and builtin callables/namespaces do not expose one ordinary property store to walk:
- * arrays combine indexed elements with a named store, while builtins use a table plus an
- * ordinary store. CopyDataProperties takes their full own-key snapshot first, then checks each
+/* Arrays, typed arrays and builtin callables/namespaces combine indexed or intrinsic
+ * properties with a separate named store. CopyDataProperties takes their full own-key snapshot first, then checks each
  * current descriptor and performs [[Get]]. */
 static int kiln_c99_spread_snapshot_keys(kiln_host *host, kiln_value target, kiln_value source,
                                          int depth, kiln_value *thrown) {
@@ -1332,10 +1331,6 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
                 return status;
             }
         }
-        /* ...and then whatever the program hung on a string by name, which is own and
-         * enumerable like any other property: `a.total = 1` belongs in the result, and
-         * `Object.keys` already reported it while the spread beside it dropped it. `length` is
-         * not among them, because it is not enumerable. */
     } else if (source.tag == KILN_VALUE_OBJECT) {
         named = source;
     } else if (source.tag == KILN_VALUE_FUNCTION || source.tag == KILN_VALUE_METHOD ||
