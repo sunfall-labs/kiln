@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
+pub use kiln_hir::{SourceOrigin, Span, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 11;
+pub const BYTECODE_VERSION: u16 = 12;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -593,6 +593,10 @@ pub struct Program {
     /// Shared with the [`Module`] it was compiled from rather than copied out of it, so a program
     /// and its HIR cost one buffer between them and not two.
     pub source: Arc<str>,
+    /// Optional lossless UTF-16 origin for sources transported through parser-safe UTF-8.
+    /// Spans remain parser-byte offsets; this shared map translates them back when reflecting
+    /// function source text. Ordinary modules leave it absent and pay no mapping cost.
+    pub source_origin: Option<Arc<SourceOrigin>>,
     /// Syntactic template literal sites compiled in this program, referenced by
     /// [`Instruction::LoadTemplateObject`].
     pub template_sites: Vec<TemplateSite>,
@@ -607,6 +611,7 @@ impl Default for Program {
             local_count: 0,
             functions: Vec::new(),
             source: "".into(),
+            source_origin: None,
             template_sites: Vec::new(),
         }
     }

@@ -553,7 +553,7 @@ impl Value {
             // `Function.prototype.toString`: the text the program wrote. The span and the source
             // both travel on the program the closure already carries, so this is a slice rather
             // than a reconstruction -- there is no spelling to invent and none to get wrong.
-            Self::Function(closure) => closure.source_text().to_owned(),
+            Self::Function(closure) => closure.source_units().to_lossy_string(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) | Self::Shared(_) => "[object Object]".to_owned(),
@@ -639,6 +639,7 @@ impl Value {
     pub(super) fn to_string_units_checked(&self) -> Result<StringUnits, ExecutionError> {
         match self {
             Self::String(value) => Ok(value.clone()),
+            Self::Function(closure) => Ok(closure.source_units()),
             Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
             Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
             Self::RegExp(regexp) => Ok(regexp_string_units(regexp)),

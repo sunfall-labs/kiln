@@ -9,6 +9,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count,

@@ -2139,6 +2139,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
 fn asset_module_program(path: &str) -> Program {
     Program {
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![kiln_ir::Constant::String(path.to_owned().into())],
         code: vec![
             Instruction::Const(0),

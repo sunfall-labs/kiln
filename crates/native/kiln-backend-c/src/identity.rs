@@ -472,6 +472,20 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     for value in program.source.bytes() {
         byte(&mut hash, value);
     }
+    match &program.source_origin {
+        Some(origin) => {
+            byte(&mut hash, 0x65);
+            word(&mut hash, origin.units.len() as u64);
+            for unit in origin.units.units() {
+                word(&mut hash, u64::from(unit));
+            }
+            word(&mut hash, origin.byte_to_unit.len() as u64);
+            for offset in origin.byte_to_unit.iter() {
+                word(&mut hash, u64::from(*offset));
+            }
+        }
+        None => {}
+    }
     if !program.template_sites.is_empty() {
         byte(&mut hash, 0x64);
         word(&mut hash, program.template_sites.len() as u64);
@@ -558,6 +572,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     *hash = hash_program_with_seed(
         &Program {
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: Vec::new(),
             code: function.code.clone(),
             local_count: 0,

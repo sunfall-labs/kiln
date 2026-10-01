@@ -1326,6 +1326,7 @@ mod tests {
         let program = Program {
             source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
             constants,
             code: vec![],
             local_count: 0,

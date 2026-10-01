@@ -6,6 +6,7 @@ fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 1,
@@ -81,6 +82,7 @@ fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
     let module = ModuleProgram {
         program: Program {
             version: BYTECODE_VERSION,
+            source_origin: None,
             source: String::new().into(),
             constants: Vec::new(),
             code: vec![Instruction::Return],
@@ -224,6 +226,7 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 1,
@@ -1237,6 +1240,7 @@ fn executable_arrow_captures_its_defining_receiver() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("make".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -1294,6 +1298,7 @@ fn executable_runaway_recursion_reports_rather_than_crashing() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![
             Instruction::NewCell(0),
@@ -1620,6 +1625,7 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 2,
@@ -1695,6 +1701,7 @@ fn executable_generic_clone_reads_a_speculated_sum_boxed_after_an_exit() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::String("".into()),        // 0
             Constant::Number(0.0f64.to_bits()), // 1
@@ -1783,6 +1790,7 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::String("".into()),        // 0
             Constant::Number(0.0f64.to_bits()), // 1
@@ -1854,6 +1862,7 @@ fn executable_branch_on_a_number_remainder_reads_a_live_twin() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0.0f64.to_bits()),   // 0
             Constant::Number(2.0f64.to_bits()),   // 1
@@ -1929,6 +1938,7 @@ fn executable_unary_plus_of_a_product_copies_a_written_box() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(2.5f64.to_bits()), // 0
             Constant::Number(2.0f64.to_bits()), // 1
@@ -2014,6 +2024,7 @@ fn executable_length_specialization() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 6,

@@ -96,6 +96,7 @@ fn one_site(callback: Option<FunctionProto>, extra: usize, constants: Constants)
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 0,
@@ -360,6 +361,7 @@ fn tier_1_a_capture_written_once_is_parallel_and_one_written_twice_is_not() {
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: constants.0,
             code,
             local_count: 1,
@@ -640,6 +642,7 @@ fn compare_with(
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 3,
@@ -949,6 +952,7 @@ fn family_site(
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 0,
@@ -1180,6 +1184,7 @@ fn tier_2_reads_run_in_the_pool_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 1,
@@ -1337,6 +1342,7 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 1,
@@ -1501,6 +1507,7 @@ fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: constants.0,
         code,
         local_count: 1,

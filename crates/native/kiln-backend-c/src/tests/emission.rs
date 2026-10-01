@@ -47,6 +47,7 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -168,6 +169,7 @@ fn decoupled_modules_include_one_external_runtime_header() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -353,6 +355,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("f16round".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -742,6 +745,24 @@ fn program_hash_covers_function_table_and_proto_contents() {
 }
 
 #[test]
+fn program_hash_covers_lossless_source_origin() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_origin = |unit| {
+        let mut program = base.clone();
+        program.source_origin = Some(std::sync::Arc::new(kiln_ir::SourceOrigin {
+            units: kiln_ir::StringUnits::from_units(&[unit]),
+            byte_to_unit: vec![0, 1].into(),
+        }));
+        program
+    };
+    assert_ne!(
+        hash_program(&with_origin(0xd800)),
+        hash_program(&with_origin(0xfffd)),
+        "distinct original UTF-16 source units must not share an emitted-artifact identity"
+    );
+}
+
+#[test]
 fn emitted_closure_names_use_lossless_effective_function_metadata() {
     let mut high = function(vec![Instruction::Return]);
     high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
@@ -892,6 +913,7 @@ fn executable_compact_closure_executes_correctly() {
         &Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![
                 Constant::Number(0f64.to_bits()),
                 Constant::Number(1f64.to_bits()),
@@ -1397,6 +1419,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![
                 Constant::String("foo".to_owned().into()),
                 Constant::String("bar".to_owned().into()),
@@ -1499,6 +1522,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![
                 Constant::String("k0".to_owned().into()),
                 Constant::String("k1".to_owned().into()),

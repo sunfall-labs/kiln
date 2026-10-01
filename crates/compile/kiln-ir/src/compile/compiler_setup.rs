@@ -43,6 +43,7 @@ impl super::Compiler {
     pub(super) fn new(module: &Module) -> Self {
         let mut compiler = Self {
             source: Arc::clone(&module.source),
+            source_origin: module.source_origin.clone(),
             constants: Vec::new(),
             constant_indices: rustc_hash::FxHashMap::default(),
             code: Vec::new(),
@@ -224,6 +225,7 @@ impl super::Compiler {
                     local_count: self.local_count,
                     functions: self.functions,
                     source: self.source,
+                    source_origin: self.source_origin,
                     template_sites: self.template_sites,
                 },
                 Strictness {

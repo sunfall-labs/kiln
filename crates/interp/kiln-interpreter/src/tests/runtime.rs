@@ -175,6 +175,7 @@ fn new_on_a_non_constructor_is_rejected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![number(1.0)],
         code: vec![
             Instruction::Const(0),
@@ -223,6 +224,7 @@ fn an_uncaught_throw_names_what_was_thrown() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("boom".to_owned().into())],
         code: vec![Instruction::Const(0), Instruction::Throw],
         local_count: 0,
@@ -242,6 +244,7 @@ fn unwinding_restores_the_stack_the_handler_expected() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             number(1.0),
             number(2.0),
@@ -293,6 +296,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![number(5.0)],
         code: vec![
             Instruction::MakeFunction(0),
@@ -396,6 +400,7 @@ fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![number(1.0)],
         code: vec![
             Instruction::Const(0),
@@ -422,6 +427,7 @@ fn runaway_recursion_is_bounded_by_call_depth() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![
             Instruction::MakeFunction(0),
@@ -486,6 +492,7 @@ fn an_unknown_function_index_is_rejected_rather_than_indexed() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::MakeFunction(3), Instruction::Return],
         local_count: 0,
@@ -535,6 +542,7 @@ fn a_marked_local_read_throws_a_reference_error() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![
             Instruction::MarkUninitialized(0),
@@ -801,6 +809,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
         source: "".into(),
         template_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::String("make".into()),
             Constant::String("tag".into()),

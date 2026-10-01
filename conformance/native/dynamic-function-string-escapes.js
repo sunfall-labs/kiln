@@ -22,6 +22,9 @@ const rawSourceRegexp = Function('return /a' + rawLoneSurrogate + 'b/;')();
 const nestedFunctionSurrogate = Function(
   'return function(){ return "' + rawLoneSurrogate + '"; }',
 )()();
+const nestedFunctionSource = Function(
+  'return function(){ return "' + rawLoneSurrogate + '"; }',
+)().toString();
 const methodSurrogate = Function(
   'return ({ method(){ return "' + rawLoneSurrogate + '"; } }).method()',
 )();
@@ -57,6 +60,7 @@ console.log(JSON.stringify({
   escapedRawEuro: units(escapedRawEuro),
   rawSourceRegexp: [units(rawSourceRegexp.source), rawSourceRegexp.test(rawSourceValue)],
   nestedFunctionSurrogate: units(nestedFunctionSurrogate),
+  nestedFunctionSource: units(nestedFunctionSource),
   methodSurrogate: units(methodSurrogate),
   arrowSurrogate: units(arrowSurrogate),
   escapedSeparators,

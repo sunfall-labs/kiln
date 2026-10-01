@@ -1499,6 +1499,7 @@ fn every_object_tag_converts_and_is_truthy_and_names_itself() {
 fn rejects_bad_versions_and_stack_shapes_explicitly() {
     let bad_version = Program {
         version: BYTECODE_VERSION + 1,
+        source_origin: None,
         ..program(Vec::new(), vec![Instruction::Return], 0)
     };
     assert!(matches!(
@@ -1603,6 +1604,7 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0f64.to_bits()),
             Constant::Number(1f64.to_bits()),
@@ -1653,6 +1655,7 @@ fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code: vec![
             Instruction::MakeFunction(0),
@@ -6369,6 +6372,7 @@ fn executable_cached_shape_object_literal_executes_correctly() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 3,

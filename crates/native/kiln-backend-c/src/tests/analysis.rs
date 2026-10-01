@@ -49,6 +49,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
@@ -139,6 +140,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
@@ -232,6 +234,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
@@ -302,6 +305,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -412,6 +416,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -463,6 +468,7 @@ fn value_graph_builds_and_verifies_try_catch() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("err".into()), Constant::Number(42)],
         code: vec![Instruction::Return],
         local_count: 0,
@@ -508,6 +514,7 @@ fn value_graph_does_not_protect_an_operation_before_try() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::Undefined],
         code: vec![Instruction::Return],
         local_count: 0,
@@ -555,6 +562,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -624,6 +632,7 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -694,6 +703,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::NewCell(1),
@@ -764,6 +774,7 @@ fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::Const(0),
@@ -831,6 +842,7 @@ fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -913,6 +925,7 @@ fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -981,6 +994,7 @@ fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -1062,6 +1076,7 @@ fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -1117,6 +1132,7 @@ fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("Literals".into()), Constant::Number(1)],
         code: vec![
             Instruction::LoadLocal(0),
@@ -1143,6 +1159,7 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::String("fromInputUnsafe".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -1188,6 +1205,7 @@ fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![Constant::Number(0)],
         code: vec![
             Instruction::MakeFunction(0),
@@ -1226,6 +1244,7 @@ fn closed_world_namespace_keeps_every_member_when_the_value_escapes() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::LoadLocal(0), Instruction::Return],
         local_count: 1,
@@ -1281,6 +1300,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -1372,6 +1392,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
     let untyped_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -1381,6 +1402,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
     let typed_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -1482,6 +1504,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
     let untyped_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -1491,6 +1514,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
     let typed_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -1567,6 +1591,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -1663,6 +1688,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(2f64.to_bits()),
             Constant::String("parallelMap".into()),
@@ -1691,6 +1717,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
     let full_program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(2f64.to_bits()),
             Constant::String("parallelMap".into()),
@@ -1766,6 +1793,7 @@ fn test_proven_types_recognize_new_object_and_method_returns() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::String("indexOf".to_owned().into()),   // 0
             Constant::String("push".to_owned().into()),      // 1
@@ -1902,6 +1930,7 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0.0f64.to_bits()),
             Constant::Number(2.0f64.to_bits()),

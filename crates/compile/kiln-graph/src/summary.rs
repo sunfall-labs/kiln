@@ -250,6 +250,7 @@ mod tests {
     fn empty_program() -> Program {
         Program {
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,

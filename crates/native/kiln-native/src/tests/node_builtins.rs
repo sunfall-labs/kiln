@@ -12,6 +12,7 @@ fn typed_node_querystring_has_a_native_materializer() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Number(1_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),

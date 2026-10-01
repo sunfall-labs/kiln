@@ -8,6 +8,7 @@ fn module(body: Vec<Statement>) -> Module {
         // point into. A function compiled from one answers `toString` with the empty string,
         // which is what "no source" means here.
         source: "".into(),
+        source_origin: None,
         strict: false,
         source_kind: kiln_hir::SourceKind::JavaScript,
         // Script, because these fixtures are bodies rather than ESM: the goal now decides

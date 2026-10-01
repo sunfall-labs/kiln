@@ -216,6 +216,7 @@ fn release_module_specialization_budget_counts_all_instructions() {
     let mut program = Program {
         source: String::new().into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return; MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS],
         local_count: 0,
@@ -239,6 +240,7 @@ fn release_module_specialization_budget_counts_functions() {
     let mut program = Program {
         source: String::new().into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,

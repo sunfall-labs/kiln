@@ -977,6 +977,7 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             source: "".into(),
             template_sites: Vec::new(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -1007,6 +1008,7 @@ fn native_entry_program() -> ModuleProgram {
             source: "".into(),
             template_sites: Vec::new(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::LoadCell(0),

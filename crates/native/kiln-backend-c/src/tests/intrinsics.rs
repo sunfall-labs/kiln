@@ -364,6 +364,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
         let generated = emit(&Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
             constants: vec![
                 Constant::String("valueOf".to_owned().into()),
                 Constant::String("called".to_owned().into()),
@@ -1121,6 +1122,7 @@ fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 3,
@@ -1603,6 +1605,7 @@ fn loop_induction_and_string_length_emit_assigned_twins() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(1),
@@ -1653,6 +1656,7 @@ fn object_profile_selects_only_simple_array_parameter_receivers() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             Constant::Number(0.0f64.to_bits()),
             Constant::String("length".into()),
@@ -1830,6 +1834,7 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 3,
@@ -1932,6 +1937,7 @@ fn executable_chained_intrinsic_array_and_string_devirtualization() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 6,
@@ -2025,6 +2031,7 @@ fn executable_math_all_pure_functions_unboxed() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 4,
@@ -2108,6 +2115,7 @@ fn executable_static_builtin_predicates_array_is_array() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 5,
@@ -2226,6 +2234,7 @@ fn executable_static_builtin_predicates_number() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 9,
@@ -2319,6 +2328,7 @@ fn executable_array_indexing_and_bounds() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count: 7,

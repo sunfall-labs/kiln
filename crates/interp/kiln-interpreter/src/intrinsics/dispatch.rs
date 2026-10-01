@@ -334,7 +334,10 @@ pub(crate) fn call_native(
                     ),
                 });
             }
-            Value::String(receiver.to_display_string().into())
+            match receiver {
+                Value::Function(closure) => Value::String(closure.source_units()),
+                _ => Value::String(receiver.to_display_string().into()),
+            }
         }
         // Both build a program from source, which needs the machine: a compilation has to be
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and

@@ -737,6 +737,8 @@ struct Compiler {
     /// The text being compiled, handed to the [`Program`] so a function can answer with its own
     /// definition. Shared, never copied: see [`Program::source`].
     source: Arc<str>,
+    /// Lossless source units and parser-byte mapping when this source used a transport encoding.
+    source_origin: Option<Arc<kiln_hir::SourceOrigin>>,
     constants: Vec<Constant>,
     /// Lookup only: insertion order in `constants` remains the bytecode's stable index order.
     constant_indices: rustc_hash::FxHashMap<Constant, u32>,

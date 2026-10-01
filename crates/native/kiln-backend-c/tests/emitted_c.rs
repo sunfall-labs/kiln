@@ -48,6 +48,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants,
         code,
         local_count,
@@ -1310,6 +1311,7 @@ fn typed_array_borrowed_generic_methods() {
     let unit = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
         constants: vec![
             number(1.0),
             number(2.0),
@@ -1601,6 +1603,7 @@ fn rejected_programs() {
         "unsupported bytecode version",
         emit(&Program {
             version: BYTECODE_VERSION + 1,
+            source_origin: None,
             ..minimal_program()
         })
         .expect_err("must be rejected"),

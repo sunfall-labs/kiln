@@ -1009,6 +1009,26 @@ impl Closure {
     /// An empty answer where the span does not resolve. Every proto the compiler emits has a real
     /// span, so this is unreachable in practice; it is written as an empty string rather than a
     /// panic because a `toString` is not worth ending a program over.
+    pub fn source_units(&self) -> StringUnits {
+        let Some(proto) = self.program.functions.get(self.function as usize) else {
+            return StringUnits::default();
+        };
+        if let Some(origin) = &self.program.source_origin {
+            if let Some(source) = origin.slice_bytes(proto.span.start, proto.span.end) {
+                return source;
+            }
+        }
+        StringUnits::from(
+            self.program
+                .source
+                .get(proto.span.start as usize..proto.span.end as usize)
+                .unwrap_or(""),
+        )
+    }
+
+    /// Parser-source spelling for metadata and diagnostics that require Rust `str`.
+    /// Language reflection should use [`Self::source_units`] so a lossless UTF-16 origin is
+    /// preserved when the parser transport escaped lone surrogate code units.
     pub fn source_text(&self) -> &str {
         let Some(proto) = self.program.functions.get(self.function as usize) else {
             return "";
