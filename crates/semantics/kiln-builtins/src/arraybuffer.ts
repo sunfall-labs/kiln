@@ -40,6 +40,19 @@ delete (globalThis as any).__kilnSharedBuffer;
     return;
   }
 
+  // Both constructors expose the standard inherited-species accessor as an own accessor.
+  // Installing it through the ordinary TS surface gives ownKeys and descriptor inspection the
+  // same authority as reads, including computed `Symbol.species` access.
+  if (typeof Symbol !== "undefined" && Symbol.species) {
+    const speciesDescriptor = Object.getOwnPropertyDescriptor({
+      get [Symbol.species]() { return this; },
+    }, Symbol.species)!;
+    Object.defineProperty(ArrayBuffer, Symbol.species, speciesDescriptor);
+    if (typeof SharedArrayBuffer !== "undefined") {
+      Object.defineProperty(SharedArrayBuffer, Symbol.species, speciesDescriptor);
+    }
+  }
+
   // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
   // rather than a function declaration, which would have [[Construct]].
   // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and

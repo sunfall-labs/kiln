@@ -112,6 +112,27 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+        builtin == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) {
+        /* These constructors have an intrinsic own-key shape even though their host-backed
+         * operations are not all ordinary method-table rows. Keep the standard callable keys
+         * and species symbol together with any properties installed by the TS bootstrap. */
+        kiln_value species;
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK && builtin == KILN_C99_BUILTIN_ARRAY_BUFFER)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("isView", 6));
+        if (status == KILN_C99_OK && kiln_c99_symbol_of_key("@@species", 9, &species))
+            status = kiln_c99_array_push(built, species);
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     {
         kiln_typed_kind kind;
         if (kiln_c99_builtin_typed_kind(builtin, &kind)) {

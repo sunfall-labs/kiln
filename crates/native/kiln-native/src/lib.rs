@@ -2466,7 +2466,8 @@ impl NativeBuilder {
         // so the `-D` flags below only ever remove what nothing retained can
         // reach. Computed once; the explain path recomputes it out-of-band.
         let members = kiln_graph::analyze_demanded_members(graph, &demand.live, &demand.slots);
-        let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members);
+        let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members)
+            | graph::NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS;
         if trace_emit {
             eprintln!(
                 "kiln: graph selection and member analysis {}ms",

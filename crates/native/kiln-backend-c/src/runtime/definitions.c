@@ -1211,6 +1211,23 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             *out = built;
             return status;
         }
+        if ((target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+             target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) &&
+            kiln_c99_same_name_key(view, "prototype")) {
+            kiln_value value;
+            status = kiln_c99_get_key(host, target, view, canonical, &value, depth, thrown);
+            if (status == KILN_C99_OK) status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) { *found = 1; *out = built; }
+            return status;
+        }
         {
             char intrinsic_buffer[256];
             const char *intrinsic_key;
