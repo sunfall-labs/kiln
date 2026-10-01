@@ -87,6 +87,8 @@ const HTTP_EVENT_UPGRADE_READY: u32 = 12;
 #[cfg(feature = "realm-http")]
 const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
 #[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_WRITE_COMPLETE: u32 = 14;
+#[cfg(feature = "realm-http")]
 const HTTP_AGENT_CONNECT: i32 = 1;
 #[cfg(feature = "realm-http")]
 const HTTP_AGENT_REUSE: i32 = 2;
@@ -121,6 +123,8 @@ pub struct HttpEventView {
     pub headers_len: u64,
     pub data: *const u8,
     pub data_len: u64,
+    /// Nonzero only for `UPGRADE_WRITE_COMPLETE`; pairs an append with its flush callback.
+    pub write_fence: u64,
 }
 
 #[repr(C)]
@@ -4296,6 +4300,7 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             HttpEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
             HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
             HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
+            HttpEventKind::UpgradeWriteComplete => HTTP_EVENT_UPGRADE_WRITE_COMPLETE,
             HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,
             HttpEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
             HttpEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
@@ -4317,7 +4322,10 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             event.reason
         });
         let (headers, headers_len) = event_bytes(event.headers);
-        let (data, data_len) = event_bytes(if event.kind == HttpEventKind::Error {
+        let (data, data_len) = event_bytes(if matches!(
+            event.kind,
+            HttpEventKind::Error | HttpEventKind::UpgradeWriteComplete
+        ) {
             event.message
         } else {
             event.data
@@ -4339,6 +4347,7 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             headers_len,
             data,
             data_len,
+            write_fence: event.write_fence,
         };
         // SAFETY: the engine keeps every span live for this synchronous call, and the
         // owner's adapter allocation lives until the connection is removed below.
@@ -4921,21 +4930,54 @@ pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active(
         let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
             return INVALID_ARGUMENT;
         };
-        let Some(disposition) =
+        let Some(receipt) =
             runtime
                 .http_server()
                 .write_upgrade(kiln_host_abi::ResourceId::new(resource), id, data)
         else {
             return RUNTIME_ERROR;
         };
-        i32::from(!disposition.ready)
+        i32::from(!receipt.disposition.ready)
+    })
+}
+
+/// Additive upgrade-write entry point that returns the fence completed when this append has
+/// actually reached the upgraded transport. The legacy entry point remains ABI-stable.
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active_with_fence(
+    resource: u64,
+    id: u64,
+    data: *const u8,
+    data_len: u64,
+    out_fence: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if out_fence.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(receipt) = runtime.http_server().write_upgrade(
+            kiln_host_abi::ResourceId::new(resource), id, data,
+        ) else {
+            return RUNTIME_ERROR;
+        };
+        unsafe { *out_fence = receipt.fence };
+        i32::from(!receipt.disposition.ready)
     })
 }
 
 /// Linkable HTTP stubs for archives built without `realm-http`.
 ///
-/// Every symbol the provider ABI registry names must still link (PROVIDER_EXPORTS keeps
-/// its 99 entries and PROVIDER_ABI_VERSION stays 37), so each entry point keeps its exact
+/// Every symbol the provider ABI registry names must still link, so each entry point keeps its exact
 /// signature and answers invalid-argument. The stubs are unreachable in an HTTP-free
 /// graph: generated adapters only call them after a successful attach, and every attach
 /// fails without the engines. Enforcement of that "no HTTP calls" invariant belongs to a
@@ -4974,6 +5016,7 @@ mod http_stubs {
     http_stub!(kiln_realm_http_response_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
     http_stub!(kiln_realm_http_response_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
     http_stub!(kiln_realm_http_upgrade_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active_with_fence(resource: u64, id: u64, data: *const u8, data_len: u64, out_fence: *mut u64) -> i32);
 }
 
 #[cfg(not(feature = "realm-http"))]
@@ -6787,6 +6830,9 @@ macro_rules! assert_provider_export {
         };
         (realm, $name:ident, realm_http_response_write) => {
             const _: unsafe extern "C" fn(u64, u64, *const u8, u64) -> i32 = $name;
+        };
+        (realm, kiln_realm_http_upgrade_write_active_with_fence, realm_http_upgrade_write_fence) => {
+            const _: unsafe extern "C" fn(u64, u64, *const u8, u64, *mut u64) -> i32 = kiln_realm_http_upgrade_write_active_with_fence;
         };
         (realm, kiln_node_fs_read_file_sync, node_fs_read_file_sync) => {
             const _: unsafe extern "C" fn(*const u8, u64, *mut *mut u8, *mut u64, *mut i32) -> i32 = kiln_node_fs_read_file_sync;

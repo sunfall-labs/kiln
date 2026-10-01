@@ -47,6 +47,9 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
                                         const uint8_t *data, uint64_t data_len);
 int kiln_realm_http_upgrade_write_active(uint64_t resource, uint64_t id,
                                          const uint8_t *data, uint64_t data_len);
+int kiln_realm_http_upgrade_write_active_with_fence(uint64_t resource, uint64_t id,
+                                                    const uint8_t *data, uint64_t data_len,
+                                                    uint64_t *out_fence);
 
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown);

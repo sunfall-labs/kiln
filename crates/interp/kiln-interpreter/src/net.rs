@@ -23,6 +23,10 @@ pub(crate) struct NetSocketState {
     pub(crate) cork_depth: usize,
     pub(crate) corked_write: Vec<u8>,
     pub(crate) corked_callbacks: Vec<Value>,
+    /// Write callbacks retained until the HTTP upgrade engine confirms each append reached
+    /// the transport. Fence values are private runtime sequence numbers.
+    pub(crate) upgrade_write_callbacks: std::collections::BTreeMap<u64, Vec<Value>>,
+    pub(crate) shutdown_after_upgrade_fence: Option<u64>,
     pub(crate) end_requested: bool,
     pub(crate) destroyed: bool,
     pub(crate) connect_request: Option<kiln_host_abi::RequestId>,
@@ -187,8 +191,6 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         "destroy",
         Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
     );
-    data.set("cork", Value::Native(Native::NodeSocketCork, RealmId::PRIMARY));
-    data.set("uncork", Value::Native(Native::NodeSocketUncork, RealmId::PRIMARY));
     data.set("readyState", Value::String("open".into()));
     data.set("connecting", Value::Boolean(state.borrow().connecting));
     if state.borrow().connecting {

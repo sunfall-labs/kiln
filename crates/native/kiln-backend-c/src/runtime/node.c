@@ -1314,6 +1314,14 @@ static int kiln_c99_node_socket_run_write_callbacks(kiln_host *host,
                                                      kiln_value *thrown);
 static void kiln_c99_node_socket_take_write_callbacks(kiln_node_socket *socket,
                                                        kiln_node_completion *work);
+static int kiln_c99_node_socket_save_upgrade_callbacks(kiln_node_socket *socket,
+                                                        uint64_t fence);
+static int kiln_c99_node_socket_finish_upgrade_callbacks(kiln_host *host,
+                                                          kiln_node_socket *socket,
+                                                          uint64_t fence,
+                                                          kiln_value callback_error,
+                                                          kiln_value *thrown);
+static int kiln_c99_node_socket_cancel_queued_write_callbacks(kiln_node_socket *socket);
 
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
                                const char *text, size_t text_len, const uint8_t *bytes,
@@ -1530,6 +1538,9 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
     int status = kiln_c99_new_object_tenured(&socket->object);
     if (status == KILN_C99_OK)
         kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), socket, socket->object.ptr);
+    if (status == KILN_C99_OK)
+        kiln_c99_heap_store_value(socket, &socket->upgrade_write_callbacks,
+                                  kiln_c99_undefined());
     if (status == KILN_C99_OK)
         status = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
                                      socket->object, NULL, 0, 0, thrown);
@@ -1808,6 +1819,36 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     int status;
     (void)host;
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (event->kind == 14) {
+        kiln_value callback_error = kiln_c99_undefined();
+        uint64_t end_fence;
+        if (event->data_len != 0) {
+            status = kiln_c99_new_error(
+                &callback_error, KILN_C99_BUILTIN_ERROR,
+                kiln_c99_copy_text((const char *)event->data, (size_t)event->data_len));
+            if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&callback_error);
+        }
+        status = kiln_c99_node_socket_finish_upgrade_callbacks(
+            socket->host, socket, event->write_fence, callback_error, exception);
+        if (status != KILN_C99_OK) return status;
+        end_fence = socket->shutdown_after_upgrade_fence;
+        if (end_fence == event->write_fence) {
+            kiln_node_completion *shutdown;
+            socket->shutdown_after_upgrade_fence = 0;
+            if (event->data_len != 0) return KILN_C99_OK;
+            if (socket->closing || socket->closed) return KILN_C99_OK;
+            shutdown = (kiln_node_completion *)kiln_c99_gc_calloc(
+                KILN_GC_NODE_COMPLETION, sizeof *shutdown);
+            if (shutdown == NULL) return KILN_C99_OUT_OF_MEMORY;
+            shutdown->kind = KILN_REALM_OP_TCP_SHUTDOWN;
+            kiln_c99_heap_store_pointer(shutdown, &shutdown->socket, socket);
+            return kiln_c99_node_start(KILN_REALM_OP_TCP_SHUTDOWN, socket->resource,
+                                       0, NULL, 0, NULL, 0, shutdown,
+                                       &socket->shutdown_request);
+        }
+        return KILN_C99_OK;
+    }
     client = kiln_c99_node_client_for_id(socket, event->id);
     if (client == NULL) client = kiln_c99_node_client_request_find(event->id);
     if (event->kind == 11 && socket->server != NULL) {
@@ -2241,6 +2282,24 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             (void)kiln_c99_put(NULL, socket->object, "connecting", 10,
                                kiln_c99_boolean(0), 0, NULL);
             (void)kiln_c99_node_socket_ready_state(socket, "closed", 6);
+            if (socket->write_callbacks.tag == KILN_VALUE_ARRAY &&
+                ((kiln_array *)KILN_VAL_PTR(socket->write_callbacks))->count != 0) {
+                kiln_value callback_error;
+                if (completion->error_message_len > SIZE_MAX ||
+                    (completion->error_message_len != 0 && completion->error_message == NULL))
+                    return KILN_C99_INVALID_ARGUMENT;
+                kiln_c99_node_socket_take_write_callbacks(socket, work);
+                kiln_c99_heap_store_value(socket, &socket->write_callbacks,
+                                          kiln_c99_undefined());
+                status = kiln_c99_new_error(
+                    &callback_error, KILN_C99_BUILTIN_ERROR,
+                    kiln_c99_copy_text((const char *)completion->error_message,
+                                       (size_t)completion->error_message_len));
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_node_socket_run_write_callbacks((kiln_host *)host, work,
+                                                                   callback_error, exception);
+                if (status != KILN_C99_OK) return status;
+            }
         }
         if (work->socket != NULL && work->kind == KILN_REALM_OP_TCP_WRITE &&
             work->write_callbacks.tag == KILN_VALUE_ARRAY) {
@@ -4329,6 +4388,118 @@ static int kiln_c99_node_socket_run_write_callbacks(kiln_host *host,
     return KILN_C99_OK;
 }
 
+/* Store each completion record as three ordinary Array entries (high fence word, low word,
+ * callback Array). The outer Array is a precise GC root on the socket; splitting the fence into
+ * 32-bit words preserves all u64 values without routing through a lossy JS Number key. */
+static int kiln_c99_node_socket_save_upgrade_callbacks(kiln_node_socket *socket,
+                                                        uint64_t fence) {
+    kiln_value batch;
+    size_t start;
+    int status;
+    if (socket->write_callbacks.tag != KILN_VALUE_ARRAY ||
+        ((kiln_array *)KILN_VAL_PTR(socket->write_callbacks))->count == 0)
+        return KILN_C99_OK;
+    if (socket->upgrade_write_callbacks.tag != KILN_VALUE_ARRAY) {
+        status = kiln_c99_new_array(&batch);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_heap_store_value(socket, &socket->upgrade_write_callbacks, batch);
+    }
+    batch = socket->upgrade_write_callbacks;
+    start = ((kiln_array *)KILN_VAL_PTR(batch))->count;
+    status = kiln_c99_array_push(socket->upgrade_write_callbacks,
+                                 kiln_c99_number((double)(fence >> 32)));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_array_push(socket->upgrade_write_callbacks,
+                                     kiln_c99_number((double)(fence & UINT32_MAX)));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_array_push(socket->upgrade_write_callbacks, socket->write_callbacks);
+    if (status != KILN_C99_OK) {
+        kiln_array *items = (kiln_array *)KILN_VAL_PTR(socket->upgrade_write_callbacks);
+        while (items->count > start) {
+            --items->count;
+            kiln_c99_heap_store_val(items, &items->elements[items->count], KILN_VAL_HOLE);
+        }
+        return status;
+    }
+    kiln_c99_heap_store_value(socket, &socket->write_callbacks, kiln_c99_undefined());
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_node_socket_finish_upgrade_callbacks(kiln_host *host,
+                                                          kiln_node_socket *socket,
+                                                          uint64_t fence,
+                                                          kiln_value callback_error,
+                                                          kiln_value *thrown) {
+    kiln_array *items;
+    size_t index;
+    if (socket->upgrade_write_callbacks.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
+    items = (kiln_array *)KILN_VAL_PTR(socket->upgrade_write_callbacks);
+    for (index = 0; index + 2 < items->count; index += 3) {
+        uint64_t high;
+        uint64_t low;
+        kiln_value callbacks;
+        kiln_node_completion *work;
+        size_t move;
+        int status;
+        if (!KILN_VAL_IS_NUMBER(items->elements[index]) ||
+            !KILN_VAL_IS_NUMBER(items->elements[index + 1]))
+            continue;
+        high = (uint64_t)kiln_c99_as_number(kiln_val_to_boundary(items->elements[index]));
+        low = (uint64_t)kiln_c99_as_number(kiln_val_to_boundary(items->elements[index + 1]));
+        if (((high << 32) | low) != fence) continue;
+        work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                           sizeof *work);
+        if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+        items = (kiln_array *)KILN_VAL_PTR(socket->upgrade_write_callbacks);
+        if (index + 2 >= items->count) {
+            kiln_c99_gc_release(work);
+            return KILN_C99_OK;
+        }
+        callbacks = kiln_val_to_boundary(items->elements[index + 2]);
+        kiln_c99_heap_store_value(work, &work->write_callbacks, callbacks);
+        for (move = index; move + 3 < items->count; ++move)
+            kiln_c99_heap_store_val(items, &items->elements[move], items->elements[move + 3]);
+        for (move = items->count - 3; move < items->count; ++move)
+            kiln_c99_heap_store_val(items, &items->elements[move], KILN_VAL_HOLE);
+        items->count -= 3;
+        status = kiln_c99_node_socket_run_write_callbacks(host, work, callback_error, thrown);
+        kiln_c99_gc_release(work);
+        return status;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_node_socket_cancel_queued_write_callbacks(kiln_node_socket *socket) {
+    kiln_value error;
+    int status;
+    if (socket->write_callbacks.tag != KILN_VALUE_ARRAY ||
+        ((kiln_array *)KILN_VAL_PTR(socket->write_callbacks))->count == 0)
+        return KILN_C99_OK;
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR,
+                                kiln_c99_copy_text("socket destroyed", 16));
+    if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&error);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, error, "code", 4,
+                              kiln_c99_copy_text("ERR_STREAM_DESTROYED", 20), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    while (socket->write_callbacks.tag == KILN_VALUE_ARRAY &&
+           ((kiln_array *)KILN_VAL_PTR(socket->write_callbacks))->count != 0) {
+        kiln_array *callbacks = (kiln_array *)KILN_VAL_PTR(socket->write_callbacks);
+        kiln_value callback = kiln_val_to_boundary(callbacks->elements[0]);
+        size_t index;
+        for (index = 0; index + 1 < callbacks->count; ++index)
+            kiln_c99_heap_store_val(callbacks, &callbacks->elements[index],
+                                    callbacks->elements[index + 1]);
+        kiln_c99_heap_store_val(callbacks, &callbacks->elements[callbacks->count - 1],
+                                KILN_VAL_HOLE);
+        callbacks->count--;
+        status = kiln_c99_enqueue_next_tick(callback, &error, 1);
+        if (status != KILN_C99_OK) return status;
+    }
+    kiln_c99_heap_store_value(socket, &socket->write_callbacks, kiln_c99_undefined());
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_socket_flush_corked(kiln_node_socket *socket) {
     kiln_node_completion *work;
     int has_callbacks = socket->write_callbacks.tag == KILN_VALUE_ARRAY &&
@@ -4347,10 +4518,13 @@ static int kiln_c99_node_socket_flush_corked(kiln_node_socket *socket) {
                socket->corked_write_bytes, socket->corked_write_len);
         socket->pending_write_len = total;
     } else if (socket->upgrade_request_id != 0) {
-        status = kiln_realm_http_upgrade_write_active(
+        uint64_t fence = 0;
+        status = kiln_realm_http_upgrade_write_active_with_fence(
             socket->resource, socket->upgrade_request_id,
-            (const uint8_t *)socket->corked_write_bytes, socket->corked_write_len);
+            (const uint8_t *)socket->corked_write_bytes, socket->corked_write_len, &fence);
         if (status < 0) return status;
+        status = kiln_c99_node_socket_save_upgrade_callbacks(socket, fence);
+        if (status != KILN_C99_OK) return status;
     } else {
         work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
                                                            sizeof *work);
@@ -4722,6 +4896,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (code == KILN_C99_METHOD_NODE_SOCKET_DESTROY) {
             status = kiln_c99_node_socket_ready_state(socket, "closed", 6);
             if (status != KILN_C99_OK) return status;
+            status = kiln_c99_node_socket_cancel_queued_write_callbacks(socket);
+            if (status != KILN_C99_OK) return status;
             if ((socket->connecting && socket->resource == 0) || socket->pending_http_attach) {
                 kiln_node_client_request *request = socket->client_requests;
                 socket->connecting = 0;
@@ -4792,6 +4968,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 return kiln_c99_node_write_after_end(host, receiver, args, argc, result);
             }
             if (socket->cork_depth != 0) {
+                size_t buffered;
                 status = kiln_c99_node_socket_note_write_callback(socket, args, argc);
                 if (status != KILN_C99_OK) {
                     kiln_c99_node_http_byte_span_release(&span);
@@ -4808,8 +4985,11 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                     memcpy(socket->corked_write_bytes + socket->corked_write_len,
                            span.bytes, span.len);
                 socket->corked_write_len += span.len;
+                buffered = socket->pending_write_len > SIZE_MAX - socket->corked_write_len
+                               ? SIZE_MAX
+                               : socket->pending_write_len + socket->corked_write_len;
                 kiln_c99_node_http_byte_span_release(&span);
-                *result = kiln_c99_boolean(1);
+                *result = kiln_c99_boolean(buffered < 16384);
                 return KILN_C99_OK;
             }
             if (socket->connecting && socket->resource == 0) {
@@ -4834,17 +5014,22 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 return KILN_C99_OK;
             }
             if (socket->upgrade_request_id != 0) {
+                uint64_t fence = 0;
+                int backpressure;
                 status = kiln_c99_node_socket_note_write_callback(socket, args, argc);
                 if (status != KILN_C99_OK) {
                     kiln_c99_node_http_byte_span_release(&span);
                     return status;
                 }
-                status = kiln_realm_http_upgrade_write_active(socket->resource,
-                                                              socket->upgrade_request_id,
-                                                              span.bytes, span.len);
+                status = kiln_realm_http_upgrade_write_active_with_fence(
+                    socket->resource, socket->upgrade_request_id,
+                    span.bytes, span.len, &fence);
                 kiln_c99_node_http_byte_span_release(&span);
                 if (status < 0) return status;
-                *result = kiln_c99_boolean(status == 0);
+                backpressure = status;
+                status = kiln_c99_node_socket_save_upgrade_callbacks(socket, fence);
+                if (status != KILN_C99_OK) return status;
+                *result = kiln_c99_boolean(backpressure == 0);
                 return KILN_C99_OK;
             }
             work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
@@ -4902,6 +5087,45 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             socket->pending_write_len += span.len;
             kiln_c99_node_http_byte_span_release(&span);
             socket->shutdown_after_write = 1;
+            status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
+            if (status != KILN_C99_OK) return status;
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+        if (socket->upgrade_request_id != 0) {
+            kiln_c99_node_byte_span span;
+            uint64_t fence = 0;
+            size_t old_len = socket->corked_write_len;
+            memset(&span, 0, sizeof span);
+            if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED &&
+                !kiln_c99_is_callable(args[0])) {
+                status = kiln_c99_node_http_byte_span(args[0], &span);
+                if (status != KILN_C99_OK) return status;
+            }
+            if (span.len > SIZE_MAX - old_len ||
+                kiln_c99_reserve((void **)&socket->corked_write_bytes,
+                                 &socket->corked_write_capacity, old_len + span.len, 1) != KILN_C99_OK) {
+                kiln_c99_node_http_byte_span_release(&span);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if (span.len != 0)
+                memcpy(socket->corked_write_bytes + old_len, span.bytes, span.len);
+            socket->corked_write_len = old_len + span.len;
+            status = kiln_realm_http_upgrade_write_active_with_fence(
+                socket->resource, socket->upgrade_request_id,
+                (const uint8_t *)socket->corked_write_bytes,
+                socket->corked_write_len, &fence);
+            kiln_c99_node_http_byte_span_release(&span);
+            if (status < 0) {
+                socket->corked_write_len = old_len;
+                return status;
+            }
+            status = kiln_c99_node_socket_save_upgrade_callbacks(socket, fence);
+            if (status != KILN_C99_OK) return status;
+            socket->corked_write_len = 0;
+            socket->cork_depth = 0;
+            socket->write_closed = 1;
+            socket->shutdown_after_upgrade_fence = fence;
             status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
             if (status != KILN_C99_OK) return status;
             *result = receiver;

@@ -3257,6 +3257,7 @@ struct kiln_node_socket {
     uint64_t shutdown_request;
     uint64_t close_request;
     uint64_t upgrade_request_id;
+    uint64_t shutdown_after_upgrade_fence;
     char *pending_write_bytes;
     size_t pending_write_len;
     size_t pending_write_capacity;
@@ -3266,6 +3267,8 @@ struct kiln_node_socket {
     size_t corked_write_capacity;
     unsigned int cork_depth;
     kiln_value write_callbacks;
+    /* Upgrade callback batches are keyed by HTTP engine append-completion fences. */
+    kiln_value upgrade_write_callbacks;
     int http_upgrade_pending;
     int http_upgraded;
     int connecting;
@@ -3707,6 +3710,7 @@ typedef struct kiln_realm_http_event {
     uint64_t headers_len;
     const uint8_t *data;
     uint64_t data_len;
+    uint64_t write_fence;
 } kiln_realm_http_event;
 typedef struct kiln_realm_http_request {
     const uint8_t *method;

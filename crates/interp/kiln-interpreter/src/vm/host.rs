@@ -306,6 +306,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    upgrade_write_callbacks: Default::default(),
+                    shutdown_after_upgrade_fence: None,
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
@@ -380,6 +382,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_net_socket_state(receiver)?;
+        if native == Native::NodeSocketEnd {
+            if let Some(chunk) = arguments.first().filter(|value| !is_callable(value)) {
+                let _ = node_body_bytes(Some(chunk))?;
+            }
+        }
         if native == Native::NodeSocketEnd
             && let Some(callback) = arguments.iter().rev().find(|value| is_callable(value))
         {
@@ -392,7 +399,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
         if native == Native::NodeSocketCork {
             let mut state = state.borrow_mut();
-            state.cork_depth = state.cork_depth.saturating_add(1);
+            if state.cork_depth >= u32::MAX as usize {
+                return Err(ExecutionError::RangeErrorMessage {
+                    message: "socket cork depth overflow".into(),
+                });
+            }
+            state.cork_depth += 1;
             return Ok(Value::Undefined);
         }
         if native == Native::NodeSocketUncork {
@@ -452,7 +464,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             state.corked_callbacks.push(callback.clone());
                         }
                     }
-                    return Ok(Value::Boolean(true));
+                    let buffered = state.pending_write.len().saturating_add(state.corked_write.len());
+                    return Ok(Value::Boolean(buffered < DEFAULT_HIGH_WATER_MARK));
                 }
                 Native::NodeSocketEnd => {
                     let data = arguments
@@ -482,16 +495,33 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if destroyed {
                         return Ok(receiver.clone());
                     }
-                    {
+                    let queued_write_callbacks = {
                         let mut state = state.borrow_mut();
                         state.destroyed = true;
                         state.connecting = false;
-                    }
+                        std::mem::take(&mut state.corked_callbacks)
+                    };
                     if let Value::Object(object) = receiver {
                         let mut object = object.borrow_mut();
                         object.set("connecting", Value::Boolean(false));
                         object.set("destroyed", Value::Boolean(true));
                         object.set("readyState", Value::String("closed".into()));
+                    }
+                    if !queued_write_callbacks.is_empty() {
+                        let error = self.construct_error(
+                            ErrorKind::Error,
+                            &[Value::String("socket destroyed".into())],
+                        );
+                        if let Value::Object(object) = &error {
+                            object.borrow_mut().set(
+                                "code",
+                                Value::String("ERR_STREAM_DESTROYED".into()),
+                            );
+                        }
+                        for callback in queued_write_callbacks {
+                            let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
+                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                        }
                     }
                     if let Some(request) = connect_request {
                         let canceled = if let Some(host) = self.async_host {
@@ -608,7 +638,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
                     state.corked_callbacks.push(callback.clone());
                 }
-                return Ok(Value::Boolean(true));
+                let buffered = state.pending_write.len().saturating_add(state.corked_write.len());
+                return Ok(Value::Boolean(buffered < DEFAULT_HIGH_WATER_MARK));
             }
         }
         let mut write_callbacks = if matches!(native, Native::NodeSocketWrite | Native::NodeSocketEnd) {
@@ -621,7 +652,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         {
             write_callbacks.push(callback.clone());
         }
-        if native == Native::NodeSocketWrite
+        if matches!(native, Native::NodeSocketWrite | Native::NodeSocketEnd)
             && let Some(id) = server
                 .borrow()
                 .streams
@@ -629,19 +660,53 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 .find(|stream| stream.resource() == resource)
                 .and_then(|stream| stream.upgrade_request_id)
         {
-            let bytes = node_stream_write_bytes(arguments.first())?;
+            let bytes = if native == Native::NodeSocketWrite {
+                node_stream_write_bytes(arguments.first())?
+            } else {
+                let mut bytes = state.borrow().corked_write.clone();
+                if let Some(data) = arguments
+                    .first()
+                    .filter(|value| !matches!(value, Value::Undefined) && !is_callable(value))
+                    .map(|value| node_body_bytes(Some(value)))
+                    .transpose()?
+                {
+                    bytes.extend(data);
+                }
+                bytes
+            };
             let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "node:http requires the realm HTTP runtime".into(),
             })?;
-            let disposition =
+            let receipt =
                 unsafe { ActiveHttpRuntime::write_upgrade(&mut *runtime, resource, id, &bytes) }
                     .ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "HTTP upgrade write is no longer available".into(),
                     })?;
-            state.borrow_mut().corked_callbacks.extend(write_callbacks);
-            return Ok(Value::Boolean(disposition.ready));
+            let mut callbacks = std::mem::take(&mut state.borrow_mut().corked_callbacks);
+            callbacks.extend(write_callbacks);
+            if !callbacks.is_empty() {
+                state
+                    .borrow_mut()
+                    .upgrade_write_callbacks
+                    .entry(receipt.fence)
+                    .or_default()
+                    .extend(callbacks);
+            }
+            if native == Native::NodeSocketEnd {
+                let mut socket_state = state.borrow_mut();
+                socket_state.cork_depth = 0;
+                socket_state.corked_write.clear();
+                socket_state.end_requested = true;
+                socket_state.shutdown_after_upgrade_fence = Some(receipt.fence);
+                if let Value::Object(object) = receiver {
+                    object.borrow_mut().set("readyState", Value::String("readOnly".into()));
+                    object.borrow_mut().set("writable", Value::Boolean(false));
+                }
+                return Ok(receiver.clone());
+            }
+            return Ok(Value::Boolean(receipt.disposition.ready));
         }
         let (result, actions) = {
             let mut server_state = server.borrow_mut();
@@ -1604,6 +1669,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             cork_depth: 0,
             corked_write: Vec::new(),
             corked_callbacks: Vec::new(),
+            upgrade_write_callbacks: Default::default(),
+            shutdown_after_upgrade_fence: None,
             end_requested: false,
             destroyed: false,
             connect_request: None,
@@ -1742,6 +1809,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    upgrade_write_callbacks: Default::default(),
+                    shutdown_after_upgrade_fence: None,
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
@@ -2186,6 +2255,56 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         head,
                         instruction,
                     )?;
+                }
+                RuntimeHttpEvent::UpgradeWriteComplete { fence, error, .. } => {
+                    let socket_state = server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
+                        .and_then(|stream| stream.socket.clone());
+                    if let Some(socket_state) = socket_state {
+                        let (callbacks, end_after_fence) = {
+                            let mut state = socket_state.borrow_mut();
+                            (
+                                state.upgrade_write_callbacks.remove(&fence).unwrap_or_default(),
+                                state.shutdown_after_upgrade_fence == Some(fence),
+                            )
+                        };
+                        let error = error.map(|message| {
+                            self.construct_error(
+                                ErrorKind::Error,
+                                &[Value::String(message.into())],
+                            )
+                        });
+                        for callback in callbacks {
+                            let arguments = error.clone().into_iter().collect();
+                            self.call_value(&callback, Value::Undefined, arguments, instruction)?;
+                        }
+                        if end_after_fence {
+                            socket_state.borrow_mut().shutdown_after_upgrade_fence = None;
+                        }
+                        if end_after_fence && !socket_state.borrow().destroyed {
+                            let actions = {
+                                let mut server_state = server.borrow_mut();
+                                let connection = server_state
+                                    .streams
+                                    .iter_mut()
+                                    .find(|stream| stream.resource() == resource)
+                                    .ok_or_else(|| ExecutionError::Host {
+                                        instruction,
+                                        message: "upgraded HTTP stream disappeared before end"
+                                            .into(),
+                                    })?;
+                                connection.driver.end(None).1
+                            };
+                            for action in actions {
+                                self.start_http_stream_action(
+                                    server, resource, action, instruction,
+                                )?;
+                            }
+                        }
+                    }
                 }
                 RuntimeHttpEvent::UpgradeReady { head } => {
                     let (socket, actions) = {
@@ -4611,6 +4730,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 })
                             }
                         };
+                        let pending_write_callbacks = match &target {
+                            PendingConnect::Net(state) => {
+                                std::mem::take(&mut state.borrow_mut().corked_callbacks)
+                            }
+                            PendingConnect::Http(state) => state
+                                .borrow()
+                                .socket
+                                .as_ref()
+                                .map(|socket| {
+                                    std::mem::take(&mut socket.borrow_mut().corked_callbacks)
+                                })
+                                .unwrap_or_default(),
+                        };
                         if let Some(socket) = socket_value {
                             if let Value::Object(object) = &socket {
                                 object.borrow_mut().set("connecting", Value::Boolean(false));
@@ -4652,6 +4784,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             None
                         };
                         let error = self.node_error_value(error);
+                        for callback in pending_write_callbacks {
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                vec![error.clone()],
+                                self.instruction,
+                            )?;
+                        }
                         let object = match &target {
                             PendingConnect::Net(state) => state
                                 .borrow()

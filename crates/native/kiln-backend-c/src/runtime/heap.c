@@ -5311,7 +5311,7 @@ static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
 #define KILN_C99_HOST_SERVER_FIELDS(V, P, A) \
     V(object) V(connection_listener) P(sockets)
 #define KILN_C99_HOST_SOCKET_FIELDS(V, P, A) \
-    V(object) V(write_callbacks) P(next) P(server) P(client_requests) P(responses)
+    V(object) V(write_callbacks) V(upgrade_write_callbacks) P(next) P(server) P(client_requests) P(responses)
 #define KILN_C99_HOST_REQUEST_FIELDS(V, P, A) \
     V(object) V(callback) V(response) P(socket) P(next)
 #define KILN_C99_HOST_RESPONSE_FIELDS(V, P, A) \
