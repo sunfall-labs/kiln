@@ -55,8 +55,9 @@ def wait_ready(port: int, process: subprocess.Popen[bytes], timeout: float = 5.0
     raise RuntimeError(f"server did not answer on port {port} within {timeout:g}s")
 
 def runtime_command(runtime: str, variant: dict[str, Path], workload: str, sources: Path) -> list[str]:
-    script = sources / ("serve.mjs" if workload == "hello" else "app.mjs")
-    if runtime == "kiln": return [str(variant["hello" if workload == "hello" else "app"])]
+    simple_server = workload in ("hello", "pipeline")
+    script = sources / ("serve.mjs" if simple_server else "app.mjs")
+    if runtime == "kiln": return [str(variant["hello" if simple_server else "app"])]
     if runtime == "node": return ["node", str(script)]
     if runtime == "bun": return ["bun", "run", str(script)]
     if runtime == "deno": return ["deno", "run", "--allow-net", "--quiet", str(script)]
@@ -136,6 +137,15 @@ def positive_setting(name: str, default: str) -> int:
     if value <= 0: raise ValueError(f"{name} must be a positive integer")
     return value
 
+def paired_variant_order(variants: list[tuple[str, dict[str, Path]]], pass_number: int) -> list[tuple[str, dict[str, Path]]]:
+    """Alternate A/B order between passes to avoid a fixed warmup/order advantage."""
+    return variants if pass_number % 2 else list(reversed(variants))
+
+def runtime_variant_order(variants: list[tuple[str, dict[str, Path]]], runtime: str, pass_number: int) -> list[tuple[str, dict[str, Path]]]:
+    if runtime == "kiln":
+        return paired_variant_order(variants, pass_number)
+    return [variants[-1]]
+
 def main() -> int:
     if len(sys.argv) not in (3, 6) or (len(sys.argv) == 6 and sys.argv[3] != "--baseline"):
         print("usage: compare.sh <candidate-hello> <candidate-app> [--baseline <hello> <app>]", file=sys.stderr); return 2
@@ -163,20 +173,32 @@ def main() -> int:
             "serve_source_sha256": sha256(HERE / "serve.mjs"), "app_source_sha256": sha256(HERE / "app.mjs"),
             "transformed_serve_source_sha256": sha256(sources / "serve.mjs"), "transformed_app_source_sha256": sha256(sources / "app.mjs"),
             "driver_source_sha256": sha256(HERE / "drive.mjs"), "drive_mix_source_sha256": sha256(HERE / "drive-mix.mjs"),
+            "drive_pipeline_source_sha256": sha256(HERE / "drive-pipeline.mjs"),
             "variants": {label: {kind: sha256(path) for kind, path in paths.items()} for label, paths in variants},
             "runtime_versions": {runtime: runtime_version(runtime, candidate) for runtime in runtimes if runtime == "kiln" or shutil.which(runtime)},
             "passes": passes, "processes": processes, "connections": connections, "duration_ms": duration,
             "port": port, "runtimes": runtimes, "workloads": workloads,
+            "variant_order_by_pass": {
+                str(pass_number): {
+                    runtime: [label for label, _ in runtime_variant_order(variants, runtime, pass_number)]
+                    for runtime in runtimes
+                }
+                for pass_number in range(1, passes + 1)
+            },
         }
         (result_root / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
         for pass_number in range(1, passes + 1):
             for workload in workloads:
-                driver = HERE / ("drive-mix.mjs" if workload == "mixed" else "drive.mjs")
+                driver = HERE / (
+                    "drive-mix.mjs" if workload == "mixed" else
+                    "drive-pipeline.mjs" if workload == "pipeline" else
+                    "drive.mjs"
+                )
                 for runtime in runtimes:
                     if runtime != "kiln" and shutil.which(runtime) is None:
                         print(f"pass={pass_number} workload={workload:<18} runtime={runtime:<4} skipped (not on PATH)"); continue
                     if not port_free(port): raise RuntimeError(f"port {port} is already occupied")
-                    active_variants = variants if runtime == "kiln" else [variants[-1]]
+                    active_variants = runtime_variant_order(variants, runtime, pass_number)
                     for label, variant in active_variants:
                         if not port_free(port): raise RuntimeError(f"port {port} is already occupied before {label}")
                         run_dir = result_root / f"pass-{pass_number}-{label}-{runtime}-{workload}"; run_dir.mkdir()

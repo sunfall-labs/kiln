@@ -14,6 +14,15 @@ spec.loader.exec_module(compare)
 
 
 class CompareHarnessTests(unittest.TestCase):
+    def test_paired_variants_alternate_order_each_pass(self):
+        baseline = ("baseline", {"hello": Path("baseline")})
+        candidate = ("candidate", {"hello": Path("candidate")})
+        variants = [baseline, candidate]
+        self.assertEqual(compare.paired_variant_order(variants, 1), [baseline, candidate])
+        self.assertEqual(compare.paired_variant_order(variants, 2), [candidate, baseline])
+        self.assertEqual(compare.paired_variant_order(variants, 3), [baseline, candidate])
+        self.assertEqual(compare.runtime_variant_order(variants, "node", 2), [candidate])
+
     def test_clients_are_started_concurrently(self):
         with tempfile.TemporaryDirectory() as directory:
             fake = Path(directory) / "fake_client.py"
