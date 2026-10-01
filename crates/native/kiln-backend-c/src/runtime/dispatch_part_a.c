@@ -3258,7 +3258,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                 }
                 status = kiln_c99_regexp_find(regexp, subject, units, count, start, ranges,
-                                              ranges_capacity, &groups, &matched);
+                                              ranges_capacity, &groups, &matched, 1);
                 if (status == KILN_C99_OK && matched && groups > ranges_capacity / 2) {
                     ranges = (int64_t *)malloc(groups * 2 * sizeof(int64_t));
                     if (ranges == NULL) {
@@ -3269,7 +3269,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     ranges_capacity = groups * 2;
                     status = kiln_c99_regexp_find(regexp, subject, units, count, start, ranges,
-                                                  ranges_capacity, &groups, &matched);
+                                                  ranges_capacity, &groups, &matched, 1);
                 }
             }
             if (status != KILN_C99_OK) {

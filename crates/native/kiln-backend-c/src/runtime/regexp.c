@@ -156,6 +156,49 @@ int kiln_c99_regexp_publish_legacy(kiln_value subject, const int64_t *ranges,
     return KILN_C99_OK;
 }
 
+/* MatchAll builds its current snapshot-backed iterator eagerly. Preserve the ranges on each
+ * yielded match and publish them from iterator.next instead, so merely creating the iterator has
+ * no observable effect on RegExp.$1 through RegExp.$9. The subject itself is already rooted by
+ * the match result's `input` slot. */
+int kiln_c99_regexp_defer_legacy(kiln_value match, const int64_t *ranges, size_t groups) {
+    kiln_value saved;
+    size_t index;
+    int status;
+    if (match.tag != KILN_VALUE_ARRAY || ranges == NULL || groups == 0) return KILN_C99_OK;
+    if (groups > 10) groups = 10;
+    status = kiln_c99_new_array(&saved);
+    for (index = 0; index < groups * 2 && status == KILN_C99_OK; ++index) {
+        status = kiln_c99_array_push(saved, kiln_c99_number((double)ranges[index]));
+    }
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_put(NULL, match, "@@regexpLegacyRanges", 20, saved, 0, NULL);
+}
+
+int kiln_c99_regexp_publish_deferred(kiln_value match) {
+    kiln_array *result;
+    kiln_property *saved_slot;
+    kiln_value saved;
+    kiln_array *ranges_array;
+    int64_t ranges[20];
+    size_t groups;
+    size_t index;
+    if (match.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
+    result = kiln_c99_array_of(match);
+    saved_slot = kiln_c99_own_private(match, "@@regexpLegacyRanges", 20);
+    if (saved_slot == NULL || result->match_input.tag != KILN_VALUE_STRING ||
+        saved_slot->value.tag != KILN_VALUE_ARRAY)
+        return KILN_C99_OK;
+    saved = saved_slot->value;
+    ranges_array = kiln_c99_array_of(saved);
+    groups = ranges_array->count / 2;
+    if (groups == 0 || groups > 10) return KILN_C99_OK;
+    for (index = 0; index < groups * 2; ++index) {
+        ranges[index] = (int64_t)kiln_c99_as_number(
+            kiln_val_to_boundary(ranges_array->elements[index]));
+    }
+    return kiln_c99_regexp_publish_legacy(result->match_input, ranges, groups, 1);
+}
+
 int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out) {
     kiln_c99_realm_state *realm = kiln_c99_realm();
     uint16_t *units = NULL;
@@ -192,7 +235,7 @@ int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out) {
 static int kiln_c99_regexp_find(kiln_regexp *regexp, kiln_value js_subject,
                                 const uint16_t *units, size_t count,
                                 size_t start, int64_t *ranges, size_t capacity, size_t *groups,
-                                int *matched) {
+                                int *matched, int publish_legacy) {
     *matched = 0;
     *groups = 0;
     if (start > count) {
@@ -209,7 +252,9 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, kiln_value js_subject,
                 return KILN_C99_OK;
             }
         }
-        return kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, *matched);
+        return publish_legacy
+                   ? kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, *matched)
+                   : KILN_C99_OK;
     }
     kiln_string subject = {
         .unit_len = count > UINT32_MAX ? 0 : (uint32_t)count,
@@ -225,5 +270,6 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, kiln_value js_subject,
     }
     *groups = kiln_regexp_group_count(regexp->handle);
     *matched = 1;
-    return kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, 1);
+    return publish_legacy ? kiln_c99_regexp_publish_legacy(js_subject, ranges, *groups, 1)
+                          : KILN_C99_OK;
 }

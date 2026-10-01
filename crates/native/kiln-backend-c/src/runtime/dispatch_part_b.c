@@ -719,6 +719,7 @@
                     } else {
                         produced = kiln_val_to_boundary(array->elements[position]);
                     }
+                    status = kiln_c99_regexp_publish_deferred(produced);
                 }
                 status = status == KILN_C99_OK
                              ? kiln_c99_put(host, step, "value", 5, produced, depth, thrown)

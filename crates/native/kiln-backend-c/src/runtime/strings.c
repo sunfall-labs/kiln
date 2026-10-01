@@ -1490,8 +1490,7 @@ static int kiln_c99_string_pattern_split(kiln_host *host, kiln_value *result, ki
                                          const kiln_value *args, size_t argc, int depth,
                                          kiln_value *thrown) {
     int status = kiln_c99_string_pattern(host, result, KILN_C99_METHOD_SPLIT, receiver, args,
-                                         argc > 1 ? 1 : argc, depth, thrown);
-    if (status == KILN_C99_OK) kiln_c99_split_limit(*result, args, argc);
+                                         argc, depth, thrown);
     return status;
 }
 
@@ -1507,6 +1506,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     size_t replacement_count = 0;
     size_t from = 0;
     size_t at = 0;
+    uint32_t split_limit = UINT32_MAX;
+    int split_stopped = 0;
     int64_t stack_ranges[64];
     int64_t *ranges = stack_ranges;
     size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
@@ -1541,6 +1542,16 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     }
     every = regexp->global || code == KILN_C99_METHOD_REPLACE_ALL ||
             code == KILN_C99_METHOD_STRING_MATCH_ALL || code == KILN_C99_METHOD_SPLIT;
+    if (code == KILN_C99_METHOD_SPLIT && argc > 1 &&
+        args[1].tag != KILN_VALUE_UNDEFINED) {
+        double number;
+        status = kiln_c99_to_number_checked(host, args[1], &number, depth, thrown);
+        if (status != KILN_C99_OK) {
+            free(units);
+            return status;
+        }
+        split_limit = kiln_c99_to_uint32(number);
+    }
     if (code == KILN_C99_METHOD_STRING_MATCH || code == KILN_C99_METHOD_STRING_MATCH_ALL ||
         code == KILN_C99_METHOD_SPLIT) {
         status = kiln_c99_new_array(&collected);
@@ -1549,13 +1560,19 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             return status;
         }
     }
+    if (code == KILN_C99_METHOD_SPLIT && split_limit == 0) {
+        if (ranges != stack_ranges) free(ranges);
+        free(units);
+        *result = collected;
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_SPLIT && count == 0) {
         /* An empty subject is the one case with no trailing piece: a separator that matches it
          * splits it into nothing, and one that does not leaves it whole. */
         size_t groups = 0;
         int matched = 0;
         status = kiln_c99_regexp_find(regexp, receiver, units, count, 0, ranges,
-                                      ranges_capacity, &groups, &matched);
+                                      ranges_capacity, &groups, &matched, 1);
         if (status == KILN_C99_OK && !matched) {
             status = kiln_c99_array_push(collected, kiln_c99_from_units(units, 0));
         }
@@ -1578,8 +1595,14 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     for (;;) {
         size_t groups = 0;
         int matched = 0;
+        if (code == KILN_C99_METHOD_SPLIT &&
+            kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+            split_stopped = 1;
+            break;
+        }
         status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
-                                      ranges_capacity, &groups, &matched);
+                                      ranges_capacity, &groups, &matched,
+                                      code != KILN_C99_METHOD_STRING_MATCH_ALL);
         if (status != KILN_C99_OK || !matched) {
             break;
         }
@@ -1595,7 +1618,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             ranges = new_ranges;
             ranges_capacity = groups * 2;
             status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
-                                          ranges_capacity, &groups, &matched);
+                                          ranges_capacity, &groups, &matched,
+                                          code != KILN_C99_METHOD_STRING_MATCH_ALL);
             if (status != KILN_C99_OK || !matched) {
                 break;
             }
@@ -1630,6 +1654,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, depth,
                                            thrown, regexp);
             if (status == KILN_C99_OK) {
+                status = kiln_c99_regexp_defer_legacy(entry, ranges, groups);
+            }
+            if (status == KILN_C99_OK) {
                 status = kiln_c99_array_push(collected, entry);
             }
         } else if (code == KILN_C99_METHOD_SPLIT) {
@@ -1649,16 +1676,25 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             status = kiln_c99_array_push(collected,
                                          kiln_c99_from_units(units + from,
                                                              (size_t)ranges[0] - from));
+            if (status == KILN_C99_OK &&
+                kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+                split_stopped = 1;
+            }
             /* A captured group becomes an element of its own, which is what makes
              * `"a1b".split(/(\d)/)` three parts rather than two. */
-            for (group = 1; group < groups && status == KILN_C99_OK; ++group) {
+            for (group = 1; group < groups && status == KILN_C99_OK && !split_stopped; ++group) {
                 status = kiln_c99_array_push(
                     collected, ranges[group * 2] < 0
                                    ? kiln_c99_undefined()
                                    : kiln_c99_from_units(units + (size_t)ranges[group * 2],
                                                          (size_t)(ranges[group * 2 + 1] -
                                                                   ranges[group * 2])));
+                if (status == KILN_C99_OK &&
+                    kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+                    split_stopped = 1;
+                }
             }
+            if (split_stopped) break;
             from = (size_t)ranges[1];
         } else {
             kiln_value head = kiln_c99_from_units(units + from, (size_t)ranges[0] - from);
@@ -1723,8 +1759,10 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             status = kiln_c99_new_iterator(result, collected, 2);
             break;
         case KILN_C99_METHOD_SPLIT:
-            status = kiln_c99_array_push(collected,
-                                         kiln_c99_from_units(units + from, count - from));
+            if (!split_stopped && kiln_c99_array_of(collected)->count < (size_t)split_limit) {
+                status = kiln_c99_array_push(collected,
+                                             kiln_c99_from_units(units + from, count - from));
+            }
             *result = collected;
             break;
         default: {

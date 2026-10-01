@@ -491,6 +491,9 @@ extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
 extern int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern int kiln_c99_regexp_publish_legacy(kiln_value subject, const int64_t *ranges,
                                           size_t groups, int matched);
+extern int kiln_c99_regexp_defer_legacy(kiln_value match, const int64_t *ranges,
+                                        size_t groups);
+int kiln_c99_regexp_publish_deferred(kiln_value match);
 extern int kiln_c99_regexp_legacy_capture(size_t index, kiln_value *out);
 extern int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_val *out);
 extern kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak);
