@@ -1621,12 +1621,11 @@ static int kiln_c99_crypto_key_info_raw(kiln_host *host, kiln_value *result, con
                           kiln_c99_number((double)bits), 0, thrown);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, *result, "type", 4,
-                          kiln_c99_value(KILN_VALUE_STRING, 0,
-                                         key_type == 2 ? "private" : "public",
-                                         key_type == 2 ? 7 : 6), 0, thrown);
+                          kiln_c99_copy_text(key_type == 2 ? "private" : "public",
+                                              key_type == 2 ? 7 : 6), 0, thrown);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, *result, "asymmetricKeyType", 17,
-                          kiln_c99_value(KILN_VALUE_STRING, 0, "rsa", 3), 0, thrown);
+                          kiln_c99_copy_text("rsa", 3), 0, thrown);
     if (status != KILN_C99_OK) return status;
     return kiln_c99_put(host, *result, "asymmetricKeyDetails", 20, details, 0, thrown);
 }
