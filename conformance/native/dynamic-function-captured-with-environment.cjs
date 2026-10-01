@@ -32,6 +32,6 @@ const makeNestedReader = Function(
   "scope",
   "with (scope) { return function() { return function() { return name; }; }; }"
 );
-const nested = makeNestedReader(object, "outer")()();
+const nested = makeNestedReader(object, "outer")();
 if (nested() !== "second") throw new Error("nested closure lost with record identity");
 console.log("nested-with-live", nested());

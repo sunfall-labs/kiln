@@ -474,8 +474,14 @@ static int kiln_dyn_captured_records_get(kiln_host *host, kiln_value records,
         if (with_record) {
             status = kiln_dyn_with_has_binding(host, target, name, name_len, depth,
                                                &present, thrown);
+            kiln_c99_gc_keep_alive(&records);
+            kiln_c99_gc_keep_alive(&entry);
+            kiln_c99_gc_keep_alive(&target);
             if (status == KILN_C99_OK && present && read_value)
                 status = kiln_c99_get(host, target, name, name_len, out, depth, thrown);
+            kiln_c99_gc_keep_alive(&records);
+            kiln_c99_gc_keep_alive(&entry);
+            kiln_c99_gc_keep_alive(&target);
         } else {
             status = read_value
                          ? kiln_dyn_private_environment_get(target, name, name_len, out,
@@ -522,6 +528,9 @@ static int kiln_dyn_captured_records_has(kiln_host *host, kiln_value records,
                          ? kiln_dyn_with_has_binding(host, target, name, name_len, depth,
                                                      &present, thrown)
                          : kiln_dyn_private_environment_has(target, name, name_len, &present);
+        kiln_c99_gc_keep_alive(&records);
+        kiln_c99_gc_keep_alive(&entry);
+        kiln_c99_gc_keep_alive(&target);
         if (status != KILN_C99_OK) return status;
         if (!present) continue;
         *found = 1;
@@ -550,7 +559,7 @@ static int kiln_dyn_with_has_binding(kiln_host *host, kiln_value object, const c
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(object));
     kiln_c99_gc_keep_alive(&symbol);
     if (status != KILN_C99_OK) return status;
-    if (unscopables.tag == KILN_VALUE_OBJECT || unscopables.tag == KILN_VALUE_FUNCTION) {
+    if (kiln_c99_is_reference(unscopables)) {
         kiln_value excluded = kiln_c99_undefined();
         status = kiln_c99_get(host, unscopables, name, name_len, &excluded, depth, thrown);
         kiln_c99_gc_keep_alive(&unscopables);
@@ -5305,6 +5314,7 @@ static int kiln_dyn_switch_initialize_functions(kiln_host *host,
 
 static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
                                                   kiln_dyn_scope *scope,
+                                                  kiln_host *host, int depth,
                                                   kiln_value *thrown) {
     const char *site = lex->curr.start;
     if (!kiln_dyn_scope_has_function_declaration(scope, site))
@@ -6440,7 +6450,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_FUNCTION)
-        return kiln_dyn_consume_function_declaration(lex, scope, thrown);
+        return kiln_dyn_consume_function_declaration(lex, scope, host, depth, thrown);
     if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
         kiln_dyn_lexer look;
         memset(&look, 0, sizeof look);
@@ -6454,7 +6464,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 lex->src, lex->pos, (size_t)(look.curr.start - lex->src));
         kiln_dyn_token_free(&look.curr);
         if (async_declaration)
-            return kiln_dyn_consume_function_declaration(lex, scope, thrown);
+            return kiln_dyn_consume_function_declaration(lex, scope, host, depth, thrown);
     }
     if (lex->curr.kind == KILN_DYN_LBRACE) {
         const char *body = NULL;

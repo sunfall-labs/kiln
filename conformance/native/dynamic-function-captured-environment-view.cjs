@@ -14,7 +14,7 @@ const makeNested = Function(
   "value",
   "return function() { return function() { value = value + 2; return value; }; };"
 );
-const nested = makeNested(10)()();
+const nested = makeNested(10)();
 const nestedFirst = nested();
 const nestedSecond = nested();
 if (nestedFirst !== 12 || nestedSecond !== 14) throw new Error("nested capture lost its cell");
