@@ -150,6 +150,7 @@ fn demand_namespace_members(
     namespace: &Path,
     members: &BTreeSet<String>,
     live: &mut BTreeSet<PathBuf>,
+    live_imports: &mut BTreeSet<(PathBuf, usize)>,
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     namespace_demands: &mut BTreeSet<PathBuf>,
     queue: &mut VecDeque<PathBuf>,
@@ -177,6 +178,7 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::Namespace { module }) => {
+                mark_namespace_reexport_import_live(graph, namespace, name, live_imports);
                 let newly_live = live.insert(module.clone());
                 let newly_demanded = namespace_demands.insert(module.clone());
                 if newly_live || newly_demanded {
@@ -207,6 +209,36 @@ fn demand_namespace_members(
         }
     }
     Ok(())
+}
+
+/// A namespace re-export is represented in the resolved export table by its target module, while
+/// the executable graph still needs the import slot behind the export wired to that namespace
+/// value. The slot may be a namespace import directly or a named re-export that resolves through
+/// another barrel, so follow the export's local binding rather than matching the final provider.
+fn mark_namespace_reexport_import_live(
+    graph: &ModuleGraph,
+    owner: &Path,
+    exported_name: &str,
+    live_imports: &mut BTreeSet<(PathBuf, usize)>,
+) {
+    let Some(node) = graph.module(owner) else {
+        return;
+    };
+    let Some(export) = node.program.exports.iter().find(|export| {
+        !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+            && export.exported == exported_name
+    }) else {
+        return;
+    };
+    let Some(import_index) = node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local_slot == export.local_slot)
+    else {
+        return;
+    };
+    live_imports.insert((node.path.clone(), import_index));
 }
 
 /// Select the source bodies an executable can observe after applying package side-effect facts.
@@ -366,6 +398,7 @@ pub fn select_executable_modules<'a>(
                         &dependency.target,
                         &members,
                         &mut live,
+                        &mut live_imports,
                         &mut live_export_slots,
                         &mut namespace_demands,
                         &mut queue,
@@ -419,6 +452,7 @@ pub fn select_executable_modules<'a>(
                             module,
                             &members,
                             &mut live,
+                            &mut live_imports,
                             &mut live_export_slots,
                             &mut namespace_demands,
                             &mut queue,
@@ -477,6 +511,12 @@ pub fn select_executable_modules<'a>(
                         // namespace. Marking only the provider module live leaves its export
                         // slots empty, so downstream namespace objects can contain missing
                         // members (for example htmlparser2's `DomUtils.getElementById`).
+                        mark_namespace_reexport_import_live(
+                            graph,
+                            &path,
+                            &name,
+                            &mut live_imports,
+                        );
                         let newly_live = live.insert(module.clone());
                         let newly_demanded = namespace_demands.insert(module.clone());
                         if newly_live || newly_demanded {

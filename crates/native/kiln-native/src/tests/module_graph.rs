@@ -4506,6 +4506,20 @@ fn executable_graph_namespace_reexport_demand_keeps_provider_exports() {
     .expect("select executable graph");
     let provider = fs::canonicalize(provider).expect("canonical provider");
     let provider_node = graph.module(&provider).expect("provider node");
+    let barrel = fs::canonicalize(project.path.join("barrel.js")).expect("canonical barrel");
+    let barrel_node = graph.module(&barrel).expect("barrel node");
+    let namespace_import = barrel_node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.imported == kiln_ir::NAMESPACE_IMPORT)
+        .expect("barrel namespace import");
+    assert!(
+        selected
+            .live_imports
+            .contains(&(barrel.clone(), namespace_import)),
+        "the namespace import that backs the re-export must be linked"
+    );
     let demanded = selected
         .live_export_slots
         .get(&provider)
