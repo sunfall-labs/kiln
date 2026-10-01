@@ -3747,14 +3747,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                         message: "HTTP response lost its ClientRequest".into(),
                     })?;
-                let state =
-                    node_http_client_request(&request).map_err(|_| ExecutionError::Host {
-                        instruction,
-                        message: format!(
-                            "HTTP response connection stored {} instead of ClientRequest",
-                            request.type_name()
-                        ),
-                    })?;
+                node_http_client_request(&request).map_err(|_| ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "HTTP response connection stored {} instead of ClientRequest",
+                        request.type_name()
+                    ),
+                })?;
                 let mut incoming = ObjectData {
                     node_events: Some(Vec::new()),
                     node_object: Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
@@ -5386,10 +5385,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                     }
                     if is_write {
-                        if let Some(socket) = socket
-                            .as_ref()
-                            .and_then(|socket| node_net_socket_state(socket).ok())
-                        {
+                        if let Some(socket) = socket.as_ref() {
                             let deferred = socket.borrow_mut().deferred_destroy_callbacks.take();
                             if let Some((write_callbacks, end_callbacks)) = deferred {
                                 if let Some(error) = completion_error {
