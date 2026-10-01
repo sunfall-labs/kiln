@@ -1602,7 +1602,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     path,
                     headers,
                     body: Vec::new(),
-                    callback: callback.clone(),
                     socket: None,
                     object: None,
                     ended: false,

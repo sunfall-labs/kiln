@@ -5764,7 +5764,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                                                                  sizeof *request);
         if (request == NULL) return KILN_C99_OUT_OF_MEMORY;
         request->host = host;
-        kiln_c99_heap_store_value(request, &request->callback, callback);
         status = kiln_c99_node_copy_utf8(host_value, &request->host_name, &request->host_name_len);
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_node_copy_utf8(path_value, &request->path, &request->path_len);

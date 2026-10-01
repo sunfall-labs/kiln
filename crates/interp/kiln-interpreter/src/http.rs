@@ -18,7 +18,6 @@ pub(crate) struct HttpClientRequestState {
     pub(crate) path: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
-    pub(crate) callback: Value,
     pub(crate) socket: Option<Rc<RefCell<NetSocketState>>>,
     pub(crate) object: Option<Rc<RefCell<ObjectData>>>,
     pub(crate) ended: bool,

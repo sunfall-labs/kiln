@@ -3300,7 +3300,6 @@ struct kiln_node_socket {
 typedef struct kiln_node_client_request {
     kiln_host *host;
     kiln_value object;
-    kiln_value callback;
     kiln_value response;
     kiln_node_socket *socket;
     char *host_name;

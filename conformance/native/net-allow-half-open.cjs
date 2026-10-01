@@ -35,6 +35,7 @@ checkNetServer(undefined, false, () => {
       });
       server.listen(0, "127.0.0.1", () => {
         const request = http.get({ host: "127.0.0.1", port: server.address().port }, (response) => {
+          assert(response.socket === request.socket, "response exposes the assigned socket");
           assert(response.socket.allowHalfOpen === false, "outgoing HTTP socket defaults to false");
           response.resume();
           response.on("end", () => server.close(() => console.log("socket half-open defaults and options: ok")));
