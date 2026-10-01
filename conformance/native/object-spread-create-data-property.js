@@ -67,6 +67,9 @@ if (inheritedSetterCalls !== 0) {
   throw new Error(`spread invoked ${inheritedSetterCalls} inherited setter(s)`);
 }
 
+const mutationSymbol = Symbol("deleted during spread");
+const mutationAddedSymbol = Symbol("added during spread");
+
 function mutationSource(arraySource = false) {
   const source = arraySource ? ["index"] : {};
   Object.defineProperty(source, "first", {
@@ -74,7 +77,9 @@ function mutationSource(arraySource = false) {
     enumerable: true,
     get() {
       delete source.later;
+      delete source[mutationSymbol];
       source.added = "too late";
+      source[mutationAddedSymbol] = "too late too";
       source.second = "updated";
       return "first value";
     },
@@ -91,6 +96,12 @@ function mutationSource(arraySource = false) {
     value: "original",
     writable: true,
   });
+  Object.defineProperty(source, mutationSymbol, {
+    configurable: true,
+    enumerable: true,
+    value: "symbol deleted before its turn",
+    writable: true,
+  });
   return source;
 }
 
@@ -98,13 +109,55 @@ function checkMutation(label, source) {
   const copy = { ...source };
   if (copy.first !== "first value" || copy.second !== "updated" ||
       Object.prototype.hasOwnProperty.call(copy, "later") ||
-      Object.prototype.hasOwnProperty.call(copy, "added")) {
+      Object.prototype.hasOwnProperty.call(copy, "added") ||
+      Object.prototype.hasOwnProperty.call(copy, mutationSymbol) ||
+      Object.prototype.hasOwnProperty.call(copy, mutationAddedSymbol)) {
     throw new Error(`${label} spread did not use the original key snapshot and fresh descriptors`);
   }
 }
 
 checkMutation("object", mutationSource());
 checkMutation("array", mutationSource(true));
+const typedSymbol = Symbol("typed array enumerable key");
+const typedLateSymbol = Symbol("typed array added during spread");
+const typedSource = new Uint8Array([41, 42, 43]);
+Object.defineProperty(typedSource, "first", {
+  configurable: true,
+  enumerable: true,
+  get() {
+    delete typedSource.later;
+    typedSource.added = "too late";
+    typedSource.second = "updated";
+    typedSource[typedLateSymbol] = "too late too";
+    return "first value";
+  },
+});
+Object.defineProperty(typedSource, "later", {
+  configurable: true,
+  enumerable: true,
+  value: "deleted before its turn",
+  writable: true,
+});
+Object.defineProperty(typedSource, "second", {
+  configurable: true,
+  enumerable: true,
+  value: "original",
+  writable: true,
+});
+Object.defineProperty(typedSource, typedSymbol, {
+  configurable: true,
+  enumerable: true,
+  value: "typed symbol value",
+});
+const typedCopy = { ...typedSource };
+if (typedCopy[0] !== 41 || typedCopy[1] !== 42 || typedCopy[2] !== 43 ||
+    typedCopy.first !== "first value" || typedCopy.second !== "updated" ||
+    typedCopy[typedSymbol] !== "typed symbol value" ||
+    Object.prototype.hasOwnProperty.call(typedCopy, "later") ||
+    Object.prototype.hasOwnProperty.call(typedCopy, "added") ||
+    Object.prototype.hasOwnProperty.call(typedCopy, typedLateSymbol)) {
+  throw new Error("typed array spread dropped named or symbol keys or missed fresh descriptors");
+}
 const proxyMutationTarget = mutationSource();
 checkMutation("proxy", new Proxy(proxyMutationTarget, {
   ownKeys(target) { return Reflect.ownKeys(target); },

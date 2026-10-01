@@ -679,6 +679,14 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         if (slot >= 0.0 && (size_t)slot < array->count) {
             kiln_c99_heap_store_val(array, &array->elements[(size_t)slot], KILN_VAL_HOLE);
             array->is_numeric = 0;
+            return KILN_C99_OK;
+        }
+        /* Named and symbol properties live beside the indexed elements. Deleting one must
+         * reach that ordinary store; otherwise getters that delete a later key leave it visible
+         * to the fresh descriptor check performed by object spread. */
+        if (slot < 0.0 && array->properties.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_store_has(array->properties, key, ikey)) {
+            return kiln_c99_delete_key(host, array->properties, key, ikey, answer, depth, thrown);
         }
         return KILN_C99_OK;
     }

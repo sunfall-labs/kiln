@@ -1281,7 +1281,7 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
     if (source.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_spread_builtin(host, target, source, depth, thrown);
     }
-    if (source.tag == KILN_VALUE_ARRAY) {
+    if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_TYPED_ARRAY) {
         return kiln_c99_spread_snapshot_keys(host, target, source, depth, thrown);
     }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
@@ -1291,7 +1291,7 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
         source.tag == KILN_VALUE_SYMBOL || source.tag == KILN_VALUE_BIGINT) {
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_STRING) {
+    if (source.tag == KILN_VALUE_STRING) {
         /* An indexed value spreads as its own enumerable properties, and those are its indices:
          * `{...[7, 8]}` is `{"0": 7, "1": 8}` and `{..."hi"}` is `{"0": "h", "1": "i"}`.
          *
@@ -1300,15 +1300,11 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
          * elements and `{...[1, , 3]}` has two properties. */
         size_t count = 0;
         size_t at;
-        if (source.tag == KILN_VALUE_TYPED_ARRAY) {
-            count = kiln_c99_typed_array_of(source)->length;
-        } else {
-            uint16_t *units = NULL;
-            int status = kiln_c99_to_units(source, &units, &count);
-            free(units);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        uint16_t *units = NULL;
+        int status = kiln_c99_to_units(source, &units, &count);
+        free(units);
+        if (status != KILN_C99_OK) {
+            return status;
         }
         for (at = 0; at < count; ++at) {
             kiln_value element;
@@ -1336,11 +1332,10 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
                 return status;
             }
         }
-        /* ...and then whatever the program hung on the value by name, which is own and
+        /* ...and then whatever the program hung on a string by name, which is own and
          * enumerable like any other property: `a.total = 1` belongs in the result, and
          * `Object.keys` already reported it while the spread beside it dropped it. `length` is
-         * not among them, because it is not enumerable. A string and a typed array have no
-         * named store to walk, so for those this falls straight through. */
+         * not among them, because it is not enumerable. */
     } else if (source.tag == KILN_VALUE_OBJECT) {
         named = source;
     } else if (source.tag == KILN_VALUE_FUNCTION || source.tag == KILN_VALUE_METHOD ||
