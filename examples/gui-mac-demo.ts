@@ -41,7 +41,7 @@ console.log(`Active Platform Driver: ${getActiveDriver().name}`);
 const win = new Window({
   title: '⚡ Kiln Developer Studio • macOS AppKit',
   width: 660,
-  height: 640,
+  height: 680,
 });
 
 // Fine-grained reactive state
@@ -294,13 +294,6 @@ const subsystemsCard = new Card({
   children: [metalRow, telemetryRow, new Divider({ width: 556 }), strictCheckbox],
 });
 
-// ── Scrollable Body Area ─────────────────────────────────────
-const scrollableContainer = new ScrollView({
-  width: 588,
-  height: 440,
-  children: [computeCard, targetCard, profileCard, subsystemsCard],
-});
-
 // ── Footer Section with Theme info & Action Buttons ───────────
 const themeInfo = new Text({
   text: `macOS ${systemTheme.getTheme().toUpperCase()} • Zero-CPU Idle Wait • AppKit`,
@@ -355,11 +348,14 @@ const footerActionRow = new HStack({
 
 // ── Assemble Root Content View ───────────────────────────────
 win.content = new VStack({
-  spacing: 14,
+  spacing: 12,
   children: [
     headerTopRow,
     subtitleLabel,
-    scrollableContainer,
+    computeCard,
+    targetCard,
+    profileCard,
+    subsystemsCard,
     footerActionRow,
   ],
 });

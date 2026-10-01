@@ -659,14 +659,23 @@ export class AppKitDriver implements PlatformDriver {
     if (handle) return handle;
 
     try {
-      let text = "";
+      let text = (node as any).text || "";
       if (node.tag === "button") {
-        text = String(node.getProperty("label") || "");
+        text = String(node.getProperty("label") || text);
       } else if (node.tag === "text") {
-        text = String(node.getProperty("text") || "");
+        text = String(node.getProperty("text") || text);
       } else if (node.tag === "textinput") {
-        text = String(node.getProperty("value") || "");
+        text = String(node.getProperty("value") || text);
+      } else if (node.tag === "segmented") {
+        text = String(node.getProperty("items") || text);
+      } else if (node.tag === "select" || node.tag === "dropdown") {
+        text = String(node.getProperty("options") || text);
+      } else if (node.tag === "checkbox") {
+        text = String(node.getProperty("label") || text);
+      } else if (node.tag === "icon" || node.tag === "image") {
+        text = String(node.getProperty("name") || node.getProperty("symbol") || text);
       }
+
       const res = this.appkit.functions.kiln_gui_appkit_widget_create(
         BigInt(node.id),
         toCStr(this.ffi, node.tag),
@@ -684,7 +693,7 @@ export class AppKitDriver implements PlatformDriver {
           if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
           const max = node.getProperty("max");
           if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
-        } else if (node.tag === "toggle") {
+        } else if (node.tag === "toggle" || node.tag === "checkbox") {
           const chk = node.getProperty("checked");
           if (chk !== undefined) this.updateProperty(handle, node.tag, "checked", chk);
         } else if (node.tag === "text") {
@@ -697,23 +706,47 @@ export class AppKitDriver implements PlatformDriver {
         } else if (node.tag === "button") {
           const variant = node.getProperty("variant");
           if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
+          const icon = node.getProperty("icon");
+          if (icon !== undefined) this.updateProperty(handle, node.tag, "icon", icon);
         } else if (node.tag === "textinput") {
           const placeholder = node.getProperty("placeholder");
           if (placeholder !== undefined) this.updateProperty(handle, node.tag, "placeholder", placeholder);
-        } else if (node.tag === "vstack" || node.tag === "hstack") {
+        } else if (node.tag === "segmented") {
+          const items = node.getProperty("items");
+          if (items !== undefined) this.updateProperty(handle, node.tag, "items", items);
+          const idx = node.getProperty("selectedIndex");
+          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
+        } else if (node.tag === "select" || node.tag === "dropdown") {
+          const opts = node.getProperty("options");
+          if (opts !== undefined) this.updateProperty(handle, node.tag, "options", opts);
+          const idx = node.getProperty("selectedIndex");
+          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
+        } else if (node.tag === "progressbar" || node.tag === "progress") {
+          const val = node.getProperty("value");
+          if (val !== undefined) this.updateProperty(handle, node.tag, "value", val);
+          const max = node.getProperty("max");
+          if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
+          const min = node.getProperty("min");
+          if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
+          const ind = node.getProperty("indeterminate");
+          if (ind !== undefined) this.updateProperty(handle, node.tag, "indeterminate", ind);
+        }
+
+        const isContainer =
+          node.tag === "vstack" ||
+          node.tag === "hstack" ||
+          node.tag === "card" ||
+          node.tag === "box" ||
+          node.tag === "scroll" ||
+          node.tag === "scrollview";
+
+        if (isContainer) {
           const spacing = node.getProperty("spacing");
           if (spacing !== undefined) this.updateProperty(handle, node.tag, "spacing", spacing);
           const alignment = node.getProperty("alignment");
           if (alignment !== undefined) this.updateProperty(handle, node.tag, "alignment", alignment);
           const padding = node.getProperty("padding");
           if (padding !== undefined) this.updateProperty(handle, node.tag, "padding", padding);
-          for (let i = 0; i < node.children.length; i++) {
-            const childHandle = this.createWidget(node.children[i]);
-            if (childHandle) {
-              this.appkit.functions.kiln_gui_appkit_widget_add_child(handle, childHandle);
-            }
-          }
-        } else if (node.tag === "card") {
           for (let i = 0; i < node.children.length; i++) {
             const childHandle = this.createWidget(node.children[i]);
             if (childHandle) {

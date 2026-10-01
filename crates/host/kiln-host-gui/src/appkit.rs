@@ -275,6 +275,25 @@ fn set_image_from_symbol_or_path(img_view: *mut Object, name: &str) {
     }
 }
 
+fn get_or_create_flipped_clip_class() -> *const Class {
+    if let Some(cls) = Class::get("KilnFlippedClipView") {
+        cls
+    } else {
+        let superclass = class!(NSClipView);
+        let mut decl = ClassDecl::new("KilnFlippedClipView", superclass).unwrap();
+        extern "C" fn is_flipped(_this: &Object, _cmd: Sel) -> i8 {
+            1
+        }
+        unsafe {
+            decl.add_method(
+                sel!(isFlipped),
+                is_flipped as extern "C" fn(&Object, Sel) -> i8,
+            );
+        }
+        decl.register()
+    }
+}
+
 fn get_or_create_action_target() -> *mut Object {
     let mut guard = ACTION_TARGET.lock().unwrap();
     if !guard.0.is_null() {
@@ -742,16 +761,30 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                 let rect = CGRect {
                     origin: CGPoint { x: 0.0, y: 0.0 },
                     size: CGSize {
-                        width: 400.0,
-                        height: 250.0,
+                        width: 588.0,
+                        height: 440.0,
                     },
                 };
                 let scroll: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let clip_cls = get_or_create_flipped_clip_class();
+                let clip_alloc: *mut Object = msg_send![clip_cls, alloc];
+                let clip: *mut Object = msg_send![clip_alloc, initWithFrame: rect];
+                let () = msg_send![clip, setDrawsBackground: NO];
+                let () = msg_send![scroll, setContentView: clip];
+
                 let () = msg_send![scroll, setHasVerticalScroller: YES];
                 let () = msg_send![scroll, setHasHorizontalScroller: NO];
                 let () = msg_send![scroll, setAutohidesScrollers: YES];
                 let () = msg_send![scroll, setDrawsBackground: NO];
                 let () = msg_send![scroll, setTranslatesAutoresizingMaskIntoConstraints: NO];
+                let width_anchor: *mut Object = msg_send![scroll, widthAnchor];
+                let w_constraint: *mut Object =
+                    msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 480.0f64];
+                let () = msg_send![w_constraint, setActive: YES];
+                let height_anchor: *mut Object = msg_send![scroll, heightAnchor];
+                let h_constraint: *mut Object =
+                    msg_send![height_anchor, constraintGreaterThanOrEqualToConstant: 320.0f64];
+                let () = msg_send![h_constraint, setActive: YES];
                 scroll
             }
             "segmented" => {
@@ -1132,12 +1165,24 @@ pub fn widget_add_child(parent_id: u64, child_id: u64) {
                 let () = msg_send![parent_view, setContentView: child_view];
             } else if parent_tag == "scroll" || parent_tag == "scrollview" {
                 let () = msg_send![parent_view, setDocumentView: child_view];
+                let () = msg_send![child_view, setTranslatesAutoresizingMaskIntoConstraints: NO];
                 let content_view: *mut Object = msg_send![parent_view, contentView];
-                let child_width: *mut Object = msg_send![child_view, widthAnchor];
-                let clip_width: *mut Object = msg_send![content_view, widthAnchor];
-                let constraint: *mut Object =
-                    msg_send![child_width, constraintEqualToAnchor: clip_width];
-                let () = msg_send![constraint, setActive: YES];
+                let child_leading: *mut Object = msg_send![child_view, leadingAnchor];
+                let clip_leading: *mut Object = msg_send![content_view, leadingAnchor];
+                let c_leading: *mut Object =
+                    msg_send![child_leading, constraintEqualToAnchor: clip_leading];
+                let () = msg_send![c_leading, setActive: YES];
+
+                let child_trailing: *mut Object = msg_send![child_view, trailingAnchor];
+                let clip_trailing: *mut Object = msg_send![content_view, trailingAnchor];
+                let c_trailing: *mut Object =
+                    msg_send![child_trailing, constraintEqualToAnchor: clip_trailing];
+                let () = msg_send![c_trailing, setActive: YES];
+
+                let child_top: *mut Object = msg_send![child_view, topAnchor];
+                let clip_top: *mut Object = msg_send![content_view, topAnchor];
+                let c_top: *mut Object = msg_send![child_top, constraintEqualToAnchor: clip_top];
+                let () = msg_send![c_top, setActive: YES];
             } else {
                 let () = msg_send![parent_view, addSubview: child_view];
             }
