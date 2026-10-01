@@ -89,6 +89,7 @@ def main():
                 'inventory_sha256': hashlib.sha256((HERE / 'packages.tsv').read_bytes()).hexdigest(),
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
+                'discovered': len(rows),
                 'timezone': os.environ.get('TZ'),
                 'host': 'node',
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
