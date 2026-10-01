@@ -16,9 +16,11 @@ fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
     let provider = project.join("provider.mjs");
     fs::write(
         &provider,
-        "const unusedA = 1; const unusedB = 2; export function plugin() { return import.meta.url; }",
+        "import { unused } from './unused.mjs'; import { live } from './live.mjs'; if (false) console.log(unused); export function plugin() { return live + import.meta.url; }",
     )
     .expect("write provider");
+    fs::write(project.join("unused.mjs"), "export const unused = 1;").expect("write unused");
+    fs::write(project.join("live.mjs"), "export const live = 2;").expect("write live");
 
     let graph = ModuleGraph::build_node(
         &entry,
@@ -35,6 +37,12 @@ fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
         .get(&provider)
         .and_then(|slots| slots.iter().next())
         .expect("provider export is demanded");
+    let old_live_imports = demand
+        .live_imports
+        .iter()
+        .filter_map(|(path, index)| (path == &provider).then_some(*index))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(old_live_imports, BTreeSet::from([0, 1]));
 
     let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
     let new_slot = reparsed
@@ -54,6 +62,17 @@ fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
     assert_eq!(
         remapped.slots.get(&provider),
         Some(&BTreeSet::from([new_slot]))
+    );
+    let reparsed_provider = reparsed.module(&provider).expect("reparsed provider");
+    assert_eq!(reparsed_provider.program.imports.len(), 1);
+    assert_eq!(reparsed_provider.program.imports[0].local, "live");
+    assert_eq!(
+        remapped
+            .live_imports
+            .iter()
+            .filter_map(|(path, index)| (path == &provider).then_some(*index))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0])
     );
 }
 
