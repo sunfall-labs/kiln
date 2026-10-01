@@ -20,6 +20,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeEventEmitter => node_event_emitter(),
+            // `new Buffer(value)` retains Node's deprecated constructor behavior and shares the
+            // same allocation semantics as the callable form and `Buffer.from`.
+            Native::NodeBufferGlobal => {
+                crate::buffer::dispatch(Native::NodeBufferFrom, &Value::Undefined, arguments)?
+            }
             Native::ConsoleConstructor => self.construct_console(arguments, current)?,
             Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),

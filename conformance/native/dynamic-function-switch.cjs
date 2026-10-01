@@ -61,12 +61,18 @@ const varCapture = Function(`
 `);
 if (varCapture() !== 17) throw new Error("switch var declaration targets function scope");
 
-const switchTdz = Function(
-  "outer", "switch (outer) { case outer: let outer = 23; } return outer;",
+const switchDiscriminantScope = Function(
+  "x", "switch (x) { case 0: let x = 23; return x; }",
+);
+if (switchDiscriminantScope(0) !== 23) {
+  throw new Error("switch discriminant resolves before entering the case lexical scope");
+}
+const switchCaseTdz = Function(
+  "outer", "switch (0) { case outer: let outer = 23; } return outer;",
 );
 let tdzThrew = false;
-try { switchTdz(0); } catch (error) { tdzThrew = error.name === "ReferenceError"; }
-if (!tdzThrew) throw new Error("switch lexical binding shadows the discriminant in its TDZ");
+try { switchCaseTdz(0); } catch (error) { tdzThrew = error.name === "ReferenceError"; }
+if (!tdzThrew) throw new Error("switch case expression sees the lexical binding in its TDZ");
 
 const laterClauseTdz = Function(
   "outer", "switch (0) { case 1: break; case outer: break; default: let outer = 29; } return outer;",

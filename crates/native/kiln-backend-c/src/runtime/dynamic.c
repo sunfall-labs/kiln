@@ -1262,10 +1262,10 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_value globals = kiln_c99_undefined();
         int status = kiln_c99_global_object(&globals);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_get(host, globals, name, name_len, out, depth, thrown);
-            if (status == KILN_C99_OK) {
-                return KILN_C99_OK;
-            }
+            int present = 0;
+            status = kiln_c99_has_property(host, globals, name, name_len, &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present) return kiln_c99_get(host, globals, name, name_len, out, depth, thrown);
         }
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "Variable is not defined");
     }
@@ -3343,7 +3343,9 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         discriminant_lex.len = discriminant_end - discriminant_start;
         kiln_dyn_lexer_next(&discriminant_lex);
         kiln_value discriminant;
-        status = kiln_dyn_eval_expr(host, &discriminant_lex, &switch_scope, receiver,
+        /* The switch discriminant runs before entering the CaseBlock lexical environment.
+         * Keep it in the surrounding scope; case tests and statements below use switch_scope. */
+        status = kiln_dyn_eval_expr(host, &discriminant_lex, scope, receiver,
                                     args, argc, depth, &discriminant, thrown);
         if (status == KILN_C99_OK && discriminant_lex.curr.kind != KILN_DYN_EOF)
             status = kiln_dyn_throw_parse_error(&discriminant_lex, thrown,
