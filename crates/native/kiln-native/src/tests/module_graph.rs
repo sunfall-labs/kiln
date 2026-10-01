@@ -371,10 +371,22 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
         family::WEB_BOOTSTRAP_DEPENDENCIES
+    );
+    members.names.insert("floor".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+    );
+    members.names.clear();
+    members.names.insert("getOwnPropertyNames".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
             | family::NUMERIC_MATH
             | family::TYPED_ARRAY
             | family::ARRAY_BUFFER
     );
+    members.names.clear();
     members.builtins.clear();
     members.names.insert("f16round".to_owned());
     assert_eq!(
