@@ -2384,7 +2384,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 37,
+        sites: 36,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2854,9 +2854,10 @@ const _: () = assert_refusals_name_themselves(
 /// Buffer encoding comparisons measure only the fixed NUL-terminated encoding-name literal;
 /// the user-supplied encoding retains its headed string's explicit length.
 /// Computed builtin own-key tables measure their fixed literal name/symbol rows (four sites).
-/// Dynamic function captures measure the parser's NUL-terminated identifier buffer (one site).
+/// Dynamic function captures now use the parser's stored identifier lengths; the two former
+/// identifier-buffer scans were removed with lexical capture serialization.
 /// Site 84 measures a constructor own-key name from a fixed NUL-terminated literal table.
-pub const C_STRING_LENGTH_SITES: usize = 84;
+pub const C_STRING_LENGTH_SITES: usize = 82;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
