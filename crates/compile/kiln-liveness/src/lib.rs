@@ -591,6 +591,12 @@ pub fn retained_method_groups(
         .globals
         .iter()
         .any(|name| name == "Bun" || name == "Kiln");
+    // `fetch` is a WHATWG global (not `--node`-gated) built on the HTTP client host
+    // (`process.__kilnNativeModules.http.request`, kiln-builtins web.ts); like `serve`,
+    // the global is the only sign of it a program gives, since there is no `node:http`
+    // import edge. Retain the client dispatch groups (no server group: fetch never
+    // calls `createServer`).
+    let uses_fetch_global = members.globals.iter().any(|name| name == "fetch");
     let uses_date = members.builtins.iter().any(|name| name == "Date");
     let uses_math_number = members
         .builtins
@@ -652,6 +658,15 @@ pub fn retained_method_groups(
     }
     if uses_serve_global {
         mask |= builtin_groups(&NodeBuiltin::Http).unwrap_or(FULL);
+    }
+    if uses_fetch_global {
+        mask |= groups::URL
+            | groups::NODE_HTTP
+            | groups::NODE_RESPONSE
+            | groups::NODE_NET
+            | groups::NODE_STREAM
+            | groups::NODE_EVENT
+            | groups::BUFFER;
     }
     if uses_temporal {
         mask |= groups::TEMPORAL
@@ -929,6 +944,18 @@ pub fn retained_provider_capabilities(
         || members.names.contains("toLocaleUpperCase")
     {
         required = required.with(ProviderCapability::Intl);
+    }
+    // The `fetch` and `serve` web globals reach the native Hyper-backed HTTP
+    // engine without a `node:http` import edge, so they demand the Http
+    // provider capability just like an explicit `node:http` import does.
+    // Without this the resolver picks a variant whose HTTP functions are
+    // ABI-compatible refusal stubs.
+    if members
+        .globals
+        .iter()
+        .any(|global| global == "fetch" || global == "serve")
+    {
+        required = required.with(ProviderCapability::Http);
     }
 
     let specifier_capability = |specifier: &str| match NodeBuiltin::parse(specifier) {

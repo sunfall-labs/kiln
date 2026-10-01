@@ -1271,7 +1271,7 @@ function fetch(input: any, init?: any): Promise<Response> {
       }
     }
 
-    (async () => {
+    {
       try {
         const body = req._body;
         if (typeof body === "string") {
@@ -1296,7 +1296,7 @@ function fetch(input: any, init?: any): Promise<Response> {
         }
         reject(err);
       }
-    })();
+    }
   });
 }
 

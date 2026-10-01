@@ -1198,6 +1198,9 @@ pub(super) fn native_bootstrap_families(
     if builtin(&["structuredClone"]) || members.globals.contains("structuredClone") {
         selected |= family::STRUCTURED_CLONE;
     }
+    // The WHATWG web bootstrap (fetch, streams, events) is included unconditionally and
+    // web_events_streams.ts calls __kilnStructuredClone, so the family must always be present.
+    selected |= family::STRUCTURED_CLONE;
     if builtin(&["Map", "Set"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
         selected |= family::MAP_UPSERT;
     }
