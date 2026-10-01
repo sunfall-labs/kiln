@@ -40,6 +40,27 @@ if (Function("fn", "return delete fn();")(() => { called++; return 1; }) !== tru
 if (Function("fn", "return delete (fn());")(() => { called++; return 1; }) !== true || called !== 2) {
   throw new Error("parenthesized delete of a call evaluates the call exactly once");
 }
+const callReceiver = {
+  calls: 0,
+  method() {
+    this.calls++;
+    return { value: 9 };
+  },
+};
+if (Function("object", "return delete object.method();")(callReceiver) !== true ||
+    callReceiver.calls !== 1 || typeof callReceiver.method !== "function") {
+  throw new Error("delete of a member call evaluates once and retains its receiver");
+}
+if (Function("object", "return delete (object.method());")(callReceiver) !== true ||
+    callReceiver.calls !== 2 || typeof callReceiver.method !== "function") {
+  throw new Error("parenthesized delete of a member call evaluates once and retains its receiver");
+}
+const callResult = { value: 9 };
+const resultReceiver = { method() { return callResult; } };
+if (Function("object", "return delete object.method().value;")(resultReceiver) !== true ||
+    "value" in callResult) {
+  throw new Error("delete after a member call removes the result object's property");
+}
 const locked = {};
 Object.defineProperty(locked, "value", { value: 1, configurable: false });
 let strictDeleteThrew = false;
