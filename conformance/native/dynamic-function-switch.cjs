@@ -67,6 +67,18 @@ const switchDiscriminantScope = Function(
 if (switchDiscriminantScope(0) !== 23) {
   throw new Error("switch discriminant resolves before entering the case lexical scope");
 }
+const switchShadowsOuterVar = Function(
+  "var x = 1; switch (0) { case 0: let x = 2; return x; }",
+);
+if (switchShadowsOuterVar() !== 2) {
+  throw new Error("switch lexical declarations may shadow an outer function var");
+}
+const switchIgnoresNestedFunctionVar = Function(
+  "switch (0) { case 0: let x = 2; function nested() { var x = 3; } return x; }",
+);
+if (switchIgnoresNestedFunctionVar() !== 2) {
+  throw new Error("nested function vars do not conflict with the switch CaseBlock");
+}
 const switchCaseTdz = Function(
   "outer", "switch (0) { case outer: let outer = 23; } return outer;",
 );
