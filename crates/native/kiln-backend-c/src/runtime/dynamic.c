@@ -532,6 +532,15 @@ typedef struct {
     size_t pos;
     int dynamic_function_body;
     int strict;
+    /* The lexer only needs to remember whether a closing parenthesis ended a control head,
+     * not the full token stack. Keep the bounded nesting state inline so cheap lexer copies
+     * remain independent and no parser-owned heap allocation can escape. */
+    unsigned char control_parens[128];
+    size_t paren_depth;
+    size_t paren_overflow;
+    int closed_control_paren;
+    int regex_literal_error;
+    int allocation_error;
     kiln_dyn_token curr;
     kiln_dyn_token_kind prev_kind;
     kiln_dyn_active_label *active_labels;
@@ -554,6 +563,17 @@ static int kiln_dyn_label_matches(const kiln_dyn_active_label *labels,
 
 static void kiln_dyn_token_free(kiln_dyn_token *tok);
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex);
+
+static int kiln_dyn_current_token_is_control_head(const kiln_dyn_lexer *lex) {
+    if (lex->prev_kind == KILN_DYN_DOT) return 0;
+    if (lex->curr.kind == KILN_DYN_KW_IF || lex->curr.kind == KILN_DYN_KW_FOR ||
+        lex->curr.kind == KILN_DYN_KW_WITH || lex->curr.kind == KILN_DYN_KW_SWITCH)
+        return 1;
+    return lex->curr.kind == KILN_DYN_IDENT &&
+        ((lex->curr.len == 5 &&
+          (memcmp(lex->curr.start, "while", 5) == 0 ||
+           memcmp(lex->curr.start, "catch", 5) == 0)));
+}
 
 static int kiln_dyn_labeled_statement_targets_iteration(const kiln_dyn_lexer *lex) {
     kiln_dyn_lexer look;
@@ -688,9 +708,17 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
         }
         kiln_dyn_lexer_next(&scan);
     }
-    int status = scan.curr.kind == KILN_DYN_ERROR
-        ? kiln_dyn_throw_parse_error(&scan, thrown, "Invalid string escape")
-        : KILN_C99_OK;
+    int status = KILN_C99_OK;
+    if (scan.curr.kind == KILN_DYN_ERROR) {
+        if (scan.allocation_error) {
+            status = KILN_C99_OUT_OF_MEMORY;
+        } else {
+            status = kiln_dyn_throw_parse_error(
+                &scan, thrown, scan.regex_literal_error
+                    ? "Invalid regular expression literal"
+                    : "Invalid string escape");
+        }
+    }
     kiln_dyn_token_free(&scan.curr);
     return status;
 }
@@ -934,6 +962,9 @@ static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_
 }
 
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
+    int opening_control_paren = kiln_dyn_current_token_is_control_head(lex);
+    int regex_after_control = lex->closed_control_paren;
+    lex->closed_control_paren = 0;
     lex->prev_kind = lex->curr.kind;
     kiln_dyn_token_free(&lex->curr);
     memset(&lex->curr, 0, sizeof(lex->curr));
@@ -1159,7 +1190,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
     }
 
     if (c == '/') {
-        int can_be_regex = (lex->prev_kind == KILN_DYN_EOF ||
+        int can_be_regex = (regex_after_control || lex->prev_kind == KILN_DYN_EOF ||
                             lex->prev_kind == KILN_DYN_SEMI ||
                             lex->prev_kind == KILN_DYN_LBRACE ||
                             lex->prev_kind == KILN_DYN_LPAREN ||
@@ -1213,8 +1244,19 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
             lex->pos++;
             size_t pat_start = lex->pos;
             int in_class = 0;
+            int closed = 0;
             while (lex->pos < lex->len) {
                 char rc = lex->src[lex->pos];
+                size_t line_pos = lex->pos;
+                uint32_t line_cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &line_pos);
+                if (line_cp == '\n' || line_cp == '\r' || line_cp == 0x2028 || line_cp == 0x2029) {
+                    lex->pos = line_pos;
+                    lex->regex_literal_error = 1;
+                    lex->curr.kind = KILN_DYN_ERROR;
+                    lex->curr.start = &lex->src[reg_start];
+                    lex->curr.len = lex->pos - reg_start;
+                    return;
+                }
                 if (rc == '\\' && lex->pos + 1 < lex->len) {
                     lex->pos += 2;
                     continue;
@@ -1222,21 +1264,41 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                 if (rc == '[') in_class = 1;
                 else if (rc == ']') in_class = 0;
                 else if (rc == '/' && !in_class) {
+                    closed = 1;
                     break;
                 }
                 lex->pos++;
             }
-            size_t pat_len = lex->pos - pat_start;
-            if (lex->pos < lex->len && lex->src[lex->pos] == '/') {
-                lex->pos++;
+            if (!closed) {
+                lex->regex_literal_error = 1;
+                lex->curr.kind = KILN_DYN_ERROR;
+                lex->curr.start = &lex->src[reg_start];
+                lex->curr.len = lex->pos - reg_start;
+                return;
             }
+            size_t pat_len = lex->pos - pat_start;
+            lex->pos++;
             size_t flags_start = lex->pos;
             while (lex->pos < lex->len && ((lex->src[lex->pos] >= 'a' && lex->src[lex->pos] <= 'z') ||
                                            (lex->src[lex->pos] >= 'A' && lex->src[lex->pos] <= 'Z'))) {
                 lex->pos++;
             }
             size_t flags_len = lex->pos - flags_start;
-            char *buf = (char *)malloc(pat_len + 1 + flags_len + 1);
+            if (flags_len > SIZE_MAX - 2 || pat_len > SIZE_MAX - flags_len - 2) {
+                lex->allocation_error = 1;
+                lex->curr.kind = KILN_DYN_ERROR;
+                lex->curr.start = &lex->src[reg_start];
+                lex->curr.len = lex->pos - reg_start;
+                return;
+            }
+            char *buf = (char *)malloc(pat_len + flags_len + 2);
+            if (buf == NULL) {
+                lex->allocation_error = 1;
+                lex->curr.kind = KILN_DYN_ERROR;
+                lex->curr.start = &lex->src[reg_start];
+                lex->curr.len = lex->pos - reg_start;
+                return;
+            }
             memcpy(buf, &lex->src[pat_start], pat_len);
             buf[pat_len] = '\0';
             memcpy(buf + pat_len + 1, &lex->src[flags_start], flags_len);
@@ -1483,8 +1545,27 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
     case ',': lex->curr.kind = KILN_DYN_COMMA; return;
     case ':': lex->curr.kind = KILN_DYN_COLON; return;
     case ';': lex->curr.kind = KILN_DYN_SEMI; return;
-    case '(': lex->curr.kind = KILN_DYN_LPAREN; return;
-    case ')': lex->curr.kind = KILN_DYN_RPAREN; return;
+    case '(': {
+        if (lex->paren_overflow != 0 || lex->paren_depth == sizeof(lex->control_parens)) {
+            if (lex->paren_overflow == SIZE_MAX) {
+                lex->curr.kind = KILN_DYN_ERROR;
+                return;
+            }
+            lex->paren_overflow++;
+        } else {
+            lex->control_parens[lex->paren_depth++] = (unsigned char)opening_control_paren;
+        }
+        lex->curr.kind = KILN_DYN_LPAREN;
+        return;
+    }
+    case ')':
+        if (lex->paren_overflow != 0) {
+            lex->paren_overflow--;
+        } else if (lex->paren_depth != 0) {
+            lex->closed_control_paren = lex->control_parens[--lex->paren_depth] != 0;
+        }
+        lex->curr.kind = KILN_DYN_RPAREN;
+        return;
     case '{': lex->curr.kind = KILN_DYN_LBRACE; return;
     case '}': lex->curr.kind = KILN_DYN_RBRACE; return;
     case '[': lex->curr.kind = KILN_DYN_LBRACKET; return;

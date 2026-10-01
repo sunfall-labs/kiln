@@ -24,3 +24,27 @@ const stringValue = Function(`return "${slash}${lone}";`)();
 if (stringValue !== lone) throw new Error("string literal transport preserves its identity escape");
 
 console.log("dynamic regexp construction:", stringValue.length, /./.test("x"));
+
+for (const source of [
+  "if (false) /[/u;",
+  "if (((false))) /[/u;",
+  "while (false) /[/u;",
+  "for (; false;) /[/u;",
+  "return /unterminated",
+  "return /line\nfeed/;",
+]) {
+  let rejectedAtConstruction = false;
+  try {
+    Function(source);
+  } catch (error) {
+    rejectedAtConstruction = error instanceof SyntaxError;
+  }
+  if (!rejectedAtConstruction) {
+    throw new Error(`invalid regex source was accepted: ${JSON.stringify(source)}`);
+  }
+}
+
+const divide = Function("return (8) / 2;");
+if (divide() !== 4) throw new Error("ordinary parenthesized expression remains division");
+const callDivide = Function("return Number(8) / 2;");
+if (callDivide() !== 4) throw new Error("ordinary call parentheses remain division");
