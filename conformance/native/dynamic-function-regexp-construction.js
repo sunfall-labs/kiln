@@ -1,5 +1,12 @@
 const lone = String.fromCharCode(0xd800);
 const slash = "\\";
+const boxedMatchReceiver = new String("wrapped");
+const delegatedMatchReceiver = String.prototype.match.call(boxedMatchReceiver, {
+  [Symbol.match](receiver) { return receiver === boxedMatchReceiver; },
+});
+if (delegatedMatchReceiver !== true) {
+  throw new Error("String.prototype.match delegates with the original boxed receiver");
+}
 
 // Template interpolation invokes String conversion before Function sees its source.
 if (String(lone) !== lone || `${lone}` !== lone ||

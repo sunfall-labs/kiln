@@ -820,6 +820,10 @@ pub(super) fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
         // abstract ToString then observes an own @@toPrimitive/toString override. Only the
         // brand-checked valueOf/toString methods above open the wrapper directly.
         other if other.walks_a_string() => false,
+        // match/matchAll/search/replace/split first delegate through their RegExp symbol methods
+        // when present. That protocol receives the original this value, so these must not open
+        // a String wrapper before the VM has performed the protocol lookup.
+        Native::StringMatch | Native::StringMatchAll | Native::StringSearch => false,
         // Static String methods ignore their receiver, so opening a wrapper here is harmless.
         other => format!("{other:?}").starts_with("String"),
     };
