@@ -184,10 +184,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "http".to_owned(),
                 Value::Native(Native::NodeHttp, RealmId::PRIMARY),
             ),
-            (
-                "net".to_owned(),
-                crate::net::native_capabilities(),
-            ),
+            ("net".to_owned(), crate::net::native_capabilities()),
         ]);
         process.set_non_enumerable("__kilnNativeModules", native_modules);
         let value = Value::Object(Rc::new(RefCell::new(process)));
