@@ -1078,7 +1078,11 @@ impl super::Compiler {
                     Place::Global(slot),
                     local.kind,
                     local.imported,
-                    !local.initialized,
+                    // Module slots retain their own uninitialized state, and LoadGlobal reads
+                    // that cell at call time. The function may be compiled before the module
+                    // declaration but invoked after its initializer, so compiler-order state
+                    // cannot stand in for the actual runtime TDZ check here.
+                    false,
                 )
             }
             // A `var` this program declared on the global object. `ThrowReference` reads it and
