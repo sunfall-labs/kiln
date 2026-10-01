@@ -3227,17 +3227,23 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
             assert_eq!(exchange.cancel_query, 0);
             assert_eq!(exchange.cancel_accept, 0);
             assert_ne!(exchange.accepted_resource, 0);
+            assert_eq!(exchange.trigger.value_kind, VALUE_RESOURCE_STATE);
             assert_eq!(exchange.borrowed_query.value_kind, 0);
             assert_eq!(exchange.accepted.value_kind, 0);
             assert_eq!(exchange.trigger.drops, 1);
             assert_eq!(exchange.borrowed_query.drops, 1);
             assert_eq!(exchange.accepted.drops, 1);
+            assert_eq!(exchange.cancel_work_drops, 2);
             let mut byte = [0_u8; 1];
             assert_eq!(exchange.peer.as_mut().unwrap().read(&mut byte).unwrap(), 0);
         }
     }
     assert_ne!(exchange.accepted_after_cancel.status, 0);
     assert_eq!(exchange.listener_after_cancel.status, 0);
+    assert_eq!(
+        exchange.listener_after_cancel.value_kind,
+        VALUE_RESOURCE_STATE
+    );
     assert_eq!(exchange.close_listener.status, 0);
     assert_eq!(kiln_realm_destroy(handle), 0);
 }
