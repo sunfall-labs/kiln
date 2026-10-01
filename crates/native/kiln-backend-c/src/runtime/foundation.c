@@ -632,6 +632,10 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create);
+static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
+                                             const kiln_string *canonical,
+                                             kiln_property *out);
+static kiln_value kiln_c99_object_prototype_read(kiln_value owner);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message);
 static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
