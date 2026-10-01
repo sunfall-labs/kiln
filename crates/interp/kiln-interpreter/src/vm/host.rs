@@ -3036,18 +3036,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .borrow()
             .object
             .as_ref()
-            .map(|object| Value::Object(Rc::clone(object)))
+            .map(|object| (Value::Object(Rc::clone(object)), Rc::clone(object)))
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "HTTP client request lost its JavaScript object".into(),
             })?;
         state.borrow_mut().socket = Some(Rc::clone(&socket));
+        let socket_value = Value::Object(Rc::clone(&socket));
+        request.1.borrow_mut().set("socket", socket_value.clone());
+        request.1.borrow_mut().set("connection", socket_value);
         let inserted = owner
             .borrow_mut()
             .streams
             .iter_mut()
             .find(|stream| stream.resource() == resource)
-            .map(|stream| stream.client_requests.insert(request_id, request))
+            .map(|stream| stream.client_requests.insert(request_id, request.0))
             .is_some();
         if !inserted {
             return Err(ExecutionError::Host {

@@ -123,6 +123,8 @@ pub(crate) fn node_http_client_request_object(
         "end",
         Value::Native(Native::NodeClientRequestEnd, RealmId::PRIMARY),
     );
+    data.set("socket", Value::Null);
+    data.set("connection", Value::Null);
     data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
     data.set(
         "once",

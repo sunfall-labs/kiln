@@ -132,9 +132,12 @@ const server = http.createServer((request, response) => {
 });
 server.listen(0, "127.0.0.1", () => {
   const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    if (!request.socket || request.connection !== request.socket) throw new Error("client request socket");
+    if (response.socket !== request.socket || response.connection !== request.socket) throw new Error("client response socket");
     response.on("data", () => {});
     response.on("end", () => {});
   });
+  if (request.socket !== null || request.connection !== null) throw new Error("client socket before connect");
   request.end();
 });
 "#,

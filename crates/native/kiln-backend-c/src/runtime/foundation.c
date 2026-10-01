@@ -56,6 +56,14 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
     if (attach_runtime) {
         status = kiln_c99_node_socket_object(socket, thrown);
         if (status != KILN_C99_OK) return status;
+    }
+    /* Node publishes ClientRequest.socket/connection when the Agent attaches a socket. Keep
+     * the aliases identical for both newly connected and reused keep-alive sockets. */
+    status = kiln_c99_put(NULL, request->object, "socket", 6, socket->object, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, request->object, "connection", 10, socket->object, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    if (attach_runtime) {
         status = kiln_realm_http_client_attach_active(socket->resource,
                                                       kiln_c99_node_http_event,
                                                       kiln_c99_node_drop_http_connection,

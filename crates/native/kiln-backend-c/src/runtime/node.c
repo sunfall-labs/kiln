@@ -4331,6 +4331,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             return kiln_c99_throw_not_a(thrown, headers_value, "headers object");
         }
         if (status == KILN_C99_OK) status = kiln_c99_new_object_for_owner(&request->object, request);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request->object, "socket", 6,
+                                  kiln_c99_null(), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request->object, "connection", 10,
+                                  kiln_c99_null(), 0, NULL);
         if (status == KILN_C99_OK) {
             kiln_value ignored;
             status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
