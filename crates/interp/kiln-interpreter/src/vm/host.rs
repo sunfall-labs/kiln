@@ -504,6 +504,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 state.http_agent_request.clone(),
             )
         };
+        if native == Native::NodeSocketEnd && destroyed {
+            let (write_callbacks, end_callbacks) = Self::take_node_socket_queued_state(&state);
+            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            return Ok(receiver.clone());
+        }
         if connecting && resource.is_none() {
             match native {
                 Native::NodeSocketWrite => {
@@ -2447,7 +2452,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         // listeners enqueue their final writes first, then use the same end
                         // operation that drains the write queue before transport shutdown.
                         let state = node_net_socket_state(&socket)?;
-                        if !state.borrow().destroyed {
+                        let already_ending = server.borrow().streams.iter().any(|stream| {
+                            stream.resource() == resource
+                                && (stream.driver.state().end_requested()
+                                    || stream.driver.state().write_closed())
+                        });
+                        if !state.borrow().destroyed && !already_ending {
                             let callback = Value::Bound(Rc::new(BoundFunction {
                                 target: self.read_property(&socket, "end", instruction)?,
                                 this_value: socket.clone(),
