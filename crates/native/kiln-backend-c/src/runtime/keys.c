@@ -299,8 +299,9 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         /* A constructor with a genuinely unmodeled kind-specific static surface cannot claim a
          * complete own-key list. Keep the refusal until its reads and descriptors have an
          * equally authoritative owner. */
-        KILN_C99_REFUSE("own keys of a built-in whose statics are computed from its kind rather "
-                        "than declared");
+        const char *owner = kiln_c99_builtin_name(builtin);
+        KILN_C99_REFUSE_NAMED("own keys of a built-in whose statics are computed from its kind "
+                              "rather than declared", owner, strlen(owner));
     }
     status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {

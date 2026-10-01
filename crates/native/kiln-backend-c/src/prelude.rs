@@ -2856,7 +2856,8 @@ const _: () = assert_refusals_name_themselves(
 /// identifier-buffer scans were removed with lexical capture serialization.
 /// Site 84 measures a constructor own-key name from a fixed NUL-terminated literal table.
 /// The shared callable descriptor authority removed one duplicate fixed method-name scan.
-pub const C_STRING_LENGTH_SITES: usize = 81;
+/// Refused computed builtin own-key queries name the fixed C-literal builtin registry owner.
+pub const C_STRING_LENGTH_SITES: usize = 82;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
