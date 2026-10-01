@@ -45,6 +45,29 @@ if (preserveObject(returnedObject) !== returnedObject) {
   throw new Error("normal finally preserves the pending return value across allocations");
 }
 
+const returnFreshObject = Function(`
+  try { return { payload: "fresh pending return" }; }
+  finally { for (var index = 0; index < 40; index++) Object.create({ index }); }
+`);
+const freshReturned = returnFreshObject();
+if (freshReturned.payload !== "fresh pending return") {
+  throw new Error("finally keeps a fresh return object alive across allocations");
+}
+
+const throwFreshObject = Function(`
+  try { throw { payload: "fresh pending throw" }; }
+  finally { for (var index = 0; index < 40; index++) Object.create({ index }); }
+`);
+let freshThrown;
+try {
+  throwFreshObject();
+} catch (error) {
+  freshThrown = error;
+}
+if (freshThrown?.payload !== "fresh pending throw") {
+  throw new Error("finally keeps a fresh thrown object alive across allocations");
+}
+
 const flowEvents = [];
 const labeledFlow = Function("events", `
   var index = 0;
