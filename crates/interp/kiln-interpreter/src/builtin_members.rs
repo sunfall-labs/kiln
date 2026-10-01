@@ -1246,6 +1246,7 @@ pub(super) fn native_is_constructor(native: Native) -> bool {
         | Native::ConsoleConstructor
         | Native::NodeHttpServer
         | Native::NodeAsyncLocalStorage
+        | Native::NodeBufferGlobal
         | Native::WebStub(_) => true,
         Native::AsyncFunctionPrototype
         | Native::GeneratorFunctionPrototype

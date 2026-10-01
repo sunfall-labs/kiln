@@ -1705,7 +1705,7 @@ typedef enum {
 
 static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *scope,
                                             const char *name, size_t name_len, int depth,
-                                            int allow_missing, kiln_value *current,
+                                            int allow_missing, int read_value, kiln_value *current,
                                             kiln_dyn_update_reference *reference,
                                             kiln_dyn_scope **binding_scope,
                                             kiln_value *with_target,
@@ -1723,8 +1723,8 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
                 kiln_val *cell = kiln_c99_cell_of(binding->value);
                 int status = kiln_c99_val_check_tdz(*cell, thrown);
                 if (status != KILN_C99_OK) return status;
-                *current = kiln_val_to_boundary(*cell);
-            } else {
+                if (read_value) *current = kiln_val_to_boundary(*cell);
+            } else if (read_value) {
                 *current = binding->value;
             }
             *binding_scope = environment;
@@ -1739,9 +1739,11 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
             if (present) {
                 *with_target = environment->with_object;
                 kiln_c99_gc_keep_alive(with_target);
-                status = kiln_c99_get(host, *with_target, name, name_len, current, depth,
-                                      thrown);
-                if (status != KILN_C99_OK) return status;
+                if (read_value) {
+                    status = kiln_c99_get(host, *with_target, name, name_len, current, depth,
+                                          thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
                 *reference = KILN_DYN_UPDATE_WITH;
                 return KILN_C99_OK;
             }
@@ -1759,7 +1761,7 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
                                         "Variable is not defined");
         *current = kiln_c99_undefined();
         *unresolvable = 1;
-    } else {
+    } else if (read_value) {
         status = kiln_c99_get(host, *global_target, name, name_len, current, depth, thrown);
         if (status != KILN_C99_OK) return status;
     }
@@ -1781,7 +1783,7 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
     kiln_dyn_scope *binding_scope = NULL;
     kiln_dyn_update_reference reference = KILN_DYN_UPDATE_BINDING;
     int unresolvable = 0;
-    int status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 0,
+    int status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 0, 1,
                                                    &current, &reference, &binding_scope,
                                                    &with_target, &global_target, &unresolvable,
                                                    thrown);
@@ -1809,7 +1811,7 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
         /* A with-environment reference is resolved again when its mutable binding is written.
          * The value's ToPrimitive may have deleted the matching property, allowing an outer
          * with/global/lexical environment to supply SetMutableBinding. */
-        status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 1,
+        status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 1, 0,
                                                    &current, &reference, &binding_scope,
                                                    &with_target, &global_target, &unresolvable,
                                                    thrown);
@@ -1818,8 +1820,6 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
             status = kiln_dyn_scope_check_write(binding_scope, name, name_len, &ignore_write,
                                                 thrown);
             if (status != KILN_C99_OK) return status;
-            if (!ignore_write && !kiln_dyn_scope_update(binding_scope, name, name_len, next))
-                return KILN_C99_OUT_OF_MEMORY;
         }
     }
     if (!ignore_write) {

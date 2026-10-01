@@ -29,6 +29,18 @@ const updateWith = new Function("outer", "inner",
   "with (outer) { with (inner) { return value++; } }");
 console.log(updateWith(outer, inner), inner.value, outer.value);
 
+let stableGetterCalls = 0;
+let stableSetterCalls = 0;
+const stableWith = {};
+Object.defineProperty(stableWith, "value", {
+  get() { stableGetterCalls++; return 7; },
+  set(next) { stableSetterCalls++; this.saved = next; },
+});
+const updateStableWith = new Function("object",
+  "with (object) { return value++; }");
+console.log(updateStableWith(stableWith), stableGetterCalls, stableSetterCalls,
+  stableWith.saved);
+
 function updateWithLexicalShadow() {
   const value = 100;
   const object = { value: 5 };
