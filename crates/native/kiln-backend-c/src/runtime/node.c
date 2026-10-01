@@ -5681,7 +5681,12 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                            span.bytes, span.len);
                 socket->pending_write_len += span.len;
                 kiln_c99_node_http_byte_span_release(&span);
-                *result = kiln_c99_boolean(1);
+                buffered = socket->active_write_len;
+                buffered = socket->pending_write_len > SIZE_MAX - buffered
+                               ? SIZE_MAX : buffered + socket->pending_write_len;
+                buffered = socket->corked_write_len > SIZE_MAX - buffered
+                               ? SIZE_MAX : buffered + socket->corked_write_len;
+                *result = kiln_c99_boolean(buffered < 16384);
                 return KILN_C99_OK;
             }
             if (socket->upgrade_request_id != 0) {
