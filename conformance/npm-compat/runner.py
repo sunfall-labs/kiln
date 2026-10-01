@@ -58,6 +58,8 @@ def main():
     if args.timeout <= 0:
         parser.error('--timeout must be positive')
     kiln = str(Path(args.kiln).resolve())
+    # Commands execute from the corpus directory; keep artifacts anchored to the caller.
+    args.raw = args.raw.resolve()
     rows = []
     with (HERE / 'packages.tsv').open() as f:
         for row in csv.reader(f, delimiter='\t'):
