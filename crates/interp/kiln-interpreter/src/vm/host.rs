@@ -2202,6 +2202,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 .streams
                                 .iter_mut()
                                 .filter_map(|stream| {
+                                    // A successful upgrade has transferred this resource to the
+                                    // raw StreamDriver. HTTP server close must not signal the
+                                    // retired HTTP runtime connection for it.
+                                    if !stream.runtime_http {
+                                        return None;
+                                    }
                                     stream.close_when_response_ends = true;
                                     let response_ended = stream
                                         .response
