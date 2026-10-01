@@ -602,9 +602,10 @@ static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t
 
 static int kiln_dyn_scope_get(kiln_host *host, kiln_dyn_scope *scope, const char *name,
                               size_t name_len, int depth, kiln_value *out, int *found,
-                              kiln_value *thrown) {
+                              kiln_value *reference_base, kiln_value *thrown) {
     kiln_dyn_scope *curr = scope;
     *found = 0;
+    if (reference_base != NULL) *reference_base = kiln_c99_undefined();
     while (curr != NULL) {
         size_t i;
         for (i = 0; i < curr->count; ++i) {
@@ -630,19 +631,30 @@ static int kiln_dyn_scope_get(kiln_host *host, kiln_dyn_scope *scope, const char
             if (present) {
                 status = kiln_c99_get(host, curr->with_object, name, name_len, out, depth,
                                       thrown);
-                if (status == KILN_C99_OK) *found = 1;
+                if (status == KILN_C99_OK) {
+                    *found = 1;
+                    if (reference_base != NULL) *reference_base = curr->with_object;
+                }
                 return status;
             }
         }
         if (curr->has_captured_records) {
             int is_with = 0;
+            kiln_value with_target = kiln_c99_undefined();
             int status = kiln_dyn_captured_records_get(host, curr->captured_records, name,
                                                        name_len, depth, 1, out, found, &is_with,
-                                                       NULL, thrown);
+                                                       &with_target, thrown);
+            if (status == KILN_C99_OK && *found && is_with && reference_base != NULL)
+                *reference_base = with_target;
             if (status != KILN_C99_OK || *found) return status;
         }
-        int status = kiln_dyn_captured_get(curr, name, name_len, out, found, thrown);
-        if (status != KILN_C99_OK || *found) return status;
+        /* Ordered records cover every captured lexical environment. The flattened environment
+         * remains as a serialization/index format, but rescanning it after a miss in the ordered
+         * chain is redundant. Keep it only for older closures without record metadata. */
+        if (!curr->has_captured_records) {
+            int status = kiln_dyn_captured_get(curr, name, name_len, out, found, thrown);
+            if (status != KILN_C99_OK || *found) return status;
+        }
         curr = curr->parent;
     }
     return KILN_C99_OK;
@@ -2376,7 +2388,9 @@ static int kiln_dyn_body_has_use_strict(const char *body, size_t length) {
 
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
-                                int depth, kiln_value *out, kiln_value *thrown) {
+                                int depth, kiln_value *out, kiln_value *reference_base,
+                                kiln_value *thrown) {
+    if (reference_base != NULL) *reference_base = kiln_c99_undefined();
     if (lex->curr.kind == KILN_DYN_NUM) {
         *out = kiln_c99_number(lex->curr.num_val);
     kiln_dyn_lexer_next(lex);
@@ -2529,7 +2543,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         }
         int scope_found = 0;
         int scope_status = kiln_dyn_scope_get(host, scope, name, name_len, depth, out,
-                                              &scope_found, thrown);
+                                              &scope_found, reference_base, thrown);
         if (scope_status != KILN_C99_OK) return scope_status;
         if (scope_found) {
             return KILN_C99_OK;
@@ -2715,7 +2729,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 }
                 int scope_found = 0;
                 status = kiln_dyn_scope_get(host, scope, key_name, key_len, depth, &val,
-                                            &scope_found, thrown);
+                                            &scope_found, NULL, thrown);
                 if (status != KILN_C99_OK) {
                     free(owned_key);
                     return status;
@@ -2948,10 +2962,12 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                  kiln_value receiver, const kiln_value *args, size_t argc,
                                  int depth, kiln_value *out, kiln_value *thrown,
                                  int construct_first_call) {
-    int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth, out, thrown);
-    if (status != KILN_C99_OK) return status;
-
     kiln_value current_receiver = kiln_c99_undefined();
+    int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth, out,
+                                       &current_receiver, thrown);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&current_receiver);
+
     int constructing = construct_first_call;
 
     while (1) {
@@ -2967,6 +2983,7 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             status = kiln_c99_get(host, *out, prop, prop_len, &res, depth, thrown);
             if (status != KILN_C99_OK) return status;
             current_receiver = *out;
+            kiln_c99_gc_keep_alive(&current_receiver);
             *out = res;
         } else if (lex->curr.kind == KILN_DYN_LBRACKET) {
             kiln_dyn_lexer_next(lex);
@@ -2981,6 +2998,7 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             status = kiln_c99_get_computed(host, *out, idx, &res, depth, thrown);
             if (status != KILN_C99_OK) return status;
             current_receiver = *out;
+            kiln_c99_gc_keep_alive(&current_receiver);
             *out = res;
         } else if (lex->curr.kind == KILN_DYN_LPAREN) {
             kiln_dyn_lexer_next(lex);
@@ -3294,7 +3312,7 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
             if (lex->curr.kind != KILN_DYN_DOT && lex->curr.kind != KILN_DYN_LBRACKET && lex->curr.kind != KILN_DYN_LPAREN) {
                 int scope_found = 0;
                 int scope_status = kiln_dyn_scope_get(host, scope, name, name_len, depth,
-                                                      out, &scope_found, thrown);
+                                                      out, &scope_found, NULL, thrown);
                 if (scope_status != KILN_C99_OK) return scope_status;
                 if (scope_found) {
                     *out = kiln_c99_typeof(*out);
@@ -3694,7 +3712,7 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
     int depth, kiln_value *out, kiln_value *thrown, kiln_dyn_token_kind prefix_update) {
     kiln_value target, key, current, rhs;
     int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth,
-                                       &target, thrown);
+                                       &target, NULL, thrown);
     if (status != KILN_C99_OK) return status;
     while (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
         int computed = lex->curr.kind == KILN_DYN_LBRACKET;
@@ -3784,7 +3802,7 @@ static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
                                        kiln_value *out, kiln_value *thrown) {
     kiln_value target = kiln_c99_undefined(), key = kiln_c99_undefined();
     int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth,
-                                       &target, thrown);
+                                       &target, NULL, thrown);
     if (status != KILN_C99_OK) return status;
     kiln_value current_receiver = kiln_c99_undefined();
     while (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET ||
@@ -4131,7 +4149,7 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                     kiln_value target;
                     int scope_found = 0;
                     status = kiln_dyn_scope_get(host, scope, name, name_len, depth, &target,
-                                                &scope_found, thrown);
+                                                &scope_found, NULL, thrown);
                     if (status != KILN_C99_OK) return status;
                     if (!scope_found) {
                         kiln_value globals = kiln_c99_undefined();
@@ -4162,7 +4180,7 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                     kiln_value target;
                     int scope_found = 0;
                         status = kiln_dyn_scope_get(host, scope, name, name_len, depth,
-                                                    &target, &scope_found, thrown);
+                                                    &target, &scope_found, NULL, thrown);
                     if (status != KILN_C99_OK) return status;
                     if (!scope_found) {
                         kiln_value globals = kiln_c99_undefined();
@@ -5309,7 +5327,7 @@ static int kiln_dyn_switch_initialize_functions(kiln_host *host,
         kiln_dyn_lexer_next(&function_lex);
         kiln_value function = kiln_c99_undefined();
         int status = kiln_dyn_eval_primary(host, &function_lex, scope, receiver, args, argc,
-                                           depth, &function, thrown);
+                                           depth, &function, NULL, thrown);
         kiln_dyn_token_free(&function_lex.curr);
         if (status != KILN_C99_OK) return status;
         if (function.tag != KILN_VALUE_FUNCTION ||
@@ -5347,7 +5365,7 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
         kiln_value function = kiln_c99_undefined();
         int found = 0;
         int status = kiln_dyn_scope_get(host, scope, function_name, function_name_len,
-                                        depth, &function, &found, thrown);
+                                        depth, &function, &found, NULL, thrown);
         if (status != KILN_C99_OK || !found) {
             if (status == KILN_C99_OK) status = KILN_C99_INVALID_ARGUMENT;
             return status;
@@ -7251,7 +7269,7 @@ declaration_scan_done:
         function_lex.strict = scope->strict;
         kiln_dyn_lexer_next(&function_lex);
         status = kiln_dyn_eval_primary(host, &function_lex, scope, receiver, args, argc,
-                                       depth, &function, thrown);
+                                       depth, &function, NULL, thrown);
         kiln_dyn_token_free(&function_lex.curr);
         if (status != KILN_C99_OK) goto done;
         if (function.tag != KILN_VALUE_FUNCTION ||
@@ -7362,7 +7380,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                             int scope_found = 0;
                             int scope_status = kiln_dyn_scope_get(host, &scope, &p[vstart],
                                                                   vlen, depth, &dval,
-                                                                  &scope_found, thrown);
+                                                                  &scope_found, NULL, thrown);
                             if (scope_status != KILN_C99_OK) {
                                 free(params_owned);
                                 kiln_dyn_scope_destroy(&scope);
