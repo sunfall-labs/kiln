@@ -563,6 +563,91 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
     }
 
+    /* String padding has two observable short circuits: ToLength(targetLength) happens first,
+     * and the filler is not converted at all when the receiver already meets that length. Keep
+     * this ahead of the shared argument preparation below so an unused filler cannot run user
+     * code (or throw), and so an object target uses the language's ToNumber path. */
+    if (code == KILN_C99_METHOD_PAD_START || code == KILN_C99_METHOD_PAD_END) {
+        double target = 0.0;
+        size_t wanted;
+        size_t count = receiver_string->unit_len;
+        static const uint16_t space[] = {0x20};
+        const uint16_t *filler = space;
+        size_t filler_count = 1;
+        uint16_t *filler_units = NULL;
+        int status = KILN_C99_OK;
+
+        if (argc > 0) {
+            status = kiln_c99_to_number_checked(host, args[0], &target, depth, thrown);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (isnan(target) || target <= 0.0) {
+            wanted = 0;
+        } else if (!isfinite(target)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Invalid string length");
+        } else {
+            target = trunc(target);
+            /* The string header stores its UTF-16 length in uint32_t. Refuse before a cast or
+             * allocation can wrap, and match the language-visible RangeError for oversize. */
+            if (target > (double)UINT32_MAX || target >= (double)SIZE_MAX ||
+                target > (double)(SIZE_MAX / sizeof(uint16_t))) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "Invalid string length");
+            }
+            wanted = (size_t)target;
+        }
+        if (wanted <= count) {
+            *result = receiver;
+            kiln_c99_gc_keep_alive(&receiver);
+            return KILN_C99_OK;
+        }
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            kiln_value filler_value;
+            status = kiln_c99_to_text_argument(host, args[1], &filler_value, depth, thrown);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_to_units(filler_value, &filler_units, &filler_count);
+            kiln_c99_gc_keep_alive(&filler_value);
+            if (status != KILN_C99_OK) {
+                free(filler_units);
+                return status;
+            }
+            filler = filler_units;
+        }
+        if (filler_count == 0) {
+            free(filler_units);
+            *result = receiver;
+            kiln_c99_gc_keep_alive(&receiver);
+            return KILN_C99_OK;
+        }
+        {
+            uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
+            size_t fill = wanted - count;
+            size_t index;
+            if (padded == NULL) {
+                free(filler_units);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < fill; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? index : count + index] =
+                    filler[index % filler_count];
+            }
+            for (index = 0; index < count; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? fill + index : index] =
+                    kiln_string_unit_at(receiver_string, index);
+            }
+            *result = kiln_c99_from_units(padded, wanted);
+            free(padded);
+            free(filler_units);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (result->tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            kiln_c99_gc_keep_alive(result);
+        }
+        return KILN_C99_OK;
+    }
+
     if (code == KILN_C99_METHOD_STRING_CODE_POINT_AT) {
         double position = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
         if (position != position) position = 0.0;
@@ -891,7 +976,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
     }
     /* Most of these take a string argument, and converting it once here keeps each case short.
      * A case that does not want one simply ignores it. */
-    if (argc > 0) {
+    if (argc > 0 && code != KILN_C99_METHOD_STRING_CONCAT) {
         kiln_value shown = kiln_c99_text(args[0]);
         if (shown.tag == KILN_VALUE_STRING) {
             status = kiln_c99_to_units(shown, &needle, &needle_count);
@@ -1422,23 +1507,15 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         break;
     }
     case KILN_C99_METHOD_STRING_CONCAT: {
-        uint16_t *joined = NULL;
-        size_t joined_count = 0;
-        size_t joined_capacity = 0;
+        /* `units` is already the receiver's exact UTF-16 representation. Transfer its owned
+         * buffer into the builder rather than converting/allocating the receiver a second time. */
+        uint16_t *joined = units;
+        size_t joined_count = count;
+        size_t joined_capacity = count;
         size_t index;
         uint16_t *part = NULL;
         size_t part_count = 0;
-        status = kiln_c99_to_units(receiver, &part, &part_count);
-        if (status == KILN_C99_OK && part_count != 0) {
-            status = kiln_c99_reserve((void **)&joined, &joined_capacity, part_count,
-                                      sizeof *joined);
-            if (status == KILN_C99_OK) {
-                memcpy(joined, part, part_count * sizeof *part);
-                joined_count = part_count;
-            }
-        }
-        free(part);
-        part = NULL;
+        units = NULL;
         kiln_c99_gc_keep_alive(&receiver);
         for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
             kiln_value argument = args[index];
