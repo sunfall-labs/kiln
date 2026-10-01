@@ -421,6 +421,8 @@ pub enum InvalidSpecifierReason {
     UrlScheme,
     BarePackage,
     EmbeddedNul,
+    InvalidPercentEncoding,
+    EncodedPathSeparator,
 }
 
 impl InvalidSpecifierReason {
@@ -431,6 +433,8 @@ impl InvalidSpecifierReason {
             Self::UrlScheme => "URL schemes are not supported",
             Self::BarePackage => "bare package specifiers are not supported",
             Self::EmbeddedNul => "embedded NUL is not supported",
+            Self::InvalidPercentEncoding => "invalid percent encoding in file URL path",
+            Self::EncodedPathSeparator => "encoded path separators are not supported",
         }
     }
 }
@@ -850,10 +854,38 @@ impl NodePackageResolver {
             })
         ) {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
+                // ESM specifiers are URL references: percent escapes are decoded as UTF-8 before
+                // filesystem lookup. CommonJS resolution intentionally keeps its historical
+                // raw-path behavior. Preserve the original specifier for package/error identity.
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
+                let decoded_specifier = if request == NodeRequestKind::Import {
+                    decode_esm_relative_specifier(specifier, &canonical_importer)?
+                } else {
+                    PathBuf::from(specifier)
+                };
+                if request == NodeRequestKind::Import {
+                    // The decoded path may legitimately contain `?` or `#`, which are filename
+                    // bytes here rather than URL query/fragment delimiters. Do not feed it back
+                    // through a specifier parser; validate the exact file URL target directly.
+                    let canonical_target =
+                        fs::canonicalize(&decoded_specifier).map_err(|error| ResolveError::Io {
+                            role: PathRole::Target,
+                            path: decoded_specifier.clone(),
+                            kind: error.kind(),
+                        })?;
+                    return validate_node_target(
+                        canonical_target,
+                        ResolutionKind::Relative,
+                        None,
+                        self.project_root(),
+                    );
+                }
                 let resolution = packages
-                    .resolve(importer_directory, specifier)
+                    .resolve(
+                        importer_directory,
+                        decoded_specifier.to_string_lossy().as_ref(),
+                    )
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
                     .package_json()
@@ -891,6 +923,48 @@ impl NodePackageResolver {
             self.project_root(),
         )
     }
+}
+
+/// Decode a relative ESM URL path for filesystem resolution. Encoded path separators are
+/// rejected, matching file-URL module loading, while escaped `#`, `?`, `%`, and UTF-8 bytes are
+/// ordinary filename characters after URL decoding.
+fn decode_esm_relative_specifier(
+    specifier: &str,
+    importer: &Path,
+) -> Result<PathBuf, ResolveError> {
+    let invalid = |reason| ResolveError::InvalidSpecifier {
+        specifier: specifier.to_owned(),
+        reason,
+    };
+    let bytes = specifier.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            }
+            let hex = |byte: u8| (byte as char).to_digit(16);
+            let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) else {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            };
+            let escaped = ((high << 4) | low) as u8;
+            if matches!(escaped, b'/' | b'\\') {
+                return Err(invalid(InvalidSpecifierReason::EncodedPathSeparator));
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    let base = url::Url::from_file_path(importer)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let target = base
+        .join(specifier)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let path = target
+        .to_file_path()
+        .map_err(|_| invalid(InvalidSpecifierReason::EncodedPathSeparator))?;
+    Ok(path)
 }
 
 fn validate_node_target(
@@ -2348,6 +2422,36 @@ mod tests {
             .expect("Node require resolves the .js extension");
 
         assert_eq!(resolved.path, target);
+    }
+
+    #[test]
+    fn esm_relative_specifiers_decode_file_url_escapes_but_require_does_not() {
+        let project = TempProject::new();
+        let importer = project.write("main.mjs", "");
+        let decoded_target = project.write("identity #%? ü 😀.mjs", "export {};");
+        let raw_target = project.write(
+            "identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs",
+            "module.exports = {};",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let encoded = "./identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs";
+
+        let imported = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("ESM URL escapes resolve to filename bytes");
+        assert_eq!(imported.path, fs::canonicalize(decoded_target).unwrap());
+
+        let required = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Require)
+            .expect("CommonJS keeps literal percent escapes in its path");
+        assert_eq!(required.path, fs::canonicalize(raw_target).unwrap());
+
+        for invalid in ["./bad%2Fname.mjs", "./bad%5cname.mjs", "./bad%XZ.mjs"] {
+            assert!(matches!(
+                resolver.resolve_for_request(invalid, &importer, NodeRequestKind::Import),
+                Err(ResolveError::InvalidSpecifier { .. })
+            ));
+        }
     }
 
     #[test]
