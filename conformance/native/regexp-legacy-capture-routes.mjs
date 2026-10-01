@@ -31,6 +31,12 @@ if (indexedFirst.index !== 1 || indexedMatchAll.lastIndex !== 1) {
 }
 console.log("match-all-last-index", indexedFirst.index, indexedMatchAll.lastIndex);
 
+const manyMatches = [..."x".repeat(128).matchAll(/(x)/g)];
+if (manyMatches.length !== 128 || manyMatches[127].index !== 127 || manyMatches[127][1] !== "x") {
+  throw new Error("matchAll must retain its snapshot and capture ranges across many matches");
+}
+console.log("match-all-many", manyMatches.length, manyMatches[127].index);
+
 const nonglobal = /x/;
 let directRejected = false;
 try { "x".matchAll(nonglobal); } catch (error) { directRejected = error instanceof TypeError; }

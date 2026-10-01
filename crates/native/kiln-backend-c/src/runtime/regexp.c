@@ -161,20 +161,24 @@ int kiln_c99_regexp_publish_legacy(kiln_value subject, const int64_t *ranges,
  * no observable effect on RegExp.$1 through RegExp.$9. The subject itself is already rooted by
  * the match result's `input` slot. */
 int kiln_c99_regexp_defer_legacy(kiln_value match, const int64_t *ranges, size_t groups) {
-    kiln_value saved;
+    kiln_value saved = kiln_c99_undefined();
     size_t index;
     int status;
     if (match.tag != KILN_VALUE_ARRAY || ranges == NULL || groups == 0) return KILN_C99_OK;
     if (groups > 10) groups = 10;
-    status = kiln_c99_gc_keep_during_job(match);
-    if (status != KILN_C99_OK) return status;
     status = kiln_c99_new_array(&saved);
-    if (status == KILN_C99_OK) status = kiln_c99_gc_keep_during_job(saved);
     for (index = 0; index < groups * 2 && status == KILN_C99_OK; ++index) {
         status = kiln_c99_array_push(saved, kiln_c99_number((double)ranges[index]));
     }
-    if (status != KILN_C99_OK) return status;
-    return kiln_c99_put(NULL, match, "@@regexpLegacyRanges", 20, saved, 0, NULL);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, match, "@@regexpLegacyRanges", 20, saved, 0, NULL);
+    }
+    /* The eager snapshot and its range records are reachable through these frame locals until
+     * the final property store links them together. Job roots would accumulate two entries per
+     * match and make root insertion quadratic for long matchAll scans. */
+    kiln_c99_gc_keep_alive(&match);
+    kiln_c99_gc_keep_alive(&saved);
+    return status;
 }
 
 int kiln_c99_regexp_publish_deferred(kiln_value match) {
