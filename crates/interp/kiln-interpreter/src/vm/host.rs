@@ -26,11 +26,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 
     fn schedule_node_socket_queued_callbacks(
         &mut self,
-        receiver: &Value,
         write_callbacks: Vec<Value>,
         end_callbacks: Vec<Value>,
     ) {
-        if !write_callbacks.is_empty() {
+        let error = if !write_callbacks.is_empty() || !end_callbacks.is_empty() {
             let error = self.construct_error(
                 ErrorKind::Error,
                 &[Value::String("socket destroyed".into())],
@@ -40,34 +39,36 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     .borrow_mut()
                     .set_non_enumerable("code", Value::String("ERR_STREAM_DESTROYED".into()));
             }
+            Some(error)
+        } else {
+            None
+        };
+        if let Some(error) = error.as_ref() {
             for callback in write_callbacks {
                 let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
                 self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
             }
-        }
-        for callback in end_callbacks {
-            let callback = Value::Bound(Rc::new(BoundFunction {
-                target: callback,
-                this_value: receiver.clone(),
-                arguments: Vec::new(),
-                properties: RefCell::new(ObjectData::default()),
-            }));
-            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
-            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+            for callback in end_callbacks {
+                let scheduled = self.scheduled(Job::NextTick(callback, vec![error.clone()]));
+                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+            }
         }
     }
 
     fn call_node_socket_end_callbacks(
         &mut self,
-        receiver: &Value,
+        state: &Rc<RefCell<crate::net::NetSocketState>>,
+        callback_error: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let callbacks = {
-            let state = node_net_socket_state(receiver)?;
-            std::mem::take(&mut state.borrow_mut().end_callbacks)
-        };
+        let callbacks = std::mem::take(&mut state.borrow_mut().end_callbacks);
         for callback in callbacks {
-            self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
+            self.call_value(
+                &callback,
+                Value::Undefined,
+                vec![callback_error.clone()],
+                instruction,
+            )?;
         }
         Ok(())
     }
@@ -579,7 +580,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         object.set("readyState", Value::String("closed".into()));
                     }
                     self.schedule_node_socket_queued_callbacks(
-                        receiver,
                         queued_write_callbacks,
                         end_callbacks,
                     );
@@ -665,7 +665,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 socket_state.connecting = false;
             }
             let (write_callbacks, end_callbacks) = Self::take_node_socket_queued_state(&state);
-            self.schedule_node_socket_queued_callbacks(receiver, write_callbacks, end_callbacks);
+            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
             if let Value::Object(object) = receiver {
                 let mut object = object.borrow_mut();
                 object.set("destroyed", Value::Boolean(true));
@@ -2210,7 +2210,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &[Value::String("finish".into())],
                             instruction,
                         )?;
-                        self.call_node_socket_end_callbacks(&socket, instruction)?;
+                        let socket_state = node_net_socket_state(&socket)?;
+                        self.call_node_socket_end_callbacks(
+                            &socket_state,
+                            Value::Null,
+                            instruction,
+                        )?;
                     }
                     return Ok(());
                 }
@@ -2236,13 +2241,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if let Ok(socket_state) = node_net_socket_state(&socket) {
                         let (write_callbacks, end_callbacks) =
                             Self::take_node_socket_queued_state(&socket_state);
-                        self.schedule_node_socket_queued_callbacks(
-                            &socket,
-                            write_callbacks,
-                            Vec::new(),
-                        );
+                        self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
                         for callback in end_callbacks {
-                            self.call_value(&callback, socket.clone(), Vec::new(), instruction)?;
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                vec![Value::Null],
+                                instruction,
+                            )?;
                         }
                     }
                     // Node exposes the terminal stream state from inside the `close` listener.
@@ -2569,11 +2575,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             state.shutdown_after_upgrade_fence = None;
                             (callbacks, end_callbacks)
                         };
-                        self.schedule_node_socket_queued_callbacks(
-                            &socket_value,
-                            write_callbacks,
-                            Vec::new(),
-                        );
+                        self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
                         let socket_value = socket
                             .borrow()
                             .object
@@ -2584,8 +2586,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         for callback in end_callbacks {
                             self.call_value(
                                 &callback,
-                                socket_value.clone(),
-                                Vec::new(),
+                                Value::Undefined,
+                                vec![Value::Null],
                                 instruction,
                             )?;
                         }
@@ -4944,23 +4946,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             None
                         };
                         let error = self.node_error_value(error);
-                        let end_this = socket_value.clone().unwrap_or(Value::Undefined);
-                        for callback in end_callbacks {
-                            self.call_value(
-                                &callback,
-                                end_this.clone(),
-                                Vec::new(),
-                                self.instruction,
-                            )?;
-                        }
-                        for callback in pending_write_callbacks {
-                            self.call_value(
-                                &callback,
-                                Value::Undefined,
-                                vec![error.clone()],
-                                self.instruction,
-                            )?;
-                        }
                         let object = match &target {
                             PendingConnect::Net(state) => state
                                 .borrow()
@@ -4976,12 +4961,57 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 .map(|object| Value::Object(Rc::clone(object)))
                                 .unwrap_or(Value::Undefined),
                         };
-                        self.dispatch_node_event(
-                            Native::NodeEventEmit,
-                            &object,
-                            &[Value::String("error".into()), error],
-                            self.instruction,
-                        )?;
+                        let queued_net_write = matches!(&target, PendingConnect::Net(_))
+                            && !pending_write_callbacks.is_empty();
+                        if queued_net_write {
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &object,
+                                &[Value::String("error".into()), error.clone()],
+                                self.instruction,
+                            )?;
+                        }
+                        let write_error = if queued_net_write {
+                            let error = self.construct_error(
+                                ErrorKind::Error,
+                                &[Value::String(
+                                    "Socket closed before the connection was established".into(),
+                                )],
+                            );
+                            if let Value::Object(object) = &error {
+                                object.borrow_mut().set_non_enumerable(
+                                    "code",
+                                    Value::String("ERR_SOCKET_CLOSED_BEFORE_CONNECTION".into()),
+                                );
+                            }
+                            error
+                        } else {
+                            error.clone()
+                        };
+                        for callback in pending_write_callbacks {
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                vec![write_error.clone()],
+                                self.instruction,
+                            )?;
+                        }
+                        for callback in end_callbacks {
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                vec![error.clone()],
+                                self.instruction,
+                            )?;
+                        }
+                        if !queued_net_write {
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &object,
+                                &[Value::String("error".into()), error],
+                                self.instruction,
+                            )?;
+                        }
                         if let Some(AgentFailure::Connect { request }) = retry {
                             let queued = self.http_client_request(request).ok_or_else(|| {
                                 ExecutionError::Host {
