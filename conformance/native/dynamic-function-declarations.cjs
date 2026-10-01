@@ -23,6 +23,28 @@ const capturedVar = Function(
 );
 console.log("declaration captures later var:", capturedVar());
 
+const blockVarCapture = Function(
+  "function read() { return inside; } if (true) { var inside = 37; } return read();",
+);
+console.log("block var capture:", blockVarCapture());
+
+const forVarCapture = Function(
+  "function read() { return item; } for (var item = 41; item < 42; item++) {} return read();",
+);
+console.log("for var capture:", forVarCapture());
+
+const whileVarCapture = Function(
+  "function read() { return whileOnly; } var index = 0; " +
+    "while (index < 1) { var whileOnly = 45; index++; } return read();",
+);
+console.log("while var capture:", whileVarCapture());
+
+const nestedVarDoesNotLeak = Function(
+  "function inner() { var hidden = 43; } inner(); " +
+    "try { return hidden; } catch (error) { return error.name; }",
+);
+console.log("nested var isolation:", nestedVarDoesNotLeak());
+
 const nested = Function(
   "function outer() { return inside(); function inside() { return 31; } } return outer();",
 );

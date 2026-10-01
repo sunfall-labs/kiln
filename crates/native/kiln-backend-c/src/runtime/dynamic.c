@@ -1023,9 +1023,10 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
 }
 
 static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
+                                 const char *name, size_t name_len,
                                  const char *params, size_t params_len,
                                  const char *body, size_t body_len, kiln_value receiver,
-                                 int asynchronous, int arrow, kiln_value *out,
+                                 int asynchronous, int arrow, int method, kiln_value *out,
                                  kiln_value *thrown);
 static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                                         kiln_value env_obj, int depth,
@@ -1171,8 +1172,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                 "Unterminated arrow function body");
                 }
-                return kiln_dyn_make_closure(host, scope, name, name_len, body, body_len,
-                                             receiver, 0, 1, out, thrown);
+                return kiln_dyn_make_closure(host, scope, NULL, 0, name, name_len,
+                                             body, body_len, receiver, 0, 1, 0,
+                                             out, thrown);
             }
             if (!kiln_dyn_capture_expression(lex, &body, &body_len))
                 return kiln_dyn_throw_parse_error(lex, thrown,
@@ -1183,9 +1185,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             memcpy(return_body, "return ", 7);
             memcpy(return_body + 7, body, body_len);
             return_body[7 + body_len] = ';';
-            int closure_status = kiln_dyn_make_closure(host, scope, name, name_len,
-                                                       return_body, body_len + 8,
-                                                       receiver, 0, 1, out, thrown);
+            int closure_status = kiln_dyn_make_closure(host, scope, NULL, 0,
+                                                       name, name_len, return_body, body_len + 8,
+                                                       receiver, 0, 1, 0, out, thrown);
             free(return_body);
             return closure_status;
         }
@@ -1319,8 +1321,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 if (!kiln_dyn_capture_block(lex, &body, &body_len))
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                       "Unterminated method body");
-                status = kiln_dyn_make_closure(host, scope, params, params_len, body,
-                                               body_len, receiver, 0, 0, &val, thrown);
+                status = kiln_dyn_make_closure(host, scope, key_name, key_len, params,
+                                               params_len, body, body_len, receiver, 0, 0, 1,
+                                               &val, thrown);
                 if (status != KILN_C99_OK) return status;
                 kiln_c99_gc_keep_alive(&val);
             } else if (lex->curr.kind == KILN_DYN_COLON) {
@@ -2436,9 +2439,10 @@ static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
 }
 
 static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
+                                 const char *name, size_t name_len,
                                  const char *params, size_t params_len,
                                  const char *body, size_t body_len, kiln_value receiver,
-                                 int asynchronous, int arrow, kiln_value *out,
+                                 int asynchronous, int arrow, int method, kiln_value *out,
                                  kiln_value *thrown) {
     kiln_value upvals[3];
     kiln_value env_obj;
@@ -2460,8 +2464,12 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
         kiln_val_from_boundary(upvals[1]),
         kiln_val_from_boundary(upvals[2])
     };
-    return kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline, NULL,
-                                 "", 0, "eval", 0, 0, 0, asynchronous, 0, 0, arrow, 0,
+    const kiln_string *closure_name = name == NULL
+        ? NULL : kiln_c99_intern_static(name, name_len);
+    if (name != NULL && closure_name == NULL) return KILN_C99_OUT_OF_MEMORY;
+    return kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline, closure_name,
+                                 "", 0, "eval", 0, 0, 0, asynchronous, 0,
+                                 method ? KILN_C99_FUNCTION_METHOD : 0, arrow, 0,
                                  arrow ? kiln_val_from_boundary(receiver) : KILN_VAL_UNDEFINED,
                                  KILN_VAL_UNDEFINED, 0, 16, 0, 0, val_upvals, 3);
 }
@@ -2476,8 +2484,8 @@ static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
         if (!kiln_dyn_capture_block(lex, &body, &body_len))
             return kiln_dyn_throw_parse_error(lex, thrown,
                                         "Unterminated arrow function body");
-        return kiln_dyn_make_closure(host, scope, params, params_len, body, body_len,
-                                     receiver, asynchronous, 1, out, thrown);
+        return kiln_dyn_make_closure(host, scope, NULL, 0, params, params_len, body,
+                                     body_len, receiver, asynchronous, 1, 0, out, thrown);
     }
     if (!kiln_dyn_capture_expression(lex, &body, &body_len))
         return kiln_dyn_throw_parse_error(lex, thrown,
@@ -2487,8 +2495,9 @@ static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
     memcpy(return_body, "return ", 7);
     memcpy(return_body + 7, body, body_len);
     return_body[7 + body_len] = ';';
-    int status = kiln_dyn_make_closure(host, scope, params, params_len, return_body,
-                                       body_len + 8, receiver, asynchronous, 1, out, thrown);
+    int status = kiln_dyn_make_closure(host, scope, NULL, 0, params, params_len,
+                                       return_body, body_len + 8, receiver, asynchronous,
+                                       1, 0, out, thrown);
     free(return_body);
     (void)depth;
     return status;
@@ -3242,8 +3251,19 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
     kiln_dyn_var_declaration *vars = NULL;
     size_t var_count = 0;
     size_t var_capacity = 0;
+    int *callable_braces = NULL;
+    size_t callable_brace_capacity = 0;
+    unsigned char *callable_parens = NULL;
+    size_t callable_paren_capacity = 0;
     kiln_dyn_lexer scan;
     int brace_depth = 0;
+    int callable_depth = 0;
+    int paren_depth = 0;
+    int function_header = 0;
+    int function_paren_depth = -1;
+    int pending_callable_body = 0;
+    int previous_previous_is_method_key = 0;
+    int previous_is_control_head = 0;
     int statement_start = 1;
     kiln_dyn_token_kind previous = KILN_DYN_EOF;
     size_t previous_end = 0;
@@ -3272,7 +3292,7 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
         /* `var` bindings exist before function declarations are closed over this scope. The
          * dynamic evaluator executes declarations sequentially, so without this instantiation
          * pass an earlier-created function misses a later `var` binding entirely. */
-        if (kind == KILN_DYN_KW_VAR && brace_depth == 0) {
+        if (kind == KILN_DYN_KW_VAR && callable_depth == 0) {
             kiln_dyn_lexer look;
             memset(&look, 0, sizeof look);
             look.src = source;
@@ -3367,10 +3387,75 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
             kiln_dyn_token_free(&look.curr);
         }
 declaration_scan_done:
+        if (kind == KILN_DYN_KW_FUNCTION) {
+            function_header = 1;
+            function_paren_depth = -1;
+        } else if (kind == KILN_DYN_LPAREN) {
+            int method_candidate = previous_previous_is_method_key && !previous_is_control_head &&
+                previous != KILN_DYN_KW_IF && previous != KILN_DYN_KW_FOR &&
+                previous != KILN_DYN_KW_WITH;
+            if ((size_t)paren_depth >= callable_paren_capacity) {
+                size_t capacity = callable_paren_capacity == 0 ? 16 : callable_paren_capacity * 2;
+                if (capacity <= (size_t)paren_depth || capacity > SIZE_MAX / sizeof *callable_parens) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    goto done;
+                }
+                unsigned char *next = (unsigned char *)realloc(callable_parens, capacity);
+                if (next == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    goto done;
+                }
+                memset(next + callable_paren_capacity, 0, capacity - callable_paren_capacity);
+                callable_parens = next;
+                callable_paren_capacity = capacity;
+            }
+            callable_parens[paren_depth] = method_candidate;
+            paren_depth++;
+            if (function_header && function_paren_depth < 0) function_paren_depth = paren_depth;
+        } else if (kind == KILN_DYN_RPAREN && paren_depth > 0) {
+            int opener = --paren_depth;
+            int method_candidate = (size_t)opener < callable_paren_capacity
+                ? callable_parens[opener] : 0;
+            if (function_paren_depth == paren_depth + 1) {
+                pending_callable_body = 1;
+                function_header = 0;
+                function_paren_depth = -1;
+            } else if (method_candidate && paren_depth == 0) {
+                pending_callable_body = 1;
+            }
+        } else if (kind == KILN_DYN_ARROW) {
+            pending_callable_body = 1;
+            function_header = 0;
+        } else if (kind != KILN_DYN_LBRACE) {
+            if (pending_callable_body) pending_callable_body = 0;
+            if (kind != KILN_DYN_KW_ASYNC && kind != KILN_DYN_KW_FUNCTION &&
+                kind != KILN_DYN_IDENT && kind != KILN_DYN_STAR)
+                function_header = 0;
+        }
         if (kind == KILN_DYN_LBRACE) {
             brace_depth++;
+            if (pending_callable_body) {
+                if ((size_t)callable_depth >= callable_brace_capacity) {
+                    size_t capacity = callable_brace_capacity == 0 ? 16 : callable_brace_capacity * 2;
+                    if (capacity <= (size_t)callable_depth || capacity > SIZE_MAX / sizeof *callable_braces) {
+                        status = KILN_C99_OUT_OF_MEMORY;
+                        goto done;
+                    }
+                    int *next = (int *)realloc(callable_braces, capacity * sizeof *callable_braces);
+                    if (next == NULL) {
+                        status = KILN_C99_OUT_OF_MEMORY;
+                        goto done;
+                    }
+                    callable_braces = next;
+                    callable_brace_capacity = capacity;
+                }
+                callable_braces[callable_depth++] = brace_depth;
+            }
+            pending_callable_body = 0;
             if (brace_depth == 1) statement_start = 0;
         } else if (kind == KILN_DYN_RBRACE) {
+            if (callable_depth > 0 && callable_braces[callable_depth - 1] == brace_depth)
+                callable_depth--;
             if (brace_depth > 0) brace_depth--;
             if (brace_depth == 0) statement_start = 1;
         } else if (kind == KILN_DYN_SEMI && brace_depth == 0) {
@@ -3378,6 +3463,12 @@ declaration_scan_done:
         } else if (brace_depth == 0) {
             statement_start = 0;
         }
+        previous_previous_is_method_key = kind == KILN_DYN_IDENT || kind == KILN_DYN_STR ||
+                                          kind == KILN_DYN_RBRACKET;
+        previous_is_control_head = kind == KILN_DYN_IDENT &&
+            ((scan.curr.len == 5 && memcmp(scan.curr.start, "while", 5) == 0) ||
+             (scan.curr.len == 6 && memcmp(scan.curr.start, "switch", 6) == 0) ||
+             (scan.curr.len == 5 && memcmp(scan.curr.start, "catch", 5) == 0));
         previous = kind;
         previous_end = scan.pos;
         kiln_dyn_lexer_next(&scan);
@@ -3470,6 +3561,8 @@ done:
     if (scan.curr.kind != KILN_DYN_EOF) kiln_dyn_token_free(&scan.curr);
     free(vars);
     free(decls);
+    free(callable_braces);
+    free(callable_parens);
     return status;
 }
 
