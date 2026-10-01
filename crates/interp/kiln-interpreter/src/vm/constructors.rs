@@ -102,6 +102,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, current, "function")?
             }
+            Native::AsyncFunctionConstructor => {
+                self.function_from_source(arguments, current, "async function")?
+            }
             Native::GeneratorFunctionConstructor => {
                 self.function_from_source(arguments, current, "function*")?
             }
@@ -403,6 +406,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // that decides which prototype the result inherits, which this realm does not model.
             Value::Native(Native::FunctionConstructor, _) => {
                 let built = self.function_from_source(&arguments, current, "function")?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::AsyncFunctionConstructor, _) => {
+                let built = self.function_from_source(&arguments, current, "async function")?;
                 self.stack.push(built);
             }
             Value::Native(Native::GeneratorFunctionConstructor, _) => {

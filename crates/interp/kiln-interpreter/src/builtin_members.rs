@@ -919,6 +919,22 @@ pub(super) fn generator_prototype_table(closure: &Rc<Closure>) -> Option<Prototy
     }
 }
 
+/// The distinct built-in constructor inherited by each function kind. Async function bodies are
+/// lowered through the generator execution machinery, but that implementation detail must not
+/// make their observable constructor or `instanceof` chain a GeneratorFunction.
+pub(super) fn function_kind_prototype(closure: &Rc<Closure>) -> Option<Native> {
+    let proto = closure.program.functions.get(closure.function as usize)?;
+    if proto.async_generator {
+        Some(Native::AsyncGeneratorFunctionPrototype)
+    } else if proto.asynchronous {
+        Some(Native::AsyncFunctionPrototype)
+    } else if proto.generator {
+        Some(Native::GeneratorFunctionPrototype)
+    } else {
+        None
+    }
+}
+
 pub(super) fn prototype_object(closure: &Rc<Closure>) -> Value {
     let mut slot = closure.prototype.borrow_mut();
     if let Some(existing) = slot.as_ref() {
@@ -1225,7 +1241,9 @@ pub(super) fn native_is_constructor(native: Native) -> bool {
         | Native::NodeHttpServer
         | Native::NodeAsyncLocalStorage
         | Native::WebStub(_) => true,
-        Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype => false,
+        Native::AsyncFunctionPrototype
+        | Native::GeneratorFunctionPrototype
+        | Native::AsyncGeneratorFunctionPrototype => false,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
         Native::Error(_) => true,

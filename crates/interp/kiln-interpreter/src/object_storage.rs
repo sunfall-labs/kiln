@@ -1243,14 +1243,8 @@ pub(super) fn indexed_definition_key(
 pub(super) fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     let mut current = closure.properties.borrow().prototype().cloned();
     if current.is_none() {
-        match generator_prototype_table(closure) {
-            Some(PrototypeTable::AsyncGenerator) => {
-                return Some(Native::AsyncGeneratorFunctionPrototype);
-            }
-            Some(PrototypeTable::Generator) => {
-                return Some(Native::GeneratorFunctionPrototype);
-            }
-            _ => {}
+        if let Some(prototype) = function_kind_prototype(closure) {
+            return Some(prototype);
         }
     }
     for _ in 0..MAX_PROTOTYPE_DEPTH {

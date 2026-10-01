@@ -512,11 +512,15 @@ pub(super) fn prototype_of(value: &Value) -> Value {
         // walks to. Falling to `Object.prototype` with the arm below broke exactly that:
         // `Iterator.from(x)` must hand back `x` when it is already an iterator, and stopped.
         Value::Native(
-            Native::AsyncGeneratorFunctionConstructor | Native::GeneratorFunctionConstructor,
+            Native::AsyncFunctionConstructor
+                | Native::AsyncGeneratorFunctionConstructor
+                | Native::GeneratorFunctionConstructor,
             _,
         ) => Value::Native(Native::FunctionConstructor, realm),
         Value::Native(
-            Native::AsyncGeneratorFunctionPrototype | Native::GeneratorFunctionPrototype,
+            Native::AsyncFunctionPrototype
+                | Native::AsyncGeneratorFunctionPrototype
+                | Native::GeneratorFunctionPrototype,
             _,
         ) => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
         Value::Native(Native::PrototypeOf(PrototypeTable::AsyncGenerator), _) => {
@@ -589,19 +593,10 @@ pub(super) fn prototype_of(value: &Value) -> Value {
         // machinery makes are callables too -- a program is handed `resolve` and `reject` and can
         // ask what they inherit from, and answering null said they were not functions at all.
         Value::Function(closure) => {
-            if let Some(table) = generator_prototype_table(closure) {
-                match table {
-                    PrototypeTable::AsyncGenerator => {
-                        Value::Native(Native::AsyncGeneratorFunctionPrototype, realm)
-                    }
-                    PrototypeTable::Generator => {
-                        Value::Native(Native::GeneratorFunctionPrototype, realm)
-                    }
-                    _ => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
-                }
-            } else {
-                Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
-            }
+            function_kind_prototype(closure).map_or_else(
+                || Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
+                |prototype| Value::Native(prototype, realm),
+            )
         }
         Value::Native(_, _)
         | Value::Bound(_)

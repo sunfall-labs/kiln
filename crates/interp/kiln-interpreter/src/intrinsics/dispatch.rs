@@ -341,6 +341,7 @@ pub(crate) fn call_native(
         // every call of a built-in goes through it -- so reaching here means a caller found a
         // route around the machine, and refusing says so rather than answering `undefined`.
         Native::FunctionConstructor
+        | Native::AsyncFunctionConstructor
         | Native::GeneratorFunctionConstructor
         | Native::AsyncGeneratorFunctionConstructor
         | Native::Eval => {
@@ -2996,6 +2997,7 @@ pub(crate) fn call_native(
         // here means something called it.
         | Native::Math
         | Native::Json
+        | Native::AsyncFunctionPrototype
         | Native::GeneratorFunctionPrototype
         | Native::AsyncGeneratorFunctionPrototype
         | Native::WebStub(_) => Value::Undefined,

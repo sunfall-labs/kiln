@@ -3108,6 +3108,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, instruction, "function")
             }
+            Native::AsyncFunctionConstructor => {
+                self.function_from_source(arguments, instruction, "async function")
+            }
             Native::GeneratorFunctionConstructor => {
                 self.function_from_source(arguments, instruction, "function*")
             }

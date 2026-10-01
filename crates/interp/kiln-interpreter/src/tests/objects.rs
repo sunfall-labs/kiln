@@ -2187,6 +2187,26 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
                 upvalues: Vec::new(),
                 type_annotations: None,
             },
+            // Function 2: async function. The IR uses the async execution machinery, but its
+            // observable constructor/prototype identity is distinct from generator functions.
+            kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: true,
+                name: None,
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                is_method: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 0,
+                code: vec![Instruction::Return],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            },
         ],
     };
 
@@ -2233,6 +2253,27 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
 
     let gen_fn = Value::Function(vm.make_closure(0).expect("make generator closure"));
     let async_gen_fn = Value::Function(vm.make_closure(1).expect("make async generator closure"));
+    let async_fn = Value::Function(vm.make_closure(2).expect("make async closure"));
+
+    let async_proto = prototype_of(&async_fn);
+    assert_eq!(
+        async_proto,
+        Value::Native(Native::AsyncFunctionPrototype, RealmId::PRIMARY)
+    );
+    let async_ctor = vm.read_property(&async_fn, "constructor", 0).unwrap();
+    assert_eq!(
+        async_ctor,
+        Value::Native(Native::AsyncFunctionConstructor, RealmId::PRIMARY)
+    );
+    assert_eq!(
+        vm.read_property(&async_proto, "constructor", 0).unwrap(),
+        async_ctor
+    );
+    let to_string_tag_key = Symbol::WellKnown(WellKnown::ToStringTag).property_key();
+    assert_eq!(
+        vm.read_property(&async_proto, &to_string_tag_key, 0).unwrap(),
+        Value::String("AsyncFunction".into())
+    );
 
     // 1. GeneratorFunction prototype and constructor checks
     let gen_proto = prototype_of(&gen_fn);
@@ -2250,7 +2291,6 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
     let gen_proto_ctor = vm.read_property(&gen_proto, "constructor", 0).unwrap();
     assert_eq!(gen_proto_ctor, gen_ctor);
 
-    let to_string_tag_key = Symbol::WellKnown(WellKnown::ToStringTag).property_key();
     let gen_proto_tag = vm.read_property(&gen_proto, &to_string_tag_key, 0).unwrap();
     assert_eq!(gen_proto_tag, Value::String("GeneratorFunction".into()));
 

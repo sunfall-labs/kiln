@@ -708,7 +708,10 @@ pub enum Native {
     CollectionEntries(bool),
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
-    /// `GeneratorFunction` and `AsyncGeneratorFunction` constructors and prototypes.
+    /// `AsyncFunction`, `GeneratorFunction` and `AsyncGeneratorFunction` constructors and
+    /// prototypes.
+    AsyncFunctionConstructor,
+    AsyncFunctionPrototype,
     GeneratorFunctionConstructor,
     GeneratorFunctionPrototype,
     AsyncGeneratorFunctionConstructor,
@@ -1304,6 +1307,10 @@ impl Native {
     /// one authority; property() converts the selected row to a Value.
     pub(crate) fn own_property_rows(self) -> &'static [(&'static str, FixedOwnValue)] {
         match self {
+            Self::AsyncFunctionPrototype => &[(
+                "constructor",
+                FixedOwnValue::Native(Self::AsyncFunctionConstructor),
+            )],
             Self::AbortSignalConstructor => &[
                 ("abort", FixedOwnValue::Native(Self::AbortSignalAbort)),
                 ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
@@ -1698,6 +1705,18 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::Function),
                 RealmId::PRIMARY,
             )),
+            (Self::AsyncFunctionConstructor, "prototype") => {
+                Some(Value::Native(Self::AsyncFunctionPrototype, RealmId::PRIMARY))
+            }
+            (Self::AsyncFunctionConstructor, "name") => {
+                Some(Value::String("AsyncFunction".to_owned().into()))
+            }
+            (Self::AsyncFunctionConstructor, "length") => Some(Value::Number(1.0)),
+            (Self::AsyncFunctionPrototype, key)
+                if key == WellKnown::ToStringTag.property_key() =>
+            {
+                Some(Value::String("AsyncFunction".to_owned().into()))
+            }
             (Self::AsyncGeneratorFunctionConstructor, "prototype") => Some(Value::Native(
                 Self::AsyncGeneratorFunctionPrototype,
                 RealmId::PRIMARY,

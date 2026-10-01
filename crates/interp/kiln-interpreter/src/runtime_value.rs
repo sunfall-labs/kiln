@@ -253,7 +253,9 @@ impl Value {
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
             Self::Native(
-                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
                 _,
             ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
@@ -353,7 +355,9 @@ impl Value {
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
             Self::Native(
-                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
                 _,
             ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`

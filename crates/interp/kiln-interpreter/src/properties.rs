@@ -3453,6 +3453,19 @@ pub(super) fn published_attributes(
     key: &str,
     found: &Value,
 ) -> Attributes {
+    if matches!(
+        native,
+        Native::AsyncFunctionPrototype
+            | Native::GeneratorFunctionPrototype
+            | Native::AsyncGeneratorFunctionPrototype
+    ) && key == "constructor"
+    {
+        return Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+    }
     // A Node builtin module's exports are *enumerable*, which is how `{ ...require("path") }`
     // and every `export * from "path"` re-export shim a bundler emits copies them.
     // `Object.keys(require("path"))` was 0 against node's 17 while every individual member read
