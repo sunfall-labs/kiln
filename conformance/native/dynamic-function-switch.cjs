@@ -124,6 +124,30 @@ const annexBCapturedOuterLexical = Function(
 if (annexBCapturedOuterLexical() !== "function") {
   throw new Error("a CaseBlock alias is local to its function despite captured outer lexical names");
 }
+const annexBFunctionBodyLexicalTdz = Function(
+  "switch (0) { case 0: function lexicalName() {} } return lexicalName; let lexicalName;",
+);
+let lexicalTdzThrew = false;
+try { annexBFunctionBodyLexicalTdz(); } catch (error) {
+  lexicalTdzThrew = error.name === "ReferenceError";
+}
+if (!lexicalTdzThrew) {
+  throw new Error("function-body lexical bindings suppress Annex B aliases and retain TDZ");
+}
+const annexBEnclosingBlockLexical = Function(
+  "{ let blockName = 1; switch (0) { case 0: function blockName() {} } } " +
+    "return typeof blockName;",
+);
+if (annexBEnclosingBlockLexical() !== "undefined") {
+  throw new Error("an enclosing block lexical binding suppresses the function alias");
+}
+const annexBSiblingBlockLexical = Function(
+  "{ let blockName = 1; } switch (0) { case 0: function blockName() {} } " +
+    "return typeof blockName;",
+);
+if (annexBSiblingBlockLexical() !== "function") {
+  throw new Error("a sibling block lexical binding does not suppress the function alias");
+}
 const annexBUnselectedFunction = Function(
   "switch (1) { case 0: function annexed() {} } return typeof annexed;",
 );
