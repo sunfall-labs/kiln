@@ -2317,16 +2317,18 @@
     }
     if ((groups & KILN_C99_GROUP_STRING_DISPATCH)) {
         if (receiver.tag != KILN_VALUE_STRING) {
-            if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_STRING,
-                                                  &receiver)) {
-                /* String.prototype.toString/valueOf require a String receiver. The other
-                 * String prototype methods are generic: they first require a non-nullish this
-                 * value, then apply abstract ToString (which also preserves user coercion and
-                 * rejects Symbols). */
-                if (code == KILN_C99_METHOD_STRING_TO_STRING ||
-                    code == KILN_C99_METHOD_STRING_VALUE_OF ||
-                    receiver.tag == KILN_VALUE_UNDEFINED ||
-                    receiver.tag == KILN_VALUE_NULL) {
+            /* String.prototype.toString/valueOf require the String internal slot. The other
+             * String prototype methods are generic: even for a String wrapper, they must run
+             * ordinary ToString so an own @@toPrimitive/toString override remains observable. */
+            if (code == KILN_C99_METHOD_STRING_TO_STRING ||
+                code == KILN_C99_METHOD_STRING_VALUE_OF) {
+                if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_STRING,
+                                                      &receiver)) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "String.prototype method called on an incompatible receiver");
+                }
+            } else {
+                if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "String.prototype method called on an incompatible receiver");
                 }

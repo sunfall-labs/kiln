@@ -5,6 +5,10 @@ const slash = "\\";
 if (String(lone) !== lone || `${lone}` !== lone ||
     String({toString() { return lone; }}) !== lone ||
     String.prototype.concat.call({toString() { return lone; }}, "x") !== lone + "x" ||
+    String.prototype.concat.call(
+      Object.assign(new String("wrapped"), {toString() { return lone; }}), "x") !== lone + "x" ||
+    String.prototype.toString.call(
+      Object.assign(new String("wrapped"), {toString() { return lone; }})) !== "wrapped" ||
     "".concat({toString() { return lone; }}) !== lone ||
     "".padStart(1, {toString() { return lone; }}) !== lone ||
     new String(lone).valueOf() !== lone || new String().valueOf() !== "") {
