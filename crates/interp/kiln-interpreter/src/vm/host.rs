@@ -639,6 +639,55 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 _ => {}
             }
         }
+        // A refused connection has no server owner or stream resource. `destroy()` is still
+        // valid in this terminal state; it closes the socket object locally and reports close
+        // on the next tick instead of routing through a server that never owned it.
+        if native == Native::NodeSocketDestroy && resource.is_none() {
+            if destroyed {
+                return Ok(receiver.clone());
+            }
+            if let Some(request) = connect_request {
+                let canceled = if let Some(host) = self.async_host {
+                    unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) }
+                } else {
+                    false
+                };
+                if canceled {
+                    if let Some(realm) = &self.module_realm {
+                        realm
+                            .borrow_mut()
+                            .pending_node
+                            .retain(|pending| pending.request() != request);
+                    } else {
+                        self.pending_node
+                            .retain(|pending| pending.request() != request);
+                    }
+                }
+            }
+            {
+                let mut socket_state = state.borrow_mut();
+                socket_state.destroyed = true;
+                socket_state.connecting = false;
+            }
+            let (write_callbacks, end_callbacks) = Self::take_node_socket_queued_state(&state);
+            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            if let Value::Object(object) = receiver {
+                let mut object = object.borrow_mut();
+                object.set("connecting", Value::Boolean(false));
+                object.set("destroyed", Value::Boolean(true));
+                object.set("readyState", Value::String("closed".into()));
+            }
+            let emit = self.read_property(receiver, "emit", instruction)?;
+            let callback = Value::Bound(Rc::new(BoundFunction {
+                target: emit,
+                this_value: receiver.clone(),
+                arguments: vec![Value::String("close".into())],
+                properties: RefCell::new(ObjectData::default()),
+            }));
+            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+            return Ok(receiver.clone());
+        }
         let (server, resource) = {
             let state = state.borrow();
             let server = state

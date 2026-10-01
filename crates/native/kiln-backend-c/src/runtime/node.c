@@ -2353,6 +2353,11 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_node_socket *socket = work->socket;
             socket->connect_request = 0;
             socket->connecting = 0;
+            /* A refused connection has no resource to close, but it still completes the
+             * socket lifecycle. Mark it closed before callbacks so a reentrant destroy cannot
+             * enqueue a duplicate close event. */
+            if (work->client_request == NULL && socket->resource == 0)
+                socket->closed = 1;
             (void)kiln_c99_put(NULL, socket->object, "connecting", 10,
                                kiln_c99_boolean(0), 0, NULL);
             (void)kiln_c99_node_socket_ready_state(socket, "closed", 6);
@@ -2405,6 +2410,13 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 completion->error_message, completion->error_message_len, exception);
         } else {
             status = KILN_C99_OK;
+        }
+        if (status == KILN_C99_OK && work->socket != NULL &&
+            work->kind == KILN_REALM_OP_TCP_CONNECT && work->client_request == NULL &&
+            work->socket->resource == 0 && work->socket->closed) {
+            status = kiln_c99_enqueue_next_tick(
+                kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK),
+                &work->socket->object, 1);
         }
         if (work->client_request != NULL) {
             kiln_node_client_request *request = work->client_request;
@@ -5065,6 +5077,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         }
         if (code == KILN_C99_METHOD_NODE_SOCKET_DESTROY) {
             kiln_value socket_error;
+            if (socket->closed) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
             status = kiln_c99_node_socket_ready_state(socket, "closed", 6);
             if (status != KILN_C99_OK) return status;
             status = kiln_c99_node_socket_destroy_error(&socket_error);
