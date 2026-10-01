@@ -669,9 +669,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
             /* `name` and `length` begin as closure metadata, but both are configurable own
              * properties. A program can redefine either in the callable's store, and reads must
-             * then observe that descriptor just like any other own property. */
-            return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
-                                    depth, thrown);
+             * then observe that descriptor just like any other own property. The store is only
+             * where the descriptor lives: an accessor still receives the callable that was
+             * read, not this internal storage object. */
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+                                              thrown);
         }
         if (kiln_c99_same_name_key(key, "prototype") &&
             !closure->arrow &&
@@ -693,9 +698,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
             /* An assigned property wins, exactly as an own property shadows an
-             * inherited one -- which is what `Function.prototype.call` is. */
-            return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
-                                    depth, thrown);
+             * inherited one -- which is what `Function.prototype.call` is. Its descriptor is
+             * stored separately from the callable, but an accessor's receiver remains the
+             * callable itself. */
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+                                              thrown);
         }
         kiln_value store = kiln_c99_closure_store(closure);
         kiln_value parent = store.tag == KILN_VALUE_OBJECT
