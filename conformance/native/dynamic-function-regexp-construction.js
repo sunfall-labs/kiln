@@ -9,6 +9,14 @@ if (String(lone) !== lone || `${lone}` !== lone ||
       Object.assign(new String("wrapped"), {toString() { return lone; }}), "x") !== lone + "x" ||
     String.prototype.toString.call(
       Object.assign(new String("wrapped"), {toString() { return lone; }})) !== "wrapped" ||
+    String.prototype.concat.call(
+      Object.assign(new String("wrapped"), {
+        [Symbol.toPrimitive](hint) { return hint === "string" ? lone : "wrong hint"; },
+      }), "x") !== lone + "x" ||
+    String.prototype.valueOf.call(
+      Object.assign(new String("wrapped"), {
+        [Symbol.toPrimitive]() { return "overridden"; },
+      })) !== "wrapped" ||
     "".concat({toString() { return lone; }}) !== lone ||
     "".padStart(1, {toString() { return lone; }}) !== lone ||
     new String(lone).valueOf() !== lone || new String().valueOf() !== "") {
