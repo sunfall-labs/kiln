@@ -3622,7 +3622,14 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int sw = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int sw = s_recv->unit_len >= s_ndl->unit_len; \
+                                 if (sw && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     sw = memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (sw) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, index) != kiln_string_unit_at(s_ndl, index)) {{ sw = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = sw ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -3644,7 +3651,15 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int ew = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv) + (s_recv->unit_len - s_ndl->unit_len), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int ew = s_recv->unit_len >= s_ndl->unit_len; \
+                                 size_t start = ew ? s_recv->unit_len - s_ndl->unit_len : 0; \
+                                 if (ew && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     ew = memcmp(kiln_string_latin1(s_recv) + start, kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (ew) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, start + index) != kiln_string_unit_at(s_ndl, index)) {{ ew = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = ew ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
