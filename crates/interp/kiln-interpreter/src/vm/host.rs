@@ -2576,13 +2576,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             (callbacks, end_callbacks)
                         };
                         self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
-                        let socket_value = socket
-                            .borrow()
-                            .object
-                            .as_ref()
-                            .and_then(Weak::upgrade)
-                            .map(Value::Object)
-                            .unwrap_or(Value::Undefined);
                         for callback in end_callbacks {
                             self.call_value(
                                 &callback,
