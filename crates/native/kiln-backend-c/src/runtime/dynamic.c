@@ -97,6 +97,9 @@ typedef struct kiln_dyn_scope {
     kiln_value with_object;
     int has_with_object;
     int strict;
+    const char **function_declaration_sites;
+    size_t function_declaration_count;
+    size_t function_declaration_capacity;
 } kiln_dyn_scope;
 
 static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
@@ -107,6 +110,9 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->with_object = kiln_c99_undefined();
     scope->has_with_object = 0;
     scope->strict = parent != NULL ? parent->strict : 0;
+    scope->function_declaration_sites = NULL;
+    scope->function_declaration_count = 0;
+    scope->function_declaration_capacity = 0;
 }
 
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
@@ -149,6 +155,31 @@ static int kiln_dyn_scope_mark_restriction(kiln_dyn_scope *scope, const char *na
             memcmp(scope->bindings[i].name, name, name_len) == 0) {
             scope->bindings[i].restriction = restriction;
             return 1;
+        }
+    }
+    return 0;
+}
+
+static int kiln_dyn_scope_add_function_declaration(kiln_dyn_scope *scope,
+                                                    const char *site) {
+    if (scope->function_declaration_count == scope->function_declaration_capacity) {
+        size_t capacity = scope->function_declaration_capacity == 0
+                              ? 8 : scope->function_declaration_capacity * 2;
+        const char **sites = (const char **)realloc(
+            scope->function_declaration_sites, capacity * sizeof *sites);
+        if (sites == NULL) return 0;
+        scope->function_declaration_sites = sites;
+        scope->function_declaration_capacity = capacity;
+    }
+    scope->function_declaration_sites[scope->function_declaration_count++] = site;
+    return 1;
+}
+
+static int kiln_dyn_scope_has_function_declaration(kiln_dyn_scope *scope,
+                                                    const char *site) {
+    for (kiln_dyn_scope *current = scope; current != NULL; current = current->parent) {
+        for (size_t index = 0; index < current->function_declaration_count; ++index) {
+            if (current->function_declaration_sites[index] == site) return 1;
         }
     }
     return 0;
@@ -303,6 +334,7 @@ static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
         free(scope->bindings[i].name);
     }
     free(scope->bindings);
+    free(scope->function_declaration_sites);
 }
 
 typedef enum {
@@ -1202,30 +1234,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (lex->curr.kind != KILN_DYN_LBRACE) {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected '{' for function body");
         }
-        size_t bstart = lex->pos;
-        int bdepth = 1;
-        while (bdepth > 0 && lex->pos < lex->len) {
-            char c = lex->src[lex->pos];
-            if (c == '"' || c == '\'' || c == '`') {
-                lex->pos++;
-                while (lex->pos < lex->len) {
-                    if (lex->src[lex->pos] == '\\') {
-                        lex->pos += 2;
-                    } else if (lex->src[lex->pos] == c) {
-                        lex->pos++;
-                        break;
-                    } else {
-                        lex->pos++;
-                    }
-                }
-                continue;
-            }
-            if (c == '{') bdepth++;
-            else if (c == '}') bdepth--;
-            lex->pos++;
-        }
-        size_t blen = (lex->pos > 0 && lex->pos > bstart) ? (lex->pos - 1 - bstart) : 0;
-        kiln_dyn_lexer_next(lex);
+        const char *body_source = NULL;
+        size_t blen = 0;
+        if (!kiln_dyn_capture_block(lex, &body_source, &blen))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                        "Unterminated function body");
 
         kiln_value upvals[3];
         kiln_value name_value = kiln_c99_undefined();
@@ -1238,12 +1251,12 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         }
         upvals[0] = kiln_c99_copy_text(&lex->src[pstart], plen);
         kiln_c99_gc_keep_alive(&upvals[0]);
-        upvals[1] = kiln_c99_copy_text(&lex->src[bstart], blen);
+        upvals[1] = kiln_c99_copy_text(body_source, blen);
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
         int status;
         int function_strict = scope->strict ||
-                              kiln_dyn_body_has_use_strict(&lex->src[bstart], blen);
+                              kiln_dyn_body_has_use_strict(body_source, blen);
         kiln_dyn_scope function_scope;
         kiln_dyn_scope_init(&function_scope, scope);
         function_scope.strict = function_strict;
@@ -2084,27 +2097,38 @@ direct_eval_done:
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {
     if (lex->curr.kind != KILN_DYN_LBRACE) return 0;
     size_t start = lex->pos;
-    size_t pos = start;
+    kiln_dyn_lexer scan;
+    memset(&scan, 0, sizeof scan);
+    scan.src = lex->src;
+    scan.len = lex->len;
+    scan.pos = start;
+    scan.prev_kind = KILN_DYN_LBRACE;
+    kiln_dyn_lexer_next(&scan);
     int nesting = 1;
-    while (pos < lex->len && nesting > 0) {
-        char c = lex->src[pos++];
-        if (c == '\"' || c == '\'' || c == '`') {
-            char quote = c;
-            while (pos < lex->len) {
-                c = lex->src[pos++];
-                if (c == '\\' && pos < lex->len) pos++;
-                else if (c == quote) break;
-            }
-        } else if (c == '{') {
+    size_t close_start = start;
+    while (scan.curr.kind != KILN_DYN_EOF) {
+        if (scan.curr.kind == KILN_DYN_LBRACE) {
             nesting++;
-        } else if (c == '}') {
+        } else if (scan.curr.kind == KILN_DYN_RBRACE) {
             nesting--;
+            if (nesting == 0) {
+                close_start = (size_t)(scan.curr.start - scan.src);
+                break;
+            }
         }
+        kiln_dyn_lexer_next(&scan);
     }
-    if (nesting != 0) return 0;
+    if (nesting != 0) {
+        kiln_dyn_token_free(&scan.curr);
+        return 0;
+    }
+    size_t end = scan.pos;
+    kiln_dyn_token_free(&scan.curr);
     *body = &lex->src[start];
-    *body_len = pos - start - 1;
-    lex->pos = pos;
+    *body_len = close_start - start;
+    lex->pos = end;
+    /* The closing brace is the previous lexical token for the token after this body. */
+    lex->curr.kind = KILN_DYN_RBRACE;
     kiln_dyn_lexer_next(lex);
     return 1;
 }
@@ -2290,6 +2314,41 @@ static void kiln_dyn_skip_statement(kiln_dyn_lexer *lex) {
         else if (lex->curr.kind == KILN_DYN_RBRACE && braces > 0) braces--;
         kiln_dyn_lexer_next(lex);
     }
+}
+
+static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
+                                                  kiln_dyn_scope *scope,
+                                                  kiln_value *thrown) {
+    const char *site = lex->curr.start;
+    if (!kiln_dyn_scope_has_function_declaration(scope, site))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Block-level function declarations are not supported");
+    kiln_dyn_lexer_next(lex);
+    if (lex->curr.kind == KILN_DYN_STAR) kiln_dyn_lexer_next(lex);
+    if (lex->curr.kind != KILN_DYN_IDENT)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Expected function declaration name");
+    kiln_dyn_lexer_next(lex);
+    if (lex->curr.kind != KILN_DYN_LPAREN)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Expected '(' after function name");
+    int depth = 0;
+    do {
+        if (lex->curr.kind == KILN_DYN_LPAREN) depth++;
+        else if (lex->curr.kind == KILN_DYN_RPAREN) depth--;
+        kiln_dyn_lexer_next(lex);
+    } while (depth > 0 && lex->curr.kind != KILN_DYN_EOF);
+    if (depth != 0 || lex->curr.kind != KILN_DYN_LBRACE)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Expected function body");
+    const char *body;
+    size_t body_len;
+    if (!kiln_dyn_capture_block(lex, &body, &body_len))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                    "Unterminated function body");
+    (void)body;
+    (void)body_len;
+    return KILN_C99_OK;
 }
 
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -2865,6 +2924,8 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
         return KILN_C99_OK;
     }
+    if (lex->curr.kind == KILN_DYN_KW_FUNCTION)
+        return kiln_dyn_consume_function_declaration(lex, scope, thrown);
     if (lex->curr.kind == KILN_DYN_LBRACE) {
         kiln_dyn_lexer_next(lex);
         while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
@@ -2980,6 +3041,11 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
 
     /* Allocate all local declaration cells before any closure captures the environment. */
     for (size_t index = 0; index < decl_count; ++index) {
+        if (!kiln_dyn_scope_add_function_declaration(scope,
+                                                     source + decls[index].offset)) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
         int found = 0;
         for (size_t prior = 0; prior < index; ++prior) {
             if (decls[prior].name_len == decls[index].name_len &&

@@ -3805,7 +3805,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         uint8_t *host_owned = NULL;
         size_t host_len = 0;
         kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
-        kiln_value host_value = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
+        kiln_value host_value = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED &&
+                                        !kiln_c99_is_callable(args[1])
                                     ? kiln_c99_text(args[1])
                                     : kiln_c99_copy_text("localhost", 9);
         size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
@@ -3824,6 +3825,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 host_value = kiln_c99_copy_text("localhost", 9);
             callback_index = 1;
         }
+        if (port_value.tag != KILN_VALUE_NUMBER && port_value.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_error(
+                thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                "The options.port property must be one of type number or string");
         double port = kiln_c99_as_number(port_value);
         int status;
         if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))

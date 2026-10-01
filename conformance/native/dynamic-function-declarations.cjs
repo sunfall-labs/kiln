@@ -8,6 +8,13 @@ console.log("mutual declaration:", mutual());
 const repeated = Function("function choose() { return 1; } function choose() { return 2; } return choose();");
 console.log("last declaration wins:", repeated());
 
+const assignmentBetween = Function(
+  "function select() { return 1; } " +
+    "select = function () { return 3; }; " +
+    "function select() { return 2; } return select();",
+);
+console.log("declarations do not reinitialize:", assignmentBetween());
+
 const varPreserves = Function("var later; return typeof later; function later() { return 19; }");
 console.log("var does not erase declaration:", varPreserves());
 
