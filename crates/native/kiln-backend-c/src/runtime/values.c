@@ -778,7 +778,6 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
                                       thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN) {
-        static const char empty[] = "";
         switch (callee.bits) {
 #if KILN_RETAIN_GROUP_BUFFER
         case KILN_C99_BUILTIN_BUFFER:
@@ -792,7 +791,8 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
             kiln_value subject;
             int status;
             if (argc == 0) {
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0);
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                          (const char *)&kiln_c99_empty_string, 0);
                 return KILN_C99_OK;
             }
             /* The *string* hint: `toString` before `valueOf`, which is the other way round from
