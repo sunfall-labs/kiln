@@ -6,10 +6,18 @@ const rounded = [
 ];
 console.log(...rounded);
 
+const nested = [];
+const outer = Math.f16round({ valueOf() {
+  nested.push(Math.f16round(1.0006));
+  return 1.00048828125;
+} });
+console.log(outer, nested[0]);
+
 const coercions = [];
 const bits = { valueOf() { coercions.push("bits"); return 8.9; } };
 const value = { [Symbol.toPrimitive](hint) { coercions.push(`value:${hint}`); return -1n; } };
-console.log(BigInt.asIntN(bits, value), BigInt.asUintN(8, -1n), coercions.join(","));
+console.log(BigInt.asIntN(bits, value), BigInt.asUintN(8, -1n),
+  BigInt.asIntN(8, "255"), BigInt.asUintN(8, true), coercions.join(","));
 
 const order = [];
 try {

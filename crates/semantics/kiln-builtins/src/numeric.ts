@@ -53,9 +53,11 @@
         return value;
       }
 
-      // A negative value converted to unsigned at a huge width must produce a correspondingly
-      // huge BigInt. Bound that materialization rather than exhausting the process; ordinary wide
-      // inputs that already fit returned above without allocating the modulus.
+      // Match the interpreter BigInt representation authority (`truncate_bigint` in
+      // intrinsic_helpers.rs): it caps materialized moduli at 2^24 bits. A negative value
+      // converted to unsigned at a huge width must produce a correspondingly huge BigInt. Bound
+      // that materialization rather than exhausting the process; ordinary wide inputs that
+      // already fit returned above without allocating the modulus.
       if (bits > (1 << 24)) throw new RangeError("BigInt result exceeds the supported width");
       const modulus = 1n << width;
       let result = value % modulus;
