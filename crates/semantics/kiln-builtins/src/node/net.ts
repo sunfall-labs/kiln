@@ -62,15 +62,9 @@ if (typeof process !== "undefined" && typeof (process as any).__kilnSocketDecora
 
 export function createServer(...args: any[]): any {
   if (nativeModule && typeof nativeModule.createServer === "function") {
-    const listenerIndex = args.findIndex((argument) => typeof argument === "function");
-    if (listenerIndex >= 0) {
-      const forwarded = args.slice();
-      const listener = forwarded[listenerIndex];
-      forwarded[listenerIndex] = function (this: any, socket: any, ...rest: any[]): any {
-        return listener.apply(this, [decorateSocket(socket), ...rest]);
-      };
-      return nativeModule.createServer(...forwarded);
-    }
+    // The host decorates accepted sockets before it emits `connection`, regardless of whether
+    // listeners are installed here or later with on()/prependListener(). Preserve listener
+    // identity and native argument handling by forwarding the original arguments unchanged.
     return nativeModule.createServer(...args);
   }
   throw new Error("node:net requires a net host capability that this realm does not provide");
