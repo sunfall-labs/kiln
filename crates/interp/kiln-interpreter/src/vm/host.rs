@@ -3594,6 +3594,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     self.remove_http_client_request(id);
                     let transport_reusable = reusable
+                        && end_result.is_ok()
                         && owner
                             .borrow()
                             .streams

@@ -2022,7 +2022,8 @@ static int kiln_c99_node_socket_request_read(kiln_node_socket *socket, size_t ta
 }
 
 static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
-                                                     const uint8_t *bytes, uint64_t length) {
+                                                     const uint8_t *bytes, uint64_t length,
+                                                     kiln_value *thrown) {
     size_t total;
     if (length == 0) {
         socket->paused_read_eof = 1;
@@ -2036,7 +2037,7 @@ static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
             if (status != KILN_C99_OK) return status;
         }
         return kiln_c99_node_emit(socket->host, socket->object, "readable",
-                                  kiln_c99_undefined(), 0, 0, NULL);
+                                  kiln_c99_undefined(), 0, 0, thrown);
     }
     if (bytes == NULL || length > SIZE_MAX - socket->paused_read_len)
         return KILN_C99_INVALID_ARGUMENT;
@@ -2056,7 +2057,7 @@ static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
         socket->read_demand_active = 0;
     {
         int status = kiln_c99_node_emit(socket->host, socket->object, "readable",
-                                        kiln_c99_undefined(), 0, 0, NULL);
+                                        kiln_c99_undefined(), 0, 0, thrown);
         if (status != KILN_C99_OK) return status;
     }
     if (socket->read_paused && socket->read_demand_active &&
@@ -2179,7 +2180,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         if (status != KILN_C99_OK) return status;
         if (event->data_len != 0) {
             if (socket->read_paused) {
-                status = kiln_c99_node_socket_buffer_paused_read(socket, event->data, event->data_len);
+                status = kiln_c99_node_socket_buffer_paused_read(socket, event->data,
+                                                                 event->data_len, exception);
             } else {
                 kiln_value head;
                 status = kiln_c99_buffer_from_bytes(&head, event->data, (size_t)event->data_len);
@@ -2457,7 +2459,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         kiln_c99_node_client_request_unregister(client);
         release = kiln_realm_http_agent_release_active(socket->resource,
                                                        event->flags != 0 &&
-                                                           !socket->closing && !socket->closed,
+                                                           !socket->closing && !socket->closed &&
+                                                           end_status == KILN_C99_OK,
                                                        &next_request_id);
         if (release == KILN_REALM_HTTP_AGENT_DISPATCH) {
             kiln_node_client_request *next = kiln_c99_node_client_request_find(next_request_id);
@@ -2926,7 +2929,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             socket->read_request = 0;
             if (socket->read_paused)
                 return kiln_c99_node_socket_buffer_paused_read(
-                    socket, completion->bytes, completion->bytes_len);
+                    socket, completion->bytes, completion->bytes_len, exception);
             if (completion->bytes_len == 0) {
                 int status = kiln_c99_node_socket_ready_state(socket, "writeOnly", 9);
                 if (status == KILN_C99_OK && socket->readable_state.tag == KILN_VALUE_OBJECT)
