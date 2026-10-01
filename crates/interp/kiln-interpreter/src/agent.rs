@@ -912,7 +912,10 @@ fn run_agent_realm(
         Ok(source) => (source, None),
         Err(_) => {
             transport = source_units.to_lossy_string();
-            (std::borrow::Cow::Borrowed(transport.as_str()), Some(source_units))
+            (
+                std::borrow::Cow::Borrowed(transport.as_str()),
+                Some(source_units),
+            )
         }
     };
     let (program, strictness) = compile(&EvalSource {

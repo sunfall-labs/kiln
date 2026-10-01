@@ -18,10 +18,10 @@ use kiln_hir::{
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
-    RequestedModule, SourceGoal, SourceKind, SourceOrigin, Span as HirSpan, Statement as HirStatement,
-    StatementKind as HirStatementKind, StringUnits, TypeAnnotation as HirTypeAnnotation,
-    UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
-    VariableKind as HirVariableKind,
+    RequestedModule, SourceGoal, SourceKind, SourceOrigin, Span as HirSpan,
+    Statement as HirStatement, StatementKind as HirStatementKind, StringUnits,
+    TypeAnnotation as HirTypeAnnotation, UnaryOperator as HirUnaryOperator,
+    VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
 };
 use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::ast::{
@@ -92,10 +92,8 @@ fn mapped_template_raw(
     let (Some(units), Some(map)) = (source_units, source_map) else {
         return StringUnits::from(parsed_raw);
     };
-    let (Some(&start), Some(&end)) = (
-        map.get(span.start as usize),
-        map.get(span.end as usize),
-    ) else {
+    let (Some(&start), Some(&end)) = (map.get(span.start as usize), map.get(span.end as usize))
+    else {
         return StringUnits::from(parsed_raw);
     };
     let Some(raw) = units.get(start..end) else {
@@ -340,7 +338,8 @@ fn source_units_transport(units: &[u16]) -> (String, Vec<usize>) {
                 .get(index + 1)
                 .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
         {
-            let scalar = 0x10000 + (((unit as u32 - 0xd800) << 10) | (units[index + 1] as u32 - 0xdc00));
+            let scalar =
+                0x10000 + (((unit as u32 - 0xd800) << 10) | (units[index + 1] as u32 - 0xdc00));
             let ch = char::from_u32(scalar).expect("paired UTF-16 units form a scalar");
             append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 2);
             index += 2;
@@ -370,7 +369,11 @@ fn source_units_transport(units: &[u16]) -> (String, Vec<usize>) {
             let ch = char::from_u32(unit as u32).expect("non-surrogate UTF-16 unit is scalar");
             append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 1);
             index += 1;
-            slash_run = if unit == b'\\' as u16 { slash_run + 1 } else { 0 };
+            slash_run = if unit == b'\\' as u16 {
+                slash_run + 1
+            } else {
+                0
+            };
         }
     }
     (text, byte_to_unit)
@@ -2131,9 +2134,8 @@ fn lower_parsed_in_context(
         inline_eval_calls,
     };
     let body = lowerer.statements(&parsed.program.body);
-    let source_origin = source_units.and_then(|(units, map)| {
-        SourceOrigin::from_parser_transport(units, map)
-    });
+    let source_origin =
+        source_units.and_then(|(units, map)| SourceOrigin::from_parser_transport(units, map));
     if source_units.is_some() && source_origin.is_none() {
         diagnostics.push(Diagnostic {
             message: "dynamic source origin exceeds supported parser span bounds".into(),
@@ -2428,8 +2430,7 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             sloppy,
             lexical_start: self.lexical_scopes.len(),
         });
-        self.lexical_scopes
-            .push(Self::lexical_names(&program.body));
+        self.lexical_scopes.push(Self::lexical_names(&program.body));
         walk::walk_program(self, program);
         self.lexical_scopes.pop();
         self.scopes.pop();
@@ -2455,10 +2456,7 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
         self.scopes.pop();
     }
 
-    fn visit_arrow_function_expression(
-        &mut self,
-        function: &ArrowFunctionExpression<'ast>,
-    ) {
+    fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'ast>) {
         let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
         let body = match &function.body {
             oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => Some(body.as_ref()),
@@ -2469,9 +2467,8 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             sloppy: inherited_sloppy && !function.has_use_strict_directive(),
             lexical_start,
         });
-        self.lexical_scopes.push(body.map_or_else(HashMap::new, |body| {
-            Self::lexical_names(&body.statements)
-        }));
+        self.lexical_scopes
+            .push(body.map_or_else(HashMap::new, |body| Self::lexical_names(&body.statements)));
         walk::walk_arrow_function_expression(self, function);
         self.lexical_scopes.pop();
         self.scopes.pop();
@@ -2611,7 +2608,11 @@ impl<'ast, 'source> Visit<'ast> for RawSurrogateRegExpVisitor<'source> {
     fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'ast>) {
         use oxc_ast::ast::RegExpFlags;
 
-        if !literal.regex.flags.intersects(RegExpFlags::U | RegExpFlags::V) {
+        if !literal
+            .regex
+            .flags
+            .intersects(RegExpFlags::U | RegExpFlags::V)
+        {
             return;
         }
         let flags_len = literal.regex.flags.to_string().len();
@@ -6791,9 +6792,16 @@ mod tests {
             "y`;".encode_utf16().collect::<Vec<_>>(),
         ]
         .concat();
-        let module = parse_eval_units("dynamic.js", &StringUnits::from_units(&units), &EvalSyntax::default());
+        let module = parse_eval_units(
+            "dynamic.js",
+            &StringUnits::from_units(&units),
+            &EvalSyntax::default(),
+        );
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
-        let origin = module.source_origin.as_ref().expect("dynamic source origin");
+        let origin = module
+            .source_origin
+            .as_ref()
+            .expect("dynamic source origin");
         assert_eq!(
             origin.slice_bytes(0, module.source.len() as u32),
             Some(StringUnits::from_units(&units))
@@ -6810,7 +6818,10 @@ mod tests {
         else {
             panic!("expected string literal");
         };
-        assert_eq!(literal.to_units().as_ref(), &[b'a' as u16, 0xd800, b'b' as u16]);
+        assert_eq!(
+            literal.to_units().as_ref(),
+            &[b'a' as u16, 0xd800, b'b' as u16]
+        );
 
         let HirStatementKind::Variable { declarations, .. } = &module.body[1].kind else {
             panic!("expected regexp declaration");
@@ -6852,8 +6863,7 @@ mod tests {
         let prefix = "const re = /".encode_utf16().collect::<Vec<_>>();
         for flag in ["u", "v"] {
             let suffix = format!("/{flag};").encode_utf16().collect::<Vec<_>>();
-            let invalid =
-                [prefix.clone(), vec![b'\\' as u16, 0xd800], suffix.clone()].concat();
+            let invalid = [prefix.clone(), vec![b'\\' as u16, 0xd800], suffix.clone()].concat();
             let invalid = parse_eval_units(
                 "dynamic.js",
                 &StringUnits::from_units(&invalid),

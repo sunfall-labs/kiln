@@ -256,7 +256,12 @@ fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct(
     vm.source_compiler = Some(constant_compiler);
     let raw_body = Value::String(StringUnits::from_units(&[0xd800]));
     assert_eq!(
-        vm.dispatch_native(Native::FunctionConstructor, &Value::Undefined, &[raw_body], 0),
+        vm.dispatch_native(
+            Native::FunctionConstructor,
+            &Value::Undefined,
+            &[raw_body],
+            0
+        ),
         Ok(Value::Number(7.0))
     );
 }
