@@ -1406,6 +1406,8 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+/// Numeric namespace and BigInt static methods over the existing typed-array and BigInt kernels.
+pub const NUMERIC_BOOTSTRAP_SOURCE: &str = include_str!("numeric.ts");
 /// The parallel collection family (ADR 0068, ADR 0069): kiln extensions on `Array.prototype`
 /// and `%TypedArray%.prototype`, after `typedarray.ts`, whose intrinsics it borrows.
 pub const PARALLEL_BOOTSTRAP_SOURCE: &str = include_str!("parallel.ts");
@@ -1508,6 +1510,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         FUNCTION_KINDS_BOOTSTRAP_SOURCE,
         selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
+        NUMERIC_BOOTSTRAP_SOURCE,
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
         selected(family::JSON, JSON_BOOTSTRAP_SOURCE),
@@ -1791,6 +1794,14 @@ mod web_tests {
             kiln_frontend_oxc::parse("@kiln/typedarray-bootstrap.ts", TYPEDARRAY_BOOTSTRAP_SOURCE);
         let program = kiln_ir::compile_module(&hir)
             .expect("typedarray bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn numeric_bootstrap_compiles_cleanly() {
+        let hir = kiln_frontend_oxc::parse("@kiln/numeric-bootstrap.ts", NUMERIC_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("numeric bootstrap should compile to IR without error");
         assert!(!program.program.code.is_empty());
     }
 

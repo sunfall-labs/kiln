@@ -2003,9 +2003,9 @@ builtin_backlog! {
     ("Error", "isError",
      "not implemented"),
     ("BigInt", "asIntN",
-     "not implemented; needs a width-truncating call the BigInt provider does not export"),
+     "answered by the shared numeric.ts bootstrap using the BigInt value kernel; no row"),
     ("BigInt", "asUintN",
-     "not implemented; needs a width-truncating call the BigInt provider does not export"),
+     "answered by the shared numeric.ts bootstrap using the BigInt value kernel; no row"),
     ("Map", "groupBy",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Iterator", "concat",
@@ -2017,7 +2017,7 @@ builtin_backlog! {
     ("Buffer", "constants",
      "not implemented; the constants namespace object has no representation here"),
     ("Math", "f16round",
-     "not implemented; needs a half-precision round the number provider does not export"),
+     "answered by the shared numeric.ts bootstrap using Float16Array conversion; no row"),
     ("%TypedArray%", "@@species",
      "answered by the shared typedarray.ts bootstrap on the abstract constructor, not from a C row"),
     ("Promise", "allKeyed",
@@ -4238,11 +4238,11 @@ static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
  * answer -- the same question `kiln_c99_is_typed_array_member` asks one type over, and it has the
  * same two-name answer.
  *
- * `getFloat16` and `setFloat16` are the whole list. Half precision has no decode here and the
- * number provider exports no `f16round` either (`Math.f16round` is in the backlog for that
- * reason), and answering a `Float32` decode of the same two bytes would be a wrong answer no
- * program could see coming. The interpreter *does* answer both, so `undefined` would be a
- * divergence the gate cannot see; a refusal is one it can. */
+ * `getFloat16` and `setFloat16` are the whole DataView list. Math.f16round is installed separately
+ * by the shared numeric TypeScript bootstrap through Float16Array element conversion; it is not a
+ * DataView operation. Answering a Float32 decode of these same two bytes would be a wrong answer
+ * no program could see coming. The interpreter also models these DataView operations, so
+ * `undefined` would be a divergence the gate cannot see; a refusal is one it can. */
 static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
     return kiln_c99_same_name(key, key_len, "getFloat16") ||
            kiln_c99_same_name(key, key_len, "setFloat16");
