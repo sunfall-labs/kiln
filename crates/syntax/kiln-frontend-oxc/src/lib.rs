@@ -2504,6 +2504,9 @@ impl Lowerer<'_> {
             path: self.path,
             native_import_meta: None,
             inline_eval_calls: HashSet::new(),
+            // This separately parsed scalar eval literal has its own source coordinates.
+            source_units: None,
+            source_map: None,
         };
         let expression = nested.expression(&statement.expression);
         inline_eval_syntax(&expression).then_some(expression)
