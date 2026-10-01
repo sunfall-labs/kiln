@@ -441,7 +441,7 @@ async fn run(
                 message: message.as_bytes(),
                 ..HttpEvent::bare(HttpEventKind::Error, 0)
             });
-            finish(&shared, &table);
+            finish(&shared, &table, false);
             return;
         }
     };

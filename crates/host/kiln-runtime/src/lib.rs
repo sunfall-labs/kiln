@@ -2281,7 +2281,8 @@ impl HttpDispatch for QueuedDispatch {
                     HttpEventKind::Closed => RuntimeHttpEvent::Closed,
                     HttpEventKind::ResponseHead
                     | HttpEventKind::ResponseData
-                    | HttpEventKind::ResponseEnd => return 0,
+                    | HttpEventKind::ResponseEnd
+                    | HttpEventKind::UpgradeResponse => return 0,
                 };
                 self.queue.push_server(self.resource, queued);
             }

@@ -27,7 +27,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use kiln_host_abi::ResourceId;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 
 use crate::HttpCloseMode;
@@ -424,7 +424,7 @@ impl HttpServerEngine {
             let mut flattened = Vec::new();
             flatten_header_map(&headers, &mut flattened);
             if !self.start_response(resource, id, status, &flattened, 16 * 1024)
-                || !self.end_response_bytes(resource, id, &[])
+                || self.end_response_bytes(resource, id, Bytes::new()).is_none()
             {
                 return None;
             }
@@ -1329,14 +1329,14 @@ async fn serve(
                 Ok(upgraded_stream) => {
                     match upgraded_stream.downcast::<TokioIo<Box<dyn HostIo>>>() {
                         Ok(parts) => {
-                            let mut parts = parts;
+                            let parts = parts;
                             // Hyper owns request framing and exposes exactly the bytes it read
                             // beyond the upgrade headers here. They become the raw socket's
                             // first data event after the language has attached its listener.
                             let head = parts.read_buf.to_vec();
                             let request_id = shared.upgrade_request_id.get();
                             let writes = shared.upgrade_writes.borrow_mut().remove(&request_id);
-                            let mut raw = parts.io.into_inner();
+                            let raw = parts.io.into_inner();
                             let pending_write = writes
                                 .as_ref()
                                 .map_or_else(Vec::new, |writes| writes.take_trailing());
@@ -1348,7 +1348,7 @@ async fn serve(
                             upgraded.borrow_mut().insert(
                                 shared.resource,
                                 UpgradeTransport {
-                                    transport: HostTransport(Box::new(raw)),
+                                    transport: HostTransport(raw),
                                     head: head.clone(),
                                     pending_write,
                                     write_completion: Arc::clone(&write_completion),
