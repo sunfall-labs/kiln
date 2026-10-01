@@ -431,11 +431,26 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(kiln_c99_closure_store(closure), key, stable)) {
+            return 0;
+        }
         if (kiln_c99_same_name_key(key, "prototype") &&
             kiln_c99_function_owns_prototype(closure)) {
             return kiln_c99_function_prototype_writable(closure);
         }
         current = kiln_c99_closure_store(closure);
+    } else if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
+               target.tag == KILN_VALUE_BOUND ||
+               target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        int status = kiln_c99_callable_store(target, &current, 0);
+        if (status != KILN_C99_OK) return 0;
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(current, key, stable)) {
+            return 0;
+        }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (array->frozen) {

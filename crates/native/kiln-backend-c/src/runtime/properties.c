@@ -639,6 +639,14 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
+        /* `name` and `length` are synthesized as own, non-writable properties until an
+         * explicit defineProperty creates their ordinary descriptor overlay. A normal write
+         * must not turn those synthesized slots into writable store entries. */
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
+            return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+        }
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
@@ -680,6 +688,11 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         kiln_value store;
         status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(store, key, ikey)) {
+            return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+        }
         return kiln_c99_put_mode_key(host, store, key, ikey, value, strict, depth, thrown);
     }
     if (target.tag == KILN_VALUE_ARRAY) {

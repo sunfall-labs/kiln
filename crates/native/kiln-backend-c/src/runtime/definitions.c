@@ -299,6 +299,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     int has_enumerable = 0;
     int has_configurable = 0;
     int existed = 0;
+    int intrinsic_callable_name_length = 0;
     int status;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
     if (kiln_c99_is_node_hidden_key_key(view)) {
@@ -474,13 +475,36 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* Callable `name` and `length` are real own data properties even though the runtime can
+     * answer them without allocating a store slot. Treat that implicit descriptor as the
+     * existing property while merging; materialize only when the successful merge is committed.
+     * In particular `{ value: ... }` must retain configurable=true, and a failed redefinition
+     * must not create observable storage. */
+    if ((target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
+         target.tag == KILN_VALUE_BOUND || target.tag == KILN_VALUE_COMMONJS_REQUIRE) &&
+        (kiln_c99_same_name_key(view, "name") ||
+         kiln_c99_same_name_key(view, "length")) &&
+        !kiln_c99_store_has(store, view, stable)) {
+        kiln_value intrinsic_value;
+        status = kiln_c99_get_key(host, target, view, stable, &intrinsic_value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        memset(&current, 0, sizeof current);
+        current.key = view;
+        current.value = intrinsic_value;
+        current.writable = 0;
+        current.enumerable = 0;
+        current.configurable = 1;
+        existed = 1;
+        intrinsic_callable_name_length = 1;
+    }
     /* A new data property needs no dictionary entry. The bootstrap defines most built-in
      * methods this way; keeping their stores shaped lets all realms use the shared layout and
      * the object's inline value slots. Missing descriptor fields have the ordinary default
      * (false, or undefined for value). Redefinitions still take the full checks below. */
     {
         kiln_object *object = kiln_c99_object_of(store);
-        if (object->shape != NULL && !object->frozen && !object->not_extensible &&
+        if (!intrinsic_callable_name_length && object->shape != NULL && !object->frozen &&
+            !object->not_extensible &&
             !object->module_namespace && !has_getter && !has_setter) {
             const kiln_string *ikey = stable != NULL ? stable : kiln_c99_intern_key(view);
             uint32_t existing;
@@ -504,7 +528,8 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     }
     {
         kiln_object *object = kiln_c99_object_of(store);
-        existed = kiln_c99_property_read_own(object, view, stable, &current);
+        if (!intrinsic_callable_name_length)
+            existed = kiln_c99_property_read_own(object, view, stable, &current);
         if (object->module_namespace) {
             /* A namespace accepts only a descriptor that makes no semantic change. In
              * particular, export descriptors report writable=true even though [[Set]] rejects;
