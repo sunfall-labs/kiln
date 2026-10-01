@@ -42,7 +42,7 @@ server.listen(0, "127.0.0.1", () => {
     if (stage === 0) {
       assert(socket.read(5) === null, "oversized read waits while the socket is still open");
       assert(socket._readableState.length === 3, "oversized read retains all buffered bytes");
-      assert(socket.read(1).toString() === "a", "partial read consumes exactly one byte");
+      assert(socket.read(1e-7).toString() === "a", "noninteger read size uses Node's decimal parsing");
       assert(socket.read(5) === null, "oversized partial read still waits for more data");
       assert(socket._readableState.length === 2, "partial remainder stays buffered");
       stage = 1;
