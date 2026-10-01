@@ -31,7 +31,20 @@ function socketResume(this: any): any {
 function socketRead(this: any, size?: number): any {
   if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
   if (size === undefined) return nativeModule.__readSocket.call(this);
-  const parsedSize = parseInt(size as any, 10);
+  const numericArgument = typeof size === "number";
+  const parsedSize = numericArgument
+    ? Number.isFinite(size) ? Math.trunc(size) : Number.NaN
+    : parseInt(size as any, 10);
+  if (
+    (numericArgument && Number.isFinite(size) && size > 1073741824) ||
+    (!Number.isNaN(parsedSize) && parsedSize > 1073741824)
+  ) {
+    const error = new RangeError(
+      `The value of "size" is out of range. It must be <= 1GiB. Received ${size}`,
+    ) as any;
+    error.code = "ERR_OUT_OF_RANGE";
+    throw error;
+  }
   return nativeModule.__readSocket.call(this, Number.isNaN(parsedSize) ? undefined : parsedSize);
 }
 

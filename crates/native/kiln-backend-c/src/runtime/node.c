@@ -2006,6 +2006,21 @@ static int kiln_c99_node_socket_can_read_raw(kiln_node_socket *socket) {
     return 1;
 }
 
+static int kiln_c99_node_socket_request_read(kiln_node_socket *socket, size_t target) {
+    kiln_node_completion *read;
+    int status;
+    socket->read_demand = target;
+    socket->read_demand_active = 1;
+    if (!kiln_c99_node_socket_can_read_raw(socket)) return KILN_C99_OK;
+    read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
+    if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+    read->kind = KILN_REALM_OP_TCP_READ;
+    kiln_c99_heap_store_pointer(read, &read->socket, socket);
+    status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                                 NULL, 0, NULL, 0, read, &socket->read_request);
+    return status;
+}
+
 static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
                                                      const uint8_t *bytes, uint64_t length) {
     size_t total;
@@ -3022,6 +3037,9 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 return KILN_C99_OK;
             }
             if (read_after_write) {
+                if (socket->read_request != 0 ||
+                    (socket->read_paused && !socket->read_demand_active))
+                    return KILN_C99_OK;
                 next = (kiln_node_completion *)kiln_c99_gc_calloc(
                     KILN_GC_NODE_COMPLETION, sizeof *next);
                 if (next == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -5305,6 +5323,14 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (socket->paused_read_eof) {
                 status = kiln_c99_node_socket_schedule_read_end(socket);
                 if (status != KILN_C99_OK) return status;
+            } else if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED ||
+                       kiln_c99_as_number(args[0]) > 0.0) {
+                double requested = argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED
+                    ? 1.0 : kiln_c99_as_number(args[0]);
+                size_t target = !isfinite(requested) || requested < 1.0
+                    ? 1 : (size_t)requested;
+                status = kiln_c99_node_socket_request_read(socket, target);
+                if (status != KILN_C99_OK) return status;
             }
             *result = kiln_c99_null();
             return KILN_C99_OK;
@@ -5316,23 +5342,9 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 *result = kiln_c99_null();
                 return KILN_C99_OK;
             }
-            if (requested > (double)SIZE_MAX)
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                            "The value of \"size\" is out of range");
             if (requested > (double)take && !socket->paused_read_eof) {
-                socket->read_demand = (size_t)requested;
-                socket->read_demand_active = 1;
-                if (socket->read_paused && kiln_c99_node_socket_can_read_raw(socket)) {
-                    kiln_node_completion *read = (kiln_node_completion *)kiln_c99_gc_calloc(
-                        KILN_GC_NODE_COMPLETION, sizeof *read);
-                    if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    read->kind = KILN_REALM_OP_TCP_READ;
-                    kiln_c99_heap_store_pointer(read, &read->socket, socket);
-                    status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource,
-                                                 16384, NULL, 0, NULL, 0, read,
-                                                 &socket->read_request);
-                    if (status != KILN_C99_OK) return status;
-                }
+                status = kiln_c99_node_socket_request_read(socket, (size_t)requested);
+                if (status != KILN_C99_OK) return status;
                 *result = kiln_c99_null();
                 return KILN_C99_OK;
             }
@@ -5360,20 +5372,13 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_c99_number((double)socket->paused_read_len), 0, NULL);
             if (status != KILN_C99_OK) return status;
         }
+        kiln_c99_gc_keep_alive(result);
         if (socket->paused_read_len == 0 && socket->paused_read_eof) {
             status = kiln_c99_node_socket_schedule_read_end(socket);
             if (status != KILN_C99_OK) return status;
         } else if (socket->read_paused && !socket->paused_read_eof &&
                    kiln_c99_node_socket_can_read_raw(socket)) {
-            kiln_node_completion *read = (kiln_node_completion *)kiln_c99_gc_calloc(
-                KILN_GC_NODE_COMPLETION, sizeof *read);
-            if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
-            socket->read_demand = socket->paused_read_len + 1;
-            socket->read_demand_active = 1;
-            read->kind = KILN_REALM_OP_TCP_READ;
-            kiln_c99_heap_store_pointer(read, &read->socket, socket);
-            status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
-                                         NULL, 0, NULL, 0, read, &socket->read_request);
+            status = kiln_c99_node_socket_request_read(socket, socket->paused_read_len + 1);
             if (status != KILN_C99_OK) return status;
         }
         return KILN_C99_OK;

@@ -1534,7 +1534,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     if ended {
                         let emit_end = Value::Bound(Rc::new(BoundFunction {
-                            target: Value::Native(Native::NodeReadablePush, RealmId::PRIMARY),
+                            target: Value::Native(Native::NodeReadablePush, self.current_realm),
                             this_value: receiver.clone(),
                             arguments: vec![Value::Null],
                             properties: RefCell::new(ObjectData::default()),
@@ -5707,7 +5707,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     stream.resource() == resource
                                         && stream.driver.has_pending_read()
                                 });
-                                if socket_state.borrow().read_paused || already_started {
+                                let paused_without_demand = {
+                                    let socket = socket_state.borrow();
+                                    socket.read_paused && socket.read_demand.is_none()
+                                };
+                                if paused_without_demand || already_started {
                                     continue;
                                 }
                             }
