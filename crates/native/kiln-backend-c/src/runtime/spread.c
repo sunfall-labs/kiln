@@ -1244,6 +1244,11 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
         return KILN_C99_OK;
     }
+    /* CopyDataProperties can call source getters, allocate keys and invoke proxy traps. Keep
+     * both operands rooted across those calls; their raw object pointers are used by the fast
+     * shape and dictionary paths below. */
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&source);
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("an object spread into something that is not an object");
     }
@@ -1312,6 +1317,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (status != KILN_C99_OK) {
                 return status;
             }
+            /* Formatting the index can allocate. Keep the value returned by [[Get]] rooted
+             * until CreateDataProperty has published it on the target. */
+            kiln_c99_gc_keep_alive(&element);
             /* The key has to outlive this frame -- a property stores the pointer rather than
              * copying the bytes -- which is why it is built as a value rather than sprintf'd
              * into a local buffer, exactly as a computed write builds one. */
@@ -1474,11 +1482,12 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         if (object->elements != NULL) {
             for (index = 0; index < object->element_count; ++index) {
                 if (object->elements[index] == KILN_VAL_HOLE) continue;
+                kiln_value element = kiln_val_to_boundary(object->elements[index]);
+                kiln_c99_gc_keep_alive(&element);
                 kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
                 if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
                 int status = kiln_c99_create_data_property(
-                    host, target, key, kiln_val_to_boundary(object->elements[index]), depth,
-                    thrown);
+                    host, target, key, element, depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
         }
