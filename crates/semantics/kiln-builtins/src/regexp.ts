@@ -15,23 +15,26 @@
   };
   delete G.__kilnRawStringProtocols;
   const IntrinsicRegExp = RegExp;
+  const apply = Reflect.apply;
+  const TypeErrorCtor = TypeError;
+  const stringIndexOf = String.prototype.indexOf;
   const isObject = (value: any): boolean => value !== null &&
     (typeof value === "object" || typeof value === "function");
   const requireReceiver = (receiver: any, name: string): void => {
     if (receiver === null || receiver === undefined) {
-      throw new TypeError(`String.prototype.${name} called on null or undefined`);
+      throw new TypeErrorCtor(`String.prototype.${name} called on null or undefined`);
     }
   };
   const invokeRegExpProtocol = (regexp: any, key: symbol, args: any[]): any => {
     const method = regexp[key];
-    return Reflect.apply(method, regexp, args);
+    return apply(method, regexp, args);
   };
   const match = { match(this: any, regexp: any): any {
     "use strict";
     requireReceiver(this, "match");
     if (isObject(regexp)) {
       const matcher = regexp[Symbol.match];
-      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
+      if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
     return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.match, [subject]);
@@ -45,14 +48,14 @@
       isRegExp = matcher === undefined ? regexp instanceof IntrinsicRegExp : !!matcher;
       if (isRegExp) {
         const flags = regexp.flags;
-        if (flags === null || flags === undefined || `${flags}`.indexOf("g") < 0) {
-          throw new TypeError("String.prototype.matchAll called with a non-global RegExp");
+        if (flags === null || flags === undefined || apply(stringIndexOf, `${flags}`, ["g"]) < 0) {
+          throw new TypeErrorCtor("String.prototype.matchAll called with a non-global RegExp");
         }
       }
     }
     if (isObject(regexp)) {
       const matcher = regexp[Symbol.matchAll];
-      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
+      if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
     const created = new IntrinsicRegExp(regexp, "g");
@@ -63,9 +66,9 @@
     requireReceiver(this, "replace");
     if (isObject(searchValue)) {
       const replacer = searchValue[Symbol.replace];
-      if (replacer !== null && replacer !== undefined) return Reflect.apply(replacer, searchValue, [this, replaceValue]);
+      if (replacer !== null && replacer !== undefined) return apply(replacer, searchValue, [this, replaceValue]);
     }
-    return Reflect.apply(rawString.replace, this, [searchValue, replaceValue]);
+    return apply(rawString.replace, this, [searchValue, replaceValue]);
   } }.replace;
   const replaceAll = { replaceAll(this: any, searchValue: any, replaceValue: any): any {
     "use strict";
@@ -75,21 +78,21 @@
       const isRegExp = matcher === undefined ? searchValue instanceof IntrinsicRegExp : !!matcher;
       if (isRegExp) {
         const flags = searchValue.flags;
-        if (flags === null || flags === undefined || `${flags}`.indexOf("g") < 0) {
-          throw new TypeError("String.prototype.replaceAll must be called with a global RegExp");
+        if (flags === null || flags === undefined || apply(stringIndexOf, `${flags}`, ["g"]) < 0) {
+          throw new TypeErrorCtor("String.prototype.replaceAll must be called with a global RegExp");
         }
       }
       const replacer = searchValue[Symbol.replace];
-      if (replacer !== null && replacer !== undefined) return Reflect.apply(replacer, searchValue, [this, replaceValue]);
+      if (replacer !== null && replacer !== undefined) return apply(replacer, searchValue, [this, replaceValue]);
     }
-    return Reflect.apply(rawString.replaceAll, this, [searchValue, replaceValue]);
+    return apply(rawString.replaceAll, this, [searchValue, replaceValue]);
   } }.replaceAll;
   const search = { search(this: any, regexp: any): any {
     "use strict";
     requireReceiver(this, "search");
     if (isObject(regexp)) {
       const matcher = regexp[Symbol.search];
-      if (matcher !== null && matcher !== undefined) return Reflect.apply(matcher, regexp, [this]);
+      if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
     return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.search, [subject]);
@@ -99,9 +102,9 @@
     requireReceiver(this, "split");
     if (isObject(separator)) {
       const splitter = separator[Symbol.split];
-      if (splitter !== null && splitter !== undefined) return Reflect.apply(splitter, separator, [this, limit]);
+      if (splitter !== null && splitter !== undefined) return apply(splitter, separator, [this, limit]);
     }
-    return Reflect.apply(rawString.split, this, [separator, limit]);
+    return apply(rawString.split, this, [separator, limit]);
   } }.split;
   for (const [name, value] of [["match", match], ["matchAll", matchAll], ["replace", replace],
                                ["replaceAll", replaceAll], ["search", search], ["split", split]] as any) {
@@ -132,7 +135,7 @@
   // Annex B.3 method `compile(pattern, flags?)`:
   const compile = { compile(this: any, pattern: any, flags?: any): RegExp {
     if (!(this instanceof RegExp)) {
-      throw new TypeError("RegExp.prototype.compile called on incompatible receiver");
+      throw new TypeErrorCtor("RegExp.prototype.compile called on incompatible receiver");
     }
     return new RegExp(pattern, flags);
   } }.compile;
@@ -147,7 +150,7 @@
   // Static `RegExp.escape(text)` (ES2025):
   const escape = { escape(text: any): string {
     if (typeof text !== "string") {
-      throw new TypeError("RegExp.escape requires a string");
+      throw new TypeErrorCtor("RegExp.escape requires a string");
     }
     const syntax = "^$\\.*+?()[]{}|/";
     const punctuators = ",-=<>#&!%:;@~'`\"";

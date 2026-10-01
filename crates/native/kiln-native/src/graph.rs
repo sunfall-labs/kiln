@@ -513,15 +513,16 @@ if (typeof JSON !== "undefined") {
         search: String.prototype.search,
         split: String.prototype.split,
     };
+    const intrinsicApply = Reflect.apply;
     const rawStringProtocols = globalThis.__kilnRawStringProtocols;
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
     data(DataView.prototype, Symbol.toStringTag, "DataView");
     const methods = {
-        [Symbol.match](string) { return rawStringProtocols.match.call(string, this); },
-        [Symbol.matchAll](string) { return rawStringProtocols.matchAll.call(string, this); },
-        [Symbol.replace](string, replacement) { return rawStringProtocols.replace.call(string, this, replacement); },
-        [Symbol.search](string) { return rawStringProtocols.search.call(string, this); },
-        [Symbol.split](string, limit) { return rawStringProtocols.split.call(string, this, limit); },
+        [Symbol.match](string) { return intrinsicApply(rawStringProtocols.match, string, [this]); },
+        [Symbol.matchAll](string) { return intrinsicApply(rawStringProtocols.matchAll, string, [this]); },
+        [Symbol.replace](string, replacement) { return intrinsicApply(rawStringProtocols.replace, string, [this, replacement]); },
+        [Symbol.search](string) { return intrinsicApply(rawStringProtocols.search, string, [this]); },
+        [Symbol.split](string, limit) { return intrinsicApply(rawStringProtocols.split, string, [this, limit]); },
     };
     data(RegExp.prototype, Symbol.match, methods[Symbol.match], true);
     data(RegExp.prototype, Symbol.matchAll, methods[Symbol.matchAll], true);

@@ -95,4 +95,26 @@ assert(JSON.stringify(String.prototype.split.call("aba", "b")) === JSON.stringif
 assert(createdOrder === "ms", "match/search fallbacks invoke current RegExp symbol methods");
 RegExp.prototype[Symbol.match] = oldMatch;
 RegExp.prototype[Symbol.search] = oldSearch;
+
+const savedApply = Reflect.apply;
+const savedTypeError = globalThis.TypeError;
+const savedIndexOf = String.prototype.indexOf;
+try {
+  Reflect.apply = () => { throw new Error("mutable Reflect.apply was consulted"); };
+  globalThis.TypeError = function PatchedTypeError() {};
+  String.prototype.indexOf = () => { throw new Error("mutable String#indexOf was consulted"); };
+  const method = { [Symbol.match](value) { return value; } };
+  assert(String.prototype.match.call("subject", method) === "subject",
+    "protocol method invocation does not consult mutable Reflect.apply");
+  let receiverError;
+  try { String.prototype.match.call(null, method); } catch (error) { receiverError = error; }
+  assert(receiverError instanceof savedTypeError,
+    "null receiver failure uses the captured TypeError constructor");
+  assert(Array.from(String.prototype.matchAll.call("a", /a/g)).length === 1,
+    "global flag check does not consult mutable String#indexOf");
+} finally {
+  Reflect.apply = savedApply;
+  globalThis.TypeError = savedTypeError;
+  String.prototype.indexOf = savedIndexOf;
+}
 console.log("String protocol delegation and raw RegExp fallback pass");
