@@ -1314,6 +1314,61 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 return Ok(Value::Boolean(ready));
             }
             Native::NodeReadableRead => {
+                if node_net_socket_state(receiver).is_ok() {
+                    let (encoding, mut bytes, ended) = {
+                        let mut state = state.borrow_mut();
+                        let requested = arguments
+                            .first()
+                            .and_then(|value| match value {
+                                Value::Number(number) if number.is_finite() && *number > 0.0 => {
+                                    Some(number.floor() as usize)
+                                }
+                                Value::Undefined => None,
+                                _ => Some(0),
+                            })
+                            .unwrap_or(usize::MAX);
+                        let mut bytes = Vec::new();
+                        let mut remaining = requested;
+                        while remaining > 0 {
+                            let Some(chunk) = state.buffer.first().cloned() else {
+                                break;
+                            };
+                            let chunk_bytes = node_body_bytes(Some(&chunk))?;
+                            let take = remaining.min(chunk_bytes.len());
+                            bytes.extend_from_slice(&chunk_bytes[..take]);
+                            if take == chunk_bytes.len() {
+                                state.buffer.remove(0);
+                            } else {
+                                let rest = &chunk_bytes[take..];
+                                state.buffer[0] = node_bytes_value(rest.to_vec());
+                            }
+                            state.buffered_bytes = state.buffered_bytes.saturating_sub(take);
+                            remaining = remaining.saturating_sub(take);
+                        }
+                        let ended = state.ended && state.buffer.is_empty() && !state.end_emitted;
+                        if ended {
+                            state.end_emitted = true;
+                        }
+                        (state.encoding.clone(), bytes, ended)
+                    };
+                    sync_readable_public_state(receiver, &state.borrow());
+                    if ended {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            receiver,
+                            &[Value::String("end".into())],
+                            instruction,
+                        )?;
+                    }
+                    let result = if bytes.is_empty() {
+                        Value::Null
+                    } else if encoding.as_deref() == Some("utf8") {
+                        Value::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                    } else {
+                        node_bytes_value(std::mem::take(&mut bytes))
+                    };
+                    return Ok(result);
+                }
                 let (value, call_read, emit_end) = {
                     let mut state = state.borrow_mut();
                     let value = if state.buffer.is_empty() {
@@ -2600,11 +2655,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                         _ => node_bytes_value(bytes),
                     };
-                    self.dispatch_node_event(
-                        Native::NodeEventEmit,
+                    self.dispatch_readable_state(
+                        Native::NodeReadablePush,
                         &socket,
-                        &[Value::String("data".into()), chunk],
+                        &[chunk],
                         instruction,
+                        &readable,
+                        false,
                     )?;
                     return Ok(());
                 }
@@ -2737,6 +2794,23 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                 }
                 if let Some(socket) = node_net_socket_value(server, resource) {
+                    if matches!(action, StreamAction::Event(StreamEvent::End))
+                        && !server
+                            .borrow()
+                            .streams
+                            .iter()
+                            .any(|stream| stream.resource() == resource && stream.runtime_http)
+                    {
+                        let state = node_net_socket_state(&socket)?;
+                        let readable = Rc::clone(&state.borrow().readable);
+                        {
+                            let mut readable = readable.borrow_mut();
+                            readable.ended = true;
+                            readable.end_emitted = true;
+                            readable.reading = false;
+                        }
+                        sync_readable_public_state(&socket, &readable.borrow());
+                    }
                     let event = match action {
                         StreamAction::Event(StreamEvent::Drain) => "drain",
                         StreamAction::Event(StreamEvent::End) => "end",
@@ -4558,6 +4632,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // was paused are delivered to the listener that caused the transition.
                 if event == "data"
                     && (node_readable_state(receiver).is_ok()
+                        || node_net_socket_state(receiver).is_ok()
                         || node_http_incoming(receiver).is_ok())
                 {
                     self.dispatch_node_readable(

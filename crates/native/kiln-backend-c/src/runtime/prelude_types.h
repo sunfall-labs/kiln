@@ -3252,6 +3252,7 @@ struct kiln_node_server {
 struct kiln_node_socket {
     kiln_host *host;
     kiln_value object;
+    kiln_value readable_state;
     kiln_node_socket *next;
     uint64_t resource;
     uint64_t connect_request;

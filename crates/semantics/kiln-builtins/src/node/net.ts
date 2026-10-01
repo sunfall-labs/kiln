@@ -28,6 +28,11 @@ function socketResume(this: any): any {
   return nativeModule.__resumeSocket.call(this);
 }
 
+function socketRead(this: any, size?: number): any {
+  if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
+  return nativeModule.__readSocket.call(this, size);
+}
+
 const socketPrototypes = new WeakMap<object, object>();
 const decoratedSockets = new WeakSet<object>();
 
@@ -45,6 +50,7 @@ function decorateSocket(socket: any): any {
       uncork: { configurable: true, writable: true, value: socketUncork },
       pause: { configurable: true, writable: true, value: socketPause },
       resume: { configurable: true, writable: true, value: socketResume },
+      read: { configurable: true, writable: true, value: socketRead },
     });
     socketPrototypes.set(base, prototype);
   }

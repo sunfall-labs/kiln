@@ -220,6 +220,10 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
     data.set("readable", Value::Boolean(true));
     data.set("writable", Value::Boolean(true));
     data.set("destroyed", Value::Boolean(false));
+    data.set_non_enumerable(
+        "_readableState",
+        Value::Object(Rc::clone(&state.borrow().readable.borrow().public)),
+    );
     data.set(
         "setEncoding",
         Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
@@ -331,6 +335,7 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "__uncorkSocket" => Some(Value::Native(Native::NodeSocketUncork, RealmId::PRIMARY)),
         "__pauseSocket" => Some(Value::Native(Native::NodeReadablePause, RealmId::PRIMARY)),
         "__resumeSocket" => Some(Value::Native(Native::NodeReadableResume, RealmId::PRIMARY)),
+        "__readSocket" => Some(Value::Native(Native::NodeReadableRead, RealmId::PRIMARY)),
         "default" => Some(Value::Native(Native::NodeNet, RealmId::PRIMARY)),
         _ => None,
     }
@@ -354,6 +359,7 @@ pub(crate) fn native_capabilities() -> Value {
         "__uncorkSocket",
         "__pauseSocket",
         "__resumeSocket",
+        "__readSocket",
     ] {
         if let Some(value) = property(name) {
             module.set_non_enumerable(name, value);

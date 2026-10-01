@@ -4120,6 +4120,7 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value net_uncork_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 566 /* KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL */ };
     kiln_value net_pause_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 567 /* KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL */ };
     kiln_value net_resume_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 568 /* KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL */ };
+    kiln_value net_read_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 569 /* KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL */ };
     status = kiln_c99_put(host, net_obj, "connect", 7, net_connect, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
@@ -4133,6 +4134,8 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, net_obj, "__pauseSocket", 13, net_pause_socket, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "__resumeSocket", 14, net_resume_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__readSocket", 12, net_read_socket, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
