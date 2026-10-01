@@ -2817,6 +2817,48 @@ static void kiln_dyn_skip_expr(kiln_dyn_lexer *lex, int stop_at_colon) {
     }
 }
 
+/* Skip source without evaluating it, stopping at the grammar boundary needed by the caller.
+ * Short-circuit operands stop before lower-precedence logical/conditional operators, while a
+ * conditional consequent tracks nested ?: pairs and stops at its matching colon. */
+static void kiln_dyn_skip_unexecuted(kiln_dyn_lexer *lex, kiln_dyn_token_kind logical_op,
+                                     int match_conditional_colon) {
+    int pdepth = 0;
+    int bdepth = 0;
+    int kdepth = 0;
+    int conditional_depth = 0;
+    while (lex->curr.kind != KILN_DYN_EOF) {
+        if (pdepth == 0 && bdepth == 0 && kdepth == 0) {
+            if (match_conditional_colon) {
+                if (lex->curr.kind == KILN_DYN_QUESTION) {
+                    conditional_depth++;
+                } else if (lex->curr.kind == KILN_DYN_COLON) {
+                    if (conditional_depth == 0) break;
+                    conditional_depth--;
+                } else if (conditional_depth == 0 &&
+                           (lex->curr.kind == KILN_DYN_SEMI || lex->curr.kind == KILN_DYN_COMMA ||
+                            lex->curr.kind == KILN_DYN_RPAREN || lex->curr.kind == KILN_DYN_RBRACE ||
+                            lex->curr.kind == KILN_DYN_RBRACKET)) {
+                    break;
+                }
+            } else if (lex->curr.kind == KILN_DYN_SEMI || lex->curr.kind == KILN_DYN_COMMA ||
+                       lex->curr.kind == KILN_DYN_RPAREN || lex->curr.kind == KILN_DYN_RBRACE ||
+                       lex->curr.kind == KILN_DYN_RBRACKET || lex->curr.kind == KILN_DYN_QUESTION ||
+                       lex->curr.kind == KILN_DYN_COLON || lex->curr.kind == KILN_DYN_OR ||
+                       lex->curr.kind == KILN_DYN_NULLISH ||
+                       (logical_op == KILN_DYN_AND && lex->curr.kind == KILN_DYN_AND)) {
+                break;
+            }
+        }
+        if (lex->curr.kind == KILN_DYN_LPAREN) pdepth++;
+        else if (lex->curr.kind == KILN_DYN_RPAREN && pdepth > 0) pdepth--;
+        else if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
+        else if (lex->curr.kind == KILN_DYN_RBRACE && bdepth > 0) bdepth--;
+        else if (lex->curr.kind == KILN_DYN_LBRACKET) kdepth++;
+        else if (lex->curr.kind == KILN_DYN_RBRACKET && kdepth > 0) kdepth--;
+        kiln_dyn_lexer_next(lex);
+    }
+}
+
 static int kiln_dyn_eval_bitwise_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                      kiln_value receiver, const kiln_value *args, size_t argc,
                                      int depth, kiln_value *out, kiln_value *thrown) {
@@ -2868,7 +2910,7 @@ static int kiln_dyn_eval_logical_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_
     while (lex->curr.kind == KILN_DYN_AND) {
         kiln_dyn_lexer_next(lex);
         if (!kiln_c99_truthy(*out)) {
-            kiln_dyn_skip_expr(lex, 0);
+            kiln_dyn_skip_unexecuted(lex, KILN_DYN_AND, 0);
         } else {
             status = kiln_dyn_eval_bitwise_or(host, lex, scope, receiver, args, argc, depth, out, thrown);
             if (status != KILN_C99_OK) return status;
@@ -2889,7 +2931,7 @@ static int kiln_dyn_eval_logical_or(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
         int take_lhs = (op == KILN_DYN_OR) ? kiln_c99_truthy(*out)
                                            : (out->tag != KILN_VALUE_UNDEFINED && out->tag != KILN_VALUE_NULL);
         if (take_lhs) {
-            kiln_dyn_skip_expr(lex, 0);
+            kiln_dyn_skip_unexecuted(lex, op, 0);
         } else {
             status = kiln_dyn_eval_logical_and(host, lex, scope, receiver, args, argc, depth, out, thrown);
             if (status != KILN_C99_OK) return status;
@@ -2915,7 +2957,7 @@ static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 kiln_dyn_skip_expr(lex, 0);
             }
         } else {
-            kiln_dyn_skip_expr(lex, 1);
+            kiln_dyn_skip_unexecuted(lex, KILN_DYN_EOF, 1);
             if (lex->curr.kind == KILN_DYN_COLON) {
                 kiln_dyn_lexer_next(lex);
                 status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, out, thrown);

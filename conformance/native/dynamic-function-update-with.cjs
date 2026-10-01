@@ -26,4 +26,22 @@ if (expressions[0] !== 5 || expressions[1] !== 3 || expressions[2] !== 3 ||
     expressions[3] !== undefined) {
   throw new Error("direct eval returns supported expression values in the caller environment");
 }
-console.log(result.join(","));
+
+function shortCircuitPrecedence() {
+  let skipped = 0;
+  function sideEffect() { skipped++; return true; }
+  const andThenConditional = eval(
+    "false && sideEffect() ? function() { return 1; } : function() { return 2; }"
+  );
+  const orThenConditional = eval(
+    "true || sideEffect() ? function() { return 3; } : function() { return 4; }"
+  );
+  const nestedConditional = eval("false ? true ? sideEffect() : sideEffect() : 5");
+  return [andThenConditional(), orThenConditional(), nestedConditional, skipped];
+}
+const shortCircuit = shortCircuitPrecedence();
+if (shortCircuit[0] !== 2 || shortCircuit[1] !== 3 || shortCircuit[2] !== 5 ||
+    shortCircuit[3] !== 0) {
+  throw new Error("short-circuit skipping must preserve conditional precedence and side effects");
+}
+console.log(result.join(","), shortCircuit.join(","));
