@@ -1661,7 +1661,9 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
 static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                  const char *name, size_t name_len,
                                  const char *params, size_t params_len,
-                                 const char *body, size_t body_len, kiln_value receiver,
+                                 const char *body, size_t body_len,
+                                 const char *reflection_source, size_t reflection_source_len,
+                                 kiln_value receiver,
                                  int asynchronous, int arrow, int method, kiln_value *out,
                                  kiln_value *thrown);
 static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
@@ -1672,13 +1674,46 @@ static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
                                        size_t *body_len);
 static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
                                          kiln_dyn_scope *scope, const char *params,
-                                         size_t params_len, kiln_value receiver, int asynchronous,
+                                         size_t params_len, const char *source_start,
+                                         kiln_value receiver, int asynchronous,
                                          int depth, kiln_value *out, kiln_value *thrown);
 static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char **params,
                                                size_t *params_len, size_t *after_close);
 
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
                                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
+
+static int kiln_dyn_append_source_units(kiln_value *source, kiln_value part) {
+    kiln_value joined;
+    if (source == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_gc_keep_alive(source);
+    kiln_c99_gc_keep_alive(&part);
+    joined = kiln_c99_concat(*source, part);
+    kiln_c99_gc_keep_alive(source);
+    kiln_c99_gc_keep_alive(&part);
+    kiln_c99_gc_keep_alive(&joined);
+    if (joined.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    *source = joined;
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_function_constructor_source(kiln_value parameters, kiln_value body,
+                                                kiln_value *out) {
+    int status;
+    if (out == NULL || parameters.tag != KILN_VALUE_STRING || body.tag != KILN_VALUE_STRING)
+        return KILN_C99_INVALID_ARGUMENT;
+    *out = kiln_c99_static_text("function anonymous(", sizeof("function anonymous(") - 1);
+    if (out->tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_dyn_append_source_units(out, parameters);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_dyn_append_source_units(
+        out, kiln_c99_static_text("\n) {\n", sizeof("\n) {\n") - 1));
+    if (status != KILN_C99_OK) return status;
+    status = kiln_dyn_append_source_units(out, body);
+    if (status != KILN_C99_OK) return status;
+    return kiln_dyn_append_source_units(out,
+                                        kiln_c99_static_text("\n}", sizeof("\n}") - 1));
+}
 
 static int kiln_dyn_body_has_use_strict(const char *body, size_t length) {
     size_t i = 0;
@@ -1772,6 +1807,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         return KILN_C99_OK;
     }
     int asynchronous = 0;
+    const char *async_start = NULL;
     if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
         /* `async` is contextual in expression position. It starts an async function only
          * when followed by `function`; otherwise the keyword is a valid identifier (including
@@ -1788,6 +1824,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (lex->curr.kind == KILN_DYN_KW_FUNCTION &&
             !kiln_dyn_has_line_terminator(lex->src, async_end, function_start)) {
             asynchronous = 1;
+            async_start = async_token.start;
         } else {
             kiln_dyn_token_free(&lex->curr);
             lex->curr = async_token;
@@ -1809,13 +1846,16 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                 "Unterminated arrow function body");
                 }
+                const char *source_end = body + body_len + 1;
                 return kiln_dyn_make_closure(host, scope, NULL, 0, name, name_len,
-                                             body, body_len, receiver, 0, 1, 0,
+                                             body, body_len, name,
+                                             (size_t)(source_end - name), receiver, 0, 1, 0,
                                              out, thrown);
             }
             if (!kiln_dyn_capture_expression(lex, &body, &body_len))
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                             "Expected arrow function body");
+            const char *source_end = body + body_len;
             size_t return_len = body_len + sizeof "return ;";
             char *return_body = (char *)malloc(return_len);
             if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -1824,6 +1864,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             return_body[7 + body_len] = ';';
             int closure_status = kiln_dyn_make_closure(host, scope, NULL, 0,
                                                        name, name_len, return_body, body_len + 8,
+                                                       name, (size_t)(source_end - name),
                                                        receiver, 0, 1, 0, out, thrown);
             free(return_body);
             return closure_status;
@@ -1850,6 +1891,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         return kiln_dyn_throw_unresolvable_reference(thrown, name, name_len);
     }
     if (lex->curr.kind == KILN_DYN_LPAREN) {
+        const char *arrow_source = lex->curr.start;
         const char *params;
         size_t params_len, after_close;
         if (kiln_dyn_parenthesized_arrow_params(lex, &params, &params_len, &after_close)) {
@@ -1860,7 +1902,8 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                             "Expected arrow token");
             kiln_dyn_lexer_next(lex);
             return kiln_dyn_make_arrow_from_tail(host, lex, scope, params, params_len,
-                                                 receiver, 0, depth, out, thrown);
+                                                 arrow_source, receiver, 0, depth,
+                                                 out, thrown);
         }
         kiln_dyn_lexer_next(lex);
         int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, out, thrown);
@@ -1921,6 +1964,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 continue;
             }
             const char *key_name = NULL;
+            const char *method_source = lex->curr.start;
             size_t key_len = 0;
             char *owned_key = NULL;
             int string_key = 0;
@@ -1984,8 +2028,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                       "Unterminated method body");
                 }
+                const char *source_end = body + body_len + 1;
                 status = kiln_dyn_make_closure(host, scope, key_name, key_len, params,
-                                               params_len, body, body_len, receiver, 0, 0, 1,
+                                               params_len, body, body_len, method_source,
+                                               (size_t)(source_end - method_source),
+                                               receiver, 0, 0, 1,
                                                &val, thrown);
                 if (status != KILN_C99_OK) {
                     free(owned_key);
@@ -2072,7 +2119,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
     }
 
     if (lex->curr.kind == KILN_DYN_KW_FUNCTION) {
-        const char *function_source = lex->curr.start;
+        const char *function_source = asynchronous && async_start != NULL
+                                          ? async_start
+                                          : lex->curr.start;
         kiln_dyn_lexer_next(lex);
         const char *fn_name = "anonymous";
         size_t fn_name_len = 9;
@@ -3299,7 +3348,9 @@ static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
 static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                  const char *name, size_t name_len,
                                  const char *params, size_t params_len,
-                                 const char *body, size_t body_len, kiln_value receiver,
+                                 const char *body, size_t body_len,
+                                 const char *reflection_source, size_t reflection_source_len,
+                                 kiln_value receiver,
                                  int asynchronous, int arrow, int method, kiln_value *out,
                                  kiln_value *thrown) {
     kiln_value upvals[3];
@@ -3314,12 +3365,17 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
     kiln_c99_gc_keep_alive(&upvals[0]);
     status = kiln_dyn_source_to_string(body, body_len, &upvals[1]);
     if (status != KILN_C99_OK) return status;
+    kiln_value reflected_source;
+    status = kiln_dyn_source_to_string(reflection_source, reflection_source_len,
+                                       &reflected_source);
+    if (status != KILN_C99_OK) return status;
     upvals[2] = env_obj;
     if (upvals[0].tag != KILN_VALUE_STRING || upvals[1].tag != KILN_VALUE_STRING)
         return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_gc_keep_alive(&upvals[0]);
     kiln_c99_gc_keep_alive(&upvals[1]);
     kiln_c99_gc_keep_alive(&upvals[2]);
+    kiln_c99_gc_keep_alive(&reflected_source);
     kiln_val val_upvals[3] = {
         kiln_val_from_boundary(upvals[0]),
         kiln_val_from_boundary(upvals[1]),
@@ -3335,13 +3391,20 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                    method ? KILN_C99_FUNCTION_METHOD : 0, arrow, 0,
                                    arrow ? kiln_val_from_boundary(receiver) : KILN_VAL_UNDEFINED,
                                    KILN_VAL_UNDEFINED, 0, 16, 0, 0, val_upvals, 3);
+    kiln_c99_gc_keep_alive(&reflected_source);
     kiln_c99_gc_keep_alive(&name_value);
+    if (status == KILN_C99_OK) {
+        kiln_c99_heap_store_value(kiln_c99_closure_of(*out),
+                                  &kiln_c99_closure_of(*out)->source_value,
+                                  reflected_source);
+    }
     return status;
 }
 
 static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
                                          kiln_dyn_scope *scope, const char *params,
-                                         size_t params_len, kiln_value receiver, int asynchronous,
+                                         size_t params_len, const char *source_start,
+                                         kiln_value receiver, int asynchronous,
                                          int depth, kiln_value *out, kiln_value *thrown) {
     const char *body;
     size_t body_len;
@@ -3349,20 +3412,25 @@ static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
         if (!kiln_dyn_capture_block(lex, &body, &body_len))
             return kiln_dyn_throw_parse_error(lex, thrown,
                                         "Unterminated arrow function body");
+        const char *source_end = body + body_len + 1;
         return kiln_dyn_make_closure(host, scope, NULL, 0, params, params_len, body,
-                                     body_len, receiver, asynchronous, 1, 0, out, thrown);
+                                     body_len, source_start,
+                                     (size_t)(source_end - source_start), receiver,
+                                     asynchronous, 1, 0, out, thrown);
     }
     if (!kiln_dyn_capture_expression(lex, &body, &body_len))
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected arrow function body");
+    const char *source_end = body + body_len;
     char *return_body = (char *)malloc(body_len + sizeof "return ;");
     if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
     memcpy(return_body, "return ", 7);
     memcpy(return_body + 7, body, body_len);
     return_body[7 + body_len] = ';';
     int status = kiln_dyn_make_closure(host, scope, NULL, 0, params, params_len,
-                                       return_body, body_len + 8, receiver, asynchronous,
-                                       1, 0, out, thrown);
+                                       return_body, body_len + 8, source_start,
+                                       (size_t)(source_end - source_start), receiver,
+                                       asynchronous, 1, 0, out, thrown);
     free(return_body);
     (void)depth;
     return status;
@@ -6240,6 +6308,14 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     free(body_source);
     if (validation_status != KILN_C99_OK) return validation_status;
 
+    kiln_value reflected_source;
+    int source_status = kiln_dyn_function_constructor_source(upvalues[0], upvalues[1],
+                                                             &reflected_source);
+    if (source_status != KILN_C99_OK) return source_status;
+    kiln_c99_gc_keep_alive(&upvalues[0]);
+    kiln_c99_gc_keep_alive(&upvalues[1]);
+    kiln_c99_gc_keep_alive(&reflected_source);
+
     int status = kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
                                        NULL, "", 0,
                                        "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
@@ -6249,7 +6325,12 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     kiln_c99_gc_keep_alive(val_upvalues);
     kiln_c99_gc_keep_alive(&upvalues[0]);
     kiln_c99_gc_keep_alive(&upvalues[1]);
-    if (status == KILN_C99_OK) kiln_c99_heap_store_value(kiln_c99_closure_of(*result), &kiln_c99_closure_of(*result)->source_value, upvalues[1]);
+    kiln_c99_gc_keep_alive(&reflected_source);
+    if (status == KILN_C99_OK) {
+        kiln_c99_heap_store_value(kiln_c99_closure_of(*result),
+                                  &kiln_c99_closure_of(*result)->source_value,
+                                  reflected_source);
+    }
     return status;
 }
 /* Dynamic import option validation is shared by every generated importer. Keeping it in the

@@ -25,6 +25,31 @@ const nestedFunctionSurrogate = Function(
 const nestedFunctionSource = Function(
   'return function(){ return "' + rawLoneSurrogate + '"; }',
 )().toString();
+const reflectedDynamicConstructor = Function('x', 'return "' + rawLoneSurrogate + '";');
+const reflectedDynamicExpression = Function(
+  'return function(a){return "' + rawLoneSurrogate + '";}',
+)();
+const reflectedDynamicArrow = Function(
+  'return (a)=>"' + rawLoneSurrogate + '";',
+)();
+const reflectedDynamicMethod = Function(
+  'return ({m(a){return "' + rawLoneSurrogate + '";}}).m',
+)();
+const dynamicReflection = [
+  reflectedDynamicConstructor.toString(),
+  reflectedDynamicExpression.toString(),
+  reflectedDynamicArrow.toString(),
+  reflectedDynamicMethod.toString(),
+];
+const expectedDynamicReflection = [
+  'function anonymous(x\n) {\nreturn "' + rawLoneSurrogate + '";\n}',
+  'function(a){return "' + rawLoneSurrogate + '";}',
+  '(a)=>"' + rawLoneSurrogate + '"',
+  'm(a){return "' + rawLoneSurrogate + '";}',
+];
+if (dynamicReflection.some((source, index) => source !== expectedDynamicReflection[index])) {
+  throw new Error('dynamic Function#toString must preserve complete source and UTF-16 units');
+}
 const methodSurrogate = Function(
   'return ({ method(){ return "' + rawLoneSurrogate + '"; } }).method()',
 )();
@@ -61,6 +86,7 @@ console.log(JSON.stringify({
   rawSourceRegexp: [units(rawSourceRegexp.source), rawSourceRegexp.test(rawSourceValue)],
   nestedFunctionSurrogate: units(nestedFunctionSurrogate),
   nestedFunctionSource: units(nestedFunctionSource),
+  dynamicReflection: dynamicReflection.map(units),
   methodSurrogate: units(methodSurrogate),
   arrowSurrogate: units(arrowSurrogate),
   escapedSeparators,
