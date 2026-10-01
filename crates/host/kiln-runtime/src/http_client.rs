@@ -553,27 +553,27 @@ async fn exchange(
         .map_err(|error| Failure::Error(error.to_string()))?;
     if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
         let on_upgrade = hyper::upgrade::on(&mut response);
-        let (parts, _body) = response.into_parts();
-        let reason = parts.status.canonical_reason().unwrap_or_default();
+        let (response_parts, _body) = response.into_parts();
+        let reason = response_parts.status.canonical_reason().unwrap_or_default();
         let upgraded_stream = on_upgrade
             .await
             .map_err(|error| Failure::Error(error.to_string()))?;
-        let parts = upgraded_stream
+        let upgraded_parts = upgraded_stream
             .downcast::<TokioIo<Box<dyn crate::HostIo>>>()
             .map_err(|_| Failure::Error("HTTP upgrade returned an unexpected transport".into()))?;
-        let stream = parts.io.into_inner();
-        let head = parts.read_buf.to_vec();
+        let stream = upgraded_parts.io.into_inner();
+        let head = upgraded_parts.read_buf.to_vec();
         let mut scratch = shared.header_scratch.borrow_mut();
-        flatten_header_map(&parts.headers, &mut scratch);
+        flatten_header_map(&response_parts.headers, &mut scratch);
         upgraded.borrow_mut().insert(
             shared.dispatcher.resource,
             UpgradeTransport {
-                transport: HostTransport(Box::new(stream)),
+                transport: HostTransport(stream),
                 head: head.clone(),
             },
         );
         let event = HttpEvent {
-            status: parts.status.as_u16(),
+            status: response_parts.status.as_u16(),
             reason: reason.as_bytes(),
             headers: &scratch,
             data: &head,

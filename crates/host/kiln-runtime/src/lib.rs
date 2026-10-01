@@ -28,7 +28,9 @@ pub mod http_engine;
 #[cfg(feature = "http")]
 pub use http_client::HttpClientEngine;
 #[cfg(feature = "http")]
-pub use http_engine::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
+pub use http_engine::{
+    HostIo, HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine,
+};
 /// Hyper-free transport seam used when the `http` feature is off: the boxed Tokio
 /// socket a host hands over has no Hyper in it, so it lives here rather than in the
 /// gated engine.
@@ -232,14 +234,6 @@ pub trait ActiveHttpRuntime {
     /// Stop a connection of either role. False once no engine owns it, which is not an error
     /// for a caller that heard `Closed` a moment ago.
     fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool;
-    fn write_upgrade(
-        &mut self,
-        _resource: ResourceId,
-        _id: u64,
-        _data: &[u8],
-    ) -> Option<node_stream::WriteDisposition> {
-        None
-    }
     /// Bytes written by a server's `upgrade` listener before Hyper has transferred the stream.
     /// The runtime parses one raw HTTP response head and hands any trailing bytes to the socket
     /// after the 101 response commits.
