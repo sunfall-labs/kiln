@@ -3690,8 +3690,10 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             if (status != KILN_C99_OK || *returned) {
                 /* The abrupt completion belongs to this block's caller, but the caller's
                  * lexer must still resume after the whole block (not inside its tail). */
-                while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF)
+                while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+                    if (lex->curr.kind == KILN_DYN_KW_ELSE) kiln_dyn_lexer_next(lex);
                     kiln_dyn_skip_statement(lex);
+                }
                 if (lex->curr.kind == KILN_DYN_RBRACE) kiln_dyn_lexer_next(lex);
                 return status;
             }
