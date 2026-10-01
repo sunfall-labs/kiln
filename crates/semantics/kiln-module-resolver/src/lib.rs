@@ -869,10 +869,11 @@ impl NodePackageResolver {
                             path: target.clone(),
                             kind: error.kind(),
                         })?;
+                    let package_json = nearest_package_json(&canonical_target);
                     return validate_node_target(
                         canonical_target,
                         ResolutionKind::Relative,
-                        nearest_package_json(&target),
+                        package_json,
                         self.project_root(),
                     );
                 }
@@ -1120,15 +1121,8 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
     ) {
         return node_module_format(path, None);
     }
-    let mut directory = path.parent();
-    while let Some(current) = directory {
-        let manifest = current.join("package.json");
-        if manifest.is_file() {
-            return node_module_format(path, Some(&manifest));
-        }
-        directory = current.parent();
-    }
-    node_module_format(path, None)
+    let manifest = nearest_package_json(path);
+    node_module_format(path, manifest.as_deref())
 }
 
 /// Whether Node leaves this path's module format to syntax detection.
@@ -2477,6 +2471,40 @@ mod tests {
                 Err(ResolveError::InvalidSpecifier { .. })
             ));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoded_esm_symlink_uses_canonical_target_package_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        let importer = project.write("main.mjs", "");
+        project.write("provider/package.json", r#"{"type":"commonjs"}"#);
+        let target = project.write("provider/real.js", "module.exports = {};\n");
+        let alias = project.root.join("entry #%?.js");
+        symlink(&target, &alias).expect("create encoded-path alias");
+
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(
+                "./entry%20%23%25%3F.js",
+                &importer,
+                NodeRequestKind::Import,
+            )
+            .expect("resolve URL-escaped symlink");
+
+        assert_eq!(metadata.module.path, fs::canonicalize(target).unwrap());
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("provider/package.json"))
+        );
+        assert_eq!(
+            node_module_format_for_path(&metadata.module.path).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
     }
 
     #[test]
