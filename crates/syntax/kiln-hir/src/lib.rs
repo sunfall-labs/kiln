@@ -45,6 +45,62 @@ pub struct Diagnostic {
     pub span: Option<Span>,
 }
 
+/// Lossless source text retained for parser transports whose UTF-8 spelling differs from the
+/// original JavaScript UTF-16 source (for example, a lone surrogate transported as `\\uD800`).
+///
+/// The origin is shared by the HIR module, compiled program, and nested function metadata. The
+/// offset map translates parser byte spans back to UTF-16 unit boundaries without storing a
+/// separate source copy for every function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrigin {
+    pub units: StringUnits,
+    /// One entry per parser-source byte boundary, mapping to an original UTF-16 unit offset.
+    pub byte_to_unit: Arc<[u32]>,
+}
+
+impl SourceOrigin {
+    /// Build an origin from the parser transport and its byte-boundary map.
+    ///
+    /// Returns `None` for a malformed map or an offset that cannot be represented by parser
+    /// spans. Those conditions indicate an invalid transport, so callers should omit the origin
+    /// rather than retain a map that could produce the wrong function source.
+    pub fn from_parser_transport(units: &[u16], byte_to_unit: &[usize]) -> Option<Arc<Self>> {
+        if byte_to_unit.is_empty()
+            || byte_to_unit.first() != Some(&0)
+            || byte_to_unit.last() != Some(&units.len())
+            || byte_to_unit.windows(2).any(|pair| pair[0] > pair[1])
+            || byte_to_unit.iter().any(|&offset| offset > units.len())
+        {
+            return None;
+        }
+        let byte_to_unit = byte_to_unit
+            .iter()
+            .map(|&offset| u32::try_from(offset).ok())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Arc::new(Self {
+            units: StringUnits::from_units(units),
+            byte_to_unit: byte_to_unit.into(),
+        }))
+    }
+
+    /// Return the original source units covered by a parser byte span.
+    pub fn slice_bytes(&self, start: u32, end: u32) -> Option<StringUnits> {
+        let start = *self.byte_to_unit.get(start as usize)? as usize;
+        let end = *self.byte_to_unit.get(end as usize)? as usize;
+        if start > end || end > self.units.len() {
+            return None;
+        }
+        Some(StringUnits::from_units(
+            &self
+                .units
+                .units()
+                .skip(start)
+                .take(end - start)
+                .collect::<Vec<_>>(),
+        ))
+    }
+}
+
 /// Owned module HIR shared by parser adapters, incremental queries, and execution backends.
 //
 // `items` preserves cheap module-structure information while `body` contains the TypeScript-
@@ -67,6 +123,8 @@ pub struct Module {
     /// it. One buffer per module and a span per function is the same information at a fraction
     /// of the size.
     pub source: Arc<str>,
+    /// Exact UTF-16 origin when `source` is a parser-safe transport spelling.
+    pub source_origin: Option<Arc<SourceOrigin>>,
     pub source_kind: SourceKind,
     pub source_goal: SourceGoal,
     /// The body opened with a `"use strict"` directive prologue.
@@ -1258,6 +1316,7 @@ mod tests {
         let module = Module {
             module_id: "".into(),
             source: "".into(),
+            source_origin: None,
             strict: false,
             source_kind: SourceKind::TypeScript,
             source_goal: SourceGoal::Module,

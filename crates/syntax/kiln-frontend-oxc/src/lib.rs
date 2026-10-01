@@ -18,7 +18,7 @@ use kiln_hir::{
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
-    RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
+    RequestedModule, SourceGoal, SourceKind, SourceOrigin, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, StringUnits, TypeAnnotation as HirTypeAnnotation,
     UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
     VariableKind as HirVariableKind,
@@ -2135,6 +2135,9 @@ fn lower_parsed_in_context(
         module_id: Arc::from(path.unwrap_or_default()),
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
+        source_origin: source_units.and_then(|(units, map)| {
+            SourceOrigin::from_parser_transport(units, map)
+        }),
         source_kind: source_kind(source_type),
         source_goal: if source_type.is_module() {
             SourceGoal::Module
@@ -6398,6 +6401,11 @@ mod tests {
         .concat();
         let module = parse_eval_units("dynamic.js", &StringUnits::from_units(&units), &EvalSyntax::default());
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let origin = module.source_origin.as_ref().expect("dynamic source origin");
+        assert_eq!(
+            origin.slice_bytes(0, module.source.len() as u32),
+            Some(StringUnits::from_units(&units))
+        );
 
         let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
             panic!("expected literal declaration");
