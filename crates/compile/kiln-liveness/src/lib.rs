@@ -158,6 +158,15 @@ fn demand_namespace_members(
     for name in members {
         match graph.resolved_export(namespace, name) {
             Some(ResolvedExport::Local { module, local_slot }) => {
+                mark_reexport_import_live(
+                    graph,
+                    namespace,
+                    name,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                );
                 let newly_live = live.insert(module.clone());
                 let newly_demanded = live_export_slots
                     .entry(module.clone())
@@ -178,7 +187,15 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::Namespace { module }) => {
-                mark_namespace_reexport_import_live(graph, namespace, name, live_imports);
+                mark_reexport_import_live(
+                    graph,
+                    namespace,
+                    name,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                );
                 let newly_live = live.insert(module.clone());
                 let newly_demanded = namespace_demands.insert(module.clone());
                 if newly_live || newly_demanded {
@@ -211,15 +228,18 @@ fn demand_namespace_members(
     Ok(())
 }
 
-/// A namespace re-export is represented in the resolved export table by its target module, while
-/// the executable graph still needs the import slot behind the export wired to that namespace
-/// value. The slot may be a namespace import directly or a named re-export that resolves through
-/// another barrel, so follow the export's local binding rather than matching the final provider.
-fn mark_namespace_reexport_import_live(
+/// A re-export is represented in the resolved export table by its final provider, while the
+/// executable graph still needs the import slot behind the re-export wired into its local binding.
+/// This applies to namespace and named re-exports, including chains of barrels. Follow the
+/// export's local binding rather than matching the final provider.
+fn mark_reexport_import_live(
     graph: &ModuleGraph,
     owner: &Path,
     exported_name: &str,
+    live: &mut BTreeSet<PathBuf>,
     live_imports: &mut BTreeSet<(PathBuf, usize)>,
+    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
+    queue: &mut VecDeque<PathBuf>,
 ) {
     let Some(node) = graph.module(owner) else {
         return;
@@ -239,6 +259,14 @@ fn mark_namespace_reexport_import_live(
         return;
     };
     live_imports.insert((node.path.clone(), import_index));
+    let newly_live = live.insert(node.path.clone());
+    let newly_demanded = live_export_slots
+        .entry(node.path.clone())
+        .or_default()
+        .insert(export.local_slot);
+    if newly_live || newly_demanded {
+        queue.push_back(node.path.clone());
+    }
 }
 
 /// Select the source bodies an executable can observe after applying package side-effect facts.
@@ -411,6 +439,15 @@ pub fn select_executable_modules<'a>(
             }
             match graph.resolved_export(&dependency.target, &import.imported) {
                 Some(ResolvedExport::Local { module, local_slot }) => {
+                    mark_reexport_import_live(
+                        graph,
+                        &dependency.target,
+                        &import.imported,
+                        &mut live,
+                        &mut live_imports,
+                        &mut live_export_slots,
+                        &mut queue,
+                    );
                     let newly_demanded = live_export_slots
                         .entry(module.clone())
                         .or_default()
@@ -431,6 +468,15 @@ pub fn select_executable_modules<'a>(
                     }
                 }
                 Some(ResolvedExport::Namespace { module }) => {
+                    mark_reexport_import_live(
+                        graph,
+                        &dependency.target,
+                        &import.imported,
+                        &mut live,
+                        &mut live_imports,
+                        &mut live_export_slots,
+                        &mut queue,
+                    );
                     let static_members = namespace_member_cache
                         .entry((node.path.clone(), import.local_slot))
                         .or_insert_with(|| {
@@ -487,6 +533,15 @@ pub fn select_executable_modules<'a>(
             for name in names {
                 match graph.resolved_export(&path, &name) {
                     Some(ResolvedExport::Local { module, local_slot }) => {
+                        mark_reexport_import_live(
+                            graph,
+                            &path,
+                            &name,
+                            &mut live,
+                            &mut live_imports,
+                            &mut live_export_slots,
+                            &mut queue,
+                        );
                         let newly_demanded = live_export_slots
                             .entry(module.clone())
                             .or_default()
@@ -511,11 +566,14 @@ pub fn select_executable_modules<'a>(
                         // namespace. Marking only the provider module live leaves its export
                         // slots empty, so downstream namespace objects can contain missing
                         // members (for example htmlparser2's `DomUtils.getElementById`).
-                        mark_namespace_reexport_import_live(
+                        mark_reexport_import_live(
                             graph,
                             &path,
                             &name,
+                            &mut live,
                             &mut live_imports,
+                            &mut live_export_slots,
+                            &mut queue,
                         );
                         let newly_live = live.insert(module.clone());
                         let newly_demanded = namespace_demands.insert(module.clone());

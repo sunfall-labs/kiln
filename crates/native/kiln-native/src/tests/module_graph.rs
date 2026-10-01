@@ -4535,6 +4535,86 @@ fn executable_graph_namespace_reexport_demand_keeps_provider_exports() {
 }
 
 #[test]
+fn executable_graph_named_reexport_demand_keeps_backing_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-named-reexport-import-demand");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write package metadata");
+    let provider = project.path.join("provider.js");
+    fs::write(
+        &provider,
+        "export function used() { return 42; } export function otherwiseUnused() { return 7; }",
+    )
+    .expect("write named export provider");
+    let first_barrel = project.path.join("first.js");
+    fs::write(
+        &first_barrel,
+        "export { used as first } from './provider.js';",
+    )
+    .expect("write first named re-export");
+    let second_barrel = project.path.join("second.js");
+    fs::write(
+        &second_barrel,
+        "export { first as selected } from './first.js';",
+    )
+    .expect("write second named re-export");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { selected } from './second.js'; console.log(selected());",
+    )
+    .expect("write named re-export consumer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+    for barrel in [first_barrel, second_barrel] {
+        let barrel = fs::canonicalize(barrel).expect("canonical barrel");
+        let barrel_node = graph.module(&barrel).expect("barrel node");
+        let backing_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
+            .expect("re-export has a backing import");
+        assert!(
+            selected.live_imports.contains(&(barrel, backing_import)),
+            "named re-export backing import must be linked"
+        );
+        assert!(
+            selected.modules.iter().any(|module| module.path == barrel),
+            "named re-export owner must stay in the selected graph"
+        );
+    }
+    let provider = fs::canonicalize(provider).expect("canonical provider");
+    let provider_node = graph.module(&provider).expect("provider node");
+    let demanded = selected
+        .live_export_slots
+        .get(&provider)
+        .expect("named re-export demands provider export");
+    let used = provider_node
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "used")
+        .expect("used export");
+    assert!(demanded.contains(&used.local_slot));
+}
+
+#[test]
 fn release_graph_selects_the_production_arm_of_an_exact_commonjs_dispatcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
