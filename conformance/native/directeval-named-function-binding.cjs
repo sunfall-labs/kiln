@@ -28,10 +28,10 @@ console.log(captureInheritedNames(
   '(function () { return [constructor, toString, valueOf, hasOwnProperty, __proto__].join("|"); })',
 )());
 
-function namedConstructor() {
+function namedConstructor(source) {
   let constructor = 'outer-constructor';
-  const inner = eval('(function constructor() { constructor = 1; return constructor; })');
+  const inner = eval(source);
   return [inner, inner(), constructor];
 }
-const named = namedConstructor();
+const named = namedConstructor('(function constructor() { constructor = 1; return constructor; })');
 console.log(named[0] === named[1], named[2]);
