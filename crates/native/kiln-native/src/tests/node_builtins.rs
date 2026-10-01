@@ -201,14 +201,16 @@ console.log(typeof path.basename);"#,
         r#"import { createRequire } from "node:module";
 const fromUrl = createRequire(new URL(import.meta.url));
 const fromFilename = createRequire(import.meta.filename);
-export const identity = [import.meta.url, fromUrl('./dep.cjs').ok, fromFilename('./dep.cjs').ok].join('|');"#,
+export function importIdentity() {
+  return [import.meta.url, fromUrl('./dep.cjs').loads, fromFilename('./dep.cjs').loads].join('|');
+}"#,
     )
     .expect("write special-character importer");
     let entry_source = fs::read_to_string(&entry).expect("read entry source");
     fs::write(
         &entry,
         format!(
-            "import {{ identity }} from './identity%20%23%25%3F%20%C3%BC.mjs';\n{entry_source}\nconsole.log(identity);\n"
+            "import {{ importIdentity }} from './identity%20%23%25%3F%20%C3%BC.mjs';\n{entry_source}\nconsole.log(importIdentity());\n"
         ),
     )
     .expect("import special-character module");
@@ -256,7 +258,7 @@ module.exports = { loads: globalThis.__loads };"#,
         .expect("special-character importer becomes a file URL")
         .to_string();
     let expected_tail =
-        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|true|true\n");
+        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|1|1\n");
     let expected_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
         run.stdout,
