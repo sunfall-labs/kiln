@@ -324,34 +324,61 @@ declare module "kiln:gui" {
     showMessage(opts?: any): Promise<number>;
   };
   export function getActiveDriver(): { name: string; [key: string]: any };
+  export function runLoop(win?: Window, intervalMs?: number): Promise<void>;
+  export function runApp(root: any): Promise<void>;
+  export function jsx(type: any, props: any, key?: any): any;
+  export function jsxs(type: any, props: any, key?: any): any;
+  export function jsxDEV(type: any, props: any, key?: any, isStatic?: boolean, source?: any, self?: any): any;
 }
 
 declare namespace JSX {
   type Element = import("kiln:gui").Node;
-  interface IntrinsicElements {
-      window: import("kiln:gui").WindowOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      vstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      hstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      card: import("kiln:gui").CardOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      box: import("kiln:gui").BoxOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      grid: import("kiln:gui").GridOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      divider: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
-      separator: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
-      button: import("kiln:gui").ButtonOptions & { style?: import("kiln:gui").BoxStyle | any };
-      text: import("kiln:gui").TextOptions & { value?: string; style?: import("kiln:gui").BoxStyle | any; children?: any };
-      textinput: import("kiln:gui").TextInputOptions & { style?: import("kiln:gui").BoxStyle | any };
-      slider: import("kiln:gui").SliderOptions & { style?: import("kiln:gui").BoxStyle | any };
-      toggle: import("kiln:gui").ToggleOptions & { style?: import("kiln:gui").BoxStyle | any };
-      spacer: { style?: import("kiln:gui").BoxStyle | any };
-      scroll: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      scrollview: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
-      segmented: import("kiln:gui").SegmentedControlOptions & { style?: import("kiln:gui").BoxStyle | any };
-      progressbar: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
-      progress: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
-      select: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
-      dropdown: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
-      checkbox: import("kiln:gui").CheckboxOptions & { style?: import("kiln:gui").BoxStyle | any };
-      icon: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
-      image: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
-    }
+  interface ElementChildrenAttribute {
+    children: {};
   }
+  interface IntrinsicElements {
+    window: import("kiln:gui").WindowOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    vstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    hstack: import("kiln:gui").StackOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    card: import("kiln:gui").CardOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    box: import("kiln:gui").BoxOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    grid: import("kiln:gui").GridOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    divider: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
+    separator: import("kiln:gui").DividerOptions & { style?: import("kiln:gui").BoxStyle | any };
+    button: import("kiln:gui").ButtonOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    text: import("kiln:gui").TextOptions & { value?: string; style?: import("kiln:gui").BoxStyle | any; children?: any };
+    textinput: import("kiln:gui").TextInputOptions & { style?: import("kiln:gui").BoxStyle | any };
+    slider: import("kiln:gui").SliderOptions & { style?: import("kiln:gui").BoxStyle | any };
+    toggle: import("kiln:gui").ToggleOptions & { style?: import("kiln:gui").BoxStyle | any };
+    spacer: { style?: import("kiln:gui").BoxStyle | any };
+    scroll: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    scrollview: import("kiln:gui").ScrollViewOptions & { style?: import("kiln:gui").BoxStyle | any; children?: any };
+    segmented: import("kiln:gui").SegmentedControlOptions & { style?: import("kiln:gui").BoxStyle | any };
+    progressbar: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
+    progress: import("kiln:gui").ProgressBarOptions & { style?: import("kiln:gui").BoxStyle | any };
+    select: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
+    dropdown: import("kiln:gui").SelectOptions & { style?: import("kiln:gui").BoxStyle | any };
+    checkbox: import("kiln:gui").CheckboxOptions & { style?: import("kiln:gui").BoxStyle | any };
+    icon: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
+    image: import("kiln:gui").IconOptions & { style?: import("kiln:gui").BoxStyle | any };
+  }
+}
+
+declare module "kiln/jsx-runtime" {
+  export { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  import { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  export default { jsx, jsxs, jsxDEV, Fragment };
+}
+
+declare module "kiln:jsx-runtime" {
+  export { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  import { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  export default { jsx, jsxs, jsxDEV, Fragment };
+}
+
+declare module "kiln:gui/jsx-runtime" {
+  export { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  import { jsx, jsxs, jsxDEV, Fragment } from "kiln:gui";
+  export default { jsx, jsxs, jsxDEV, Fragment };
+}
+

@@ -675,7 +675,9 @@ export class AppKitDriver implements PlatformDriver {
 
     try {
       let text = (node as any).text || "";
-      if (node.tag === "button") {
+      if (node.tag === "box" || node.tag === "grid") {
+        text = JSON.stringify(node.properties);
+      } else if (node.tag === "button") {
         text = String(node.getProperty("label") || text);
       } else if (node.tag === "text") {
         text = String(node.getProperty("text") || text);
@@ -1533,15 +1535,38 @@ export class Window extends Node {
     this.setProperty("visible", val);
   }
 
+  get style(): any {
+    return this.properties.style;
+  }
+  set style(val: any) {
+    this.setProperty("style", val);
+  }
+
+  private _content: Node | null = null;
+
   get content(): Node | null {
-    return this.firstChild;
+    if (this._content) return this._content;
+    if (this.children.length === 0) return null;
+    if (this.children.length === 1 && !this.properties.style) {
+      return this.children[0];
+    }
+    const root = new VStack({
+      spacing: (this.properties.style && this.properties.style.gap !== undefined) ? this.properties.style.gap : 14,
+    });
+    const childList = [...this.children];
+    for (let i = 0; i < childList.length; i++) {
+      root.appendChild(childList[i]);
+    }
+    this._content = root;
+    return root;
   }
   set content(node: Node | null) {
+    this._content = node;
     while (this.children.length > 0) {
       this.removeChild(this.children[0]);
     }
     if (node) {
-      this.appendChild(node);
+      super.appendChild(node);
       const driver = getActiveDriver();
       const winHandle = driver.getHandle(this.id);
       if (winHandle) {
@@ -1551,6 +1576,14 @@ export class Window extends Node {
         }
       }
     }
+  }
+
+  override appendChild(child: Node): void {
+    if (this._content && this._content !== child) {
+      this._content.appendChild(child);
+      return;
+    }
+    super.appendChild(child);
   }
 
   show(): void {
@@ -1699,6 +1732,8 @@ export class HStack extends Node {
 }
 
 export class Card extends Node {
+  private _inner: VStack | null = null;
+
   constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
     super("card");
     if (options) {
@@ -1707,10 +1742,19 @@ export class Card extends Node {
       if (options.child) {
         this.appendChild(options.child);
       } else if (options.children) {
-        const inner = new VStack({ spacing: 10, children: options.children });
-        this.appendChild(inner);
+        for (let i = 0; i < options.children.length; i++) {
+          this.appendChild(options.children[i]);
+        }
       }
     }
+  }
+
+  override appendChild(child: Node): void {
+    if (!this._inner) {
+      this._inner = new VStack({ spacing: 6 });
+      super.appendChild(this._inner);
+    }
+    this._inner.appendChild(child);
   }
 }
 
@@ -2168,8 +2212,11 @@ export const widgetConstructors: Record<string, new (...args: any[]) => Node> = 
 export const universalDriver = {
   createElement: (tag: string): Node => {
     const lower = tag.toLowerCase();
-    const Ctor = widgetConstructors[lower] || Node;
-    return new Ctor(lower);
+    const Ctor = widgetConstructors[lower];
+    if (Ctor) {
+      return new Ctor();
+    }
+    return new Node(lower);
   },
   createTextNode: (value: string): Node => {
     return new Text(value);
@@ -2233,15 +2280,33 @@ export function createRenderer<T extends Node = Node>(config?: any): {
 
 const defaultRenderer = createRenderer();
 
+function appendChildRecursive(parent: Node, child: any): void {
+  if (child === null || child === undefined || child === false || child === true) return;
+  if (typeof child === "string" || typeof child === "number") {
+    parent.appendChild(new Text(String(child)));
+  } else if (typeof child === "function") {
+    parent.appendChild(new Text(child));
+  } else if (child instanceof Node) {
+    parent.appendChild(child);
+  } else if (Array.isArray(child)) {
+    for (let i = 0; i < child.length; i++) {
+      appendChildRecursive(parent, child[i]);
+    }
+  }
+}
+
 export function createElement(tag: any, props?: any, ...children: any[]): Node {
   let node: Node;
-  if (typeof tag === "function") {
-    const isClass = tag.prototype && (tag.prototype instanceof Node || tag.prototype.constructor === Node);
-    if (isClass) {
-      node = new tag(props);
-    } else {
-      return tag({ ...(props || {}), children });
-    }
+  const isClass = typeof tag === "function" && tag.prototype && (tag.prototype instanceof Node || tag.prototype.constructor === Node);
+
+  const allChildren = children.length > 0 ? children : (props && props.children ? (Array.isArray(props.children) ? props.children : [props.children]) : []);
+
+  if (isClass) {
+    node = new tag(props);
+  } else if (typeof tag === "function") {
+    const combinedProps = { ...(props || {}) };
+    if (allChildren.length > 0) combinedProps.children = allChildren.length === 1 ? allChildren[0] : allChildren;
+    return tag(combinedProps);
   } else if (typeof tag === "string") {
     node = defaultRenderer.createElement(tag);
   } else {
@@ -2250,31 +2315,37 @@ export function createElement(tag: any, props?: any, ...children: any[]): Node {
 
   if (props) {
     for (const key of Object.keys(props)) {
-      if (key !== "children") {
+      if (key !== "children" && key !== "key" && key !== "ref") {
         node.setProperty(key, props[key]);
+      }
+    }
+    if (props.ref) {
+      if (typeof props.ref === "function") {
+        props.ref(node);
+      } else if (typeof props.ref === "object" && props.ref !== null) {
+        props.ref.current = node;
       }
     }
   }
 
-  const allChildren = children.length > 0 ? children : (props && props.children ? (Array.isArray(props.children) ? props.children : [props.children]) : []);
-  for (let i = 0; i < allChildren.length; i++) {
-    const child = allChildren[i];
-    if (child !== null && child !== undefined && child !== false) {
-      if (typeof child === "string" || typeof child === "number") {
-        node.appendChild(new Text(String(child)));
-      } else if (child instanceof Node) {
-        node.appendChild(child);
-      } else if (Array.isArray(child)) {
-        for (let j = 0; j < child.length; j++) {
-          const c = child[j];
-          if (c instanceof Node) {
-            node.appendChild(c);
-          } else if (typeof c === "string" || typeof c === "number") {
-            node.appendChild(new Text(String(c)));
-          }
-        }
-      }
+  if (node instanceof Text && allChildren.length > 0) {
+    const first = allChildren[0];
+    if (typeof first === "string" || typeof first === "number" || typeof first === "function") {
+      node.text = first;
+      return node;
     }
+  }
+
+  if (node instanceof Button && !node.label && allChildren.length > 0) {
+    const first = allChildren[0];
+    if (typeof first === "string" || typeof first === "function") {
+      node.label = first;
+      return node;
+    }
+  }
+
+  for (let i = 0; i < allChildren.length; i++) {
+    appendChildRecursive(node, allChildren[i]);
   }
 
   return node;
@@ -2282,6 +2353,16 @@ export function createElement(tag: any, props?: any, ...children: any[]): Node {
 
 export const h = createElement;
 export const Fragment = (props: any) => props?.children;
+
+export function jsx(type: any, props: any, key?: any): any {
+  if (key !== undefined) {
+    props = { ...(props || {}), key };
+  }
+  return createElement(type, props);
+}
+
+export const jsxs = jsx;
+export const jsxDEV = jsx;
 
 
 // OS Utility Bridges (ADR 0074 §3)
@@ -3025,6 +3106,20 @@ export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
   });
 }
 
+export function runApp(root: Node | (() => Node)): Promise<void> {
+  const win = typeof root === "function" ? (root as any)() : root;
+  if (win && typeof (win as any).show === "function") {
+    (win as any).show();
+  }
+  if (typeof process !== "undefined" && process.env && process.env.KILN_SNAPSHOT && win && typeof (win as any).snapshot === "function") {
+    setTimeout(() => {
+      (win as any).snapshot(process.env.KILN_SNAPSHOT!);
+      process.exit(0);
+    }, 400);
+  }
+  return runLoop(win as any);
+}
+
 export default {
   Node,
   Window,
@@ -3055,6 +3150,9 @@ export default {
   createElement,
   h,
   Fragment,
+  jsx,
+  jsxs,
+  jsxDEV,
   app,
   globalShortcut,
   gtk,
@@ -3073,6 +3171,7 @@ export default {
   isPending,
   flush,
   latest,
+  runApp,
   runLoop,
   getActiveDriver,
   universalDriver,

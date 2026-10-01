@@ -109,6 +109,7 @@ pub enum NodeBuiltin {
     Constants,
     V8,
     Vm,
+    GuiJsxRuntime,
 }
 
 impl NodeBuiltin {
@@ -119,6 +120,7 @@ impl NodeBuiltin {
         Self::ActorsCore,
         Self::ActorsWorker,
         Self::Gui,
+        Self::GuiJsxRuntime,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -172,6 +174,12 @@ impl NodeBuiltin {
             "kiln:actors/core" => Self::ActorsCore,
             "kiln:actors/worker" => Self::ActorsWorker,
             "kiln:gui" => Self::Gui,
+            "kiln:jsx-runtime"
+            | "kiln:jsx-dev-runtime"
+            | "kiln:gui/jsx-runtime"
+            | "kiln:gui/jsx-dev-runtime"
+            | "kiln/jsx-runtime"
+            | "kiln/jsx-dev-runtime" => Self::GuiJsxRuntime,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -224,6 +232,7 @@ impl NodeBuiltin {
             Self::ActorsCore => "kiln:actors/core",
             Self::ActorsWorker => "kiln:actors/worker",
             Self::Gui => "kiln:gui",
+            Self::GuiJsxRuntime => "kiln:jsx-runtime",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -646,7 +655,15 @@ impl ModuleResolver {
         }
         if matches!(
             specifier,
-            "kiln:shared" | "kiln:actors" | "kiln:actors/core" | "kiln:actors/worker"
+            "kiln:shared"
+                | "kiln:actors"
+                | "kiln:actors/core"
+                | "kiln:actors/worker"
+                | "kiln:gui"
+                | "kiln:jsx-runtime"
+                | "kiln:gui/jsx-runtime"
+                | "kiln/jsx-runtime"
+                | "kiln/jsx-dev-runtime"
         ) {
             let builtin = NodeBuiltin::parse(specifier).expect("Kiln builtin");
             return Ok(ResolvedModule::new(
@@ -1218,7 +1235,7 @@ impl PinnedPackageResolver {
                 ResolutionKind::Builtin,
             ));
         }
-        if (self.node_builtins || specifier.starts_with("kiln:"))
+        if (self.node_builtins || specifier.starts_with("kiln:") || specifier.starts_with("kiln/"))
             && let Some(builtin) = NodeBuiltin::parse(specifier)
         {
             return Ok(ResolvedModule::new(
@@ -1609,6 +1626,8 @@ mod tests {
             let outside = std::env::temp_dir().join(format!("{name}-outside"));
             fs::create_dir_all(&root).expect("create test project");
             fs::create_dir_all(&outside).expect("create outside project");
+            let root = fs::canonicalize(&root).expect("canonical test project");
+            let outside = fs::canonicalize(&outside).expect("canonical outside project");
             Self { root, outside }
         }
 
@@ -2309,7 +2328,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            resolver.resolve("node:tls", &importer),
+            resolver.resolve("node:cluster", &importer),
             Err(ResolveError::InvalidSpecifier {
                 reason: InvalidSpecifierReason::UrlScheme,
                 ..
@@ -2364,6 +2383,11 @@ mod tests {
         assert_eq!(NodeBuiltin::parse("kiln:shared"), Some(NodeBuiltin::Shared));
         assert_eq!(NodeBuiltin::parse("kiln:gui"), Some(NodeBuiltin::Gui));
         assert_eq!(NodeBuiltin::Gui.specifier(), "kiln:gui");
+        assert_eq!(
+            NodeBuiltin::parse("kiln:jsx-runtime"),
+            Some(NodeBuiltin::GuiJsxRuntime)
+        );
+        assert_eq!(NodeBuiltin::GuiJsxRuntime.specifier(), "kiln:jsx-runtime");
         assert_eq!(NodeBuiltin::parse("shared"), None);
         assert_eq!(NodeBuiltin::parse("node:shared"), None);
         assert_eq!(NodeBuiltin::parse("node:kiln:shared"), None);
@@ -2488,7 +2512,7 @@ mod tests {
             Some(NodeBuiltin::Http)
         );
         assert!(matches!(
-            node.resolve("node:tls", &importer),
+            node.resolve("node:cluster", &importer),
             Err(ResolveError::InvalidSpecifier {
                 reason: InvalidSpecifierReason::UrlScheme,
                 ..

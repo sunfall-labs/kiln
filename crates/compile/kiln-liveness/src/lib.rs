@@ -741,7 +741,7 @@ pub fn retained_method_groups(
             | Process | Shared | Tty | Zlib | StringDecoder | QueryString | WorkerThreads
             | PerfHooks | AsyncHooks | ChildProcess | Timers | TimersPromises | Readline
             | ReadlinePromises | Sqlite | Constants | V8 | Vm | Path | Util | UtilTypes
-            | DiagnosticsChannel | Gui | Tls => 0,
+            | DiagnosticsChannel | Gui | GuiJsxRuntime | Tls => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })
@@ -881,6 +881,7 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("kiln-cjs-demand-{stamp}"));
         fs::create_dir_all(&root).expect("create project fixture");
+        let root = fs::canonicalize(&root).expect("canonicalize root");
         let _cleanup = TempProject(root.clone());
         fs::write(root.join("package.json"), r#"{"type":"commonjs"}"#)
             .expect("write package format");
@@ -909,9 +910,11 @@ exports.annotations = function (ast, values) { return values; };
         .expect("write CJS export provider");
 
         let entry = root.join("Schema.js");
-        let graph = kiln_module_graph::ModuleGraph::build(
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = kiln_module_graph::ModuleGraph::build_node(
             &entry,
-            &root,
+            resolver,
             |path: &Path| fs::read_to_string(path),
             OxcFrontend,
         )
@@ -1061,7 +1064,7 @@ pub fn retained_provider_capabilities(
             Some(ProviderCapability::Http)
         }
         Some(NodeBuiltin::Ffi) => Some(ProviderCapability::Ffi),
-        Some(NodeBuiltin::Gui) => Some(ProviderCapability::Gui),
+        Some(NodeBuiltin::Gui | NodeBuiltin::GuiJsxRuntime) => Some(ProviderCapability::Gui),
         _ => None,
     };
 
@@ -1089,7 +1092,9 @@ pub fn retained_provider_capabilities(
                     required.with(ProviderCapability::Http)
                 }
                 NodeBuiltin::Ffi => required.with(ProviderCapability::Ffi),
-                NodeBuiltin::Gui => required.with(ProviderCapability::Gui),
+                NodeBuiltin::Gui | NodeBuiltin::GuiJsxRuntime => {
+                    required.with(ProviderCapability::Gui)
+                }
                 _ => required,
             };
         }

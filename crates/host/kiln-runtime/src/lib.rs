@@ -1637,8 +1637,8 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// callback sees that on its next turn. Expects the executor's context.
     #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
-        let accepted = self.http_server.close(resource, mode)
-            || self.http_client.close(resource, mode);
+        let accepted =
+            self.http_server.close(resource, mode) || self.http_client.close(resource, mode);
         if accepted {
             self.closing_http_resources.insert(resource);
         }
