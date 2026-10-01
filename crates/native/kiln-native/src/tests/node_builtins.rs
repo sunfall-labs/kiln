@@ -202,7 +202,7 @@ console.log(typeof path.basename);"#,
 const fromUrl = createRequire(new URL(import.meta.url));
 const fromFilename = createRequire(import.meta.filename);
 export function importIdentity() {
-  return [import.meta.url, fromUrl('./dep.cjs').loads, fromFilename('./dep.cjs').loads].join('|');
+  return [import.meta.url, fromUrl('./dep-url.cjs').loads, fromFilename('./dep-filename.cjs').loads].join('|');
 }"#,
     )
     .expect("write special-character importer");
@@ -220,6 +220,14 @@ export function importIdentity() {
 module.exports = { loads: globalThis.__loads };"#,
     )
     .expect("write escaped createRequire dependency");
+    for name in ["dep-url.cjs", "dep-filename.cjs"] {
+        fs::write(
+            root.path.join(name),
+            r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
+module.exports = { loads: globalThis.__loads };"#,
+        )
+        .expect("write URL and filename createRequire dependencies");
+    }
     let graph = ModuleGraph::build_node(
         &entry,
         NodeRuntimeResolver::new(&root.path).expect("node resolver"),
@@ -227,6 +235,18 @@ module.exports = { loads: globalThis.__loads };"#,
         OxcFrontend,
     )
     .expect("build escaped createRequire graph");
+    let identity_path = fs::canonicalize(&identity_module).expect("canonical identity importer");
+    for specifier in ["./dep-url.cjs", "./dep-filename.cjs"] {
+        assert!(
+            graph
+                .modules()
+                .flat_map(|node| &node.runtime_dependencies)
+                .any(|dependency| {
+                    dependency.importer == identity_path && dependency.specifier == specifier
+                }),
+            "graph must capture {specifier} relative to import.meta.url/filename"
+        );
+    }
     assert!(
         graph
             .modules()
@@ -239,8 +259,8 @@ module.exports = { loads: globalThis.__loads };"#,
     };
     let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
     let dev_output = root.path.join("program-dev");
-    let run = builder
-        .run_graph(
+    let dev = builder
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: dev_output.clone(),
@@ -250,25 +270,35 @@ module.exports = { loads: globalThis.__loads };"#,
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("native escaped createRequire graph builds and runs");
-    let expected_url = url::Url::from_file_path(&dev_output)
+        .expect("native escaped createRequire graph builds");
+    let run = Command::new(&dev.output)
+        .output_when_launchable()
+        .expect("run native escaped createRequire development graph");
+    assert!(
+        run.status.success(),
+        "dev status={} stdout={} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let expected_url = url::Url::from_file_path(&dev.output)
         .expect("special-character executable path becomes a file URL")
         .to_string();
     let expected_identity_url = url::Url::from_file_path(&identity_module)
         .expect("special-character importer becomes a file URL")
         .to_string();
     let expected_tail =
-        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|1|1\n");
+        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|2|3\n");
     let expected_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
-        run.stdout,
-        expected_stdout.as_bytes(),
-        "stderr={:?}",
-        run.stderr
+        String::from_utf8(run.stdout).expect("dev stdout is UTF-8"),
+        expected_stdout,
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
     );
     let release_output = root.path.join("program-release");
     let release = builder
-        .run_graph(
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: release_output.clone(),
@@ -278,16 +308,26 @@ module.exports = { loads: globalThis.__loads };"#,
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("native release createRequire graph builds and runs");
-    let release_url = url::Url::from_file_path(&release_output)
+        .expect("native release createRequire graph builds");
+    let release_run = Command::new(&release.output)
+        .output_when_launchable()
+        .expect("run native escaped createRequire release graph");
+    assert!(
+        release_run.status.success(),
+        "release status={} stdout={} stderr={}",
+        release_run.status,
+        String::from_utf8_lossy(&release_run.stdout),
+        String::from_utf8_lossy(&release_run.stderr)
+    );
+    let release_url = url::Url::from_file_path(&release.output)
         .expect("release executable path becomes a file URL")
         .to_string();
     let expected_release_stdout = format!("{release_url}\n{expected_tail}");
     assert_eq!(
-        release.stdout,
-        expected_release_stdout.as_bytes(),
-        "release stderr={:?}",
-        release.stderr
+        String::from_utf8(release_run.stdout).expect("release stdout is UTF-8"),
+        expected_release_stdout,
+        "release stderr={}",
+        String::from_utf8_lossy(&release_run.stderr)
     );
 }
 

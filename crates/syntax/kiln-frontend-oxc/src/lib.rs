@@ -542,8 +542,38 @@ fn discover_node_runtime_requests_from_semantic(
             }
             _ => None,
         };
+        // A plausible path argument does not prove this is the Node loader factory. In
+        // particular, arbitrary local functions (or shadowed `createRequire` identifiers) must
+        // not manufacture captured graph loader capabilities.
+        base.as_ref()?;
         let argument = call.arguments.first().and_then(Argument::as_expression)?;
-        if matches!(argument, Expression::StaticMemberExpression(member) if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+        fn is_import_meta_member(expression: &Expression<'_>, property: &str) -> bool {
+            matches!(expression, Expression::StaticMemberExpression(member)
+                if member.property.name == property && matches!(member.object, Expression::ImportMeta(_)))
+        }
+        fn is_current_module_url(
+            expression: &Expression<'_>,
+            scoping: &oxc_semantic::Scoping,
+        ) -> bool {
+            if is_import_meta_member(expression, "url") {
+                return true;
+            }
+            let Expression::NewExpression(new_expression) = expression else {
+                return false;
+            };
+            let Expression::Identifier(callee) = &new_expression.callee else {
+                return false;
+            };
+            callee.name == "URL"
+                && callee.is_global_reference(scoping)
+                && new_expression
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .is_some_and(|argument| is_import_meta_member(argument, "url"))
+        }
+        if is_current_module_url(argument, scoping)
+            || is_import_meta_member(argument, "filename")
             || matches!(argument, Expression::Identifier(identifier) if identifier.name == "__filename" && identifier.is_global_reference(scoping))
         {
             return base;
@@ -5267,6 +5297,42 @@ mod tests {
                 .map(|request| request.specifier)
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn create_require_accepts_url_and_filename_bases_without_shadowed_factories() {
+        let requests = discover_node_runtime_requests(
+            "fixture #.mjs",
+            r#"
+                import { createRequire } from "node:module";
+                const fromUrl = createRequire(new URL(import.meta.url));
+                const fromFilename = createRequire(import.meta.filename);
+                fromUrl("./from-url.cjs");
+                fromFilename("./from-filename.cjs");
+                function shadow(createRequire) {
+                    const fake = createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                const unrelated = value => value;
+                const fakeLoader = unrelated("/virtual/unrelated.cjs");
+                fakeLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./from-filename.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./from-url.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
         );
     }
 
