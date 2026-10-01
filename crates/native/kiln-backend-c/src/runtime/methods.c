@@ -150,7 +150,7 @@ int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
     require->resolve = resolve;
-    require->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(require, &require->properties, kiln_c99_undefined());
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
     kiln_c99_heap_store_pointer(require, &require->root_context, root_context);

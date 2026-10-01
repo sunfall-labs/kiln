@@ -95,7 +95,7 @@ static int kiln_c99_new_primitive_wrapper(kiln_value *out, kiln_value primitive)
     /* Wrapper-owned descriptors are exotic: making this one a dictionary lets the ordinary
      * storage helpers carry their exact attributes without a wrapper-specific shape family. */
     object->shape = NULL;
-    object->slots = NULL;
+    kiln_c99_heap_store_pointer(object, &object->slots, NULL);
     object->slot_capacity = 0;
     object->primitive_wrapper_kind = kind;
     kiln_c99_heap_store_value(object, &object->boxed_primitive, primitive);

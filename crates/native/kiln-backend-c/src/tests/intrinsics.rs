@@ -690,7 +690,19 @@ fn generated_numeric_conversion_ignores_the_embedding_process_locale() {
             .source
             .contains("kiln_c99_double_to_js(number, buffer)")
     );
-    assert!(!generated.source.contains("snprintf("));
+    let formatter = generated
+        .source
+        .split("static size_t kiln_c99_double_to_js")
+        .nth(1)
+        .expect("the generated numeric formatter is present");
+    let formatter = formatter
+        .split("\nstatic ")
+        .next()
+        .expect("the numeric formatter has a body");
+    assert!(
+        !formatter.contains("snprintf("),
+        "JavaScript number formatting must not use locale-sensitive stdio"
+    );
     assert!(!generated.source.contains("setlocale("));
     let wrapper = format!(
         r#"
