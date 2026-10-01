@@ -161,6 +161,7 @@ def main() -> int:
         "source": {
             "production": source_metadata(args.production_source.resolve()) if args.production_source else None,
             "control": source_metadata(args.control_source.resolve()) if args.control_source else None,
+            "npm_lock_sha256": digest_file(CORPUS / "package-lock.json"),
             "workload_sha256": digest_file(WORKLOAD),
         },
         "binaries": {label: {"path": str(path), "sha256": digest_file(path)}
