@@ -223,6 +223,11 @@ def compare_sources(production: Path, control: Path) -> dict[str, object]:
         raise RuntimeError(f"tracked control file is missing: {DYNAMIC_CONTROL_FILE}")
     if production_dynamic[0] != "file" or control_dynamic[0] != "file":
         raise RuntimeError(f"{DYNAMIC_CONTROL_FILE} must be a regular tracked file in both trees")
+    if production_dynamic == control_dynamic:
+        raise RuntimeError(
+            f"production and control have identical {DYNAMIC_CONTROL_FILE}; "
+            "the control must contain the captured-record hydration change"
+        )
 
     # Keep each supplied tree tied to the harness checkout's benchmark inputs. This prevents a
     # workload or dependency-lock drift from masquerading as a runtime-only comparison.
