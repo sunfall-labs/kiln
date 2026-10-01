@@ -1562,19 +1562,6 @@ fn keep_alive_requested(parts: &hyper::http::request::Parts) -> bool {
     }
 }
 
-fn request_is_upgrade(request: &Request<Incoming>) -> bool {
-    let connection = request
-        .headers()
-        .get(hyper::header::CONNECTION)
-        .and_then(|value| value.to_str().ok());
-    let requests_upgrade = connection.is_some_and(|value| {
-        value
-            .split(',')
-            .any(|candidate| candidate.trim().eq_ignore_ascii_case("upgrade"))
-    });
-    requests_upgrade && request.headers().contains_key(hyper::header::UPGRADE)
-}
-
 fn parse_upgrade_response_head(bytes: &[u8]) -> Option<(u16, HeaderMap)> {
     let mut lines = bytes.split(|byte| *byte == b'\n');
     let status_line = lines.next()?.strip_suffix(b"\r")?;

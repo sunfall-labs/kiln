@@ -2366,6 +2366,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Native::PrototypeOf(PrototypeTable::Readable),
             RealmId::PRIMARY,
         ));
+        let message_headers = message.headers_object();
         incoming.set("method", Value::String(message.method.into()));
         incoming.set("url", Value::String(message.target.into()));
         incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
@@ -2404,7 +2405,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         incoming.set("socket", socket.clone());
         incoming.set("connection", socket.clone());
         let mut headers = ObjectData::default();
-        for (name, value) in message.headers_object() {
+        for (name, value) in message_headers {
             headers.set(&name, Value::String(value.into()));
         }
         incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
