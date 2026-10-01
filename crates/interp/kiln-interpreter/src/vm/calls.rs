@@ -159,6 +159,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if matches!(
+            callee,
+            Value::Native(
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
+                _
+            )
+        ) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: callee.type_name(),
+            });
+        }
         match callee {
             Value::Native(native, _) => {
                 // A method that changes its array, given a proxy, has to change what is behind

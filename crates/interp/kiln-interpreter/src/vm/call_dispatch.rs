@@ -67,6 +67,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
+        if matches!(
+            &method,
+            Value::Native(
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
+                _
+            )
+        ) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: method.type_name(),
+            });
+        }
         match method {
             // The same rule as in `call_value`: a mutating array method given a proxy has to
             // write through it, not into a snapshot.
