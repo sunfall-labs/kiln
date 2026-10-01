@@ -1483,6 +1483,9 @@ impl Default for ExecutionLimits {
 /// [`kiln_ir::compile_eval`] promises to bind them to.
 pub struct EvalSource<'a> {
     pub source: &'a str,
+    /// Exact JavaScript UTF-16 source when the transport string cannot represent it (for example,
+    /// a source body containing a lone surrogate). Compilers should prefer this when present.
+    pub source_units: Option<&'a StringUnits>,
     /// Stable module/call-site identity for private scopes created by this dynamic compilation.
     pub module_id: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],

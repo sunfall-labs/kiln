@@ -191,13 +191,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<(), ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.enter_eval(source.as_ref(), site, script)
+        let transport = source.to_lossy_string();
+        self.enter_eval_with_units(&transport, Some(source), site, script)
     }
 
     pub(super) fn enter_eval(
         &mut self,
         source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<(), ExecutionError> {
+        self.enter_eval_with_units(source, None, site, script)
+    }
+
+    fn enter_eval_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<(), ExecutionError> {
@@ -232,6 +242,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         let (program, program_strictness) = compile(&EvalSource {
             source,
+            source_units,
             module_id: &eval_module_id,
             outer: &outer,
             strict,
@@ -351,13 +362,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<Value, ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.drive_eval(source.as_ref(), site, script)
+        let transport = source.to_lossy_string();
+        self.drive_eval_with_units(&transport, Some(source), site, script)
     }
 
     pub(super) fn drive_eval(
         &mut self,
         source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<Value, ExecutionError> {
+        self.drive_eval_with_units(source, None, site, script)
+    }
+
+    fn drive_eval_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<Value, ExecutionError> {
@@ -369,7 +390,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.native_depth += 1;
         let depth = self.frames.len();
         let outcome = self
-            .enter_eval(source, site, script)
+            .enter_eval_with_units(source, source_units, site, script)
             .and_then(|()| self.run_frames(depth).map(|result| result.value));
         self.native_depth -= 1;
         outcome

@@ -82,6 +82,41 @@ fn oxc_string_units(value: &str, lone_surrogates: bool) -> StringUnits {
     StringUnits::from_units(&units)
 }
 
+fn mapped_template_raw(
+    span: oxc_span::Span,
+    parsed_raw: &str,
+    source_units: Option<&[u16]>,
+    source_map: Option<&[usize]>,
+) -> StringUnits {
+    let (Some(units), Some(map)) = (source_units, source_map) else {
+        return StringUnits::from(parsed_raw);
+    };
+    let (Some(&start), Some(&end)) = (
+        map.get(span.start as usize),
+        map.get(span.end as usize),
+    ) else {
+        return StringUnits::from(parsed_raw);
+    };
+    let Some(raw) = units.get(start..end) else {
+        return StringUnits::from(parsed_raw);
+    };
+    let mut normalized = Vec::with_capacity(raw.len());
+    let mut at = 0;
+    while at < raw.len() {
+        if raw[at] == b'\r' as u16 {
+            normalized.push(b'\n' as u16);
+            at += 1;
+            if raw.get(at) == Some(&(b'\n' as u16)) {
+                at += 1;
+            }
+        } else {
+            normalized.push(raw[at]);
+            at += 1;
+        }
+    }
+    StringUnits::from_units(&normalized)
+}
+
 /// Lossless equivalent of Oxc's `PropertyKey::static_name()`. The latter intentionally exposes
 /// only `&str`, so it cannot carry the AST node's `lone_surrogates` bit for quoted or template
 /// property keys.
@@ -248,6 +283,92 @@ pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
         None,
         None,
     )
+}
+
+/// Parse dynamic source held as JavaScript UTF-16 code units. Lone surrogates are transported to
+/// Oxc as escaped code units, while a byte-to-code-unit boundary map lets lowering restore tagged
+/// template raw text exactly. The parser never sees an invalid Rust `str`, and values retain the
+/// original UTF-16 semantics.
+pub fn parse_eval_units(path: &str, source: &StringUnits, allow: &EvalSyntax) -> Module {
+    let original = source.to_units();
+    let (text, byte_to_unit) = source_units_transport(&original);
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source_in_context_with_units(
+        Some(path),
+        &text,
+        inferred.with_script(true),
+        Some(allow),
+        None,
+        None,
+        Some((&original, &byte_to_unit)),
+    )
+}
+
+fn source_units_transport(units: &[u16]) -> (String, Vec<usize>) {
+    let mut text = String::with_capacity(units.len());
+    let mut byte_to_unit = vec![0usize];
+    let mut index = 0usize;
+    let mut slash_run = 0usize;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar = 0x10000 + (((unit as u32 - 0xd800) << 10) | (units[index + 1] as u32 - 0xdc00));
+            let ch = char::from_u32(scalar).expect("paired UTF-16 units form a scalar");
+            append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 2);
+            index += 2;
+            slash_run = 0;
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            // If the original unit was preceded by an odd backslash run, that final slash was
+            // its identity escape. Replace the pair as one `\uXXXX` escape; an even run leaves
+            // the source unit unescaped and receives an escape at its own position.
+            if slash_run % 2 == 1 {
+                text.pop();
+                byte_to_unit.pop();
+            }
+            let escape = format!("\\u{unit:04X}");
+            for (offset, byte) in escape.bytes().enumerate() {
+                text.push(byte as char);
+                byte_to_unit.push(if offset + 1 == escape.len() {
+                    index + 1
+                } else if slash_run % 2 == 1 {
+                    index.saturating_sub(1)
+                } else {
+                    index
+                });
+            }
+            index += 1;
+            slash_run = 0;
+        } else {
+            let ch = char::from_u32(unit as u32).expect("non-surrogate UTF-16 unit is scalar");
+            append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 1);
+            index += 1;
+            slash_run = if unit == b'\\' as u16 { slash_run + 1 } else { 0 };
+        }
+    }
+    (text, byte_to_unit)
+}
+
+fn append_source_scalar(
+    text: &mut String,
+    byte_to_unit: &mut Vec<usize>,
+    ch: char,
+    unit_start: usize,
+    unit_count: usize,
+) {
+    let mut bytes = [0; 4];
+    let encoded = ch.encode_utf8(&mut bytes);
+    text.push_str(encoded);
+    for offset in 0..encoded.len() {
+        byte_to_unit.push(if offset + 1 == encoded.len() {
+            unit_start + unit_count
+        } else {
+            unit_start
+        });
+    }
 }
 
 /// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
@@ -1623,6 +1744,26 @@ fn parse_source_in_context(
     demanded_exports: Option<&BTreeSet<String>>,
     native_import_meta: Option<bool>,
 ) -> Module {
+    parse_source_in_context_with_units(
+        path,
+        source,
+        source_type,
+        allow,
+        demanded_exports,
+        native_import_meta,
+        None,
+    )
+}
+
+fn parse_source_in_context_with_units(
+    path: Option<&str>,
+    source: &str,
+    source_type: SourceType,
+    allow: Option<&EvalSyntax>,
+    demanded_exports: Option<&BTreeSet<String>>,
+    native_import_meta: Option<bool>,
+    source_units: Option<(&[u16], &[usize])>,
+) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
     // asked: without this the tokenizer checks the flags, hands back the pattern as opaque text,
@@ -1703,6 +1844,7 @@ fn parse_source_in_context(
         allow,
         demanded_exports,
         native_import_meta,
+        source_units,
     );
     module.node_runtime_requests = node_runtime_requests;
     module
@@ -1714,7 +1856,7 @@ fn lower_parsed(
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(path, parsed, source, source_type, None, None, None)
+    lower_parsed_in_context(path, parsed, source, source_type, None, None, None, None)
 }
 
 fn lower_parsed_in_context(
@@ -1725,6 +1867,7 @@ fn lower_parsed_in_context(
     allow: Option<&EvalSyntax>,
     demanded_exports: Option<&BTreeSet<String>>,
     native_import_meta: Option<bool>,
+    source_units: Option<(&[u16], &[usize])>,
 ) -> Module {
     let filter_module_record = demanded_exports.is_some();
     let module_statement_spans = parsed
@@ -1959,6 +2102,8 @@ fn lower_parsed_in_context(
         text: source,
         path,
         native_import_meta,
+        source_units: source_units.map(|(units, _)| units),
+        source_map: source_units.map(|(_, map)| map),
         inline_eval_calls,
     };
     let body = lowerer.statements(&parsed.program.body);
@@ -2223,6 +2368,9 @@ struct Lowerer<'a> {
     /// Call spans whose callee is Oxc-proven to be the unresolved global `eval` and whose sole
     /// argument is a string literal. The inner source is narrowed further before HIR inlining.
     inline_eval_calls: HashSet<(u32, u32)>,
+    /// Exact input units and parser-transport byte boundaries for dynamic compilation.
+    source_units: Option<&'a [u16]>,
+    source_map: Option<&'a [usize]>,
 }
 
 impl Lowerer<'_> {
@@ -3124,7 +3272,14 @@ impl Lowerer<'_> {
                             .quasi
                             .quasis
                             .iter()
-                            .map(|quasi| StringUnits::from(quasi.value.raw.as_str()))
+                            .map(|quasi| {
+                                mapped_template_raw(
+                                    quasi.span,
+                                    quasi.value.raw.as_str(),
+                                    self.source_units,
+                                    self.source_map,
+                                )
+                            })
                             .collect(),
                     },
                     span: expression_span,
@@ -6198,6 +6353,54 @@ mod tests {
             raw[0].to_units().as_ref(),
             "\\ud800�abcd".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn dynamic_source_units_preserve_literals_and_tagged_template_raw_units() {
+        let units = [
+            "const literal = \"a".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            "b\"; const tagged = tag`x".encode_utf16().collect::<Vec<_>>(),
+            vec![0xdfff],
+            "y`;".encode_utf16().collect::<Vec<_>>(),
+        ]
+        .concat();
+        let module = parse_eval_units("dynamic.js", &StringUnits::from_units(&units), &EvalSyntax::default());
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected literal declaration");
+        };
+        let HirExpressionKind::Literal(HirLiteral::String(literal)) = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("literal initializer")
+            .kind
+        else {
+            panic!("expected string literal");
+        };
+        assert_eq!(literal.to_units().as_ref(), &[b'a' as u16, 0xd800, b'b' as u16]);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[1].kind else {
+            panic!("expected tagged declaration");
+        };
+        let HirExpressionKind::Call { arguments, .. } = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("tagged initializer")
+            .kind
+        else {
+            panic!("expected tagged call");
+        };
+        let ListElement::Item(template) = &arguments[0] else {
+            panic!("expected template argument");
+        };
+        let HirExpressionKind::TemplateStrings { cooked, raw } = &template.kind else {
+            panic!("expected template strings");
+        };
+        let expected = &[b'x' as u16, 0xdfff, b'y' as u16];
+        assert_eq!(cooked[0].as_ref().unwrap().to_units().as_ref(), expected);
+        assert_eq!(raw[0].to_units().as_ref(), expected);
     }
 
     #[test]

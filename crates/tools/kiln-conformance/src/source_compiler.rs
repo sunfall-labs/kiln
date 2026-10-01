@@ -6,7 +6,7 @@
 //! this is the same `kiln_frontend_oxc` → `kiln_ir` path every other run in the suite takes rather
 //! than a second, conformance-only compiler.
 
-use kiln_frontend_oxc::{EvalSyntax, parse_eval};
+use kiln_frontend_oxc::{EvalSyntax, parse_eval, parse_eval_units};
 use kiln_interpreter::{EvalCompileError, EvalSource, ExecutionCapabilities};
 use kiln_ir::{EvalNewTarget, EvalOptions, Program, Strictness};
 use std::path::{Path, PathBuf};
@@ -64,7 +64,18 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             .flat_map(|scope| scope.names.iter().cloned())
             .collect(),
     };
-    let module = parse_eval(request.module_id, &source, &allow);
+    let strict_prefix = kiln_interpreter::StringUnits::from("\"use strict\";\n");
+    let exact_source = request.source_units.map(|units| {
+        if request.strict {
+            strict_prefix.concat(units)
+        } else {
+            units.clone()
+        }
+    });
+    let module = exact_source.as_ref().map_or_else(
+        || parse_eval(request.module_id, &source, &allow),
+        |units| parse_eval_units(request.module_id, units, &allow),
+    );
     if let Some(diagnostic) = module.diagnostics.first() {
         return Err(EvalCompileError::Syntax(diagnostic.message.clone()));
     }

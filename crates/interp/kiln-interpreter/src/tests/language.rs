@@ -165,7 +165,7 @@ fn source_compiler_authority_is_scoped_to_one_execution() {
 }
 
 #[test]
-fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() {
+fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct() {
     fn constant_compiler(
         request: &EvalSource<'_>,
     ) -> Result<(Program, Strictness), EvalCompileError> {
@@ -224,11 +224,7 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
     assert_eq!(run_eval(escaped, constant_compiler), Ok(Value::Number(7.0)));
 
     let raw = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
-    assert!(matches!(
-        run_eval(raw, constant_compiler),
-        Err(ExecutionError::EvalUnsupported { message })
-            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
-    ));
+    assert_eq!(run_eval(raw, constant_compiler), Ok(Value::Number(7.0)));
     let program = no_program();
     let mut syntax_host = TestHost {
         calls: Vec::new(),
@@ -255,12 +251,12 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
     };
     let program = no_program();
     let mut vm = test_vm(&program, &mut host);
+    vm.source_compiler = Some(constant_compiler);
     let raw_body = Value::String(StringUnits::from_units(&[0xd800]));
-    assert!(matches!(
+    assert_eq!(
         vm.dispatch_native(Native::FunctionConstructor, &Value::Undefined, &[raw_body], 0),
-        Err(ExecutionError::EvalUnsupported { message })
-            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
-    ));
+        Ok(Value::Number(7.0))
+    );
 }
 
 /// A directive prologue decides an eval's strictness, and an escaped spelling is not one.
