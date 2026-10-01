@@ -566,6 +566,8 @@ static int kiln_dyn_labeled_statement_targets_iteration(const kiln_dyn_lexer *le
     kiln_dyn_lexer_next(&look);
     for (;;) {
         if (look.curr.kind == KILN_DYN_KW_FOR ||
+            (look.curr.kind == KILN_DYN_IDENT && look.curr.len == 2 &&
+             memcmp(look.curr.start, "do", 2) == 0) ||
             (look.curr.kind == KILN_DYN_IDENT && look.curr.len == 5 &&
              memcmp(look.curr.start, "while", 5) == 0)) {
             kiln_dyn_token_free(&look.curr);

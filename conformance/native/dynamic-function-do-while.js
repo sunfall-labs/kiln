@@ -39,5 +39,17 @@ const labeled = Function(`
 `);
 if (labeled() !== 3) throw new Error("do-while consumes its labeled continue and break");
 
+const stackedLabels = Function(`
+  var count = 0;
+  outer: inner: do {
+    count++;
+    if (count < 2) continue outer;
+  } while (count < 3);
+  return count;
+`);
+if (stackedLabels() !== 3) {
+  throw new Error("stacked labels on do-while remain iteration targets");
+}
+
 console.log("dynamic do-while:", onceEvents.join(","), continueEvents.join(","),
-  breakSkipsTest(), labeled());
+  breakSkipsTest(), labeled(), stackedLabels());
