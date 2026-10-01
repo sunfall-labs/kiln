@@ -2236,6 +2236,13 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             if (status == KILN_C99_OK)
                 status = kiln_c99_node_set_hidden_pointer(client->response, "@@node:client", 13,
                                                           client);
+            if (status == KILN_C99_OK && client->socket != NULL) {
+                status = kiln_c99_put(NULL, client->response, "socket", 6,
+                                      client->socket->object, 0, NULL);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_put(NULL, client->response, "connection", 10,
+                                          client->socket->object, 0, NULL);
+            }
             if (status == KILN_C99_OK) {
                 client->response_started = 1;
                 if (event->kind == 13) {
@@ -2257,10 +2264,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     kiln_c99_heap_store_pointer(read, &read->socket, client->socket);
                     return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, client->socket->resource, 16384,
                                                NULL, 0, NULL, 0, read, &client->socket->read_request);
-                } else if (kiln_c99_is_callable(client->callback)) {
-                    status = kiln_c99_call(client->host, &ignored, client->callback,
-                                           kiln_c99_undefined(), &client->response, 1, 0,
-                                           exception);
                 } else {
                     status = kiln_c99_node_emit(client->host, client->object, "response",
                                                 client->response, 1, 0, exception);
@@ -5790,6 +5793,13 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             kiln_value ignored;
             status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
                                          request->object, NULL, 0, depth, thrown);
+        }
+        if (status == KILN_C99_OK && kiln_c99_is_callable(callback)) {
+            kiln_value response_listener[2] = {
+                kiln_c99_copy_text("response", 8), callback};
+            kiln_value ignored;
+            status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ON,
+                                         request->object, response_listener, 2, depth, thrown);
         }
         if (status == KILN_C99_OK)
             status = kiln_c99_define_method(request->object, "write", 5,

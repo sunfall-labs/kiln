@@ -1602,7 +1602,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     path,
                     headers,
                     body: Vec::new(),
-                    callback,
+                    callback: callback.clone(),
                     socket: None,
                     object: None,
                     ended: false,
@@ -1610,6 +1610,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     request_id,
                 }));
                 let request_object = node_http_client_request_object(&state);
+                // `http.request(url, callback)` is an EventEmitter convenience: the callback
+                // is the first `response` listener, so listeners attached by the caller after
+                // the request is returned observe the same event in registration order.
+                if is_callable(&callback) {
+                    self.dispatch_node_event(
+                        Native::NodeEventOn,
+                        &request_object,
+                        &[Value::String("response".into()), callback],
+                        instruction,
+                    )?;
+                }
                 self.register_http_client_request(request_id, &state);
                 if matches!(native, Native::NodeHttpGet) {
                     state.borrow_mut().ended = true;
@@ -3277,6 +3288,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 ));
                 incoming.set("statusCode", Value::Number(f64::from(head.status)));
                 incoming.set("statusMessage", Value::String(head.reason.clone().into()));
+                if let Some(socket) = owner
+                    .borrow()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.resource() == resource)
+                    .and_then(|stream| stream.socket_object.clone())
+                {
+                    incoming.set("socket", socket.clone());
+                    incoming.set("connection", socket);
+                }
                 incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
                 incoming.set(
                     "once",
@@ -3314,10 +3335,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .client_responses
                         .insert(request_id, incoming.clone());
                 }
-                let callback = state.borrow().callback.clone();
-                if is_callable(&callback) {
-                    self.call_value(&callback, Value::Undefined, vec![incoming], instruction)?;
-                }
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    &request,
+                    &[Value::String("response".into()), incoming],
+                    instruction,
+                )?;
                 Ok(())
             }
             HttpResponseEvent::Data(bytes) => {
