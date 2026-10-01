@@ -100,6 +100,10 @@ typedef struct kiln_dyn_scope {
     kiln_value with_object;
     int has_with_object;
     int strict;
+    /* Immutable closure captures stay in their serialized object as live cells. A function call
+     * scope can borrow that environment instead of rebuilding a malloc-backed binding table. */
+    kiln_value captured_environment;
+    int has_captured_environment;
     /* Bindings live in a malloc-grown index for fast name lookup. Mirror each live value in a
      * GC object reachable from this stack scope: the collector scans C stacks, not arbitrary
      * malloc allocations. */
@@ -147,6 +151,8 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->with_object = kiln_c99_undefined();
     scope->has_with_object = 0;
     scope->strict = parent != NULL ? parent->strict : 0;
+    scope->captured_environment = kiln_c99_undefined();
+    scope->has_captured_environment = 0;
     scope->roots = kiln_c99_undefined();
     scope->var_target = NULL;
     scope->function_declaration_sites = NULL;
@@ -261,16 +267,53 @@ static int kiln_dyn_scope_has_annex_b_declaration(kiln_dyn_scope *scope,
     return 0;
 }
 
-static unsigned char kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
-                                                size_t name_len) {
+static int kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
+                                     size_t name_len, unsigned char *out,
+                                     kiln_value *thrown) {
     for (kiln_dyn_scope *curr = scope; curr != NULL; curr = curr->parent) {
         for (size_t i = 0; i < curr->count; ++i) {
             if (curr->bindings[i].name_len == name_len &&
-                memcmp(curr->bindings[i].name, name, name_len) == 0)
-                return curr->bindings[i].restriction;
+                memcmp(curr->bindings[i].name, name, name_len) == 0) {
+                *out = curr->bindings[i].restriction;
+                return KILN_C99_OK;
+            }
+        }
+        if (curr->has_captured_environment) {
+            char *marker = (char *)malloc(name_len + 1);
+            if (marker == NULL) return KILN_C99_OUT_OF_MEMORY;
+            const unsigned char candidates[] = {
+                1, 2, KILN_DYN_BINDING_PARAMETER, KILN_DYN_BINDING_ANNEX_B_VAR,
+                KILN_DYN_BINDING_LEXICAL
+            };
+            unsigned char restriction = KILN_DYN_BINDING_MUTABLE;
+            for (size_t candidate = 0; candidate < sizeof candidates; ++candidate) {
+                marker[0] = (char)candidates[candidate];
+                memcpy(marker + 1, name, name_len);
+                int present = 0;
+                int status = kiln_c99_has_property(NULL, curr->captured_environment, marker,
+                                                   name_len + 1, &present, 0, thrown);
+                if (status != KILN_C99_OK) {
+                    free(marker);
+                    return status;
+                }
+                if (present) {
+                    restriction = candidates[candidate] == 1
+                                     ? KILN_DYN_BINDING_READ_ONLY
+                                     : candidates[candidate] == 2
+                                           ? KILN_DYN_BINDING_FUNCTION_NAME
+                                           : candidates[candidate];
+                    break;
+                }
+            }
+            free(marker);
+            if (restriction != KILN_DYN_BINDING_MUTABLE) {
+                *out = restriction;
+                return KILN_C99_OK;
+            }
         }
     }
-    return KILN_DYN_BINDING_MUTABLE;
+    *out = KILN_DYN_BINDING_MUTABLE;
+    return KILN_C99_OK;
 }
 
 /* Returns one when an assignment to this binding is a sloppy named-function write that must
@@ -278,7 +321,10 @@ static unsigned char kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const cha
 static int kiln_dyn_scope_check_write(kiln_dyn_scope *scope, const char *name,
                                       size_t name_len, int *ignore_write,
                                       kiln_value *thrown) {
-    unsigned char restriction = kiln_dyn_scope_restriction(scope, name, name_len);
+    unsigned char restriction = KILN_DYN_BINDING_MUTABLE;
+    int restriction_status = kiln_dyn_scope_restriction(scope, name, name_len,
+                                                        &restriction, thrown);
+    if (restriction_status != KILN_C99_OK) return restriction_status;
     *ignore_write = 0;
     if (restriction == KILN_DYN_BINDING_FUNCTION_NAME) {
         if (!scope->strict) {
@@ -314,6 +360,50 @@ static int kiln_dyn_scope_set_key(kiln_dyn_scope *scope, const kiln_string *key,
     return result;
 }
 
+static int kiln_dyn_captured_get(kiln_dyn_scope *scope, const char *name, size_t name_len,
+                                 kiln_value *out, int *found, kiln_value *thrown) {
+    *found = 0;
+    if (!scope->has_captured_environment) return KILN_C99_OK;
+    int present = 0;
+    int status = kiln_c99_has_property(NULL, scope->captured_environment, name, name_len,
+                                       &present, 0, thrown);
+    if (status != KILN_C99_OK || !present) return status;
+    kiln_value stored = kiln_c99_undefined();
+    status = kiln_c99_get(NULL, scope->captured_environment, name, name_len, &stored, 0, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (stored.tag == KILN_VALUE_CELL) {
+        kiln_val *cell = kiln_c99_cell_of(stored);
+        status = kiln_c99_val_check_tdz(*cell, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_val_to_boundary(*cell);
+    } else {
+        *out = stored;
+    }
+    *found = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_captured_update(kiln_dyn_scope *scope, const char *name, size_t name_len,
+                                    kiln_value value, int *found) {
+    *found = 0;
+    if (!scope->has_captured_environment) return KILN_C99_OK;
+    int present = 0;
+    int status = kiln_c99_has_property(NULL, scope->captured_environment, name, name_len,
+                                       &present, 0, NULL);
+    if (status != KILN_C99_OK || !present) return status;
+    kiln_value stored = kiln_c99_undefined();
+    status = kiln_c99_get(NULL, scope->captured_environment, name, name_len, &stored, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    if (stored.tag == KILN_VALUE_CELL) {
+        kiln_c99_val_store_cell(kiln_c99_cell_of(stored), kiln_val_from_boundary(value));
+    } else {
+        status = kiln_c99_put(NULL, scope->captured_environment, name, name_len, value, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+    }
+    *found = 1;
+    return KILN_C99_OK;
+}
+
 static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
     kiln_dyn_scope *curr = scope;
     while (curr != NULL) {
@@ -332,6 +422,10 @@ static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t
                 return 1;
             }
         }
+        int found = 0;
+        if (kiln_dyn_captured_update(curr, name, name_len, val, &found) != KILN_C99_OK)
+            return 0;
+        if (found) return 1;
         curr = curr->parent;
     }
     return 0;
@@ -358,6 +452,8 @@ static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t na
                 return KILN_C99_OK;
             }
         }
+        int status = kiln_dyn_captured_get(curr, name, name_len, out, found, thrown);
+        if (status != KILN_C99_OK || *found) return status;
         curr = curr->parent;
     }
     return KILN_C99_OK;
@@ -412,6 +508,7 @@ static int kiln_dyn_scope_set_with(kiln_host *host, kiln_dyn_scope *scope, const
 static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
     size_t i;
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->roots));
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->captured_environment));
     for (i = 0; i < scope->count; ++i) {
         free(scope->bindings[i].name);
     }
@@ -1873,6 +1970,71 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 if (status != KILN_C99_OK) return status;
             }
         }
+        if (s->has_captured_environment && s->captured_environment.tag == KILN_VALUE_OBJECT) {
+            kiln_object *captured = kiln_c99_object_of(s->captured_environment);
+            if (captured->shape != NULL) kiln_c99_ensure_dictionary(captured);
+            for (size_t i = 0; i < captured->count; ++i) {
+                const kiln_string *key_header = captured->properties[i].key;
+                if (key_header == NULL) continue;
+                kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                                (const char *)key_header,
+                                                key_header->unit_len);
+                uint8_t *bytes = NULL;
+                size_t byte_len = 0;
+                int status = kiln_c99_string_to_utf8_lossy(key, &bytes, &byte_len);
+                if (status != KILN_C99_OK) return status;
+                if (byte_len == 1 && bytes[0] == 3) {
+                    free(bytes);
+                    continue;
+                }
+                if (byte_len == 0 || bytes[0] == 1 || bytes[0] == 2 ||
+                    bytes[0] == KILN_DYN_BINDING_PARAMETER ||
+                    bytes[0] == KILN_DYN_BINDING_ANNEX_B_VAR ||
+                    bytes[0] == KILN_DYN_BINDING_LEXICAL) {
+                    free(bytes);
+                    continue;
+                }
+                int already_captured = 0;
+                status = kiln_c99_has_property(host, env_obj, (const char *)bytes,
+                                               byte_len, &already_captured, depth, thrown);
+                if (status != KILN_C99_OK || already_captured) {
+                    free(bytes);
+                    if (status != KILN_C99_OK) return status;
+                    continue;
+                }
+                status = kiln_c99_put(host, env_obj, (const char *)bytes, byte_len,
+                                      captured->properties[i].value, 0, thrown);
+                if (status != KILN_C99_OK) {
+                    free(bytes);
+                    return status;
+                }
+                const unsigned char marker_kinds[] = {
+                    1, 2, KILN_DYN_BINDING_PARAMETER, KILN_DYN_BINDING_ANNEX_B_VAR,
+                    KILN_DYN_BINDING_LEXICAL
+                };
+                char *marker = (char *)malloc(byte_len + 1);
+                if (marker == NULL) {
+                    free(bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                memcpy(marker + 1, bytes, byte_len);
+                for (size_t m = 0; m < sizeof marker_kinds; ++m) {
+                    marker[0] = (char)marker_kinds[m];
+                    int marker_present = 0;
+                    status = kiln_c99_has_property(host, s->captured_environment, marker,
+                                                   byte_len + 1, &marker_present, depth, thrown);
+                    if (status != KILN_C99_OK) break;
+                    if (marker_present) {
+                        status = kiln_c99_put(host, env_obj, marker, byte_len + 1,
+                                              kiln_c99_boolean(1), 0, thrown);
+                        break;
+                    }
+                }
+                free(marker);
+                free(bytes);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
     }
     if (scope != NULL && scope->strict) {
         const char marker[] = {'\003'};
@@ -2656,6 +2818,15 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
             } else if (read_value) {
                 *current = binding->value;
             }
+            *binding_scope = environment;
+            *reference = KILN_DYN_UPDATE_BINDING;
+            return KILN_C99_OK;
+        }
+        int captured = 0;
+        int captured_status = kiln_dyn_captured_get(environment, name, name_len, current,
+                                                   &captured, thrown);
+        if (captured_status != KILN_C99_OK) return captured_status;
+        if (captured) {
             *binding_scope = environment;
             *reference = KILN_DYN_UPDATE_BINDING;
             return KILN_C99_OK;
@@ -3450,6 +3621,15 @@ static int kiln_dyn_eval_delete_identifier(kiln_host *host, kiln_dyn_lexer *lex,
                 kiln_dyn_lexer_next(lex);
                 return KILN_C99_OK;
             }
+        }
+        int captured = 0;
+        int captured_status = kiln_dyn_captured_get(environment, name, name_len, out,
+                                                    &captured, thrown);
+        if (captured_status != KILN_C99_OK) return captured_status;
+        if (captured) {
+            *out = kiln_c99_boolean(0);
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
         }
         if (environment->has_with_object) {
             int present = 0;
@@ -6781,39 +6961,15 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     kiln_dyn_scope_init(&scope, &captured_scope);
 
     if (env_val.tag == KILN_VALUE_OBJECT) {
-        kiln_object *pobj = kiln_c99_object_of(env_val);
-        /* The captured environment is an ordinary object built by `kiln_c99_put`, so it is shaped
-         * whenever its first binding's name can still branch from the root shape; the walk below
-         * reads the property list, which only a dictionary has. */
-        if (pobj->shape != NULL) kiln_c99_ensure_dictionary(pobj);
-        for (size_t i = 0; i < pobj->count; ++i) {
-            kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0,
-                                            (const char *)pobj->properties[i].key,
-                                            pobj->properties[i].key->unit_len);
-            uint8_t *key_bytes = NULL;
-            size_t key_len = 0;
-            if (kiln_c99_string_to_utf8_lossy(key, &key_bytes, &key_len) != KILN_C99_OK) {
-                kiln_dyn_scope_destroy(&scope);
-                kiln_dyn_scope_destroy(&captured_scope);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            if (key_len == 1 && key_bytes[0] == 3) {
-                captured_scope.strict = kiln_c99_truthy(pobj->properties[i].value);
-            } else if (key_len > 1 &&
-                       (key_bytes[0] == 1 || key_bytes[0] == 2 ||
-                        key_bytes[0] == KILN_DYN_BINDING_PARAMETER ||
-                        key_bytes[0] == KILN_DYN_BINDING_ANNEX_B_VAR ||
-                        key_bytes[0] == KILN_DYN_BINDING_LEXICAL)) {
-                (void)kiln_dyn_scope_mark_restriction(
-                    &captured_scope, (const char *)key_bytes + 1, key_len - 1,
-                    key_bytes[0] == 1 ? KILN_DYN_BINDING_READ_ONLY
-                    : key_bytes[0] == 2 ? KILN_DYN_BINDING_FUNCTION_NAME
-                                        : key_bytes[0]);
-            } else {
-                kiln_dyn_scope_set_key(&captured_scope, pobj->properties[i].key,
-                                       pobj->properties[i].value);
-            }
-            free(key_bytes);
+        captured_scope.captured_environment = env_val;
+        captured_scope.has_captured_environment = 1;
+        int strict_present = 0;
+        if (kiln_c99_has_property(NULL, env_val, "\003", 1, &strict_present, 0, NULL) ==
+                KILN_C99_OK && strict_present) {
+            kiln_value strict_marker = kiln_c99_undefined();
+            if (kiln_c99_get(NULL, env_val, "\003", 1, &strict_marker, 0, NULL) ==
+                KILN_C99_OK)
+                captured_scope.strict = kiln_c99_truthy(strict_marker);
         }
     }
     scope.strict = captured_scope.strict;
