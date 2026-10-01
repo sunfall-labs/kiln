@@ -1483,25 +1483,11 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                 kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
             kiln_property property;
             kiln_value copied;
-            kiln_value symbol;
             if (!kiln_c99_property_read_own(object, key, key, &property)) continue;
-            if (!property.enumerable) {
-                /* A symbol-keyed property is stored non-enumerable here whatever the program
-                 * asked for: `kiln_c99_own_slot` marks every `@@` key that way, in one place, so
-                 * that none of the walks over own *string* keys has to know about the prefix.
-                 * That rule cannot tell a key the program made enumerable -- `{ [s]: 1 }` --
-                 * from one it hid with a descriptor, and a spread is the one enumeration that
-                 * has to tell them apart, because it is the one that carries symbol keys across.
-                 *
-                 * So this says it cannot. Copying every symbol would take the hidden ones too,
-                 * and skipping them silently drops what the interpreter kept -- which is the
-                 * failure this whole helper exists to stop. A machine slot is not a symbol and
-                 * is not affected: it is skipped, as it should be. */
-                if (!kiln_c99_symbol_of_key_view(property.key, &symbol) ||
-                    property.symbol_hidden) {
-                    continue;
-                }
-            }
+            /* The backing record stores every `@@` key as non-enumerable so ordinary string-key
+             * walks can skip it. `symbol_hidden` carries the language-visible enumerable bit for
+             * symbols; consult that descriptor authority for both strings and symbols here. */
+            if (!kiln_c99_property_is_enumerable(&property)) continue;
             if (property.accessor) {
                 if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                     /* Setter-only: reading it answers `undefined`, and `undefined` is what a

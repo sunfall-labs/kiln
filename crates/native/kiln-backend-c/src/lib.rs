@@ -4455,6 +4455,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             tag->writable = 0;
             kiln_c99_object_of(object)->read_only_seen = 1;
             tag->enumerable = 0;
+            tag->symbol_hidden = 1;
             tag->configurable = 0;
             tag->accessor = 0;
         }}

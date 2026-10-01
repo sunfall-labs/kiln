@@ -141,7 +141,8 @@ int main(void) {{
     if (kiln_c99_object_of(namespace_object)->properties[0].refused ||
         kiln_c99_object_of(namespace_object)->properties[0].symbol_hidden ||
         kiln_c99_object_of(namespace_object)->properties[1].refused ||
-        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden)
+        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden ||
+        !kiln_c99_object_of(namespace_object)->properties[2].symbol_hidden)
         return 28;
     if (kiln_c99_get(NULL, namespace_object, "z", 1, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 9.0) return 7;
