@@ -69,6 +69,21 @@ pub(crate) fn node_http_socket_facade() -> Value {
         "removeAllListeners",
         Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
     );
+    // The HTTP transport owns this socket until an upgrade completes, but the facade already
+    // exposes the same write/end/destroy operations. Host dispatch resolves its owning
+    // connection by identity and handles pending-upgrade writes before raw TCP ownership.
+    data.set(
+        "write",
+        Value::Native(Native::NodeSocketWrite, RealmId::PRIMARY),
+    );
+    data.set(
+        "end",
+        Value::Native(Native::NodeSocketEnd, RealmId::PRIMARY),
+    );
+    data.set(
+        "destroy",
+        Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
+    );
     data.set("destroyed", Value::Boolean(false));
     data.set("encrypted", Value::Boolean(false));
     Value::Object(Rc::new(RefCell::new(data)))

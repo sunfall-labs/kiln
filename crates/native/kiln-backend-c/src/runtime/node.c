@@ -2054,9 +2054,18 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             }
             {
                 kiln_node_completion *read;
-                kiln_value data = kiln_c99_copy_text((const char *)completion->bytes,
-                                                     (size_t)completion->bytes_len);
+                kiln_value data;
                 int status;
+                /* TCP and upgraded HTTP sockets share Node's readable contract: raw bytes are
+                 * Buffers until setEncoding explicitly selects the text path. */
+                if (socket->utf8) {
+                    data = kiln_c99_copy_text((const char *)completion->bytes,
+                                              (size_t)completion->bytes_len);
+                } else {
+                    status = kiln_c99_buffer_from_bytes(&data, completion->bytes,
+                                                        (size_t)completion->bytes_len);
+                    if (status != KILN_C99_OK) return status;
+                }
                 status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
                                             exception);
                 if (status != KILN_C99_OK || socket->closing) return status;
