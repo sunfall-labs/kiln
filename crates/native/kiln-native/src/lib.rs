@@ -392,7 +392,6 @@ fn dce_release_graph(
 ) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
     let mut replacements = BTreeMap::new();
     let mut remapped = demand.clone();
-    let mut remapped_imports = demand.live_imports.clone();
 
     for node in graph.modules() {
         if node.source != ModuleSource::Source {
@@ -417,42 +416,18 @@ fn dce_release_graph(
             continue;
         };
 
-        let required_names = node
-            .program
-            .exports
-            .iter()
-            .map(|export| export.exported.clone())
-            .collect::<BTreeSet<_>>();
-        let reparsed_names = program
-            .exports
-            .iter()
-            .map(|export| export.exported.clone())
-            .collect::<BTreeSet<_>>();
-        if !required_names.is_subset(&reparsed_names) {
-            continue;
-        }
-
         let mut imports = Vec::new();
-        remapped_imports.retain(|(path, _)| path != &node.path);
         for mut import in program.imports {
-            let Some((old_index, linked)) = node
+            let Some(linked) = node
                 .program
                 .imports
                 .iter()
-                .enumerate()
-                .find(|(_, candidate)| candidate.local == import.local)
+                .find(|candidate| candidate.local == import.local)
             else {
                 continue;
             };
             import.source.clone_from(&linked.source);
             import.imported.clone_from(&linked.imported);
-            let new_index = imports.len();
-            if demand
-                .live_imports
-                .contains(&(node.path.clone(), old_index))
-            {
-                remapped_imports.insert((node.path.clone(), new_index));
-            }
             imports.push(import);
         }
         program.imports = imports;
@@ -492,6 +467,7 @@ fn native_import_meta_reparse(
 ) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
     let mut replacements = BTreeMap::new();
     let mut remapped = demand.clone();
+    let mut remapped_imports = demand.live_imports.clone();
 
     for node in graph.modules() {
         if node.source != ModuleSource::Source {
@@ -500,7 +476,8 @@ fn native_import_meta_reparse(
         if node.program.program.source.is_empty() {
             continue;
         }
-        // Demand all exports: no DCE, just the import.meta re-lowering.
+        // Demand all exports so reparsing can specialize dead code without changing the public
+        // interface. The pass may remove unused imports and declarations as well.
         let demanded_names = node
             .program
             .exports
@@ -521,18 +498,36 @@ fn native_import_meta_reparse(
             continue;
         };
 
+        let reparsed_names = program
+            .exports
+            .iter()
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        if !demanded_names.is_subset(&reparsed_names) {
+            continue;
+        }
+
         let mut imports = Vec::new();
+        remapped_imports.retain(|(path, _)| path != &node.path);
         for mut import in program.imports {
-            let Some(linked) = node
+            let Some((old_index, linked)) = node
                 .program
                 .imports
                 .iter()
-                .find(|candidate| candidate.local == import.local)
+                .enumerate()
+                .find(|(_, candidate)| candidate.local == import.local)
             else {
                 continue;
             };
             import.source.clone_from(&linked.source);
             import.imported.clone_from(&linked.imported);
+            let new_index = imports.len();
+            if demand
+                .live_imports
+                .contains(&(node.path.clone(), old_index))
+            {
+                remapped_imports.insert((node.path.clone(), new_index));
+            }
             imports.push(import);
         }
         program.imports = imports;
