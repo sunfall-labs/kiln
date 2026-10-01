@@ -2720,8 +2720,8 @@ struct Lowerer<'a> {
     text: &'a str,
     path: Option<&'a str>,
     /// Native-binary `import.meta` mode: `None` lowers to the standard static object with
-    /// build-time paths; `Some(is_entry)` lowers to a `__kilnNativeImportMeta(isEntry)` call
-    /// whose values resolve at runtime from `process.execPath` (Node SEA semantics).
+    /// build-time paths; `Some(is_entry)` calls `__kilnNativeImportMeta(isEntry, filename)`.
+    /// The entry resolves from `process.execPath`; dependencies retain their captured identity.
     native_import_meta: Option<bool>,
     /// Call spans whose callee is Oxc-proven to be the unresolved global `eval` and whose sole
     /// argument is a string literal. The inner source is narrowed further before HIR inlining.
@@ -3806,8 +3806,8 @@ impl Lowerer<'_> {
                 return self.unsupported_expression("private-in expression", expression_span);
             }
             Expression::ImportMeta(_) => {
-                // Native binary: `import.meta` resolves at runtime from `process.execPath`
-                // (Node SEA semantics). The bootstrap defines `__kilnNativeImportMeta`.
+                // A native entry uses the executable identity; bundled dependencies need their
+                // own captured identity so relative loader bases remain distinct.
                 if let Some(is_entry) = self.native_import_meta {
                     HirExpressionKind::Call {
                         callee: Box::new(HirExpression {
@@ -3816,10 +3816,18 @@ impl Lowerer<'_> {
                             ),
                             span: expression_span,
                         }),
-                        arguments: vec![kiln_hir::ListElement::Item(HirExpression {
-                            kind: HirExpressionKind::Literal(HirLiteral::Boolean(is_entry)),
-                            span: expression_span,
-                        })],
+                        arguments: vec![
+                            kiln_hir::ListElement::Item(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::Boolean(is_entry)),
+                                span: expression_span,
+                            }),
+                            kiln_hir::ListElement::Item(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    self.path.unwrap_or("/unknown").into(),
+                                )),
+                                span: expression_span,
+                            }),
+                        ],
                         optional: false,
                     }
                 } else {

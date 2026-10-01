@@ -1004,21 +1004,20 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
 
 /// `import.meta` for native binaries, written in TypeScript over the already-exposed
 /// `process.execPath` (ADR 0005: builtins are TypeScript, not C). Follows Node's
-/// single-executable-application semantics: `filename` is the executable path, `url` is its
-/// `file:` URL, `dirname` is its directory, and `main` is true for the entry module.
-/// The frontend lowers `import.meta` to a `__kilnNativeImportMeta(isEntry)` call when
-/// compiling for a native target; this snippet defines that function.
+/// single-executable-application semantics for the entry. Bundled dependencies retain their
+/// captured source identities so relative loader requests select the same base as graph planning.
+/// The frontend supplies both entry status and the captured filename.
 fn native_import_meta_bootstrap() -> String {
     r#"
 if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
     const __kilnExecPath = globalThis.process.execPath;
     const __kilnExecUrl = "file://" + __kilnExecPath;
     const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
-    globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry) {
+    globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
         return {
-            url: __kilnExecUrl,
-            filename: __kilnExecPath,
-            dirname: __kilnExecDir,
+            url: isEntry ? __kilnExecUrl : "file://" + sourceFilename,
+            filename: isEntry ? __kilnExecPath : sourceFilename,
+            dirname: isEntry ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,
         };
     };
@@ -4047,6 +4046,16 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
             importer.len(),
             file_url.as_ref().map(|url| format!(" || kiln_c99_filename_matches(arguments[0], {}, (size_t){})", native_c_string(url), url.len())).unwrap_or_default(),
         ).unwrap();
+    }
+    // The entry's import.meta uses its relocated executable path. Only that module's
+    // resolver table can be selected by the executable alias; dependency identities above
+    // remain separate even when they request the same relative specifier.
+    if let Some((base_index, _)) = runtime_importers
+        .keys()
+        .enumerate()
+        .find(|(_, importer)| importer.as_path() == graph.entry())
+    {
+        writeln!(output, "    {{ const uint8_t *bytes = NULL; uint64_t length = 0; if (kiln_realm_argv_at(0, &bytes, &length) == KILN_C99_OK && kiln_c99_filename_matches(arguments[0], (const char *)bytes, (size_t)length)) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->require_contexts[{base_index}], kiln_graph_gc_visit_roots, graph); }} }}").unwrap();
     }
     output.push_str(
         "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_roots, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
