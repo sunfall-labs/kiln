@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 12;
+pub const BYTECODE_VERSION: u16 = 13;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -51,6 +51,9 @@ pub enum UnaryOp {
     Increment,
     /// `ToNumeric(x)` minus one, in the type the conversion produced.
     Decrement,
+    /// Abstract `ToString` used by template interpolation. Unlike calling the public `String`
+    /// function, this rejects symbols after string-hint primitive conversion.
+    ToString,
 }
 
 /// Binary operations understood by the bytecode runtime.

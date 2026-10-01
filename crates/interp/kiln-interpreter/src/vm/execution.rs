@@ -208,6 +208,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
+                    if *operator == UnaryOp::ToString {
+                        let converted = self.as_string_units(&value, current);
+                        if let Some(text) = self.catchable(converted, current)? {
+                            self.stack.push(Value::String(text));
+                        }
+                        continue;
+                    }
                     // Numbers cannot invoke coercion or fail a unary operation. Reuse the
                     // scalar implementation without constructing two fallible call results.
                     if matches!(value, Value::Number(_)) {

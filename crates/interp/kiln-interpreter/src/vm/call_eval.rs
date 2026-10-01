@@ -480,8 +480,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<String, ExecutionError> {
+        Ok(self.as_string_units(value, instruction)?.to_lossy_string())
+    }
+
+    /// Lossless abstract `ToString`, for language operations whose result remains a JS string.
+    pub(super) fn as_string_units(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
         if let Value::String(text) = value {
-            return Ok(text.to_lossy_string());
+            return Ok(text.clone());
         }
         let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         // A symbol is the one primitive `ToString` refuses: it has a description, not a
@@ -489,6 +498,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(primitive, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }
-        Ok(primitive.to_display_string())
+        primitive.to_string_units_checked()
     }
 }

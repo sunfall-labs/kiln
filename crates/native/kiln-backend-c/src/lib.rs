@@ -5773,6 +5773,7 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::ToNumeric => 7,
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
+        UnaryOp::ToString => 10,
     }
 }
 

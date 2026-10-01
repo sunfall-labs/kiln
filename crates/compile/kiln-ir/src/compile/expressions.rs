@@ -469,13 +469,15 @@ impl super::Compiler {
                     //
                     // A literal is already a primitive and converts to itself, so it keeps the
                     // plain concatenation -- which is also what leaves a template of constants
-                    // compilable by a backend that has no calls.
+                    // compilable by a backend that has no calls. Non-literals use the abstract
+                    // operation: resolving/calling the mutable public `String` binding is not
+                    // template interpolation, and `String(Symbol())` accepts a symbol where
+                    // template `ToString` must throw.
                     if matches!(expression.kind, ExpressionKind::Literal(_)) {
                         self.expression(expression);
                     } else {
-                        self.code.push(Instruction::LoadBuiltin(Builtin::String));
                         self.expression(expression);
-                        self.code.push(Instruction::Call { argc: 1 });
+                        self.code.push(Instruction::Unary(UnaryOp::ToString));
                     }
                     self.code.push(Instruction::Binary(BinaryOp::Add));
                     // A run of text between two holes is skipped when it is empty, which is the

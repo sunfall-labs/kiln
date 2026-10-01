@@ -300,6 +300,21 @@ static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double 
 
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown) {
+    /* Abstract ToString differs from the public String function for symbols. It also needs the
+     * string hint before primitive conversion, which is why this stays in the checked machine
+     * path rather than the pure unary helper. */
+    if (operation == 10) {
+        if (kiln_c99_is_reference(value)) {
+            int status = kiln_c99_to_primitive(host, value, 1, &value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (value.tag == KILN_VALUE_SYMBOL) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot convert a Symbol value to a string");
+        }
+        *out = kiln_c99_text(value);
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
     int numeric = operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
                   operation == 8 || operation == 9;
     if (numeric && kiln_c99_is_reference(value)) {

@@ -2239,6 +2239,7 @@ fn unary_of_number(operator: UnaryOp, value: &Value) -> Value {
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
         // `typeof` never coerces and never throws; it reports the type tag directly.
         UnaryOp::TypeOf => Value::String(value.type_of().to_owned().into()),
+        UnaryOp::ToString => unreachable!("abstract ToString requires VM coercion"),
         // `~x` is `-(ToInt32(x) + 1)`: a numeric operator, despite reading as a logical one.
         UnaryOp::BitwiseNot => Value::Number(f64::from(!to_int32(value.as_number()))),
         // `void x` evaluates its operand -- which already happened -- and discards it.

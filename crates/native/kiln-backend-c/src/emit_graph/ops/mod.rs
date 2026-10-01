@@ -185,7 +185,7 @@ pub(super) fn unary_fast_body(op: UnaryOp) -> Option<&'static str> {
         UnaryOp::BitwiseNot => "kiln_c99_val_unary_fast(5, value)",
         UnaryOp::Increment => "kiln_c99_val_from_double(a + 1.0)",
         UnaryOp::Decrement => "kiln_c99_val_from_double(a - 1.0)",
-        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void => return None,
+        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void | UnaryOp::ToString => return None,
     })
 }
 
@@ -200,6 +200,7 @@ pub(super) fn unary_code(op: UnaryOp) -> u16 {
         UnaryOp::ToNumeric => 7,
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
+        UnaryOp::ToString => 10,
     }
 }
 
@@ -824,10 +825,10 @@ pub(super) fn emit_graph_op(
                 }
             }
         }
-        GraphOp::Unary { op, value } if typed_int => {
+        GraphOp::Unary { op, value } if typed_int && *op != UnaryOp::ToString => {
             arithmetic::emit_unary_int(output, vid, op, value, &ctx)
         }
-        GraphOp::Unary { op, value } if typed => {
+        GraphOp::Unary { op, value } if typed && *op != UnaryOp::ToString => {
             arithmetic::emit_unary_typed(output, vid, op, value, &ctx)
         }
         GraphOp::Unary { op, value } => arithmetic::emit_unary_boxed(output, vid, op, value, &ctx),
