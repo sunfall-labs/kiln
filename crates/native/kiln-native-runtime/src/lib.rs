@@ -314,6 +314,52 @@ static inline int kiln_string_equals_ascii(const kiln_string *string, const char
         if (kiln_string_unit_at(string, index) != (uint8_t)ascii[index]) return 0;
     return 1;
 }
+/* Compare a JavaScript UTF-16 string with an already UTF-8 filesystem path without allocating.
+ * Valid surrogate pairs are encoded as their four-byte scalar; unpaired surrogates cannot equal
+ * a filesystem path represented by UTF-8 bytes. */
+static inline int kiln_string_equals_utf8(const kiln_string *string, const char *utf8,
+                                           size_t length) {
+    size_t unit = 0;
+    size_t byte = 0;
+    if (string == NULL || (utf8 == NULL && length != 0)) return 0;
+    while (unit < string->unit_len) {
+        uint32_t codepoint = kiln_string_unit_at(string, unit++);
+        uint8_t encoded[4];
+        size_t width;
+        if (codepoint >= UINT32_C(0xD800) && codepoint <= UINT32_C(0xDBFF)) {
+            if (unit >= string->unit_len) return 0;
+            uint32_t low = kiln_string_unit_at(string, unit++);
+            if (low < UINT32_C(0xDC00) || low > UINT32_C(0xDFFF)) return 0;
+            codepoint = UINT32_C(0x10000) + ((codepoint - UINT32_C(0xD800)) << 10) +
+                        (low - UINT32_C(0xDC00));
+        } else if (codepoint >= UINT32_C(0xDC00) && codepoint <= UINT32_C(0xDFFF)) {
+            return 0;
+        }
+        if (codepoint < UINT32_C(0x80)) {
+            encoded[0] = (uint8_t)codepoint;
+            width = 1;
+        } else if (codepoint < UINT32_C(0x800)) {
+            encoded[0] = (uint8_t)(UINT32_C(0xC0) | (codepoint >> 6));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 2;
+        } else if (codepoint < UINT32_C(0x10000)) {
+            encoded[0] = (uint8_t)(UINT32_C(0xE0) | (codepoint >> 12));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3F)));
+            encoded[2] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 3;
+        } else {
+            encoded[0] = (uint8_t)(UINT32_C(0xF0) | (codepoint >> 18));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 12) & UINT32_C(0x3F)));
+            encoded[2] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3F)));
+            encoded[3] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 4;
+        }
+        if (width > length - byte) return 0;
+        for (size_t i = 0; i < width; ++i)
+            if ((uint8_t)utf8[byte++] != encoded[i]) return 0;
+    }
+    return byte == length;
+}
 static inline int kiln_string_starts_ascii(const kiln_string *string, const char *ascii,
                                            size_t length) {
     size_t index;

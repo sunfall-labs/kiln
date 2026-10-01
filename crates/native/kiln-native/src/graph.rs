@@ -3353,15 +3353,9 @@ static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t 
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
-    if (s->unit_len >= 7 && kiln_string_starts_ascii(value, "file://", 7))
+    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7))
         return kiln_c99_file_url_matches_path(s, path, path_len);
-    uint8_t *encoded = NULL;
-    size_t encoded_len = 0;
-    if (kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len) != KILN_C99_OK) return 0;
-    int matches = encoded_len == path_len &&
-                  (path_len == 0 || memcmp(encoded, path, path_len) == 0);
-    free(encoded);
-    return matches;
+    return kiln_string_equals_utf8(s, path, path_len);
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,

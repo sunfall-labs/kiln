@@ -171,10 +171,10 @@ console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/f
 fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
-    let root = TestDirectory::new("kiln-native-create-require #%? ü");
+    let root = TestDirectory::new("kiln-native-create-require #%? ü 😀");
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
         .expect("write package metadata");
-    let entry = root.path.join("entry with #%? ü.mjs");
+    let entry = root.path.join("entry with #%? ü 😀.mjs");
     fs::write(
         &entry,
         r#"import { createRequire } from "node:module";
@@ -195,7 +195,7 @@ const path = createRequire(import.meta.url)('node:path');
 console.log(typeof path.basename);"#,
     )
     .expect("write escaped createRequire entry");
-    let identity_module = root.path.join("identity #%? ü.mjs");
+    let identity_module = root.path.join("identity #%? ü 😀.mjs");
     fs::write(
         &identity_module,
         r#"import { createRequire } from "node:module";
@@ -210,7 +210,7 @@ export function importIdentity() {
     fs::write(
         &entry,
         format!(
-            "import {{ importIdentity }} from './identity%20%23%25%3F%20%C3%BC.mjs';\n{entry_source}\nconsole.log(importIdentity());\n"
+            "import {{ importIdentity }} from './identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs';\n{entry_source}\nconsole.log(importIdentity());\n"
         ),
     )
     .expect("import special-character module");

@@ -124,6 +124,7 @@ static inline const uint8_t *kiln_string_latin1(const kiln_string *string) {
 static inline const uint16_t *kiln_string_utf16(const kiln_string *string) {
 static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t index) {
 static inline int kiln_string_equals_ascii(const kiln_string *string, const char *ascii,
+static inline int kiln_string_equals_utf8(const kiln_string *string, const char *utf8,
 static inline int kiln_string_starts_ascii(const kiln_string *string, const char *ascii,
 static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
 static inline int kiln_string_compare_units(const kiln_string *left, const kiln_string *right) {
