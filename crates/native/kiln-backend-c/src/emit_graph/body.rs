@@ -307,22 +307,30 @@ pub fn emit_function_from_graph_with_profile(
             }
         }
     }
-    // 1. Function comment header
+    // 1. Function comment header. Keep source identity beside the function index: native
+    // refusal diagnostics report the bytecode PC, and this lets a retained generated-C artifact
+    // map that PC back to the exact frontend function (including anonymous class methods).
+    write!(
+        output,
+        "/* function {index}: source bytes {}..{}; method={}; instructions={}",
+        proto.span.start,
+        proto.span.end,
+        proto.is_method,
+        proto.code.len()
+    )
+    .unwrap();
     if let Some(name) = proto.name.as_deref().filter(|name| {
         !name.is_empty()
             && name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
     }) {
-        match kind {
-            EntryKind::Boxed => writeln!(output, "/* function {index}: {name} */").unwrap(),
-            EntryKind::Typed { .. } => {
-                writeln!(output, "/* function {index}: {name}, typed entry */").unwrap()
-            }
-            EntryKind::Fast => {
-                writeln!(output, "/* function {index}: {name}, fast clone */").unwrap()
-            }
-        }
+        write!(output, "; name={name}").unwrap();
+    }
+    match kind {
+        EntryKind::Boxed => writeln!(output, " */").unwrap(),
+        EntryKind::Typed { .. } => writeln!(output, "; typed entry */").unwrap(),
+        EntryKind::Fast => writeln!(output, "; fast clone */").unwrap(),
     }
 
     // 2. Signature. The typed entry takes what a direct call has in registers: no context
