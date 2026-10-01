@@ -27,6 +27,12 @@ if (!Function("object", "return delete (object.nested).value;")(parentBase) ||
 }
 const keywords = Function("return ({ delete: 1, finally: 2 }).delete + ({ finally: 3 }).finally;")();
 if (keywords !== 4) throw new Error("new statement tokens remain valid property names");
+const keywordMethods = Function(
+  '"use strict"; return ({ delete(value) { return value; }, finally() { return 4; } });'
+)();
+if (keywordMethods.delete(7) !== 7 || keywordMethods.finally() !== 4) {
+  throw new Error("strict method names that are keywords remain valid");
+}
 let called = 0;
 if (Function("fn", "return delete fn();")(() => { called++; return 1; }) !== true || called !== 1) {
   throw new Error("delete of a call result evaluates it without deleting its callee");

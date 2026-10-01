@@ -699,7 +699,7 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
             }
             int unqualified = identifier && parens == 0 &&
                 look.curr.kind != KILN_DYN_DOT && look.curr.kind != KILN_DYN_LBRACKET &&
-                look.curr.kind != KILN_DYN_LPAREN;
+                look.curr.kind != KILN_DYN_LPAREN && look.curr.kind != KILN_DYN_LBRACE;
             kiln_dyn_token_free(&look.curr);
             if (unqualified) {
                 int error_status = kiln_dyn_throw_parse_error(
@@ -3129,6 +3129,7 @@ static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
                 kiln_c99_gc_keep_alive(&target);
                 kiln_c99_gc_keep_alive(&current_receiver);
                 if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(&call_args[call_argc]);
                 call_argc++;
                 if (lex->curr.kind != KILN_DYN_COMMA) break;
                 kiln_dyn_lexer_next(lex);
@@ -3137,12 +3138,15 @@ static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                                   "Expected ')' after delete-call arguments");
             kiln_dyn_lexer_next(lex);
+            for (size_t i = 0; i < call_argc; ++i)
+                kiln_c99_gc_keep_alive(&call_args[i]);
             kiln_value called;
             status = kiln_c99_call(host, &called, target, current_receiver, call_args,
                                    call_argc, depth, thrown);
             kiln_c99_gc_keep_alive(&target);
             kiln_c99_gc_keep_alive(&current_receiver);
             if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&called);
             target = called;
             current_receiver = kiln_c99_undefined();
             continue;
