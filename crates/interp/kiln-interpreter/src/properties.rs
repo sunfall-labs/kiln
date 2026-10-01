@@ -806,7 +806,9 @@ pub(super) fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
         // `Object.prototype.valueOf` is deliberately absent: it answers with the box.
         Native::PrimitiveToString => matches!(boxed, Value::Symbol(_)),
         Native::SymbolValueOf => matches!(boxed, Value::Symbol(_)),
-        Native::StringValueOf => matches!(boxed, Value::String(_)),
+        Native::StringValueOf | Native::StringToStringMethod => {
+            matches!(boxed, Value::String(_))
+        }
         Native::BigIntValueOf | Native::BigIntToString => matches!(boxed, Value::BigInt(_)),
         Native::NumberToString
         | Native::NumberToFixed
@@ -814,10 +816,11 @@ pub(super) fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
         | Native::NumberToPrecision
         | Native::NumberValueOf => true,
         Native::BooleanToString | Native::BooleanValueOf => true,
-        // Every `String.prototype` method, recognised the same way `builtin_js_name` recognises
-        // one: by the type its variant is spelled for. A list of forty-five names would be
-        // forty-five chances to leave one out, and the ones that share the prefix without taking
-        // a receiver -- `String.raw`, `String.fromCharCode` -- ignore it either way.
+        // Generic String prototype methods must see the wrapper, not its primitive payload:
+        // abstract ToString then observes an own @@toPrimitive/toString override. Only the
+        // brand-checked valueOf/toString methods above open the wrapper directly.
+        other if other.walks_a_string() => false,
+        // Static String methods ignore their receiver, so opening a wrapper here is harmless.
         other => format!("{other:?}").starts_with("String"),
     };
     opens.then_some(boxed)
