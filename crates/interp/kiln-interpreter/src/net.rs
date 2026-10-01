@@ -20,6 +20,9 @@ pub(crate) struct NetSocketState {
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
     pub(crate) read_paused: bool,
+    /// A bounded `read(n)` on a paused socket may need more transport bytes before its next
+    /// `readable` notification. This target enables pull reads without switching to flowing mode.
+    pub(crate) read_demand: Option<usize>,
     pub(crate) connecting: bool,
     pub(crate) pending_write: Vec<u8>,
     pub(crate) cork_depth: usize,

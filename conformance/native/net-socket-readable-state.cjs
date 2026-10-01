@@ -8,7 +8,10 @@ let accepted;
 const server = net.createServer((socket) => {
   accepted = socket;
   socket.on("data", (chunk) => {
-    if (chunk.toString() === "ack") socket.end();
+    const text = chunk.toString();
+    if (text === "ack1") socket.write("d");
+    else if (text === "ack2") socket.write("e");
+    else if (text === "ack3") socket.end();
   });
   socket.write("abc");
 });
@@ -25,16 +28,26 @@ server.listen(0, "127.0.0.1", () => {
       assert(socket.read(5) === null, "oversized partial read still waits for more data");
       assert(socket._readableState.length === 2, "partial remainder stays buffered");
       stage = 1;
-      socket.write("ack");
+      socket.write("ack1");
       return;
     }
     if (stage === 1) {
-      assert(socket.read(5).toString() === "bc", "oversized read drains the final bytes after EOF");
+      assert(socket.read(1).toString() === "b", "bounded read consumes the requested byte");
       stage = 2;
+      socket.write("ack2");
+      return;
+    }
+    if (stage === 2) {
+      let available = "";
+      let chunk;
+      while ((chunk = socket.read()) !== null) available += chunk.toString();
+      assert(available === "cde", `unbounded read drains available bytes before EOF: ${available}`);
+      stage = 3;
+      socket.write("ack3");
     }
   });
   socket.on("end", () => {
-    assert(stage === 2, "end waits until buffered bytes have been consumed");
+    assert(stage === 3, "end waits until buffered bytes have been consumed");
     assert(socket._readableState.endEmitted === true, "readable state records end emission");
     assert(socket._readableState.length === 0, "readable state has no bytes after end");
     assert(socket.read() === null, "read after consumed end returns null");

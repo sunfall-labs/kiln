@@ -11,6 +11,122 @@ fn node_stream_write_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionEr
 }
 
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
+    fn request_node_socket_read(
+        &mut self,
+        socket: &Value,
+        target: usize,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let socket_state = node_net_socket_state(socket)?;
+        let (owner, resource, destroyed) = {
+            let mut state = socket_state.borrow_mut();
+            state.read_demand = Some(target);
+            (
+                state.owner.as_ref().and_then(std::rc::Weak::upgrade),
+                state.resource,
+                state.destroyed,
+            )
+        };
+        let (Some(owner), Some(resource)) = (owner, resource) else {
+            return Ok(());
+        };
+        if destroyed {
+            return Ok(());
+        }
+        let actions = {
+            let mut owner_state = owner.borrow_mut();
+            let connection = owner_state
+                .streams
+                .iter_mut()
+                .find(|stream| stream.resource() == resource)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:net socket lost its stream while reading".into(),
+                })?;
+            if connection.runtime_http {
+                return Ok(());
+            }
+            connection.driver.resume_reading()
+        };
+        for action in actions {
+            self.start_http_stream_action(&owner, resource, action, instruction)?;
+        }
+        Ok(())
+    }
+
+    fn settle_node_socket_read_demand(&mut self, socket: &Value) -> Result<(), ExecutionError> {
+        let socket_state = node_net_socket_state(socket)?;
+        let (complete, owner, resource) = {
+            let mut state = socket_state.borrow_mut();
+            let complete = state.read_demand.is_some_and(|target| {
+                state.readable.borrow().buffered_bytes >= target || state.readable.borrow().ended
+            });
+            if complete {
+                state.read_demand = None;
+            }
+            (
+                complete,
+                state.owner.as_ref().and_then(std::rc::Weak::upgrade),
+                state.resource,
+            )
+        };
+        if complete && let (Some(owner), Some(resource)) = (owner, resource) {
+            if let Some(connection) = owner
+                .borrow_mut()
+                .streams
+                .iter_mut()
+                .find(|stream| stream.resource() == resource)
+            {
+                connection.driver.pause_reading();
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_node_socket_read_demand(&mut self, socket: &Value) -> Result<(), ExecutionError> {
+        let socket_state = node_net_socket_state(socket)?;
+        let (was_pending, paused, owner, resource) = {
+            let mut state = socket_state.borrow_mut();
+            let pending = state.read_demand.take().is_some();
+            (
+                pending,
+                state.read_paused,
+                state.owner.as_ref().and_then(std::rc::Weak::upgrade),
+                state.resource,
+            )
+        };
+        if was_pending
+            && paused
+            && let (Some(owner), Some(resource)) = (owner, resource)
+        {
+            if let Some(connection) = owner
+                .borrow_mut()
+                .streams
+                .iter_mut()
+                .find(|stream| stream.resource() == resource)
+            {
+                connection.driver.pause_reading();
+            }
+        }
+        Ok(())
+    }
+
+    fn request_node_socket_refill(
+        &mut self,
+        socket: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let state = node_net_socket_state(socket)?;
+        let target = {
+            let state = state.borrow();
+            if !state.read_paused || state.readable.borrow().ended || state.destroyed {
+                return Ok(());
+            }
+            state.readable.borrow().buffered_bytes.saturating_add(1)
+        };
+        self.request_node_socket_read(socket, target, instruction)
+    }
+
     fn schedule_node_socket_auto_end(
         &mut self,
         socket: &Value,
@@ -523,6 +639,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                     read_paused: false,
+                    read_demand: None,
                     connecting: true,
                     pending_write: Vec::new(),
                     cork_depth: 0,
@@ -1304,10 +1421,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if matches!(chunk, Value::Null) {
                         state.ended = true;
                         state.reading = false;
-                        let emit_end =
-                            state.flowing && state.buffer.is_empty() && !state.end_emitted;
+                        let emit_end = (state.end_scheduled
+                            || (state.flowing && state.buffer.is_empty()))
+                            && !state.end_emitted;
                         if emit_end {
                             state.end_emitted = true;
+                            state.end_scheduled = false;
                         }
                         ("readable", Vec::new(), emit_end, false, false)
                     } else {
@@ -1357,8 +1476,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Native::NodeReadableRead => {
                 if node_net_socket_state(receiver).is_ok() {
-                    let (encoding, mut bytes, ended) = {
+                    let (encoding, mut bytes, ended, demand) = {
                         let mut state = state.borrow_mut();
+                        let bounded = arguments
+                            .first()
+                            .is_some_and(|value| !matches!(value, Value::Undefined));
                         let requested = arguments
                             .first()
                             .and_then(|value| match value {
@@ -1371,51 +1493,54 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             })
                             .unwrap_or(usize::MAX);
                         let available = state.buffered_bytes;
-                        if requested > available && !state.ended {
-                            return Ok(Value::Null);
-                        }
-                        if requested == 0 && available != 0 {
-                            return Ok(Value::Null);
-                        }
-                        let mut bytes = Vec::new();
-                        let mut remaining = requested.min(available);
-                        while remaining > 0 {
-                            let Some(chunk) = state.buffer.first().cloned() else {
-                                break;
-                            };
-                            let chunk_bytes = node_body_bytes(Some(&chunk))?;
-                            let take = remaining.min(chunk_bytes.len());
-                            bytes.extend_from_slice(&chunk_bytes[..take]);
-                            if take == chunk_bytes.len() {
-                                state.buffer.remove(0);
-                            } else {
-                                let rest = &chunk_bytes[take..];
-                                state.buffer[0] = node_bytes_value(rest.to_vec());
+                        let demand = bounded && requested > available && !state.ended;
+                        if demand {
+                            (state.encoding.clone(), Vec::new(), false, Some(requested))
+                        } else if requested == 0 && available != 0 {
+                            (state.encoding.clone(), Vec::new(), false, None)
+                        } else {
+                            let mut bytes = Vec::new();
+                            let mut remaining = requested.min(available);
+                            while remaining > 0 {
+                                let Some(chunk) = state.buffer.first().cloned() else {
+                                    break;
+                                };
+                                let chunk_bytes = node_body_bytes(Some(&chunk))?;
+                                let take = remaining.min(chunk_bytes.len());
+                                bytes.extend_from_slice(&chunk_bytes[..take]);
+                                if take == chunk_bytes.len() {
+                                    state.buffer.remove(0);
+                                } else {
+                                    let rest = &chunk_bytes[take..];
+                                    state.buffer[0] = node_bytes_value(rest.to_vec());
+                                }
+                                state.buffered_bytes = state.buffered_bytes.saturating_sub(take);
+                                remaining = remaining.saturating_sub(take);
                             }
-                            state.buffered_bytes = state.buffered_bytes.saturating_sub(take);
-                            remaining = remaining.saturating_sub(take);
+                            let ended = state.ended
+                                && state.buffer.is_empty()
+                                && !state.end_emitted
+                                && !state.end_scheduled;
+                            if ended {
+                                state.end_scheduled = true;
+                            }
+                            (state.encoding.clone(), bytes, ended, None)
                         }
-                        // Node delays `end` after an exact-sized read until the next read. An
-                        // oversized or unbounded read that drains the final bytes observes EOF
-                        // in the same operation.
-                        let drained_past_end = requested == usize::MAX || requested > available;
-                        let ended = state.ended
-                            && state.buffer.is_empty()
-                            && !state.end_emitted
-                            && (bytes.is_empty() || drained_past_end);
-                        if ended {
-                            state.end_emitted = true;
-                        }
-                        (state.encoding.clone(), bytes, ended)
                     };
                     sync_readable_public_state(receiver, &state.borrow());
+                    if let Some(demand) = demand {
+                        self.request_node_socket_read(receiver, demand, instruction)?;
+                        return Ok(Value::Null);
+                    }
                     if ended {
-                        self.dispatch_node_event(
-                            Native::NodeEventEmit,
-                            receiver,
-                            &[Value::String("end".into())],
-                            instruction,
-                        )?;
+                        let emit_end = Value::Bound(Rc::new(BoundFunction {
+                            target: Value::Native(Native::NodeReadablePush, RealmId::PRIMARY),
+                            this_value: receiver.clone(),
+                            arguments: vec![Value::Null],
+                            properties: RefCell::new(ObjectData::default()),
+                        }));
+                        let scheduled = self.scheduled(Job::NextTick(emit_end, Vec::new()));
+                        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
                         self.schedule_node_socket_auto_end(receiver, instruction)?;
                     }
                     let result = if bytes.is_empty() {
@@ -1425,6 +1550,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     } else {
                         node_bytes_value(std::mem::take(&mut bytes))
                     };
+                    self.clear_node_socket_read_demand(receiver)?;
+                    self.request_node_socket_refill(receiver, instruction)?;
                     return Ok(result);
                 }
                 let (value, call_read, emit_end) = {
@@ -2166,6 +2293,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             object: None,
             readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
             read_paused: false,
+            read_demand: None,
             connecting: true,
             pending_write: Vec::new(),
             cork_depth: 0,
@@ -2316,6 +2444,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                     read_paused: false,
+                    read_demand: None,
                     connecting: false,
                     pending_write: Vec::new(),
                     cork_depth: 0,
@@ -2651,6 +2780,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .streams
                         .iter()
                         .find(|stream| stream.resource() == resource)
+                        .and_then(|stream| stream.socket.clone())
+                        .is_some_and(|socket| {
+                            let socket = socket.borrow();
+                            socket.read_paused && socket.read_demand.is_none()
+                        })
+                {
+                    return Ok(());
+                }
+                if matches!(operation, AsyncHostOp::TcpRead { .. })
+                    && server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
                         .is_some_and(|stream| stream.driver.has_pending_read())
                 {
                     return Ok(());
@@ -2721,6 +2864,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         &readable,
                         false,
                     )?;
+                    self.settle_node_socket_read_demand(&socket)?;
                     return Ok(());
                 }
                 if server.borrow().protocol == ServerProtocol::HttpClient {
@@ -2872,6 +3016,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &readable,
                             false,
                         )?;
+                        self.settle_node_socket_read_demand(&socket)?;
                     }
                     let raw_socket = !server
                         .borrow()
@@ -3421,13 +3566,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseEnd { id, reusable } => {
+                    let release = unsafe {
+                        ActiveHttpRuntime::release_client_connection(
+                            &mut *runtime,
+                            resource,
+                            reusable,
+                        )
+                    };
+                    let agent_reuses_socket =
+                        matches!(release, AgentRelease::Idle | AgentRelease::Dispatch { .. });
                     self.dispatch_http_response_event(
                         owner,
                         resource,
                         id,
                         HttpResponseEvent::End,
                         instruction,
-                        reusable,
+                        agent_reuses_socket,
                     )?;
                     if let Some(stream) = owner
                         .borrow_mut()
@@ -3441,13 +3595,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         stream.response = None;
                     }
                     self.remove_http_client_request(id);
-                    let release = unsafe {
-                        ActiveHttpRuntime::release_client_connection(
-                            &mut *runtime,
-                            resource,
-                            reusable,
-                        )
-                    };
                     if let AgentRelease::Dispatch { request } = release {
                         let queued = self.http_client_request(request).ok_or_else(|| {
                             ExecutionError::Host {
