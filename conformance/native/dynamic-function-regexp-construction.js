@@ -17,6 +17,7 @@ if (String(lone) !== lone || `${lone}` !== lone ||
       Object.assign(new String("wrapped"), {
         [Symbol.toPrimitive]() { return "overridden"; },
       })) !== "wrapped" ||
+    String.prototype.slice.call({toString() { return lone + "tail"; }}, 0, 2) !== lone + "t" ||
     "".concat({toString() { return lone; }}) !== lone ||
     "".padStart(1, {toString() { return lone; }}) !== lone ||
     new String(lone).valueOf() !== lone || new String().valueOf() !== "") {

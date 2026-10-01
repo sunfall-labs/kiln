@@ -2340,8 +2340,10 @@
                 kiln_c99_gc_keep_alive(&receiver);
             }
         }
-        return kiln_c99_invoke_string_method(host, result, code, receiver, args, argc, depth,
-                                             thrown);
+        status = kiln_c99_invoke_string_method(host, result, code, receiver, args, argc, depth,
+                                               thrown);
+        kiln_c99_gc_keep_alive(&receiver);
+        return status;
     }
     if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
         if (code == KILN_C99_METHOD_SLICE) {
