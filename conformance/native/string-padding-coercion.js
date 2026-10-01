@@ -49,6 +49,9 @@ if (joined.length !== 3 || joined.charCodeAt(0) !== 98 || joined.charCodeAt(1) !
 let infiniteLength = false;
 let hugeLength = false;
 let symbolTarget = false;
+let emptyInfinite = false;
+let throwingFillerWon = false;
+let symbolFillerWon = false;
 try {
   "x".padStart(Infinity);
 } catch (error) {
@@ -64,7 +67,21 @@ try {
 } catch (error) {
   symbolTarget = error instanceof TypeError;
 }
+try {
+  emptyInfinite = "x".padStart(Infinity, "") === "x";
+} catch {}
+try {
+  "x".padEnd(1e20, { toString() { throw new Error("filler first"); } });
+} catch (error) {
+  throwingFillerWon = error.message === "filler first";
+}
+try {
+  "x".padEnd(1e20, Symbol("filler"));
+} catch (error) {
+  symbolFillerWon = error instanceof TypeError;
+}
 if ("x".padEnd(2.9, "-") !== "x-" || "x".padStart(-Infinity, "-") !== "x" ||
-    !infiniteLength || !hugeLength || !symbolTarget) {
+    !infiniteLength || !hugeLength || !symbolTarget || !emptyInfinite || !throwingFillerWon ||
+    !symbolFillerWon) {
   throw new Error("padding ToLength normalization mismatch");
 }

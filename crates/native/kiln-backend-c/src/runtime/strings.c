@@ -583,22 +583,15 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             if (status != KILN_C99_OK) return status;
         }
         if (isnan(target) || target <= 0.0) {
-            wanted = 0;
-        } else if (!isfinite(target)) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                        "Invalid string length");
+            target = 0.0;
+        } else if (!isfinite(target) || target >= 9007199254740991.0) {
+            /* ToLength clamps to 2^53 - 1. The implementation's maximum string length is a
+             * later check: filler conversion (and the empty-filler fast return) precedes it. */
+            target = 9007199254740991.0;
         } else {
             target = trunc(target);
-            /* The string header stores its UTF-16 length in uint32_t. Refuse before a cast or
-             * allocation can wrap, and match the language-visible RangeError for oversize. */
-            if (target > (double)UINT32_MAX || target >= (double)SIZE_MAX ||
-                target > (double)(SIZE_MAX / sizeof(uint16_t))) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                            "Invalid string length");
-            }
-            wanted = (size_t)target;
         }
-        if (wanted <= count) {
+        if (target <= (double)count) {
             *result = receiver;
             kiln_c99_gc_keep_alive(&receiver);
             return KILN_C99_OK;
@@ -622,6 +615,15 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             kiln_c99_gc_keep_alive(&receiver);
             return KILN_C99_OK;
         }
+        /* The string header stores a uint32_t unit length. Apply that implementation limit only
+         * after ToLength, receiver short-circuiting, and filler ToString have all run. */
+        if (target > (double)UINT32_MAX || target >= (double)SIZE_MAX ||
+            target > (double)(SIZE_MAX / sizeof(uint16_t))) {
+            free(filler_units);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Invalid string length");
+        }
+        wanted = (size_t)target;
         {
             uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
             size_t fill = wanted - count;
