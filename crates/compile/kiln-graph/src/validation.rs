@@ -307,7 +307,9 @@ pub fn stack_effect(
             }
         }
         // Both write a slot in place and touch no stack.
-        Instruction::NewCell(_) | Instruction::MarkUninitialized(_) => Ok((height, false)),
+        Instruction::NewCell(_)
+        | Instruction::MarkCellFunctionName(_)
+        | Instruction::MarkUninitialized(_) => Ok((height, false)),
         // Registering and retiring a handler leave the stack alone; the *target* is reached with
         // one more value on it, which the dataflow walk below accounts for.
         Instruction::PushHandler(_) | Instruction::PopHandler => Ok((height, false)),

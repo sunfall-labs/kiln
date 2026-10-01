@@ -175,13 +175,20 @@ pub fn compile_eval_with_strictness(
                 kind: match outer.declaration {
                     EvalDeclaration::Var => VariableKind::Var,
                     EvalDeclaration::Let => VariableKind::Let,
-                    EvalDeclaration::Const => VariableKind::Const,
+                    // Keep a borrowed immutable binding syntactically assignable in the eval
+                    // compiler so the captured-cell guard can produce the runtime TypeError.
+                    // Treating it as a source `const` would reject an eval-created function at
+                    // compile time, before the write can run. Its original declaration remains
+                    // in `eval_declaration` for nested eval sites and backend metadata.
+                    EvalDeclaration::Const => VariableKind::Let,
+                    EvalDeclaration::FunctionName => VariableKind::Let,
                 },
                 imported: false,
                 initialized: true,
                 // The caller's cell is installed in the slot before the body runs, so there is
                 // nothing for a prologue to box and every access goes straight through it.
                 celled: true,
+                eval_declaration: Some(outer.declaration),
             },
         );
     }
@@ -489,6 +496,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
                 imported: false,
                 initialized: true,
                 celled: true,
+                eval_declaration: None,
             },
         );
         imports.push(ImportBinding {
@@ -615,6 +623,10 @@ struct Local {
     /// name. Reads and writes go through `LoadCell`/`StoreCell` so every closure sharing the
     /// binding sees the same mutations.
     celled: bool,
+    /// The eval binding category when this is an outer binding imported into an eval compiler,
+    /// or the private name of a named function expression. It preserves distinctions that
+    /// `VariableKind` alone cannot express.
+    eval_declaration: Option<EvalDeclaration>,
 }
 
 /// The per-function half of [`Compiler`], saved and restored around a nested function body.

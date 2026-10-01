@@ -171,15 +171,18 @@ impl super::Compiler {
                 let local = scope[name];
                 // An import is the exporter's binding, and writing one is refused wherever it is
                 // written. `const` is the nearest thing this vocabulary has to that.
-                let declaration = match local.kind {
-                    _ if local.imported => EvalDeclaration::Const,
-                    VariableKind::Var => EvalDeclaration::Var,
-                    VariableKind::Let => EvalDeclaration::Let,
-                    // A `using` binding cannot be reassigned either, and what an eval'd source
-                    // may do with it is exactly what it may do with a `const`.
-                    VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing => {
-                        EvalDeclaration::Const
-                    }
+                let declaration = match local.eval_declaration {
+                    Some(declaration) => declaration,
+                    None => match local.kind {
+                        _ if local.imported => EvalDeclaration::Const,
+                        VariableKind::Var => EvalDeclaration::Var,
+                        VariableKind::Let => EvalDeclaration::Let,
+                        // A `using` binding cannot be reassigned either, and what an eval'd source
+                        // may do with it is exactly what it may do with a `const`.
+                        VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing => {
+                            EvalDeclaration::Const
+                        }
+                    },
                 };
                 order.push((name.clone(), declaration));
             }

@@ -2026,9 +2026,12 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
             status = KILN_C99_OUT_OF_MEMORY;
             goto direct_eval_done;
         }
-        if (read_only_flags[index])
+        if (read_only_flags[index] == 1)
             (void)kiln_dyn_scope_mark_restriction(&scope, names[index], name_lengths[index],
                                                   KILN_DYN_BINDING_READ_ONLY);
+        else if (read_only_flags[index] == 2)
+            (void)kiln_dyn_scope_mark_restriction(&scope, names[index], name_lengths[index],
+                                                  KILN_DYN_BINDING_FUNCTION_NAME);
     }
     scope.strict = strict_context != 0;
     memset(&lex, 0, sizeof(lex));

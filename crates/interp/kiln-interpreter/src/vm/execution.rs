@@ -1,6 +1,40 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn write_cell(
+        &mut self,
+        cell: &Cell,
+        value: Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let key = Rc::as_ptr(cell) as usize;
+        let readonly = match self.readonly_cells.get(&key) {
+            Some((weak, kind)) => match weak.upgrade() {
+                Some(known) if Rc::ptr_eq(&known, cell) => Some(*kind),
+                Some(_) => None,
+                None => {
+                    self.readonly_cells.remove(&key);
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(kind) = readonly {
+            if self.strict || kind == ReadonlyCellKind::Const {
+                self.throw_error(
+                    ErrorKind::Type,
+                    "Assignment to constant variable.".to_owned(),
+                    instruction,
+                )?;
+            }
+            // A named function expression's private name ignores sloppy writes and throws in
+            // strict code. Const writes throw in both modes above.
+            return Ok(true);
+        }
+        *cell.borrow_mut() = value;
+        Ok(false)
+    }
+
     /// The dispatch loop reached [`Self::checkpoint`]: find out which boundary that was.
     ///
     /// Deliberately not inlined into the loop. Everything here is either the end of the program
@@ -1925,7 +1959,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::StoreCell(slot) => {
                     let value = self.pop(current)?;
                     let cell = self.cell(*slot as usize)?;
-                    *cell.borrow_mut() = value;
+                    self.write_cell(&cell, value, current)?;
+                }
+                Instruction::MarkCellFunctionName(slot) => {
+                    let cell = self.cell(*slot as usize)?;
+                    self.readonly_cells.insert(
+                        Rc::as_ptr(&cell) as usize,
+                        (Rc::downgrade(&cell), ReadonlyCellKind::FunctionName),
+                    );
                 }
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();
@@ -1941,7 +1982,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::StoreUpvalue(index) => {
                     let value = self.pop(current)?;
-                    *self.upvalue(*index)?.borrow_mut() = value;
+                    let cell = self.upvalue(*index)?;
+                    self.write_cell(&cell, value, current)?;
                 }
                 Instruction::Call { argc } => {
                     let argc = *argc;

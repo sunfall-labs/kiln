@@ -266,6 +266,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     EvalAccess::Cell(slot) => self.cell(slot as usize)?,
                     EvalAccess::Upvalue(index) => self.upvalue(index)?,
                 };
+                let readonly_kind = match binding.declaration {
+                    kiln_ir::EvalDeclaration::Const => Some(super::ReadonlyCellKind::Const),
+                    kiln_ir::EvalDeclaration::FunctionName => {
+                        Some(super::ReadonlyCellKind::FunctionName)
+                    }
+                    kiln_ir::EvalDeclaration::Var | kiln_ir::EvalDeclaration::Let => None,
+                };
+                if let Some(kind) = readonly_kind {
+                    self.readonly_cells
+                        .insert(Rc::as_ptr(&cell) as usize, (Rc::downgrade(&cell), kind));
+                }
                 locals[slot] = Value::Cell(cell);
             }
         }

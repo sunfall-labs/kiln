@@ -382,6 +382,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 21);
                 word(&mut hash, u64::from(*value));
             }
+            Instruction::MarkCellFunctionName(value) => {
+                byte(&mut hash, 198);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::MakeFunction(value) => {
                 byte(&mut hash, 13);
                 word(&mut hash, u64::from(*value));

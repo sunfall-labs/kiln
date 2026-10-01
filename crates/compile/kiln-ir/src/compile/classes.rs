@@ -615,6 +615,7 @@ impl super::Compiler {
                 // compile-time flag can say whether it ran.
                 initialized: true,
                 celled: true,
+                eval_declaration: None,
             },
         );
         self.code.push(Instruction::NewCell(slot));
@@ -1002,6 +1003,7 @@ impl super::Compiler {
                     // parameters to a default's right in a dead zone.
                     initialized: !parameters_have_defaults,
                     celled,
+                    eval_declaration: None,
                 },
             );
             binding_steps.push(

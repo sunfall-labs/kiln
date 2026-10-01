@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 10;
+pub const BYTECODE_VERSION: u16 = 11;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -535,6 +535,9 @@ pub enum Instruction {
     /// Read the cell captured at this closure's upvalue index.
     LoadUpvalue(u32),
     StoreUpvalue(u32),
+    /// Mark an initialized captured cell as a named-function self binding. Its write behavior
+    /// differs from `const`: sloppy assignments are ignored, strict assignments throw.
+    MarkCellFunctionName(u32),
     /// Read a module-scope slot from inside a call frame.
     ///
     /// Distinct from `LoadLocal` because a frame's locals are its own: module bindings outlive
@@ -1007,6 +1010,8 @@ pub enum EvalDeclaration {
     Var,
     Let,
     Const,
+    /// The immutable inner name of a named function expression.
+    FunctionName,
 }
 
 /// One class's private names, as a direct `eval` written inside that class has to see them.

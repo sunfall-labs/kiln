@@ -257,6 +257,7 @@ impl super::Compiler {
                 // is the exporter's own, installed by the host before the first instruction, so
                 // there is nothing for the module prologue to box.
                 celled: true,
+                eval_declaration: None,
             },
         );
         Some(slot)

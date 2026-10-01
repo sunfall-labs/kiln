@@ -291,6 +291,11 @@ impl super::Compiler {
                 if let Some(name) = &self_bound {
                     self.scopes.push(HashMap::new());
                     self.predeclare(VariableKind::Const, name, false);
+                    if let Some(local) =
+                        self.scopes.last_mut().and_then(|scope| scope.get_mut(name))
+                    {
+                        local.eval_declaration = Some(EvalDeclaration::FunctionName);
+                    }
                 }
                 if let Some(index) = self.compile_function(function, expression.span) {
                     self.code.push(Instruction::MakeFunction(index));
@@ -310,6 +315,17 @@ impl super::Compiler {
                             self.error(Some(expression.span), "could not bind function expression");
                             self.code.push(Instruction::Pop);
                         }
+                    }
+                    // A named function expression's inner name is an immutable binding. When
+                    // this function expression itself comes from direct eval, the interpreter
+                    // needs to preserve that fact after the eval frame returns, when writes
+                    // happen through the closure's captured cell.
+                    if self.eval_program
+                        && let Resolution::Local(local) = self.resolve(name)
+                        && local.celled
+                    {
+                        self.code
+                            .push(Instruction::MarkCellFunctionName(local.slot));
                     }
                     self.scopes.pop().expect("function scope was just pushed");
                 }

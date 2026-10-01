@@ -1518,7 +1518,7 @@ pub fn build_function_graph(
                         &mut operations,
                     );
                 }
-                Instruction::Nop => {}
+                Instruction::Nop | Instruction::MarkCellFunctionName(_) => {}
                 Instruction::Return => {
                     let ret_val = frame.stack.pop();
                     terminator = Terminator::Return(ret_val);

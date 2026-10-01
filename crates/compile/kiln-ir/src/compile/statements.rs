@@ -837,6 +837,7 @@ impl super::Compiler {
                 imported: false,
                 initialized: !in_dead_zone,
                 celled,
+                eval_declaration: None,
             },
         );
         if celled {
@@ -1332,6 +1333,7 @@ impl super::Compiler {
                 imported: false,
                 initialized,
                 celled,
+                eval_declaration: None,
             },
         );
         // The cell has to exist before a hoisted function captures it, which is why this is here

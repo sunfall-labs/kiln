@@ -693,7 +693,11 @@ pub(crate) fn emit_tail_instruction(
                 writeln!(
                     output,
                     "        {},",
-                    u8::from(matches!(binding.declaration, EvalDeclaration::Const))
+                    match binding.declaration {
+                        EvalDeclaration::Const => 1,
+                        EvalDeclaration::FunctionName => 2,
+                        EvalDeclaration::Var | EvalDeclaration::Let => 0,
+                    }
                 )
                 .unwrap();
             }

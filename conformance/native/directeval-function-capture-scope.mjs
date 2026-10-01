@@ -19,6 +19,15 @@ try {
 } catch (error) {
   console.log(error instanceof TypeError);
 }
+// These assertions keep both engines honest even if the catch above stopped printing on failure.
+if (result.read() !== 2) throw new Error('captured mutable binding changed unexpectedly');
+let constWriteThrew = false;
+try {
+  result.assignConst();
+} catch (error) {
+  constWriteThrew = error instanceof TypeError;
+}
+if (!constWriteThrew) throw new Error('eval-created closure did not reject a captured const write');
 
 const intrinsicEval = eval;
 const order = [];

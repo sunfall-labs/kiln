@@ -4,6 +4,7 @@ function factory(source) { return eval(source); }
 let shadow = 'outer';
 const sloppy = factory('(function shadow() { shadow = 3; return shadow; })');
 console.log(sloppy() === sloppy, shadow);
+if (sloppy() !== sloppy || shadow !== 'outer') throw new Error('sloppy function-name write changed binding');
 
 let strictName = 'outer strict';
 const strict = factory('(function strictName() { "use strict"; strictName = 4; })');
@@ -11,6 +12,15 @@ try {
   strict();
 } catch (error) {
   console.log(error instanceof TypeError, strictName);
+}
+let strictWriteThrew = false;
+try {
+  strict();
+} catch (error) {
+  strictWriteThrew = error instanceof TypeError;
+}
+if (!strictWriteThrew || strictName !== 'outer strict') {
+  throw new Error('strict function-name write did not preserve its bindings');
 }
 
 const recursive = factory('(function factorial(n) { return n < 2 ? 1 : n * factorial(n - 1); })');
@@ -35,3 +45,6 @@ function namedConstructor(source) {
 }
 const named = namedConstructor('(function constructor() { constructor = 1; return constructor; })');
 console.log(named[0] === named[1], named[2]);
+if (named[0] !== named[1] || named[2] !== 'outer-constructor') {
+  throw new Error('named constructor self binding was changed');
+}

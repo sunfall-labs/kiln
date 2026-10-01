@@ -31,6 +31,12 @@ mod workers;
 /// check costs nothing measurable.
 pub(crate) const WORKER_QUANTUM: u64 = 100_000;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadonlyCellKind {
+    Const,
+    FunctionName,
+}
+
 pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// The program the *running* frame belongs to, swapped on every call and restored on return.
     pub(super) program: Rc<Program>,
@@ -215,6 +221,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// one mechanism for both rather than a fast path and a fallback.
     /// Empty for every module that does not import from itself, which is nearly all of them.
     pub(super) self_bindings: Vec<(Rc<RefCell<Value>>, u32)>,
+    /// Immutable direct-eval bindings keyed by cell identity. Weak keys let closures keep the
+    /// cells alive naturally without retaining every evaluated function for the VM's lifetime.
+    pub(super) readonly_cells:
+        std::collections::HashMap<usize, (Weak<RefCell<Value>>, ReadonlyCellKind)>,
     /// Namespace objects a module imported from itself, and the slots each name shows. Caught up
     /// from those slots before every instruction, so no read can see one stale.
     pub(super) self_namespaces: Vec<SelfNamespace>,

@@ -183,6 +183,7 @@ pub(crate) fn validate_code(
             | Instruction::NewCell(local)
             | Instruction::LoadCell(local)
             | Instruction::StoreCell(local)
+            | Instruction::MarkCellFunctionName(local)
             | Instruction::MarkUninitialized(local)
                 if (*local as u64) >= u64::from(local_count) =>
             {
@@ -400,6 +401,9 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         }),
         // Source admission is checked by the dynamic expression seam at execution time.
         Instruction::DirectEval(_) => Ok(()),
+        // Direct-eval bytecode is evaluated only by the interpreter's dynamic compiler; the
+        // native dynamic compiler carries immutability in its binding descriptors instead.
+        Instruction::MarkCellFunctionName(_) => Ok(()),
         Instruction::ToObject | Instruction::WithHas(_) => Err(EmitError::Unsupported {
             feature: "a `with` statement in the native backend".to_owned(),
         }),
