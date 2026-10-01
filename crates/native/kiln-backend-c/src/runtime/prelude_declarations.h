@@ -258,6 +258,9 @@ extern int kiln_c99_diagnostic_available(void);
 extern void kiln_c99_forget_handled_throw(void);
 extern KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
 extern kiln_value kiln_c99_text(kiln_value value);
+/* Language ToString for runtime methods that need to preserve the resulting UTF-16 units. */
+int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_value *out,
+                              int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 extern int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);

@@ -1264,13 +1264,18 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         const uint16_t *filler = space;
         size_t filler_count = 1;
         if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
-            kiln_value shown = kiln_c99_text(args[1]);
+            kiln_value shown;
+            status = kiln_c99_to_text_argument(host, args[1], &shown, depth, thrown);
+            kiln_c99_gc_keep_alive(&receiver);
             free(needle);
             needle = NULL;
             needle_count = 0;
-            if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_to_units(shown, &needle, &needle_count) != KILN_C99_OK) {
-                status = kiln_c99_refuse("string padding was given a filler with no text form");
+            if (status != KILN_C99_OK) {
+                break;
+            }
+            status = kiln_c99_to_units(shown, &needle, &needle_count);
+            kiln_c99_gc_keep_alive(&shown);
+            if (status != KILN_C99_OK) {
                 break;
             }
             filler = needle;
@@ -1297,6 +1302,10 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             *result = kiln_c99_from_units(padded, wanted);
             free(padded);
         }
+        if (result->tag != KILN_VALUE_STRING && status == KILN_C99_OK) {
+            status = KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_gc_keep_alive(&receiver);
         break;
     }
     case KILN_C99_METHOD_TO_UPPER_CASE:
@@ -1413,22 +1422,56 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         break;
     }
     case KILN_C99_METHOD_STRING_CONCAT: {
-        kiln_text built = {NULL, 0, 0};
+        uint16_t *joined = NULL;
+        size_t joined_count = 0;
+        size_t joined_capacity = 0;
         size_t index;
-        if (kiln_c99_text_append_string(&built, receiver) != KILN_C99_OK) {
-            status = KILN_C99_OUT_OF_MEMORY;
-        }
-        for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
-            kiln_value shown = kiln_c99_text(args[index]);
-            if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
-                status = kiln_c99_refuse("String.prototype.concat was given a value with no "
-                                         "text form");
+        uint16_t *part = NULL;
+        size_t part_count = 0;
+        status = kiln_c99_to_units(receiver, &part, &part_count);
+        if (status == KILN_C99_OK && part_count != 0) {
+            status = kiln_c99_reserve((void **)&joined, &joined_capacity, part_count,
+                                      sizeof *joined);
+            if (status == KILN_C99_OK) {
+                memcpy(joined, part, part_count * sizeof *part);
+                joined_count = part_count;
             }
         }
-        if (status == KILN_C99_OK) {
-            *result = kiln_c99_text_value(&built);
+        free(part);
+        part = NULL;
+        kiln_c99_gc_keep_alive(&receiver);
+        for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
+            kiln_value argument = args[index];
+            kiln_value shown;
+            status = kiln_c99_to_text_argument(host, argument, &shown, depth, thrown);
+            kiln_c99_gc_keep_alive(&argument);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) break;
+            status = kiln_c99_to_units(shown, &part, &part_count);
+            kiln_c99_gc_keep_alive(&shown);
+            if (status != KILN_C99_OK) break;
+            if (part_count > SIZE_MAX - joined_count) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                free(part);
+                part = NULL;
+                break;
+            }
+            status = kiln_c99_reserve((void **)&joined, &joined_capacity,
+                                      joined_count + part_count, sizeof *joined);
+            if (status == KILN_C99_OK && part_count != 0) {
+                memcpy(joined + joined_count, part, part_count * sizeof *part);
+                joined_count += part_count;
+            }
+            free(part);
+            part = NULL;
         }
+        if (status == KILN_C99_OK) {
+            *result = kiln_c99_from_units(joined, joined_count);
+            if (result->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_gc_keep_alive(&receiver);
+        free(part);
+        free(joined);
         break;
     }
     default:

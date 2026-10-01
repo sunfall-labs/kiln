@@ -59,8 +59,8 @@ static int kiln_c99_to_number_argument(kiln_host *host, kiln_value value, kiln_v
 }
 
 /* `ToString` of one argument, on the same terms. */
-static int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_value *out,
-                                     int depth, kiln_value *thrown) {
+int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_value *out,
+                              int depth, kiln_value *thrown) {
     kiln_value reduced = value;
     if (kiln_c99_is_reference(value)) {
         int status = kiln_c99_to_primitive(host, value, 1, &reduced, depth, thrown);
