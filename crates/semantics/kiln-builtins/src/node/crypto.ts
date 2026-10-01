@@ -358,33 +358,41 @@ delete (globalThis as any).__kilnCryptoKeyInfo;
 delete (globalThis as any).__kilnCryptoKeyExport;
 delete (globalThis as any).__kilnCryptoKeyFree;
 
-const asymmetricKeyHandles = new WeakMap<KeyObject, any>();
 const asymmetricKeyFinalizer: FinalizationRegistry<any> | undefined =
   typeof FinalizationRegistry === 'function' && typeof cryptoKeyFreeBridge === 'function'
     ? new FinalizationRegistry((handle: any) => { cryptoKeyFreeBridge(handle); })
     : undefined;
+let readAsymmetricHandle: ((key: any) => any) | undefined;
 
-/** Node's opaque key handle. Asymmetric values carry a parsed key-core handle in a WeakMap;
- * private material is never stored as an ordinary JavaScript byte property. */
+/** Node's opaque key handle. Asymmetric keys keep their opaque backend handle in an actual
+ * private slot: the interpreter slot owns its Rc-backed key value, while native stores only the
+ * external integer handle. Private key bytes are never exposed as an ordinary property. */
 export class KeyObject {
+  #asymmetricHandle: any;
   readonly type: string;
   readonly symmetricKeySize: number | undefined;
   readonly asymmetricKeyType: string | undefined;
   readonly asymmetricKeyDetails: any;
   private _key: Uint8Array;
 
-  constructor(key: any, type: string = 'secret', asymmetricKeyType?: string, asymmetricKeyDetails?: any) {
+  constructor(key: any, type: string = 'secret', asymmetricKeyType?: string, asymmetricKeyDetails?: any,
+    asymmetricHandle?: any) {
     this.type = type;
     this._key = type === 'secret' ? toUint8Array(key).slice() : new Uint8Array(0);
     this.symmetricKeySize = type === 'secret' ? this._key.length : undefined;
     this.asymmetricKeyType = asymmetricKeyType;
     this.asymmetricKeyDetails = asymmetricKeyDetails;
+    this.#asymmetricHandle = asymmetricHandle;
+    // Keep the brand-checked reader module-private; no public method can expose the raw handle.
+    if (readAsymmetricHandle === undefined) {
+      readAsymmetricHandle = (key: KeyObject) => key.#asymmetricHandle;
+    }
   }
 
   get [Symbol.toStringTag](): string { return 'KeyObject'; }
 
   export(options?: any): any {
-    const handle = asymmetricKeyHandles.get(this);
+    const handle = this.#asymmetricHandle;
     if (handle !== undefined) {
       if (options === undefined || options === null || typeof options !== 'object') {
         throw new TypeError('The "options.format" property is required');
@@ -418,21 +426,26 @@ export class KeyObject {
 }
 
 function makeAsymmetricKey(handle: any): KeyObject {
-  if (asymmetricKeyFinalizer === undefined) {
-    if (typeof cryptoKeyFreeBridge === 'function') cryptoKeyFreeBridge(handle);
-    throw new TypeError('The runtime cannot release asymmetric key handles after collection');
-  }
-  const info = cryptoKeyInfoBridge(handle);
-  const key = new KeyObject(undefined, info.type, info.asymmetricKeyType, info.asymmetricKeyDetails);
   try {
-    asymmetricKeyHandles.set(key, handle);
-    asymmetricKeyFinalizer.register(key, handle);
+    const info = cryptoKeyInfoBridge(handle);
+    const key = new KeyObject(undefined, info.type, info.asymmetricKeyType,
+      info.asymmetricKeyDetails, handle);
+    // The native provider returns a number naming an external allocation. Register only that
+    // scalar as a held value; an interpreter key handle is itself an Rc-backed opaque object
+    // stored by the private slot and must not be kept alive by its finalizer registry.
+    if (typeof handle === 'number') {
+      if (asymmetricKeyFinalizer === undefined) {
+        throw new TypeError('The runtime cannot release asymmetric key handles after collection');
+      }
+      asymmetricKeyFinalizer.register(key, handle);
+    }
+    return key;
   } catch (error) {
-    asymmetricKeyHandles.delete(key);
-    cryptoKeyFreeBridge(handle);
+    if (typeof handle === 'number' && typeof cryptoKeyFreeBridge === 'function') {
+      cryptoKeyFreeBridge(handle);
+    }
     throw error;
   }
-  return key;
 }
 
 export function createSecretKey(key: any, encoding?: string): KeyObject {
@@ -487,7 +500,7 @@ export function createPrivateKey(input: any): KeyObject {
 
 export function createPublicKey(input: any): KeyObject {
   if (input instanceof KeyObject) {
-    const handle = asymmetricKeyHandles.get(input);
+    const handle = readAsymmetricHandle?.(input);
     if (handle === undefined) throw new TypeError('The key argument must be an asymmetric KeyObject');
     if (input.type !== 'private') {
       throw new TypeError('The "key" argument must be a private KeyObject');
