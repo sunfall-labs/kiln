@@ -1000,9 +1000,19 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
     let stdout = child.stdout.take().expect("capture server stdout");
     let mut stdout = std::io::BufReader::new(stdout);
     let mut listening = String::new();
-    stdout
+    let read = stdout
         .read_line(&mut listening)
         .expect("read delayed-close listening port");
+    if read == 0 {
+        let output = child
+            .wait_with_output()
+            .expect("reap delayed-close server before listen");
+        panic!(
+            "delayed-close server exited before listening: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let port: u16 = listening
         .trim()
         .parse()
