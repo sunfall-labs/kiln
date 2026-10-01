@@ -1872,6 +1872,35 @@ static int kiln_c99_node_fetch_respond(kiln_value *result, const kiln_value *arg
     return KILN_C99_OK;
 }
 
+/* EOF closes only the readable half. Let listeners submit their final writes and let the
+ * existing end operation flush them before shutdown; a half-open socket keeps its writer. */
+static int kiln_c99_node_socket_after_eof(kiln_node_socket *socket, int depth,
+                                          kiln_value *thrown) {
+    kiln_value allow_half_open;
+    kiln_value job;
+    kiln_bound *bound;
+    int status;
+    if (socket->closing || socket->closed) return KILN_C99_OK;
+    if (socket->write_closed) {
+        if (socket->write_request == 0 && socket->shutdown_request == 0)
+            return kiln_c99_node_close_socket(socket, 0);
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_get(socket->host, socket->object, "allowHalfOpen", 13,
+                          &allow_half_open, depth, thrown);
+    if (status != KILN_C99_OK || kiln_c99_truthy(allow_half_open)) return status;
+    bound = (kiln_bound *)kiln_c99_gc_calloc(KILN_GC_BOUND, sizeof *bound);
+    if (bound == NULL) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_heap_store_value(bound, &bound->target,
+                              kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_END));
+    kiln_c99_heap_store_value(bound, &bound->receiver, socket->object);
+    kiln_c99_heap_store_value(bound, &bound->properties, kiln_c99_undefined());
+    job = kiln_c99_value(KILN_VALUE_BOUND, (uint64_t)(uintptr_t)bound, NULL, 0);
+    status = kiln_c99_enqueue_next_tick(job, NULL, 0);
+    kiln_c99_gc_keep_alive(&socket->object);
+    return status;
+}
+
 static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
                                                      const uint8_t *bytes, uint64_t length) {
     size_t total;
@@ -2702,7 +2731,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 status = kiln_c99_node_emit(socket->host, socket->object, "end",
                                                 kiln_c99_undefined(), 0, 0, exception);
                 if (status != KILN_C99_OK) return status;
-                return kiln_c99_node_close_socket(socket, 1);
+                return kiln_c99_node_socket_after_eof(socket, 0, exception);
             }
             {
                 kiln_node_completion *read;
@@ -2806,8 +2835,11 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             status = kiln_c99_node_emit(socket->host, socket->object, "finish",
                                         kiln_c99_undefined(), 0, 0, exception);
             if (status != KILN_C99_OK) return status;
-            return kiln_c99_node_socket_finish_end_callbacks(
+            status = kiln_c99_node_socket_finish_end_callbacks(
                 socket->host, socket, kiln_c99_null(), 0, exception);
+            if (status != KILN_C99_OK) return status;
+            if (socket->read_closed) return kiln_c99_node_close_socket(socket, 0);
+            return KILN_C99_OK;
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
             int status;
@@ -4804,7 +4836,7 @@ static int kiln_c99_node_socket_resume(kiln_node_socket *socket, int depth,
             status = kiln_c99_node_emit(socket->host, socket->object, "end",
                                         kiln_c99_undefined(), 0, depth, thrown);
         if (status != KILN_C99_OK) return status;
-        return kiln_c99_node_close_socket(socket, 1);
+        return kiln_c99_node_socket_after_eof(socket, depth, thrown);
     }
     if (socket->read_paused) return KILN_C99_OK;
     // Hyper retains exclusive read authority until raw transport handoff is complete.
@@ -5122,6 +5154,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (socket == NULL) return kiln_c99_throw_not_a(thrown, socket_value, "Socket");
         if (code == KILN_C99_METHOD_NODE_SOCKET_END) {
             size_t callback_index;
+            if (argc == 0 && (socket->closing || socket->closed || socket->write_closed)) {
+                *result = receiver;
+                return KILN_C99_OK;
+            }
             if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED &&
                 !kiln_c99_is_callable(args[0])) {
                 status = kiln_c99_node_validate_stream_chunk(args[0], thrown);
@@ -5476,6 +5512,13 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 return status;
             }
             socket->corked_write_len = 0;
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+        if (socket->write_request != 0) {
+            socket->shutdown_after_write = 1;
+            status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
+            if (status != KILN_C99_OK) return status;
             *result = receiver;
             return KILN_C99_OK;
         }
