@@ -37,6 +37,7 @@ use oxc_ast::{
         VariableDeclarationKind,
     },
 };
+use oxc_ast_visit::Visit;
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
@@ -1816,7 +1817,7 @@ fn parse_source_in_context_with_units(
     if let Some(demanded_exports) = demanded_exports
         && !parsed.panicked
         && parsed.diagnostics.is_empty()
-        && early_errors(&parsed).is_empty()
+        && early_errors_with_source_units(&parsed, source_units).is_empty()
         && !has_unexported_top_level_class_heritage(&parsed.program)
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
@@ -2114,7 +2115,7 @@ fn lower_parsed_in_context(
         diagnostics.retain(|diagnostic| !allow.permits(&diagnostic.message));
     }
     if diagnostics.is_empty() {
-        let mut early = early_errors(parsed);
+        let mut early = early_errors_with_source_units(parsed, source_units);
         if let Some(allow) = allow {
             early.retain(|diagnostic| !allow.permits(&diagnostic.message));
         }
@@ -2335,6 +2336,79 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
         .errors()
         .map(lower_diagnostic)
         .collect()
+}
+
+fn early_errors_with_source_units(
+    parsed: &oxc_parser::ParserReturn<'_>,
+    source_units: Option<(&[u16], &[usize])>,
+) -> Vec<Diagnostic> {
+    let mut errors = early_errors(parsed);
+    if let Some((units, byte_to_unit)) = source_units {
+        let mut visitor = RawSurrogateRegExpVisitor {
+            units,
+            byte_to_unit,
+            errors: Vec::new(),
+        };
+        visitor.visit_program(&parsed.program);
+        errors.extend(visitor.errors);
+    }
+    errors
+}
+
+struct RawSurrogateRegExpVisitor<'a> {
+    units: &'a [u16],
+    byte_to_unit: &'a [usize],
+    errors: Vec<Diagnostic>,
+}
+
+impl<'a> Visit<'a> for RawSurrogateRegExpVisitor<'_> {
+    fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'a>) {
+        use oxc_ast::ast::RegExpFlags;
+
+        if !literal.regex.flags.intersects(RegExpFlags::U | RegExpFlags::V) {
+            return;
+        }
+        let flags_len = literal.regex.flags.to_string().len();
+        let start_byte = literal.span.start as usize + 1;
+        let Some(end_byte) = (literal.span.end as usize).checked_sub(flags_len + 1) else {
+            return;
+        };
+        let (Some(&start), Some(&end)) = (
+            self.byte_to_unit.get(start_byte),
+            self.byte_to_unit.get(end_byte),
+        ) else {
+            return;
+        };
+        let Some(pattern) = self.units.get(start..end) else {
+            return;
+        };
+        let mut backslashes = 0usize;
+        for (index, &unit) in pattern.iter().enumerate() {
+            let lone_surrogate = match unit {
+                0xd800..=0xdbff => !pattern
+                    .get(index + 1)
+                    .is_some_and(|next| (0xdc00..=0xdfff).contains(next)),
+                0xdc00..=0xdfff => !index
+                    .checked_sub(1)
+                    .and_then(|previous| pattern.get(previous))
+                    .is_some_and(|previous| (0xd800..=0xdbff).contains(previous)),
+                _ => false,
+            };
+            if lone_surrogate && backslashes % 2 == 1 {
+                self.errors.push(Diagnostic {
+                    message: "Invalid regular expression: escaped lone surrogate in Unicode mode"
+                        .into(),
+                    span: Some(HirSpan::new(literal.span.start, literal.span.end)),
+                });
+                break;
+            }
+            backslashes = if unit == b'\\' as u16 {
+                backslashes + 1
+            } else {
+                0
+            };
+        }
+    }
 }
 
 /// A BigInt literal's value as plain decimal digits.
@@ -6460,6 +6534,41 @@ mod tests {
         let expected = &[b'x' as u16, 0xdfff, b'y' as u16];
         assert_eq!(cooked[0].as_ref().unwrap().to_units().as_ref(), expected);
         assert_eq!(raw[0].to_units().as_ref(), expected);
+    }
+
+    #[test]
+    fn unicode_regex_validation_uses_original_source_units() {
+        let prefix = "const re = /".encode_utf16().collect::<Vec<_>>();
+        for flag in ["u", "v"] {
+            let suffix = format!("/{flag};").encode_utf16().collect::<Vec<_>>();
+            let invalid =
+                [prefix.clone(), vec![b'\\' as u16, 0xd800], suffix.clone()].concat();
+            let invalid = parse_eval_units(
+                "dynamic.js",
+                &StringUnits::from_units(&invalid),
+                &EvalSyntax::default(),
+            );
+            assert!(
+                invalid
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("lone surrogate")),
+                "flag {flag}: {:?}",
+                invalid.diagnostics
+            );
+
+            let valid_raw = [prefix.clone(), vec![0xd800], suffix].concat();
+            let valid_raw = parse_eval_units(
+                "dynamic.js",
+                &StringUnits::from_units(&valid_raw),
+                &EvalSyntax::default(),
+            );
+            assert!(
+                valid_raw.diagnostics.is_empty(),
+                "flag {flag}: {:?}",
+                valid_raw.diagnostics
+            );
+        }
     }
 
     #[test]
