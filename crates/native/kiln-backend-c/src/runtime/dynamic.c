@@ -394,6 +394,9 @@ typedef struct {
     size_t active_label_len;
     const char *break_label;
     size_t break_label_len;
+    /* Set only by function-declaration instantiation, where a declaration's name is a mutable
+     * binding in its containing function scope rather than a named-expression self binding. */
+    int function_declaration;
 } kiln_dyn_lexer;
 
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
@@ -1227,7 +1230,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_value upvals[3];
         kiln_value name_value = kiln_c99_undefined();
         const kiln_string *closure_name = NULL;
-        if (explicit_name) {
+        if (explicit_name && !lex->function_declaration) {
             name_value = kiln_c99_copy_text(fn_name, fn_name_len);
             if (name_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
             kiln_c99_gc_keep_alive(&name_value);
@@ -1266,7 +1269,9 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             return status;
         }
         kiln_c99_gc_keep_alive(&env_obj);
-        status = kiln_dyn_capture_environment(host, explicit_name ? &function_scope : scope,
+        status = kiln_dyn_capture_environment(host,
+                                              explicit_name && !lex->function_declaration
+                                                  ? &function_scope : scope,
                                               env_obj, 0, thrown);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&function_scope);
@@ -1298,7 +1303,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         kiln_c99_gc_keep_alive(&env_obj);
         if (explicit_name) kiln_c99_gc_keep_alive(&self_cell);
         kiln_c99_heap_store_value(kiln_c99_closure_of(*out), &kiln_c99_closure_of(*out)->source_value, upvals[1]);
-        if (explicit_name) {
+        if (explicit_name && !lex->function_declaration) {
             kiln_c99_val_store_cell(kiln_c99_cell_of(self_cell),
                                     kiln_val_from_boundary(*out));
         }
@@ -2820,6 +2825,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_VAR || lex->curr.kind == KILN_DYN_KW_LET || lex->curr.kind == KILN_DYN_KW_CONST) {
+        int is_var = lex->curr.kind == KILN_DYN_KW_VAR;
         int is_const = lex->curr.kind == KILN_DYN_KW_CONST;
         kiln_dyn_lexer_next(lex);
         for (;;) {
@@ -2831,13 +2837,24 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             size_t name_len = lex->curr.len;
             kiln_dyn_lexer_next(lex);
             kiln_value init = kiln_c99_undefined();
-            if (lex->curr.kind == KILN_DYN_ASSIGN) {
+            int has_initializer = lex->curr.kind == KILN_DYN_ASSIGN;
+            if (has_initializer) {
                 kiln_dyn_lexer_next(lex);
                 int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
                                                 &init, thrown);
                 if (status != KILN_C99_OK) return status;
             }
-            if (!kiln_dyn_scope_set(scope, name, name_len, init))
+            int existing_local = 0;
+            for (size_t index = 0; index < scope->count; ++index) {
+                if (scope->bindings[index].name_len == name_len &&
+                    memcmp(scope->bindings[index].name, name, name_len) == 0) {
+                    existing_local = 1;
+                    break;
+                }
+            }
+            /* `var x;` does not overwrite a parameter or hoisted function declaration. */
+            if ((!is_var || has_initializer || !existing_local) &&
+                !kiln_dyn_scope_set(scope, name, name_len, init))
                 return KILN_C99_OUT_OF_MEMORY;
             if (is_const)
                 (void)kiln_dyn_scope_mark_restriction(scope, name, name_len,
@@ -2863,6 +2880,160 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     if (status != KILN_C99_OK) return status;
     if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
     return KILN_C99_OK;
+}
+
+typedef struct {
+    const char *name;
+    size_t name_len;
+    size_t offset;
+} kiln_dyn_function_declaration;
+
+static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
+    return kind == KILN_DYN_EOF || kind == KILN_DYN_SEMI || kind == KILN_DYN_RBRACE;
+}
+
+/* Function declarations are initialized before the first body statement. Pre-create their
+ * mutable cells, then make each closure against that shared scope so forward and mutual
+ * references resolve to the initialized declaration. This scanner intentionally recognizes
+ * declarations at the function-body level only; block lexical declarations remain a separate
+ * scope feature and are not reinterpreted as function-scoped bindings. */
+static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *source,
+                                                 size_t source_len, kiln_dyn_scope *scope,
+                                                 kiln_value receiver, const kiln_value *args,
+                                                 size_t argc, int depth, kiln_value *thrown) {
+    kiln_dyn_function_declaration *decls = NULL;
+    size_t decl_count = 0;
+    size_t decl_capacity = 0;
+    kiln_dyn_lexer scan;
+    int brace_depth = 0;
+    int statement_start = 1;
+    kiln_dyn_token_kind previous = KILN_DYN_EOF;
+    size_t previous_end = 0;
+    int status = KILN_C99_OK;
+
+    memset(&scan, 0, sizeof scan);
+    scan.src = source;
+    scan.len = source_len;
+    kiln_dyn_lexer_next(&scan);
+    while (scan.curr.kind != KILN_DYN_EOF) {
+        kiln_dyn_token_kind kind = scan.curr.kind;
+        size_t token_start = scan.curr.start == NULL
+                                 ? scan.pos
+                                 : (size_t)(scan.curr.start - source);
+        int line_terminated = previous_end <= token_start && previous_end < source_len &&
+                              memchr(source + previous_end, '\n', token_start - previous_end) !=
+                                  NULL &&
+                              (previous == KILN_DYN_IDENT || previous == KILN_DYN_NUM ||
+                               previous == KILN_DYN_STR || previous == KILN_DYN_RPAREN ||
+                               previous == KILN_DYN_RBRACKET ||
+                               previous == KILN_DYN_KW_RETURN);
+        int declaration_start = statement_start ||
+                                kiln_dyn_function_statement_boundary(previous) ||
+                                line_terminated;
+        if (brace_depth == 0 && kind == KILN_DYN_KW_FUNCTION &&
+            declaration_start) {
+            kiln_dyn_lexer look;
+            memset(&look, 0, sizeof look);
+            look.src = source;
+            look.len = source_len;
+            look.pos = token_start;
+            kiln_dyn_lexer_next(&look);
+            kiln_dyn_lexer_next(&look);
+            if (look.curr.kind == KILN_DYN_IDENT) {
+                if (decl_count == decl_capacity) {
+                    size_t capacity = decl_capacity == 0 ? 8 : decl_capacity * 2;
+                    kiln_dyn_function_declaration *next =
+                        (kiln_dyn_function_declaration *)realloc(
+                            decls, capacity * sizeof *next);
+                    if (next == NULL) {
+                        kiln_dyn_token_free(&look.curr);
+                        status = KILN_C99_OUT_OF_MEMORY;
+                        goto done;
+                    }
+                    decls = next;
+                    decl_capacity = capacity;
+                }
+                decls[decl_count++] = (kiln_dyn_function_declaration){
+                    .name = look.curr.start,
+                    .name_len = look.curr.len,
+                    .offset = token_start,
+                };
+            }
+            kiln_dyn_token_free(&look.curr);
+        }
+        if (kind == KILN_DYN_LBRACE) {
+            brace_depth++;
+            if (brace_depth == 1) statement_start = 0;
+        } else if (kind == KILN_DYN_RBRACE) {
+            if (brace_depth > 0) brace_depth--;
+            if (brace_depth == 0) statement_start = 1;
+        } else if (kind == KILN_DYN_SEMI && brace_depth == 0) {
+            statement_start = 1;
+        } else if (brace_depth == 0) {
+            statement_start = 0;
+        }
+        previous = kind;
+        previous_end = scan.pos;
+        kiln_dyn_lexer_next(&scan);
+    }
+    kiln_dyn_token_free(&scan.curr);
+
+    /* Allocate all local declaration cells before any closure captures the environment. */
+    for (size_t index = 0; index < decl_count; ++index) {
+        int found = 0;
+        for (size_t prior = 0; prior < index; ++prior) {
+            if (decls[prior].name_len == decls[index].name_len &&
+                memcmp(decls[prior].name, decls[index].name, decls[index].name_len) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (found) continue;
+        if (!kiln_dyn_scope_set(scope, decls[index].name, decls[index].name_len,
+                                kiln_c99_undefined())) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        for (size_t slot = 0; slot < scope->count; ++slot) {
+            if (scope->bindings[slot].name_len == decls[index].name_len &&
+                memcmp(scope->bindings[slot].name, decls[index].name,
+                       decls[index].name_len) == 0) {
+                if (scope->bindings[slot].value.tag != KILN_VALUE_CELL) {
+                    status = kiln_c99_make_cell(&scope->bindings[slot].value);
+                    if (status != KILN_C99_OK) goto done;
+                }
+                kiln_c99_gc_keep_alive(&scope->bindings[slot].value);
+                break;
+            }
+        }
+    }
+
+    for (size_t index = 0; index < decl_count; ++index) {
+        kiln_dyn_lexer function_lex;
+        kiln_value function;
+        memset(&function_lex, 0, sizeof function_lex);
+        function_lex.src = source;
+        function_lex.len = source_len;
+        function_lex.pos = decls[index].offset;
+        function_lex.function_declaration = 1;
+        kiln_dyn_lexer_next(&function_lex);
+        status = kiln_dyn_eval_primary(host, &function_lex, scope, receiver, args, argc,
+                                       depth, &function, thrown);
+        kiln_dyn_token_free(&function_lex.curr);
+        if (status != KILN_C99_OK) goto done;
+        if (function.tag != KILN_VALUE_FUNCTION ||
+            !kiln_dyn_scope_set(scope, decls[index].name, decls[index].name_len, function)) {
+            status = function.tag == KILN_VALUE_FUNCTION ? KILN_C99_OUT_OF_MEMORY
+                                                        : KILN_C99_INVALID_ARGUMENT;
+            goto done;
+        }
+        kiln_c99_gc_keep_alive(&function);
+    }
+
+done:
+    if (scan.curr.kind != KILN_DYN_EOF) kiln_dyn_token_free(&scan.curr);
+    free(decls);
+    return status;
 }
 
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
@@ -3013,6 +3184,17 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     }
     bsrc = (const char *)body_owned;
     size_t blen = body_len;
+    scope.strict = captured_scope.strict || kiln_dyn_body_has_use_strict(bsrc, blen);
+    int hoist_status = kiln_dyn_hoist_function_declarations(host, bsrc, blen, &scope,
+                                                            receiver,
+                                                            argc > 0 ? bargs : NULL,
+                                                            argc, depth, thrown);
+    if (hoist_status != KILN_C99_OK) {
+        free(body_owned);
+        kiln_dyn_scope_destroy(&scope);
+        kiln_dyn_scope_destroy(&captured_scope);
+        return hoist_status;
+    }
     kiln_dyn_lexer lex;
     memset(&lex, 0, sizeof(lex));
     lex.src = bsrc;
@@ -3121,10 +3303,19 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         kiln_val_from_boundary(upvalues[2])
     };
 
+    uint8_t *body_source = NULL;
+    size_t body_source_len = 0;
+    if (kiln_c99_string_to_utf8_lossy(upvalues[1], &body_source,
+                                      &body_source_len) != KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
+    int body_strict = kiln_dyn_body_has_use_strict((const char *)body_source,
+                                                   body_source_len);
+    free(body_source);
+
     int status = kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
                                        NULL, "", 0,
                                        "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
-                                       0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
+                                       0, 0, 0, 0, 0, body_strict, KILN_VAL_UNDEFINED,
                                        KILN_VAL_UNDEFINED, 0, 16, 0, 0,
                                        val_upvalues, 3);
     kiln_c99_gc_keep_alive(val_upvalues);

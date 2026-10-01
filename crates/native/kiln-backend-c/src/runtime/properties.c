@@ -625,6 +625,10 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
     const kiln_string *stable_key = ikey;
     if (target.tag == KILN_VALUE_SHARED)
         return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+    /* `[[Set]]` cannot box nullish values: even sloppy assignment to `undefined.x` or
+     * `null.x` throws before strict-mode write refusal is considered. */
+    if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL)
+        return kiln_c99_throw_cannot_set(thrown, target);
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     int status;
@@ -822,8 +826,7 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
          * object-like tags that also land here -- a Date, a bound function -- are a different
          * thing: those *are* objects a program may write to, and this backend simply has no store
          * for them yet, so they keep saying so. */
-        if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||
-            target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
+        if (target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_BIGINT ||
             target.tag == KILN_VALUE_SYMBOL) {
                 return strict ? kiln_c99_throw_cannot_set(thrown, target) : KILN_C99_OK;
