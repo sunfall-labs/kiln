@@ -67,6 +67,33 @@ if (inheritedSetterCalls !== 0) {
   throw new Error(`spread invoked ${inheritedSetterCalls} inherited setter(s)`);
 }
 
+const frozenArray = ["fixed index"];
+frozenArray.named = "fixed named property";
+Object.freeze(frozenArray);
+const frozenHole = [];
+frozenHole.length = 1;
+Object.freeze(frozenHole);
+if (Reflect.deleteProperty(frozenArray, "absent") !== true ||
+    Reflect.deleteProperty(frozenHole, "0") !== true ||
+    Reflect.deleteProperty(frozenArray, "0") !== false ||
+    Reflect.deleteProperty(frozenArray, "named") !== false ||
+    Reflect.deleteProperty(frozenArray, "length") !== false) {
+  throw new Error("array deletion did not distinguish absent and non-configurable properties");
+}
+function strictDeleteArrayLength(value) {
+  "use strict";
+  return delete value.length;
+}
+let strictLengthDeleteThrew = false;
+try {
+  strictDeleteArrayLength([]);
+} catch (_error) {
+  strictLengthDeleteThrew = true;
+}
+if (!strictLengthDeleteThrew) {
+  throw new Error("strict deletion of array length did not throw");
+}
+
 const mutationSymbol = Symbol("deleted during spread");
 const mutationAddedSymbol = Symbol("added during spread");
 

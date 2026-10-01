@@ -672,11 +672,18 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
          * slot reads as undefined, `length` is unchanged, and `in` says the element is gone. */
         double slot = kiln_c99_key_index_key(key);
         kiln_array *array = kiln_c99_array_of(target);
-        if (array->frozen) {
+        /* `length` is an own, non-configurable property even though it is stored on the array
+         * header rather than in the named-property store. */
+        if (kiln_c99_same_name_key(key, "length")) {
             *answer = 0;
             return KILN_C99_OK;
         }
-        if (slot >= 0.0 && (size_t)slot < array->count) {
+        if (slot >= 0.0 && (size_t)slot < array->count &&
+            array->elements[(size_t)slot] != KILN_VAL_HOLE) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
             kiln_c99_heap_store_val(array, &array->elements[(size_t)slot], KILN_VAL_HOLE);
             array->is_numeric = 0;
             return KILN_C99_OK;
@@ -686,6 +693,10 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
          * to the fresh descriptor check performed by object spread. */
         if (slot < 0.0 && array->properties.tag == KILN_VALUE_OBJECT &&
             kiln_c99_store_has(array->properties, key, ikey)) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
             return kiln_c99_delete_key(host, array->properties, key, ikey, answer, depth, thrown);
         }
         return KILN_C99_OK;
