@@ -2365,6 +2365,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         int status;
         if (client->response_ended) return KILN_C99_OK;
         client->response_ended = 1;
+        status = kiln_c99_put(NULL, client->response, "socket", 6,
+                              kiln_c99_null(), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, client->response, "connection", 10,
+                                  kiln_c99_null(), 0, NULL);
+        if (status != KILN_C99_OK) return status;
         status = kiln_c99_node_emit(client->host, client->response, "end",
                                     kiln_c99_undefined(), 0, 0, exception);
         if (status != KILN_C99_OK) return status;

@@ -38,7 +38,11 @@ checkNetServer(undefined, false, () => {
           assert(response.socket === request.socket, "response exposes the assigned socket");
           assert(response.socket.allowHalfOpen === false, "outgoing HTTP socket defaults to false");
           response.resume();
-          response.on("end", () => server.close(() => console.log("socket half-open defaults and options: ok")));
+          response.on("end", () => {
+            assert(response.socket === null, "response releases its socket before end listeners");
+            assert(response.connection === null, "response releases its connection before end listeners");
+            server.close(() => console.log("socket half-open defaults and options: ok"));
+          });
         });
         request.on("error", (error) => { throw error; });
       });

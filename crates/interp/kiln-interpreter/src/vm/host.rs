@@ -3644,6 +3644,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                         message: "HTTP response ended before its head".into(),
                     })?;
+                if let Value::Object(object) = &incoming {
+                    let mut object = object.borrow_mut();
+                    object.set("socket", Value::Null);
+                    object.set("connection", Value::Null);
+                }
                 let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
                 self.dispatch_readable_state(
                     Native::NodeReadablePush,
