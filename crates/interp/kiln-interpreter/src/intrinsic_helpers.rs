@@ -1318,7 +1318,7 @@ pub(super) fn delete_property_key(
                 // A frozen dense element is present even though it has no per-element entry in
                 // the exotic-property list. Check presence before the frozen state so deleting a
                 // hole in a frozen array still correctly reports success.
-                if frozen && !Self::is_hole(slot) {
+                if frozen && !matches!(slot, Value::Native(Native::Hole, _)) {
                     return false;
                 }
                 items.sparse.set(true);
