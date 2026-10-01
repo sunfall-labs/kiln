@@ -13,6 +13,10 @@ const rawSeparators = [
   Function("return \"a" + line + "b\"")(),
   Function("return \"a" + paragraph + "b\"")(),
 ];
+const rawLoneSurrogate = String.fromCharCode(0xD800);
+const rawSourceValue = Function('return "a' + rawLoneSurrogate + 'b"')();
+const rawSourceSurrogate = [rawSourceValue.length, units(rawSourceValue)];
+const escapedRawSourceSurrogate = Function('return "\\' + rawLoneSurrogate + '"')();
 const escapedSeparators = [
   Function("return \"a\\" + line + "b\"")(),
   Function("return \"a\\" + paragraph + "b\"")(),
@@ -37,6 +41,8 @@ const syntaxErrors = [
 console.log(JSON.stringify({
   units: values.map(units),
   rawSeparators: rawSeparators.map(value => [value.length, units(value)]),
+  rawSourceSurrogate,
+  escapedRawSourceSurrogate: units(escapedRawSourceSurrogate),
   escapedSeparators,
   continued: units(continued),
   template: units(template),

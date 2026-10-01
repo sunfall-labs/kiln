@@ -662,6 +662,105 @@ static int kiln_dyn_hex_digit(unsigned char ch) {
     return -1;
 }
 
+/* Dynamic Function source is a JavaScript string, so a lone UTF-16 surrogate in its body must
+ * survive the trip through the byte-oriented lexer. Use WTF-8 only for this private source
+ * buffer: ordinary runtime strings remain canonical UTF-16 strings, and lexer string tokens are
+ * rebuilt from their exact UTF-16 units. */
+static int kiln_dyn_string_to_source(kiln_value value, uint8_t **out, size_t *byte_len) {
+    uint16_t *units = NULL;
+    size_t count = 0;
+    if (out == NULL || byte_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out = NULL;
+    *byte_len = 0;
+    int status = kiln_c99_to_units(value, &units, &count);
+    if (status != KILN_C99_OK) return status;
+    if (count > (SIZE_MAX - 1) / 3) {
+        free(units);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    uint8_t *bytes = (uint8_t *)malloc(count * 3 + 1);
+    if (bytes == NULL) {
+        free(units);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    size_t used = 0;
+    for (size_t index = 0; index < count; ++index) {
+        uint32_t cp = units[index];
+        if (cp >= 0xD800 && cp <= 0xDBFF && index + 1 < count &&
+            units[index + 1] >= 0xDC00 && units[index + 1] <= 0xDFFF) {
+            cp = UINT32_C(0x10000) + ((cp - 0xD800) << 10) +
+                 ((uint32_t)units[++index] - 0xDC00);
+        }
+        if (cp < 0x80) {
+            bytes[used++] = (uint8_t)cp;
+        } else if (cp < 0x800) {
+            bytes[used++] = (uint8_t)(0xC0u | (cp >> 6));
+            bytes[used++] = (uint8_t)(0x80u | (cp & 0x3Fu));
+        } else if (cp < 0x10000) {
+            /* Surrogate code units are intentionally encoded as WTF-8 here. */
+            bytes[used++] = (uint8_t)(0xE0u | (cp >> 12));
+            bytes[used++] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+            bytes[used++] = (uint8_t)(0x80u | (cp & 0x3Fu));
+        } else {
+            bytes[used++] = (uint8_t)(0xF0u | (cp >> 18));
+            bytes[used++] = (uint8_t)(0x80u | ((cp >> 12) & 0x3Fu));
+            bytes[used++] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+            bytes[used++] = (uint8_t)(0x80u | (cp & 0x3Fu));
+        }
+    }
+    bytes[used] = 0;
+    free(units);
+    *out = bytes;
+    *byte_len = used;
+    return KILN_C99_OK;
+}
+
+/* Decode the private dynamic-source WTF-8 representation. Unlike the shared UTF-8 text reader,
+ * this accepts encoded surrogate code points so raw lone surrogates in quoted source become the
+ * corresponding JavaScript string code unit. */
+static uint32_t kiln_dyn_read_source_codepoint(const char *source, size_t length,
+                                               size_t *position) {
+    size_t start = *position;
+    if (start >= length) return 0xFFFD;
+    const unsigned char *bytes = (const unsigned char *)source;
+    unsigned char first = bytes[start];
+    if (first < 0x80) {
+        *position = start + 1;
+        return first;
+    }
+    size_t width;
+    uint32_t cp;
+    if (first >= 0xC2 && first <= 0xDF) {
+        width = 2; cp = first & 0x1Fu;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        width = 3; cp = first & 0x0Fu;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        width = 4; cp = first & 0x07u;
+    } else {
+        *position = start + 1;
+        return 0xFFFD;
+    }
+    if (width > length - start) {
+        *position = start + 1;
+        return 0xFFFD;
+    }
+    for (size_t offset = 1; offset < width; ++offset) {
+        unsigned char byte = bytes[start + offset];
+        if ((byte & 0xC0u) != 0x80u) {
+            *position = start + 1;
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | (byte & 0x3Fu);
+    }
+    if ((width == 2 && cp < 0x80) || (width == 3 && cp < 0x800) ||
+        (width == 4 && cp < 0x10000) || cp > 0x10FFFF) {
+        *position = start + 1;
+        return 0xFFFD;
+    }
+    *position = start + width;
+    return cp;
+}
+
 static int kiln_dyn_read_hex(const char *source, size_t length, size_t *position,
                              size_t digits, uint32_t *value) {
     uint32_t result = 0;
@@ -830,7 +929,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                     if (lex->pos < lex->len && lex->src[lex->pos] == '\n') lex->pos++;
                     cp = '\n';
                 } else {
-                    cp = kiln_c99_utf8_next(lex->src, lex->len, &lex->pos);
+                    cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &lex->pos);
                 }
             } else {
                 lex->pos++;
@@ -852,7 +951,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                         lex->pos += 2;
                         continue;
                     }
-                    cp = kiln_c99_utf8_next(lex->src, lex->len, &lex->pos);
+                    cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &lex->pos);
                     break;
                 case 'b': cp = '\b'; break;
                 case 'f': cp = '\f'; break;
@@ -2823,7 +2922,7 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
         (binding_count != 0 && (names == NULL || name_lengths == NULL || values == NULL ||
                                 read_only_flags == NULL)))
         return KILN_C99_INVALID_ARGUMENT;
-    status = kiln_c99_string_to_utf8_lossy(source, &source_owned, &source_len);
+    status = kiln_dyn_string_to_source(source, &source_owned, &source_len);
     if (status != KILN_C99_OK) return status;
     kiln_dyn_scope_init(&scope, NULL);
     for (size_t index = 0; index < binding_count; ++index) {
@@ -5558,7 +5657,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
 
     size_t params_len = 0;
     uint8_t *params_owned = NULL;
-    if (kiln_c99_string_to_utf8_lossy(params_val, &params_owned, &params_len) != KILN_C99_OK) {
+    if (kiln_dyn_string_to_source(params_val, &params_owned, &params_len) != KILN_C99_OK) {
         kiln_dyn_scope_destroy(&scope);
         kiln_dyn_scope_destroy(&captured_scope);
         return KILN_C99_OUT_OF_MEMORY;
@@ -5643,7 +5742,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     size_t body_len = 0;
     uint8_t *body_owned = NULL;
     const char *bsrc;
-    if (kiln_c99_string_to_utf8_lossy(body_val, &body_owned, &body_len) != KILN_C99_OK) {
+    if (kiln_dyn_string_to_source(body_val, &body_owned, &body_len) != KILN_C99_OK) {
         kiln_dyn_scope_destroy(&scope);
         kiln_dyn_scope_destroy(&captured_scope);
         return KILN_C99_OUT_OF_MEMORY;
@@ -5773,8 +5872,8 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 
     uint8_t *body_source = NULL;
     size_t body_source_len = 0;
-    if (kiln_c99_string_to_utf8_lossy(upvalues[1], &body_source,
-                                      &body_source_len) != KILN_C99_OK)
+    if (kiln_dyn_string_to_source(upvalues[1], &body_source,
+                                  &body_source_len) != KILN_C99_OK)
         return KILN_C99_OUT_OF_MEMORY;
     int body_strict = kiln_dyn_body_has_use_strict((const char *)body_source,
                                                    body_source_len);
