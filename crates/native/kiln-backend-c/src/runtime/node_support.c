@@ -353,3 +353,20 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
     }
     KILN_C99_REFUSE("a Buffer method this backend has not implemented");
 }
+
+/* Shared legacy `Buffer(...)` and `new Buffer(...)` dispatch. A numeric first argument selects
+ * zero-filled allocation; a second numeric/nullish value is ignored, while a string second
+ * argument is the obsolete encoding overload Node rejects. Keep the allocation itself on the
+ * existing Buffer.alloc path. */
+static int kiln_c99_buffer_legacy(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown) {
+    kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (first.tag == KILN_VALUE_NUMBER) {
+        if (argc > 1 && args[1].tag == KILN_VALUE_STRING)
+            return kiln_c99_throw_node_invalid_arg_type(
+                thrown, "The \"string\" argument must be of type string");
+        return kiln_c99_buffer_method(out, KILN_C99_METHOD_BUFFER_ALLOC,
+                                      kiln_c99_undefined(), &first, 1, thrown);
+    }
+    return kiln_c99_buffer_from(out, first, args, argc, thrown);
+}

@@ -50,12 +50,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // string encodings and the rest of the TypeScript facade stay the single implementation.
         if native == Native::NodeBufferGlobal {
             let constructor = Value::Native(Native::NodeBufferGlobal, self.current_realm);
-            let method_name = if matches!(arguments.first(), Some(Value::Number(_))) {
-                "alloc"
-            } else {
-                "from"
-            };
-            let method = self.read_property(&constructor, method_name, instruction)?;
+            if matches!(arguments.first(), Some(Value::Number(_))) {
+                if matches!(arguments.get(1), Some(Value::String(_))) {
+                    return self.throw_node_invalid_arg_type(
+                        "The \"string\" argument must be of type string",
+                    );
+                }
+                let method = self.read_property(&constructor, "alloc", instruction)?;
+                let size = arguments.first().cloned().unwrap_or(Value::Number(0.0));
+                return self.call_value(&method, constructor, vec![size], instruction);
+            }
+            let method = self.read_property(&constructor, "from", instruction)?;
             return self.call_value(&method, constructor, arguments.to_vec(), instruction);
         }
         // Ahead of the wrapper and proxy preambles below: a `Temporal` value is neither a boxed

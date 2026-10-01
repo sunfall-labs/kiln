@@ -781,13 +781,8 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
         static const char empty[] = "";
         switch (callee.bits) {
 #if KILN_RETAIN_GROUP_BUFFER
-        case KILN_C99_BUILTIN_BUFFER: {
-            kiln_value first = argc > 0 ? args[0] : kiln_c99_number(0.0);
-            if (first.tag == KILN_VALUE_NUMBER)
-                return kiln_c99_buffer_method(result, KILN_C99_METHOD_BUFFER_ALLOC,
-                                              kiln_c99_undefined(), args, argc, thrown);
-            return kiln_c99_buffer_from(result, first, args, argc, thrown);
-        }
+        case KILN_C99_BUILTIN_BUFFER:
+            return kiln_c99_buffer_legacy(result, args, argc, thrown);
 #endif
         case KILN_C99_BUILTIN_TYPED_ARRAY:
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,

@@ -12,10 +12,21 @@ console.log(Buffer.from(new Uint8Array([9, 8])).equals(Buffer.from([9, 8])), Buf
 console.log(Buffer.from("hi", "utf16le").toString("hex"), Buffer.alloc(4, "ab").toString(), Buffer("xy").toString(), Buffer.from("ff", "hex").toString("hex"));
 const legacyBufferHex = Buffer("ff", "hex");
 const legacyBufferSize = Buffer(3);
+const legacyBufferSizeWithNumber = Buffer(3, 9);
+const legacyBufferSizeWithNull = Buffer(3, null);
 const constructedBufferSize = new Buffer(2);
 if (legacyBufferHex.toString("hex") !== "ff" || legacyBufferSize.length !== 3 ||
-    legacyBufferSize[0] !== 0 || constructedBufferSize.length !== 2) {
+    legacyBufferSize[0] !== 0 || legacyBufferSizeWithNumber.length !== 3 ||
+    legacyBufferSizeWithNumber[0] !== 0 || legacyBufferSizeWithNull[0] !== 0 ||
+    constructedBufferSize.length !== 2) {
   throw new Error("legacy Buffer call and construction use the public Buffer facade");
+}
+for (const make of [() => Buffer(3, "utf8"), () => new Buffer(3, "utf8")]) {
+  let rejected = false;
+  try { make(); } catch (error) {
+    rejected = error.name === "TypeError" && error.code === "ERR_INVALID_ARG_TYPE";
+  }
+  if (!rejected) throw new Error("legacy numeric Buffer call rejects a string encoding argument");
 }
 const FastBuffer = Buffer[Symbol.species];
 const bufferSpeciesDescriptor = Object.getOwnPropertyDescriptor(Buffer, Symbol.species);

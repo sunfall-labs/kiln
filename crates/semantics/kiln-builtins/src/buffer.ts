@@ -686,8 +686,8 @@
     define(`writeBigUint64${order}`, proto[`writeBigUInt64${order}`]);
   }
 
-  // `%TypedArray%.prototype.map` and `filter` answer through the species constructor, which
-  // for a Buffer is `Buffer`: the result is a Buffer too.
+  // `%TypedArray%.prototype.map` and `filter` answer through the species constructor, which is
+  // `FastBuffer` for a Buffer. FastBuffer brands the result and gives it Buffer.prototype.
   define("map", function map(this: Uint8Array, callback: any, thisArg?: any): Uint8Array {
     return U8.prototype.map.call(this, callback, thisArg);
   });

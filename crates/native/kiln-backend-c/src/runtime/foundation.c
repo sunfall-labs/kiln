@@ -534,7 +534,9 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, const kiln_value *args,
                                 size_t argc, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
-                                  const kiln_value *args, size_t argc, kiln_value *thrown);
+                                 const kiln_value *args, size_t argc, kiln_value *thrown);
+static int kiln_c99_buffer_legacy(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown);
 static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
                              kiln_value receiver, const kiln_value *args, size_t argc,
                              int depth, kiln_value *thrown);
