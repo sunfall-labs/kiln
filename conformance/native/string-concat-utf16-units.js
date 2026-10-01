@@ -3,7 +3,13 @@ const assert = (condition, label) => {
   if (!condition) throw new Error(`String method conversion: ${label}`);
 };
 const lone = String.fromCharCode(0xd800);
+const high = String.fromCharCode(0xd83d);
+const low = String.fromCharCode(0xde00);
+const pair = high + low;
 const concat = String.prototype.concat;
+assert(pair.startsWith(high), "startsWith compares UTF-16 code units");
+assert(pair.endsWith(low), "endsWith compares UTF-16 code units");
+assert(!pair.startsWith(low), "startsWith rejects a different lone-surrogate unit");
 const boxed = Object.assign(new String("ignored"), {
   [Symbol.toPrimitive](hint) {
     assert(hint === "string", "boxed generic receiver gets the string hint");

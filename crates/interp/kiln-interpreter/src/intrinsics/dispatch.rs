@@ -1998,7 +1998,11 @@ pub(crate) fn call_native(
                 // says it does rather than where Rust's byte offsets would.
                 Native::StringIncludes | Native::StringStartsWith | Native::StringEndsWith => {
                     let haystack: Vec<u16> = text.units().collect();
-                    let needle: Vec<u16> = argument(0).encode_utf16().collect();
+                    let needle: Vec<u16> = match arguments.first() {
+                        None => Vec::new(),
+                        Some(Value::String(value)) => value.encode_utf16().collect(),
+                        Some(value) => value.to_string_units_checked()?.encode_utf16().collect(),
+                    };
                     let clamp = |raw: f64| -> usize {
                         if raw.is_nan() || raw <= 0.0 {
                             0
@@ -2180,6 +2184,18 @@ pub(crate) fn call_native(
                 }
                 Native::StringPadStart | Native::StringPadEnd => {
                     let target = arguments.first().map_or(0.0, Value::as_number);
+                    let current = text.units().count();
+                    let target = if target.is_finite() && target > 0.0 {
+                        target as usize
+                    } else if target.is_infinite() && target.is_sign_positive() {
+                        usize::MAX
+                    } else {
+                        0
+                    };
+                    if target <= current {
+                        return Ok(Value::String(text.clone().into()));
+                    }
+                    bounded_string(target)?;
                     let padding: Vec<u16> = match arguments.get(1) {
                         None | Some(Value::Undefined) => vec![u16::from(b' ')],
                         Some(Value::String(value)) => value.units().collect(),
@@ -2188,16 +2204,9 @@ pub(crate) fn call_native(
                             .units()
                             .collect(),
                     };
-                    let current = text.units().count();
-                    let target = if target.is_finite() && target > 0.0 {
-                        target as usize
-                    } else {
-                        0
-                    };
-                    bounded_string(target)?;
                     // Padding with the empty string cannot make progress, so it is left alone
                     // rather than looping forever.
-                    if target <= current || padding.is_empty() {
+                    if padding.is_empty() {
                         Value::String(text.clone().into())
                     } else {
                         let mut filler = Vec::new();
