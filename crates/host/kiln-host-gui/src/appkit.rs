@@ -353,29 +353,37 @@ pub unsafe fn layout_taffy_children(parent_id: u64, parent_view: *mut Object) {
         engine.get_child_layouts(parent_id)
     });
 
-    let wids = WIDGETS.lock().unwrap();
-    if let Some(map) = wids.as_ref() {
-        for (child_id, lrect) in child_layouts {
-            if let Some(entry) = map.get(&child_id) {
-                let child_view = entry.view.0;
-                if !child_view.is_null() {
-                    let child_rect = CGRect {
-                        origin: CGPoint {
-                            x: lrect.x as f64,
-                            y: lrect.y as f64,
-                        },
-                        size: CGSize {
-                            width: lrect.width as f64,
-                            height: lrect.height as f64,
-                        },
-                    };
-                    let () = msg_send![child_view, setFrame: child_rect];
-                    if entry.tag == "box" || entry.tag == "grid" {
-                        unsafe {
-                            layout_taffy_children(child_id, child_view);
-                        }
+    let mut pending_sub_layouts = Vec::new();
+    {
+        let wids = WIDGETS.lock().unwrap();
+        if let Some(map) = wids.as_ref() {
+            for (child_id, lrect) in child_layouts {
+                if let Some(entry) = map.get(&child_id) {
+                    let child_view = entry.view.0;
+                    if !child_view.is_null() {
+                        let is_container = entry.tag == "box" || entry.tag == "grid";
+                        pending_sub_layouts.push((child_id, child_view, lrect, is_container));
                     }
                 }
+            }
+        }
+    }
+
+    for (child_id, child_view, lrect, is_container) in pending_sub_layouts {
+        let child_rect = CGRect {
+            origin: CGPoint {
+                x: lrect.x as f64,
+                y: lrect.y as f64,
+            },
+            size: CGSize {
+                width: lrect.width as f64,
+                height: lrect.height as f64,
+            },
+        };
+        let () = msg_send![child_view, setFrame: child_rect];
+        if is_container {
+            unsafe {
+                layout_taffy_children(child_id, child_view);
             }
         }
     }
@@ -1126,6 +1134,29 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
     true
 }
 
+unsafe fn update_text_intrinsic_and_relayout(id: u64, view: *mut Object) {
+    let intrinsic: CGSize = msg_send![view, intrinsicContentSize];
+    crate::layout::with_layout_engine(|engine| {
+        engine.update_node_style(id, |style| {
+            if intrinsic.width > 0.0 {
+                style.size.width = length(intrinsic.width as f32);
+            }
+            if intrinsic.height > 0.0 {
+                style.size.height = length(intrinsic.height as f32);
+            }
+        });
+    });
+    let superview: *mut Object = msg_send![view, superview];
+    if !superview.is_null() {
+        let () = msg_send![superview, setNeedsLayout: YES];
+        if let Some(parent_id) = get_widget_id_for_view(superview) {
+            unsafe {
+                layout_taffy_children(parent_id, superview);
+            }
+        }
+    }
+}
+
 pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
     let entry_info = {
         let wids = WIDGETS.lock().unwrap();
@@ -1136,10 +1167,12 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
     if let Some((tag, view)) = entry_info {
         unsafe {
             match (tag.as_str(), name) {
-                ("text", "text")
-                | ("text", "value")
-                | ("textinput", "value")
-                | ("textinput", "text") => {
+                ("text", "text") | ("text", "value") => {
+                    let ns = ns_string(val_str);
+                    let () = msg_send![view, setStringValue: ns];
+                    update_text_intrinsic_and_relayout(id, view);
+                }
+                ("textinput", "value") | ("textinput", "text") => {
                     let ns = ns_string(val_str);
                     let () = msg_send![view, setStringValue: ns];
                 }
@@ -1186,6 +1219,7 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         }
                         _ => {}
                     }
+                    update_text_intrinsic_and_relayout(id, view);
                 }
                 ("text", "color") => {
                     let color_cls = class!(NSColor);
@@ -1205,6 +1239,7 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         let font_cls = class!(NSFont);
                         let font: *mut Object = msg_send![font_cls, systemFontOfSize: val_num];
                         let () = msg_send![view, setFont: font];
+                        update_text_intrinsic_and_relayout(id, view);
                     }
                 }
                 ("button", "label") => {
