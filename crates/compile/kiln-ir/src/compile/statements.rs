@@ -1714,8 +1714,21 @@ impl super::Compiler {
     /// is emitted here. On anything else it names a block, which needs a context of its own for
     /// `break label` to have somewhere to land.
     pub(super) fn labelled_statement(&mut self, label: &str, body: &Statement) {
+        // A chain such as `outer: inner: while (...)` gives both labels the same iteration
+        // target. Keep them together on that loop context so a continue to either label can
+        // resolve there; treating the outer label as a non-loop block incorrectly rejects it.
+        let mut target = body;
+        let mut labels = vec![label.to_owned()];
+        while let StatementKind::Labelled {
+            label: nested_label,
+            body: nested_body,
+        } = &target.kind
+        {
+            labels.push(nested_label.clone());
+            target = nested_body;
+        }
         if matches!(
-            body.kind,
+            target.kind,
             StatementKind::While { .. }
                 | StatementKind::DoWhile { .. }
                 | StatementKind::For { .. }
@@ -1723,16 +1736,16 @@ impl super::Compiler {
                 | StatementKind::ForOf { .. }
                 | StatementKind::Switch { .. }
         ) {
-            self.pending_label = Some(label.to_owned());
-            self.statement(body);
-            // Cleared in case the statement turned out not to claim it after all.
-            self.pending_label = None;
+            let previous = std::mem::replace(&mut self.pending_labels, labels);
+            self.statement(target);
+            // Restore the outer pending state even if a future target form fails to claim it.
+            self.pending_labels = previous;
             return;
         }
 
         self.loops.push(LoopContext {
             kind: BreakableKind::Labelled,
-            label: Some(label.to_owned()),
+            labels: vec![label.to_owned()],
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1806,7 +1819,7 @@ impl super::Compiler {
         self.declare_bound(kind, name, span);
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1974,7 +1987,7 @@ impl super::Compiler {
         });
         self.handler_depth += 1;
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2439,7 +2452,7 @@ impl super::Compiler {
         });
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2491,7 +2504,7 @@ impl super::Compiler {
                 .iter()
                 .rposition(|context| context.kind == BreakableKind::Loop),
             Some(label) => self.loops.iter().rposition(|context| {
-                context.label.as_deref() == Some(label)
+                context.labels.iter().any(|candidate| candidate == label)
                     && (is_break || context.kind == BreakableKind::Loop)
             }),
         };
@@ -2557,7 +2570,7 @@ impl super::Compiler {
         let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2582,7 +2595,7 @@ impl super::Compiler {
         let loop_start = self.code.len();
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2662,7 +2675,7 @@ impl super::Compiler {
 
         self.loops.push(LoopContext {
             kind: BreakableKind::Switch,
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()

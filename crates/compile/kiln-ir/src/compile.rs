@@ -592,8 +592,9 @@ enum BreakableKind {
 #[derive(Default)]
 struct LoopContext {
     kind: BreakableKind,
-    /// The label written on this construct, if any. `break outer` names one of these.
-    label: Option<String>,
+    /// Every stacked label written on this construct. `break outer` or `continue outer` can
+    /// name any label in this list when the labels share a single loop/switch target.
+    labels: Vec<String>,
     breaks: Vec<usize>,
     continues: Vec<usize>,
     /// How many cleanups were pending when the loop began, so a `break` runs only those entered
@@ -906,10 +907,10 @@ struct Compiler {
     private_declarations: Vec<HashSet<String>>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
-    /// A label written immediately before the statement now being compiled, waiting for that
-    /// statement to claim it. A loop takes it into its own context; anything else gets a
-    /// labelled block around it.
-    pending_label: Option<String>,
+    /// Labels written immediately before the statement now being compiled, waiting for that
+    /// statement to claim them. A loop/switch takes the stack into its context; anything else
+    /// gets a labelled block around each label.
+    pending_labels: Vec<String>,
     /// Short-circuit jumps of the optional chains being compiled, innermost last.
     ///
     /// A stack rather than a field because a chain can appear inside another chain's arguments,

@@ -90,7 +90,7 @@ impl super::Compiler {
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
             handler_depth: 0,
-            pending_label: None,
+            pending_labels: Vec::new(),
             chains: Vec::new(),
             super_bindings: Vec::new(),
             pending_elements: Vec::new(),
