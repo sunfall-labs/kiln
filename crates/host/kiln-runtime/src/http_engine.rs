@@ -207,7 +207,7 @@ impl UpgradeWriteCompletion {
     fn pending() -> Arc<Self> {
         Arc::new(Self {
             result: Mutex::new(None),
-            fences: Mutex::new(HashMap::new()),
+            fences: Mutex::new(HashMap::default()),
             notify: Notify::new(),
         })
     }
