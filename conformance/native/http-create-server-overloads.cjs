@@ -17,3 +17,14 @@ if (withoutListener.listeners("request")[0] !== lateListener) {
   throw new Error("createServer() must preserve later request listener identity");
 }
 console.log("http createServer overloads ok");
+
+for (const listener of [undefined, null, false, 0, ""]) {
+  if (http.createServer({}, listener).listeners("request").length !== 0) {
+    throw new Error("falsy optional request listeners must be ignored");
+  }
+}
+for (const listener of [1, {}, "listener"]) {
+  let rejected = false;
+  try { http.createServer({}, listener); } catch (error) { rejected = error instanceof TypeError; }
+  if (!rejected) throw new Error("truthy invalid request listener must throw TypeError");
+}

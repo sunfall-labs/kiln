@@ -1643,7 +1643,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
         }
         if (status == KILN_C99_OK)
             status = kiln_c99_put(socket->host, socket->object, "allowHalfOpen", 13,
-                                  allow_half_open, 0, thrown);
+                                  kiln_c99_boolean(kiln_c99_truthy(allow_half_open)), 0, thrown);
     }
     if (status == KILN_C99_OK)
         status = kiln_c99_process_object(&process);
@@ -4953,6 +4953,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         kiln_value listener = kiln_c99_undefined();
         int http = code != KILN_C99_METHOD_NODE_NET_CREATE_SERVER;
         int allow_half_open = http;
+        kiln_value allow_half_open_value = kiln_c99_boolean(http);
         int status;
         if (!http) {
             kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -4977,7 +4978,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 listener = first;
             } else if (argc > 1) {
                 listener = args[1];
-                if (listener.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(listener)) {
+                if (kiln_c99_truthy(listener) && !kiln_c99_is_callable(listener)) {
                     return kiln_c99_throw_node_invalid_arg_type(
                         thrown, "The \"listener\" argument must be of type function");
                 }
@@ -4989,6 +4990,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                   &option, depth, thrown);
             if (status != KILN_C99_OK) return status;
             allow_half_open = kiln_c99_truthy(option);
+            if (allow_half_open) allow_half_open_value = option;
         }
         server = (kiln_node_server *)kiln_c99_gc_calloc(KILN_GC_NODE_SERVER, sizeof *server);
         if (server == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -5040,7 +5042,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         }
         if (status == KILN_C99_OK)
             status = kiln_c99_put(host, server->object, "allowHalfOpen", 13,
-                                  kiln_c99_boolean(server->allow_half_open), depth, thrown);
+                                  allow_half_open_value, depth, thrown);
+        kiln_c99_gc_keep_alive(&allow_half_open_value);
         if (status != KILN_C99_OK) { kiln_c99_gc_release(server); return status; }
         *result = server->object;
         return KILN_C99_OK;

@@ -345,12 +345,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .unwrap_or(Value::Undefined);
                     (matches!(first, Value::Object(_)).then_some(first), handler)
                 };
-                let allow_half_open = if let Some(options) = options {
-                    self.read_property(&options, "allowHalfOpen", instruction)?
-                        .is_truthy()
+                let allow_half_open_value = if let Some(options) = options {
+                    let value = self.read_property(&options, "allowHalfOpen", instruction)?;
+                    if value.is_truthy() {
+                        value
+                    } else {
+                        Value::Boolean(false)
+                    }
                 } else {
-                    false
+                    Value::Boolean(false)
                 };
+                let allow_half_open = allow_half_open_value.is_truthy();
                 let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
                     handler: handler.clone(),
@@ -363,6 +368,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     close_deferred: false,
                 }));
                 let object = node_server_object(&state);
+                if let Value::Object(object) = &object {
+                    object
+                        .borrow_mut()
+                        .set("allowHalfOpen", allow_half_open_value);
+                }
                 if is_callable(&handler) {
                     self.dispatch_node_event(
                         Native::NodeEventOn,
@@ -1637,7 +1647,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         "The \"options\" argument must be of type object",
                     );
                 }
-                if !matches!(handler, Value::Undefined | Value::Null) && !is_callable(&handler) {
+                if handler.is_truthy() && !is_callable(&handler) {
                     return self.throw_node_invalid_arg_type(&format!(
                         "The \"listener\" argument must be of type function. Received type {}",
                         handler.type_name(),

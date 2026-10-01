@@ -7,6 +7,8 @@ function assert(value, message) {
   if (!value) throw new Error(message);
 }
 
+const truthyPolicy = net.createServer({ allowHalfOpen: "yes" });
+assert(truthyPolicy.allowHalfOpen === "yes", "server preserves a truthy option value");
 function checkNetServer(options, expected, done, serverValue = expected) {
   const listener = (socket) => {
     assert(socket.allowHalfOpen === expected, `net accepted allowHalfOpen ${socket.allowHalfOpen}`);
