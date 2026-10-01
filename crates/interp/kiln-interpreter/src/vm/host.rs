@@ -4692,19 +4692,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             )?;
                         }
                     }
-                    if socket.is_some_and(|socket| socket.borrow().destroyed) {
-                        if let Some(stream) = server
-                            .borrow_mut()
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.resource() == resource)
-                        {
-                            stream.applying_read_completion = false;
-                        }
-                        sync_node_socket_ready_state(&server, resource);
-                        return Ok(());
-                    }
                     for action in actions {
+                        // A callback may destroy the socket after the driver selected these
+                        // actions. Suppress stale data and follow-on operations, but deliver
+                        // the eventual resource-close completion and retire its stream below.
+                        // Recheck after each action because event listeners can also destroy it.
+                        if socket
+                            .as_ref()
+                            .is_some_and(|socket| socket.borrow().destroyed)
+                            && !matches!(action, StreamAction::Event(StreamEvent::Close))
+                        {
+                            continue;
+                        }
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
                     sync_node_socket_ready_state(&server, resource);
