@@ -289,6 +289,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
     pub(super) node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Strong roots for server EventEmitter objects from listen until terminal close. This owner
+    /// registry avoids a cycle through `ObjectData::node_object` and is released with the VM or
+    /// its shared module realm on abort/teardown.
+    pub(super) active_node_server_objects: std::collections::HashMap<usize, Value>,
     /// Interpreter-owned ClientRequest values keyed exactly like the runtime Agent queue.
     pub(super) http_client_requests:
         std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,

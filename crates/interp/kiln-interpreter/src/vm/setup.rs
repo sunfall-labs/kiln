@@ -83,6 +83,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
+            active_node_server_objects: std::collections::HashMap::new(),
             http_client_requests: std::collections::BTreeMap::new(),
             next_http_client_request_id: 1,
             module_realm: None,

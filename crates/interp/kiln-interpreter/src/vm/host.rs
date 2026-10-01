@@ -245,6 +245,54 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    fn node_server_identity(state: &Rc<RefCell<NodeServerState>>) -> usize {
+        Rc::as_ptr(state) as usize
+    }
+
+    fn retain_active_node_server_object(
+        &mut self,
+        state: &Rc<RefCell<NodeServerState>>,
+        object: Value,
+    ) {
+        let identity = Self::node_server_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow_mut()
+                .active_node_server_objects
+                .insert(identity, object);
+        } else {
+            self.active_node_server_objects.insert(identity, object);
+        }
+    }
+
+    fn active_node_server_object(&self, state: &Rc<RefCell<NodeServerState>>) -> Option<Value> {
+        let identity = Self::node_server_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow()
+                .active_node_server_objects
+                .get(&identity)
+                .cloned()
+        } else {
+            self.active_node_server_objects.get(&identity).cloned()
+        }
+    }
+
+    fn take_active_node_server_object(
+        &mut self,
+        state: &Rc<RefCell<NodeServerState>>,
+    ) -> Option<Value> {
+        let identity = Self::node_server_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow_mut()
+                .active_node_server_objects
+                .remove(&identity)
+        } else {
+            self.active_node_server_objects.remove(&identity)
+        }
+    }
+
     pub(crate) fn allocate_http_client_request_id(&mut self) -> u64 {
         if let Some(realm) = &self.module_realm {
             let mut realm = realm.borrow_mut();
@@ -1689,6 +1737,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Native::NodeServerListen => {
                 let state = node_http_server(receiver)?;
                 let (port, host, callback) = node_listen_arguments(arguments)?;
+                // A listening transport can outlive the expression that created its JS wrapper.
+                // Keep its EventEmitter alive in the owning VM/graph realm until the terminal
+                // close event, so later request callbacks retain the server as their receiver.
+                self.retain_active_node_server_object(&state, receiver.clone());
                 if let Some(callback) = callback {
                     self.dispatch_node_event(
                         Native::NodeEventOnce,
@@ -2020,6 +2072,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         return Ok(());
                     }
                 }
+                // Remove the registry root before callbacks, but keep its Value local through
+                // dispatch. A close listener may immediately listen again and install a fresh
+                // root without this completion clearing it afterward.
+                let _active_object = self.take_active_node_server_object(state);
                 self.emit_http_server(state, "close", vec![], instruction)
             }
             ServerAction::Connection(accepted) => {
@@ -2158,6 +2214,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             ServerAction::Error(error) => {
                 let error = self.node_error_value(error);
+                // A failed listen has no listener resource and is terminal for this attempt.
+                // Keep the wrapper alive through the error callback; a reentrant listen can
+                // install a new active root after this one has been removed.
+                let terminal = state.borrow().driver.listener().is_none();
+                let _active_object = terminal
+                    .then(|| self.take_active_node_server_object(state))
+                    .flatten();
                 self.emit_http_server(state, "error", vec![error], instruction)
             }
         }
@@ -2170,12 +2233,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let object = state
-            .borrow()
-            .object
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .map(Value::Object)
+        let object = self
+            .active_node_server_object(state)
+            .or_else(|| {
+                state
+                    .borrow()
+                    .object
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .map(Value::Object)
+            })
             .unwrap_or(Value::Undefined);
         let mut payload = vec![Value::String(event.to_owned().into())];
         payload.extend(arguments);
@@ -2434,6 +2501,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     ready
                 };
                 if emit_close {
+                    let _active_object = self.take_active_node_server_object(server);
                     self.emit_http_server(server, "close", vec![], instruction)?;
                 }
                 Ok(())
@@ -2846,6 +2914,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     drop(server_state);
                     if emit_close {
+                        let _active_object = self.take_active_node_server_object(server);
                         self.emit_http_server(server, "close", vec![], instruction)?;
                     }
                 }
@@ -3663,12 +3732,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let state = server.borrow();
             state.handler.clone()
         };
-        let server_object = server
-            .borrow()
-            .object
-            .clone()
-            .and_then(|object| object.upgrade())
-            .map(Value::Object);
+        let server_object = self.active_node_server_object(server).or_else(|| {
+            server
+                .borrow()
+                .object
+                .clone()
+                .and_then(|object| object.upgrade())
+                .map(Value::Object)
+        });
         if let Some(server_object) = server_object {
             self.dispatch_node_event(
                 Native::NodeEventEmit,
