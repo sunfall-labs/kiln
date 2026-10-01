@@ -410,6 +410,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                                     kiln_value *thrown);
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
                                       int depth, kiln_value *thrown);
+int kiln_c99_describe_property_value(kiln_host *host, kiln_value target, kiln_value key,
+                                     kiln_value *out, int *found, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
                                       size_t key_len, kiln_value *out, int *found, int depth,
                                       kiln_value *thrown);
