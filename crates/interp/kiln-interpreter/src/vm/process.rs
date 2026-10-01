@@ -186,7 +186,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ),
             (
                 "net".to_owned(),
-                Value::Native(Native::NodeNet, RealmId::PRIMARY),
+                crate::net::native_capabilities(),
             ),
         ]);
         process.set_non_enumerable("__kilnNativeModules", native_modules);

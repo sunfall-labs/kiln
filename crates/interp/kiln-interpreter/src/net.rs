@@ -317,6 +317,30 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
     }
 }
 
+/// Private `node:net` capabilities consumed by the TypeScript facade. Keep the private adapter
+/// methods as stored, non-enumerable properties: Native's public module projection deliberately
+/// exposes only the Node-visible entries, while the facade needs these host operations to
+/// decorate TCP and HTTP-created sockets through one shared implementation.
+pub(crate) fn native_capabilities() -> Value {
+    let mut module = ObjectData::default();
+    for name in ["createServer", "connect", "createConnection", "default"] {
+        if let Some(value) = property(name) {
+            module.set(name, value);
+        }
+    }
+    for name in [
+        "__corkSocket",
+        "__uncorkSocket",
+        "__pauseSocket",
+        "__resumeSocket",
+    ] {
+        if let Some(value) = property(name) {
+            module.set_non_enumerable(name, value);
+        }
+    }
+    Value::Object(Rc::new(RefCell::new(module)))
+}
+
 pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
     match native {
         Native::NodeNet => Some("net"),
