@@ -2851,6 +2851,398 @@ fn generic_native_host_ops_exchange_live_tcp_bytes_and_resources() {
 }
 
 #[test]
+fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    struct Exchange {
+        handle: u64,
+        stage: u8,
+        listener: HostObservation,
+        trigger: HostObservation,
+        borrowed_query: HostObservation,
+        accepted: HostObservation,
+        accepted_after_cancel: HostObservation,
+        listener_after_cancel: HostObservation,
+        close_listener: HostObservation,
+        peer: Option<TcpStream>,
+        requests: [u64; 7],
+        trigger_callback_ran: usize,
+        cancel_query: i32,
+        cancel_accept: i32,
+        accepted_resource: u64,
+        cancel_work_drops: usize,
+    }
+
+    struct CancelQueuedWork {
+        observation: *mut HostObservation,
+        handle: u64,
+        borrowed_request: *const u64,
+        accepted_request: *const u64,
+        cancel_query: *mut i32,
+        cancel_accept: *mut i32,
+        accepted_resource: *mut u64,
+        callback_ran: *mut usize,
+        drop_count: *mut usize,
+    }
+
+    unsafe extern "C" fn cancel_queued_next_tick(
+        pointer: *mut c_void,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        if pointer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let work = unsafe { &mut *pointer.cast::<CancelQueuedWork>() };
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let accept_request = unsafe { *work.accepted_request };
+        let resource = realm
+            .queued
+            .borrow()
+            .get(&RequestId::new(accept_request))
+            .copied()
+            .flatten();
+        unsafe { *work.accepted_resource = resource.map_or(0, ResourceId::get) };
+        unsafe {
+            *work.cancel_query = kiln_realm_cancel_request(work.handle, *work.borrowed_request);
+            *work.cancel_accept = kiln_realm_cancel_request(work.handle, accept_request);
+        }
+        0
+    }
+
+    unsafe extern "C" fn cancel_queued_completions(
+        pointer: *mut c_void,
+        completion: *const CompletionView,
+        host: *mut c_void,
+        thrown: *mut c_void,
+    ) -> i32 {
+        if pointer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let work = unsafe { &mut *pointer.cast::<CancelQueuedWork>() };
+        let mut host_work = HostWork {
+            observation: work.observation,
+        };
+        let status = unsafe {
+            record_host_completion((&raw mut host_work).cast(), completion, host, thrown)
+        };
+        if status != 0 {
+            return status;
+        }
+        unsafe { *work.callback_ran += 1 };
+        let followup = CancelQueuedWork {
+            observation: ptr::null_mut(),
+            handle: work.handle,
+            borrowed_request: work.borrowed_request,
+            accepted_request: work.accepted_request,
+            cancel_query: work.cancel_query,
+            cancel_accept: work.cancel_accept,
+            accepted_resource: work.accepted_resource,
+            callback_ran: work.callback_ran,
+            drop_count: work.drop_count,
+        };
+        let next_tick = Box::into_raw(Box::new(followup)).cast::<c_void>();
+        let status = unsafe {
+            kiln_realm_queue_next_tick(
+                Some(cancel_queued_next_tick),
+                Some(drop_cancel_queued_work),
+                next_tick,
+            )
+        };
+        if status != 0 {
+            unsafe { drop_cancel_queued_work(next_tick) };
+        }
+        status
+    }
+
+    unsafe extern "C" fn drop_cancel_queued_work(pointer: *mut c_void) {
+        if pointer.is_null() {
+            return;
+        }
+        let work = unsafe { Box::from_raw(pointer.cast::<CancelQueuedWork>()) };
+        if !work.observation.is_null() {
+            unsafe {
+                (*work.observation).drops = (*work.observation).drops.saturating_add(1);
+            }
+        }
+        if !work.drop_count.is_null() {
+            unsafe {
+                *work.drop_count = (*work.drop_count).saturating_add(1);
+            }
+        }
+    }
+
+    unsafe fn start_cancel_queued_op(
+        handle: u64,
+        operation: &HostOpView,
+        work: CancelQueuedWork,
+        request: *mut u64,
+    ) -> i32 {
+        let pointer = Box::into_raw(Box::new(work)).cast::<c_void>();
+        let status = unsafe {
+            kiln_realm_start_host_op(
+                handle,
+                operation,
+                Some(cancel_queued_completions),
+                Some(drop_cancel_queued_work),
+                pointer,
+                request,
+            )
+        };
+        if status != 0 {
+            unsafe { drop_cancel_queued_work(pointer) };
+        }
+        status
+    }
+
+    unsafe extern "C" fn submit_stage(context: *mut c_void) -> i32 {
+        if context.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let exchange = unsafe { &mut *context.cast::<Exchange>() };
+        let host = b"127.0.0.1";
+        match exchange.stage {
+            0 => {
+                let listen = HostOpView {
+                    operation: OP_TCP_LISTEN,
+                    flags: 1,
+                    resource: 0,
+                    argument: 0,
+                    text: host.as_ptr(),
+                    text_len: host.len() as u64,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &listen,
+                        &raw mut exchange.listener,
+                        &raw mut exchange.requests[0],
+                    )
+                }
+            }
+            1 => {
+                let mut peer =
+                    match TcpStream::connect(("127.0.0.1", exchange.listener.resource_port)) {
+                        Ok(peer) => peer,
+                        Err(_) => return RUNTIME_ERROR,
+                    };
+                let _ = peer.set_read_timeout(Some(Duration::from_secs(2)));
+                exchange.peer = Some(peer);
+                let mut state = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let work = CancelQueuedWork {
+                    observation: &raw mut exchange.trigger,
+                    handle: exchange.handle,
+                    borrowed_request: &raw const exchange.requests[2],
+                    accepted_request: &raw const exchange.requests[3],
+                    cancel_query: &raw mut exchange.cancel_query,
+                    cancel_accept: &raw mut exchange.cancel_accept,
+                    accepted_resource: &raw mut exchange.accepted_resource,
+                    callback_ran: &raw mut exchange.trigger_callback_ran,
+                    drop_count: &raw mut exchange.cancel_work_drops,
+                };
+                let status = unsafe {
+                    start_cancel_queued_op(
+                        exchange.handle,
+                        &state,
+                        work,
+                        &raw mut exchange.requests[1],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state,
+                        &raw mut exchange.borrowed_query,
+                        &raw mut exchange.requests[2],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let accept = HostOpView {
+                    operation: OP_TCP_ACCEPT,
+                    flags: 1,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &accept,
+                        &raw mut exchange.accepted,
+                        &raw mut exchange.requests[3],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                struct NoopWake;
+                impl std::task::Wake for NoopWake {
+                    fn wake(self: std::sync::Arc<Self>) {}
+                    fn wake_by_ref(self: &std::sync::Arc<Self>) {}
+                }
+                let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+                if let Some(realm) = active_realm() {
+                    realm.runtime.executor().poll_local_once(&waker);
+                    realm.runtime.executor().poll_local_once(&waker);
+                } else {
+                    return INVALID_ARGUMENT;
+                }
+                0
+            }
+            2 => {
+                let state_accepted = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.accepted_resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state_accepted,
+                        &raw mut exchange.accepted_after_cancel,
+                        &raw mut exchange.requests[4],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let state_listener = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state_listener,
+                        &raw mut exchange.listener_after_cancel,
+                        &raw mut exchange.requests[5],
+                    )
+                }
+            }
+            3 => {
+                let close = HostOpView {
+                    operation: OP_CLOSE_RESOURCE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &close,
+                        &raw mut exchange.close_listener,
+                        &raw mut exchange.requests[6],
+                    )
+                }
+            }
+            _ => INVALID_ARGUMENT,
+        }
+    }
+
+    let mut handle = 0;
+    let mut exchange = Exchange {
+        handle: 0,
+        stage: 0,
+        listener: HostObservation::default(),
+        trigger: HostObservation::default(),
+        borrowed_query: HostObservation::default(),
+        accepted: HostObservation::default(),
+        accepted_after_cancel: HostObservation::default(),
+        listener_after_cancel: HostObservation::default(),
+        close_listener: HostObservation::default(),
+        peer: None,
+        requests: [0; 7],
+        trigger_callback_ran: 0,
+        cancel_query: -1,
+        cancel_accept: -1,
+        accepted_resource: 0,
+        cancel_work_drops: 0,
+    };
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    exchange.handle = handle;
+    let mut host = 0_u8;
+    let mut thrown = 0_u8;
+    for stage in 0..=3 {
+        exchange.stage = stage;
+        assert_eq!(
+            unsafe {
+                kiln_realm_enter(
+                    handle,
+                    Some(submit_stage),
+                    (&raw mut exchange).cast::<c_void>(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                kiln_realm_drive(
+                    handle,
+                    (&raw mut host).cast::<c_void>(),
+                    (&raw mut thrown).cast::<c_void>(),
+                )
+            },
+            0
+        );
+        if stage == 1 {
+            assert_eq!(exchange.trigger_callback_ran, 1);
+            assert_eq!(exchange.cancel_query, 0);
+            assert_eq!(exchange.cancel_accept, 0);
+            assert_ne!(exchange.accepted_resource, 0);
+            assert_eq!(exchange.borrowed_query.value_kind, 0);
+            assert_eq!(exchange.accepted.value_kind, 0);
+            assert_eq!(exchange.trigger.drops, 1);
+            assert_eq!(exchange.borrowed_query.drops, 1);
+            assert_eq!(exchange.accepted.drops, 1);
+            let mut byte = [0_u8; 1];
+            assert_eq!(exchange.peer.as_mut().unwrap().read(&mut byte).unwrap(), 0);
+        }
+    }
+    assert_ne!(exchange.accepted_after_cancel.status, 0);
+    assert_eq!(exchange.listener_after_cancel.status, 0);
+    assert_eq!(exchange.close_listener.status, 0);
+    assert_eq!(kiln_realm_destroy(handle), 0);
+}
+
+#[test]
 fn active_host_op_submission_needs_no_provider_handle() {
     struct Submission {
         observation: *mut HostObservation,
