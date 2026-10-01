@@ -2798,7 +2798,7 @@ static void kiln_dyn_skip_expr(kiln_dyn_lexer *lex, int stop_at_colon) {
     int pdepth = 0;
     int bdepth = 0;
     int kdepth = 0;
-    while (lex->curr.kind != KILN_DYN_EOF) {
+    while (lex->curr.kind != KILN_DYN_EOF && lex->curr.kind != KILN_DYN_ERROR) {
         if (pdepth == 0 && bdepth == 0 && kdepth == 0) {
             if (stop_at_colon && lex->curr.kind == KILN_DYN_COLON) break;
             if (lex->curr.kind == KILN_DYN_SEMI || lex->curr.kind == KILN_DYN_COMMA ||
@@ -2826,7 +2826,7 @@ static void kiln_dyn_skip_unexecuted(kiln_dyn_lexer *lex, kiln_dyn_token_kind lo
     int bdepth = 0;
     int kdepth = 0;
     int conditional_depth = 0;
-    while (lex->curr.kind != KILN_DYN_EOF) {
+    while (lex->curr.kind != KILN_DYN_EOF && lex->curr.kind != KILN_DYN_ERROR) {
         if (pdepth == 0 && bdepth == 0 && kdepth == 0) {
             if (match_conditional_colon) {
                 if (lex->curr.kind == KILN_DYN_QUESTION) {

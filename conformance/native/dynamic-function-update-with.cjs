@@ -37,11 +37,15 @@ function shortCircuitPrecedence() {
     "true || sideEffect() ? function() { return 3; } : function() { return 4; }"
   );
   const nestedConditional = eval("false ? true ? sideEffect() : sideEffect() : 5");
-  return [andThenConditional(), orThenConditional(), nestedConditional, skipped];
+  const makeFunction = Function("sideEffect", "return false && sideEffect() ? " +
+    "function() { return 6; } : function() { return 7; };");
+  const runtimeFunction = makeFunction(sideEffect);
+  return [andThenConditional(), orThenConditional(), nestedConditional,
+    runtimeFunction(), skipped];
 }
 const shortCircuit = shortCircuitPrecedence();
 if (shortCircuit[0] !== 2 || shortCircuit[1] !== 3 || shortCircuit[2] !== 5 ||
-    shortCircuit[3] !== 0) {
+    shortCircuit[3] !== 7 || shortCircuit[4] !== 0) {
   throw new Error("short-circuit skipping must preserve conditional precedence and side effects");
 }
 console.log(result.join(","), shortCircuit.join(","));
