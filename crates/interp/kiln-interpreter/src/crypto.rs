@@ -689,6 +689,9 @@ fn key_import_error(error: kiln_key_core::KeyError) -> ExecutionError {
         kiln_key_core::KeyError::UnsupportedKeyType => ExecutionError::CryptoUnsupported {
             message: "Unsupported asymmetric key type".into(),
         },
+        kiln_key_core::KeyError::UnsupportedKeySize => ExecutionError::CryptoUnsupported {
+            message: "RSA public keys larger than 8192 bits are not supported".into(),
+        },
         kiln_key_core::KeyError::UnsupportedEncoding => ExecutionError::CryptoUnsupported {
             message: "Unsupported asymmetric key encoding".into(),
         },
@@ -701,6 +704,7 @@ fn key_export_error(error: kiln_key_core::KeyError) -> ExecutionError {
             "Invalid RSA key material"
         }
         kiln_key_core::KeyError::UnsupportedKeyType => "Unsupported asymmetric key type",
+        kiln_key_core::KeyError::UnsupportedKeySize => "Unsupported RSA public key size",
         kiln_key_core::KeyError::UnsupportedEncoding => "Unsupported asymmetric key format",
     };
     crypto_key_type_error(message)

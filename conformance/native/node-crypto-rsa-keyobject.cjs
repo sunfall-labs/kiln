@@ -60,3 +60,19 @@ try { createPrivateKey('test-secret'); } catch (error) {
 }
 console.log(pemMissingTypeRejected, derMissingTypeRejected,
   derDeclaredTypeMismatchRejected, invalidMaterialIsGenericError);
+const largePublicKey = createPublicKey({
+  key: { kty: 'RSA', n: Buffer.alloc(1024, 0xff).toString('base64url'), e: 'AQAB' },
+  format: 'jwk',
+});
+const largeDerKey = createPublicKey({
+  key: largePublicKey.export({ format: 'der', type: 'spki' }),
+  format: 'der',
+  type: 'spki',
+});
+const largePemKey = createPublicKey({
+  key: largePublicKey.export({ format: 'pem', type: 'spki' }),
+  format: 'pem',
+  type: 'spki',
+});
+console.log(largeDerKey.asymmetricKeyDetails.modulusLength,
+  largePemKey.asymmetricKeyDetails.modulusLength);

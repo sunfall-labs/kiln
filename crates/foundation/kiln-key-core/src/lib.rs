@@ -35,6 +35,7 @@ pub enum KeyEncoding {
 #[derive(Debug)]
 pub enum KeyError {
     InvalidKey,
+    UnsupportedKeySize,
     WrongKeyType,
     UnsupportedKeyType,
     UnsupportedEncoding,
@@ -158,13 +159,9 @@ pub fn import_rsa(
         (KeyEncoding::Pem, KeyType::Public) => {
             let text = core::str::from_utf8(bytes).map_err(|_| KeyError::InvalidKey)?;
             if text.contains("-----BEGIN RSA PUBLIC KEY-----") {
-                RsaPublicKey::from_pkcs1_pem(text)
-                    .map(ImportedKey::RsaPublic)
-                    .map_err(|_| KeyError::InvalidKey)
+                parse_public_pem(text, false).map(ImportedKey::RsaPublic)
             } else if text.contains("-----BEGIN PUBLIC KEY-----") {
-                RsaPublicKey::from_public_key_pem(text)
-                    .map(ImportedKey::RsaPublic)
-                    .map_err(|_| KeyError::InvalidKey)
+                parse_public_pem(text, true).map(ImportedKey::RsaPublic)
             } else if text.contains("-----BEGIN PRIVATE KEY-----")
                 || text.contains("-----BEGIN RSA PRIVATE KEY-----")
             {
@@ -179,10 +176,13 @@ pub fn import_rsa(
             .or_else(|_| RsaPrivateKey::from_pkcs1_der(bytes))
             .map(ImportedKey::RsaPrivate)
             .map_err(|_| KeyError::InvalidKey),
-        (KeyEncoding::Der, KeyType::Public) => RsaPublicKey::from_public_key_der(bytes)
-            .or_else(|_| RsaPublicKey::from_pkcs1_der(bytes))
-            .map(ImportedKey::RsaPublic)
-            .map_err(|_| KeyError::InvalidKey),
+        (KeyEncoding::Der, KeyType::Public) => {
+            let parsed = match parse_public_spki_der(bytes) {
+                Err(KeyError::InvalidKey) => parse_public_pkcs1_der(bytes),
+                result => result,
+            }?;
+            Ok(ImportedKey::RsaPublic(parsed))
+        }
         (KeyEncoding::Json, _) => Err(KeyError::UnsupportedEncoding),
     }?;
     validate_key(&parsed)?;
@@ -203,12 +203,10 @@ pub fn import_rsa_der(
         (KeyType::Private, KeyFormat::Pkcs8) => RsaPrivateKey::from_pkcs8_der(bytes)
             .map(ImportedKey::RsaPrivate)
             .map_err(|_| KeyError::InvalidKey)?,
-        (KeyType::Public, KeyFormat::Pkcs1) => RsaPublicKey::from_pkcs1_der(bytes)
-            .map(ImportedKey::RsaPublic)
-            .map_err(|_| KeyError::InvalidKey)?,
-        (KeyType::Public, KeyFormat::Spki) => RsaPublicKey::from_public_key_der(bytes)
-            .map(ImportedKey::RsaPublic)
-            .map_err(|_| KeyError::InvalidKey)?,
+        (KeyType::Public, KeyFormat::Pkcs1) => {
+            ImportedKey::RsaPublic(parse_public_pkcs1_der(bytes)?)
+        }
+        (KeyType::Public, KeyFormat::Spki) => ImportedKey::RsaPublic(parse_public_spki_der(bytes)?),
         _ => return Err(KeyError::WrongKeyType),
     };
     validate_key(&parsed)?;
@@ -219,18 +217,71 @@ fn validate_key(parsed: &ImportedKey) -> Result<(), KeyError> {
     match parsed {
         ImportedKey::RsaPrivate(key) => key.validate().map_err(|_| KeyError::InvalidKey)?,
         ImportedKey::RsaPublic(key) => {
-            RsaPublicKey::new_with_max_size(key.n().clone(), key.e().clone(), 8192)
-                .map_err(|_| KeyError::InvalidKey)?;
+            validate_public_parameters(key.n().clone(), key.e().clone())?;
         }
     }
     Ok(())
+}
+
+const MAX_PUBLIC_RSA_BITS: usize = 8192;
+
+fn validate_public_parameters(
+    modulus: rsa::BigUint,
+    exponent: rsa::BigUint,
+) -> Result<RsaPublicKey, KeyError> {
+    if modulus.bits() > MAX_PUBLIC_RSA_BITS as u64 {
+        return Err(KeyError::UnsupportedKeySize);
+    }
+    RsaPublicKey::new_with_max_size(modulus, exponent, MAX_PUBLIC_RSA_BITS)
+        .map_err(|_| KeyError::InvalidKey)
+}
+
+fn parse_public_pkcs1_der(bytes: &[u8]) -> Result<RsaPublicKey, KeyError> {
+    use rsa::pkcs1::der::Decode;
+    let encoded = rsa::pkcs1::RsaPublicKey::from_der(bytes).map_err(|_| KeyError::InvalidKey)?;
+    validate_public_parameters(
+        rsa::BigUint::from_bytes_be(encoded.modulus.as_bytes()),
+        rsa::BigUint::from_bytes_be(encoded.public_exponent.as_bytes()),
+    )
+}
+
+fn parse_public_spki_der(bytes: &[u8]) -> Result<RsaPublicKey, KeyError> {
+    use rsa::pkcs8::der::Decode;
+    let info =
+        rsa::pkcs8::SubjectPublicKeyInfoRef::from_der(bytes).map_err(|_| KeyError::InvalidKey)?;
+    if info.algorithm.oid != rsa::pkcs1::ALGORITHM_OID {
+        return Err(KeyError::UnsupportedKeyType);
+    }
+    let key_der = info
+        .subject_public_key
+        .as_bytes()
+        .ok_or(KeyError::InvalidKey)?;
+    parse_public_pkcs1_der(key_der)
+}
+
+fn parse_public_pem(text: &str, spki: bool) -> Result<RsaPublicKey, KeyError> {
+    let (label, document) =
+        rsa::pkcs1::der::Document::from_pem(text).map_err(|_| KeyError::InvalidKey)?;
+    let expected = if spki { "PUBLIC KEY" } else { "RSA PUBLIC KEY" };
+    if label != expected {
+        return Err(KeyError::InvalidKey);
+    }
+    if spki {
+        parse_public_spki_der(document.as_bytes())
+    } else {
+        parse_public_pkcs1_der(document.as_bytes())
+    }
 }
 
 /// Import either public or private RSA material, preserving the kind that the encoding contains.
 pub fn import_rsa_any(bytes: &[u8], encoding: KeyEncoding) -> Result<ImportedKey, KeyError> {
     match import_rsa(bytes, encoding, KeyType::Private) {
         Ok(key) => Ok(key),
-        Err(error @ (KeyError::UnsupportedEncoding | KeyError::UnsupportedKeyType)) => Err(error),
+        Err(
+            error @ (KeyError::UnsupportedEncoding
+            | KeyError::UnsupportedKeyType
+            | KeyError::UnsupportedKeySize),
+        ) => Err(error),
         Err(KeyError::InvalidKey | KeyError::WrongKeyType) => {
             import_rsa(bytes, encoding, KeyType::Public)
         }
@@ -244,8 +295,7 @@ pub fn import_rsa_jwk(n: &[u8], e: &[u8]) -> Result<ImportedKey, KeyError> {
     }
     let modulus = rsa::BigUint::from_bytes_be(n);
     let exponent = rsa::BigUint::from_bytes_be(e);
-    let key = RsaPublicKey::new_with_max_size(modulus, exponent, 8192)
-        .map_err(|_| KeyError::InvalidKey)?;
+    let key = validate_public_parameters(modulus, exponent)?;
     let key = ImportedKey::RsaPublic(key);
     validate_key(&key)?;
     Ok(key)
@@ -372,5 +422,29 @@ mod tests {
             import_rsa_jwk_json(json.as_bytes()),
             Err(KeyError::InvalidKey)
         ));
+    }
+
+    #[test]
+    fn eight_kib_public_key_round_trips_through_jwk_der_and_pem() {
+        use base64::Engine;
+        let modulus = vec![0xff; 1024];
+        let exponent = [0x01, 0x00, 0x01];
+        let key = import_rsa_jwk(&modulus, &exponent).unwrap();
+        assert_eq!(key.modulus_bits(), 8192);
+        let der = key.export(KeyFormat::Spki, KeyEncoding::Der).unwrap();
+        let from_der = import_rsa_der(&der, KeyType::Public, KeyFormat::Spki).unwrap();
+        assert_eq!(from_der.modulus_bits(), 8192);
+        let pem = key.export(KeyFormat::Spki, KeyEncoding::Pem).unwrap();
+        let from_pem = import_rsa(&pem, KeyEncoding::Pem, KeyType::Public).unwrap();
+        assert_eq!(from_pem.modulus_bits(), 8192);
+
+        let jwk = format!(
+            "{{\"kty\":\"RSA\",\"n\":\"{}\",\"e\":\"AQAB\"}}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(modulus)
+        );
+        assert_eq!(
+            import_rsa_jwk_json(jwk.as_bytes()).unwrap().modulus_bits(),
+            8192
+        );
     }
 }

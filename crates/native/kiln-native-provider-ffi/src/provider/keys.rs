@@ -56,7 +56,8 @@ pub unsafe extern "C" fn kiln_crypto_key_import(
         Ok(key) => key,
         Err(
             kiln_key_core::KeyError::UnsupportedEncoding
-            | kiln_key_core::KeyError::UnsupportedKeyType,
+            | kiln_key_core::KeyError::UnsupportedKeyType
+            | kiln_key_core::KeyError::UnsupportedKeySize,
         ) => {
             return UNSUPPORTED;
         }
