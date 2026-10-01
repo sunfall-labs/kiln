@@ -102,6 +102,7 @@ matched=0
 invalid=0
 diverged=0
 timeouts=0
+interruptions=0
 stress_skipped=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
@@ -164,6 +165,10 @@ run_probe() {
 	interpreted="$(run_invocation "$interpreted_marker" \
 		env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
 		${adapter:+"$adapter"} run "$probe" 2>&1)" || interpreted_status=$?
+	if [[ -f "$interpreted_marker.interrupted" ]]; then
+		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.interrupted"
+		return 0
+	fi
 	if [[ -f $interpreted_marker ]]; then
 		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.timedout"
 		return 0
@@ -227,6 +232,10 @@ run_probe() {
 		native="$(run_invocation "$native_timeout_marker" \
 			env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot \
 			${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+		if [[ -f "$native_timeout_marker.interrupted" ]]; then
+			printf '%s\n' "$native" > "$WORK_DIR/$name.interrupted"
+			return 0
+		fi
 		if [[ -f $native_timeout_marker ]]; then
 			printf '%s\n' "$native" > "$WORK_DIR/$name.timedout"
 			return 0
@@ -305,7 +314,12 @@ wait || true
 for probe in "${PROBES[@]}"; do
 	name="$(basename -- "$probe")"
 	name="${name%.*}"
-	if [[ -f "$WORK_DIR/$name.timedout" ]]; then
+	if [[ -f "$WORK_DIR/$name.interrupted" ]]; then
+		kiln_say "FAILED: invocation interrupted while running $name:"
+		kiln_say "$(<"$WORK_DIR/$name.interrupted")"
+		interruptions=$((interruptions + 1))
+		invalid=$((invalid + 1))
+	elif [[ -f "$WORK_DIR/$name.timedout" ]]; then
 		kiln_say "FAILED: deadline expired while running $name (KILN_NATIVE_TIMEOUT_SECONDS=$NATIVE_TIMEOUT_SECONDS):"
 		kiln_say "$(<"$WORK_DIR/$name.timedout")"
 		timeouts=$((timeouts + 1))
@@ -351,6 +365,9 @@ if ((invalid > 0)); then
 fi
 if ((timeouts > 0)); then
 	kiln_say "native: $timeouts invocation(s) exceeded their opt-in deadline; none were classified as refusals"
+fi
+if ((interruptions > 0)); then
+	kiln_say "native: $interruptions invocation(s) were interrupted; none were classified as refusals"
 fi
 
 if ((diverged > 0)); then

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,38 @@ class NativeTimeoutTests(unittest.TestCase):
             self.assertLess(elapsed, 3, "an escaped pipe owner must not hold the runner open")
             time.sleep(1.5)
             self.assertTrue(escaped_marker.exists(), "cleanup must not signal an escaped group")
+
+    def test_helper_signal_reaps_its_owned_process_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "timed-out"
+            child_pid = root / "child-pid"
+            child_done = root / "child-survived"
+            command = (
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(%r, 'w').write(str(os.getpid())); "
+                "print('child partial output', flush=True); time.sleep(1.2); "
+                "open(%r, 'w').write('survived')" % (str(child_pid), str(child_done))
+            )
+            helper = subprocess.Popen(
+                [sys.executable, str(HELPER), "10", str(marker), "--", sys.executable,
+                 "-c", command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 3
+            while not child_pid.exists() and helper.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(child_pid.exists(), "the invocation child did not start")
+            os.kill(helper.pid, signal.SIGTERM)
+            stdout, stderr = helper.communicate(timeout=5)
+            self.assertEqual(helper.returncode, 143)
+            self.assertTrue(Path(str(marker) + ".interrupted").exists())
+            self.assertIn("child partial output\n", stdout)
+            self.assertIn("KILN_NATIVE_INTERRUPTED:", stderr)
+            time.sleep(1)
+            self.assertFalse(child_done.exists(), "the interrupted helper left its child running")
 
     def test_runner_times_out_one_probe_and_finishes_the_batch(self):
         with tempfile.TemporaryDirectory() as temporary:
