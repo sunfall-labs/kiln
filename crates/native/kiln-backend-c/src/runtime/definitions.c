@@ -1388,6 +1388,20 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     return kiln_c99_describe_property_key(host, target, &view, NULL, out, found, depth, thrown);
 }
 
+/* Computed CopyDataProperties walks can include symbols. Keep their identity alongside the
+ * reserved spelling while using the same descriptor implementation as reflection. */
+int kiln_c99_describe_property_value(kiln_host *host, kiln_value target, kiln_value key,
+                                     kiln_value *out, int *found, int depth,
+                                     kiln_value *thrown) {
+    kiln_value name = kiln_c99_property_key(key);
+    if (name.tag != KILN_VALUE_STRING || name.ptr == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    return kiln_c99_describe_property_key(host, target, (const kiln_string *)name.ptr,
+                                          kiln_c99_property_ikey(key), out, found, depth,
+                                          thrown);
+}
+
 /* Whether `key` is an own property of `target` -- the single question behind both
  * `Object.prototype.hasOwnProperty.call(x, k)` and `Object.hasOwn(x, k)`.
  *

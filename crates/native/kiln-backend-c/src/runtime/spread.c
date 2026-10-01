@@ -1038,6 +1038,52 @@ static void kiln_c99_prepared_graph_drop(void *payload) {
     free(arena);
 }
 
+/* Builtin namespaces and callable builtins answer own keys through the same table/store
+ * authority used by Object.keys and descriptors. They do not have an ordinary object store to
+ * walk directly, so perform CopyDataProperties using a snapshot, a fresh descriptor check and
+ * [[Get]] for each still-enumerable key. */
+static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_value source,
+                                   int depth, kiln_value *thrown) {
+    kiln_value keys;
+    size_t index;
+    size_t length;
+    int status = kiln_c99_own_keys(host, source, &keys, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    length = kiln_c99_array_of(keys)->count;
+    for (index = 0; index < length; ++index) {
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+        kiln_value descriptor;
+        kiln_value enumerable;
+        kiln_value copied;
+        kiln_value name;
+        const kiln_string *view;
+        const kiln_string *canonical;
+        int found = 0;
+
+        status = kiln_c99_describe_property_value(host, source, key, &descriptor, &found,
+                                                  depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!found) continue;
+        status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_truthy(enumerable)) continue;
+
+        /* CopyDataProperties performs Get after its descriptor check. Besides preserving live
+         * namespace bindings, this invokes any accessor with the builtin itself as receiver. */
+        status = kiln_c99_get_computed(host, source, key, &copied, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        name = kiln_c99_property_key(key);
+        if (name.tag != KILN_VALUE_STRING || name.ptr == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        view = (const kiln_string *)name.ptr;
+        canonical = kiln_c99_property_ikey(key);
+        status = kiln_c99_put_mode_key(host, target, view, canonical, copied, 0, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    return KILN_C99_OK;
+}
+
 /* The JavaScript handle is only a weak key. It contains no graph pointer, and its collection
  * releases an abandoned arena before the handle's block is swept. */
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
@@ -1230,6 +1276,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
         return KILN_C99_OK;
     }
+    if (source.tag == KILN_VALUE_BUILTIN) {
+        return kiln_c99_spread_builtin(host, target, source, depth, thrown);
+    }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
      * `{...5}` is `{}`, not an error. A string is the exception and is handled below, because
      * its indices *are* own properties. */
@@ -1311,11 +1360,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             return stored;
         }
     } else {
-        /* Deliberately not `KILN_VALUE_BUILTIN`, even though it has a store: a Node builtin
-         * namespace publishes *enumerable* exports, which live in the interpreter's ABI table
-         * and not in the store a program writes into. Reading only the store would answer `{}`
-         * where the interpreter answers seventeen names -- a silent divergence, which is worse
-         * than the refusal it would replace. */
+        /* Builtin values are handled above through their own-key and descriptor authority. */
         KILN_C99_REFUSE("an object spread of a value with no enumerable property store");
     }
     /* Both stores are created on first use, so a function that never carried a property and an
