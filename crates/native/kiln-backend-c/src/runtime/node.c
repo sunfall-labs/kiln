@@ -1103,6 +1103,21 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
                                has_argument ? 2 : 1, depth, thrown);
 }
 
+/* Transport errors use the same Error value authority as ordinary exceptions. Passing the
+ * provider's message string directly loses instanceof/message semantics at every Node seam. */
+static int kiln_c99_node_emit_transport_error(kiln_host *host, kiln_value object,
+                                              const uint8_t *bytes, uint64_t length,
+                                              kiln_value *thrown) {
+    kiln_value error;
+    int status;
+    if (length > SIZE_MAX || (length != 0 && bytes == NULL))
+        return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR,
+                                kiln_c99_copy_text((const char *)bytes, (size_t)length));
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_node_emit(host, object, "error", error, 1, 0, thrown);
+}
+
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
                                                   kiln_value *thrown) {
     kiln_node_socket *socket;
@@ -1866,10 +1881,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         return KILN_C99_OK;
     }
     if (event->kind == 9) {
-        kiln_value message = kiln_c99_copy_text((const char *)event->data,
-                                                (size_t)event->data_len);
         kiln_value object = client != NULL ? client->object : socket->object;
-        status = kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
+        status = kiln_c99_node_emit_transport_error(socket->host, object, event->data,
+                                                    event->data_len, exception);
         if (socket->http_upgraded) {
             int close_status = kiln_c99_node_close_socket(socket, 1);
             return status != KILN_C99_OK ? status : close_status;
@@ -1907,9 +1921,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (completion->status != KILN_REALM_ASYNC_OK) {
             if (stdin_stream.tag == KILN_VALUE_OBJECT) {
-                kiln_value message = kiln_c99_copy_text((const char *)completion->error_message,
-                                                        (size_t)completion->error_message_len);
-                return kiln_c99_node_emit((kiln_host *)host, stdin_stream, "error", message, 1, 0, exception);
+                return kiln_c99_node_emit_transport_error((kiln_host *)host, stdin_stream,
+                    completion->error_message, completion->error_message_len, exception);
             }
             return KILN_C99_OK;
         }
@@ -1935,14 +1948,13 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
     }
     if (completion->status != KILN_REALM_ASYNC_OK) {
-        kiln_value message = kiln_c99_copy_text((const char *)completion->error_message,
-                                                (size_t)completion->error_message_len);
         kiln_value object = work->server != NULL
                                 ? work->server->object
                                 : work->client_request != NULL
                                       ? work->client_request->object
                                       : work->socket->object;
-        return kiln_c99_node_emit((kiln_host *)host, object, "error", message, 1, 0, exception);
+        return kiln_c99_node_emit_transport_error((kiln_host *)host, object,
+            completion->error_message, completion->error_message_len, exception);
     }
     if (work->client_request != NULL) {
         kiln_node_client_request *request = work->client_request;
