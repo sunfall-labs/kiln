@@ -2903,8 +2903,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (key_len == 1 && key_bytes[0] == 3) {
-                captured_scope.strict = kiln_c99_truthy(
-                    kiln_val_to_boundary(pobj->properties[i].value));
+                captured_scope.strict = kiln_c99_truthy(pobj->properties[i].value);
             } else if (key_len > 1 && (key_bytes[0] == 1 || key_bytes[0] == 2)) {
                 (void)kiln_dyn_scope_mark_restriction(
                     &captured_scope, (const char *)key_bytes + 1, key_len - 1,
