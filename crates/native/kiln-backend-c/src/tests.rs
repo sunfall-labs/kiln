@@ -925,6 +925,53 @@ int kiln_realm_http_client_owner_active(uint64_t resource, void **out_owner) {
     *out_owner = NULL;
     return KILN_C99_INVALID_ARGUMENT;
 }
+/* Provider seams retained by the current prelude. These fixtures do not execute transports. */
+int kiln_realm_http_agent_connect_failed_active(const uint8_t *host, uint64_t host_len,
+                                                uint16_t port, uint64_t request,
+                                                uint64_t *out_request) {
+    (void)host; (void)host_len; (void)port; (void)request;
+    if (out_request != NULL) *out_request = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_agent_cancel_connect_active(const uint8_t *host, uint64_t host_len,
+                                                uint16_t port, uint64_t request,
+                                                uint64_t *out_request) {
+    return kiln_realm_http_agent_connect_failed_active(host, host_len, port, request, out_request);
+}
+int kiln_realm_http_upgrade_write_active_with_fence(uint64_t resource, uint64_t id,
+                                                    const uint8_t *data, uint64_t data_len,
+                                                    uint64_t *out_fence) {
+    (void)resource; (void)id; (void)data; (void)data_len;
+    if (out_fence != NULL) *out_fence = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_crypto_key_import(const uint8_t *data, size_t length, uint32_t kind,
+                           uint64_t *out_handle) {
+    (void)data; (void)length; (void)kind;
+    if (out_handle != NULL) *out_handle = 0;
+    return -3;
+}
+int kiln_crypto_key_public(uint64_t handle, uint64_t *out_handle) {
+    (void)handle;
+    if (out_handle != NULL) *out_handle = 0;
+    return -3;
+}
+int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits) {
+    (void)handle;
+    if (out_type != NULL) *out_type = 0;
+    if (out_bits != NULL) *out_bits = 0;
+    return -3;
+}
+int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
+                           uint8_t *output, size_t capacity, size_t *out_length) {
+    (void)handle; (void)format; (void)encoding; (void)output; (void)capacity;
+    if (out_length != NULL) *out_length = 0;
+    return -3;
+}
+int kiln_crypto_key_free(uint64_t handle) {
+    (void)handle;
+    return -3;
+}
 int kiln_realm_http_agent_connected_active(const uint8_t *host, uint64_t host_len,
                                            uint16_t port, uint64_t resource,
                                            uint64_t request) {
