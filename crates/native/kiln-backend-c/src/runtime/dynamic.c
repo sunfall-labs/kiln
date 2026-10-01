@@ -620,6 +620,22 @@ static int kiln_dyn_throw_unexpected_token(kiln_dyn_lexer *lex, kiln_value *thro
     return kiln_dyn_throw_parse_error(lex, thrown, "Unexpected token");
 }
 
+/* A missing identifier is much easier to diagnose when the ReferenceError retains its name.
+ * Dynamic source identifiers are length-delimited UTF-8, so do not pass them to a `%s` formatter
+ * or assume they are NUL-terminated. This path runs only after environment lookup has failed. */
+static int kiln_dyn_throw_unresolvable_reference(kiln_value *thrown,
+                                                  const char *name, size_t name_len) {
+    static const char suffix[] = " is not defined";
+    if (name_len > SIZE_MAX - sizeof suffix) return KILN_C99_OUT_OF_MEMORY;
+    char *message = (char *)malloc(name_len + sizeof suffix);
+    if (message == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if (name_len != 0) memcpy(message, name, name_len);
+    memcpy(message + name_len, suffix, sizeof suffix);
+    int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, message);
+    free(message);
+    return status;
+}
+
 /* The dynamic executor parses lazily while running a body, but JavaScript validates escapes
  * when the Function constructor is called. Tokenize the source once up front so malformed
  * escapes are reported at construction time, including in an unreachable branch. */
@@ -1692,7 +1708,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             if (status != KILN_C99_OK) return status;
             if (present) return kiln_c99_get(host, globals, name, name_len, out, depth, thrown);
         }
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "Variable is not defined");
+        return kiln_dyn_throw_unresolvable_reference(thrown, name, name_len);
     }
     if (lex->curr.kind == KILN_DYN_LPAREN) {
         const char *params;
@@ -2208,8 +2224,7 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
     if (status != KILN_C99_OK) return status;
     if (!present) {
         if (!allow_missing)
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
-                                        "Variable is not defined");
+            return kiln_dyn_throw_unresolvable_reference(thrown, name, name_len);
         *current = kiln_c99_undefined();
         *unresolvable = 1;
     } else if (read_value) {
@@ -2282,8 +2297,7 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
             if (status != KILN_C99_OK) return status;
         } else {
             if (unresolvable && scope->strict) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
-                                            "Variable is not defined");
+                return kiln_dyn_throw_unresolvable_reference(thrown, name, name_len);
             }
             status = kiln_c99_put(host, global_target, name, name_len, next, 0, thrown);
             if (status != KILN_C99_OK) return status;
