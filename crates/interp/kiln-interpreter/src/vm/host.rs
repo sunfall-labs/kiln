@@ -234,6 +234,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    fn schedule_node_event_emit(&mut self, receiver: Value, event: &str) {
+        let callback = Value::Bound(Rc::new(BoundFunction {
+            target: Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+            this_value: receiver,
+            arguments: vec![Value::String(event.into())],
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+    }
+
     fn call_node_socket_end_callbacks(
         &mut self,
         state: &Rc<RefCell<crate::net::NetSocketState>>,
@@ -2703,6 +2714,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 };
                 match unsafe { ActiveAsyncHostOps::cancel_if_pending(&mut *host, request) } {
                     kiln_host_abi::PendingCancellation::Cancelled => {
+                        if let Some(stream) = server
+                            .borrow_mut()
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                        {
+                            stream.driver.cancelled(request);
+                        }
                         let mut cancellation_error = None;
                         if pending_is_write {
                             let error = self.construct_error(
@@ -2758,6 +2777,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         // The host has neither a pending request nor a ready completion. Retire
                         // stale bookkeeping without inventing a completion result.
                         let _ = self.take_pending_node_request(request);
+                        if let Some(stream) = server
+                            .borrow_mut()
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                        {
+                            stream.driver.cancelled(request);
+                        }
                     }
                 }
                 Ok(())
@@ -2934,15 +2961,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                     }
                     // Node exposes the terminal stream state from inside the `close` listener.
-                    // Event dispatch is synchronous, so projecting it after this branch returns
-                    // lets user code observe the previous half-open state.
+                    // Project it before queueing the event so user code sees the terminal state.
                     sync_node_socket_ready_state(server, resource);
-                    self.dispatch_node_event(
-                        Native::NodeEventEmit,
-                        &socket,
-                        &[Value::String("close".into())],
-                        instruction,
-                    )?;
+                    self.schedule_node_event_emit(socket, "close");
                 }
                 let emit_close = {
                     let mut state = server.borrow_mut();
@@ -2955,8 +2976,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     ready
                 };
                 if emit_close {
-                    let _active_object = self.take_active_node_server_object(server);
-                    self.emit_http_server(server, "close", vec![], instruction)?;
+                    let object = self
+                        .take_active_node_server_object(server)
+                        .or_else(|| {
+                            server
+                                .borrow()
+                                .object
+                                .as_ref()
+                                .and_then(Weak::upgrade)
+                                .map(Value::Object)
+                        })
+                        .unwrap_or(Value::Undefined);
+                    self.schedule_node_event_emit(object, "close");
                 }
                 Ok(())
             }

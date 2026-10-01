@@ -237,11 +237,12 @@ impl StreamDriver {
         })
     }
 
-    /// Cancel all in-flight operations before closing this resource.
+    /// Request cancellation for in-flight operations before closing this resource.
     ///
     /// The close action can be selected synchronously from a language callback while a read is
-    /// still waiting on the peer. Retiring those request identities is part of close: otherwise
-    /// the realm's host drive keeps waiting for a completion that can no longer be observed.
+    /// still waiting on the peer. Keep request identities until the host confirms cancellation:
+    /// an already-ready completion still belongs to this driver and must be consumed before the
+    /// close event can retire the stream.
     pub fn close_actions(&mut self) -> Vec<StreamAction> {
         if self.closing {
             return Vec::new();
@@ -252,9 +253,24 @@ impl StreamDriver {
             .iter()
             .map(|(request, _)| StreamAction::Cancel(*request))
             .collect();
-        self.requests.clear();
         actions.push(self.close());
         actions
+    }
+
+    /// Retire an operation only after the host confirms it was cancelled or has no completion.
+    pub fn cancelled(&mut self, request: RequestId) -> bool {
+        let Some(index) = self
+            .requests
+            .iter()
+            .position(|(pending, _)| *pending == request)
+        else {
+            return false;
+        };
+        let (_, kind) = self.requests.remove(index);
+        if kind == PendingKind::Write {
+            let _ = self.state.write_completed(request);
+        }
+        true
     }
 
     pub const fn is_closing(&self) -> bool {
@@ -776,6 +792,7 @@ mod tests {
         assert!(driver.is_closing());
         assert!(driver.close_actions().is_empty());
         assert!(driver.start_reading().is_empty());
+        assert!(driver.cancelled(RequestId::new(13)));
         assert_eq!(
             driver.completed(completion(13, AsyncHostValue::Bytes(b"stale".to_vec()))),
             None

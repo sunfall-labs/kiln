@@ -3023,6 +3023,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                     kiln_value destroy_error;
                     status = kiln_c99_node_socket_destroy_error(&destroy_error);
                     if (status != KILN_C99_OK) return status;
+                    status = kiln_c99_node_socket_discard_queued_writes(socket, destroy_error);
+                    if (status != KILN_C99_OK) return status;
                     status = kiln_c99_node_socket_finish_end_callbacks(
                         socket->host, socket, destroy_error, 1, exception);
                     if (status != KILN_C99_OK) return status;
@@ -5844,8 +5846,10 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             }
             status = kiln_c99_node_close_socket(socket, 1);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_node_socket_discard_queued_writes(socket, socket_error);
-            if (status != KILN_C99_OK) return status;
+            if (socket->write_request == 0 || !socket->close_after_write) {
+                status = kiln_c99_node_socket_discard_queued_writes(socket, socket_error);
+                if (status != KILN_C99_OK) return status;
+            }
             if (socket->write_request == 0) {
                 status = kiln_c99_node_socket_finish_end_callbacks(
                     host, socket, socket_error, 1, thrown);
