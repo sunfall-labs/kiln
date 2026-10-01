@@ -78,8 +78,16 @@ typedef struct kiln_dyn_binding {
     char *name;
     size_t name_len;
     kiln_value value;
-    int read_only;
+    /* Constants/imports always reject writes. A named function-expression binding ignores a
+     * sloppy write but throws in strict code. */
+    unsigned char restriction;
 } kiln_dyn_binding;
+
+enum {
+    KILN_DYN_BINDING_MUTABLE = 0,
+    KILN_DYN_BINDING_READ_ONLY = 1,
+    KILN_DYN_BINDING_FUNCTION_NAME = 2
+};
 
 typedef struct kiln_dyn_scope {
     kiln_dyn_binding *bindings;
@@ -88,6 +96,7 @@ typedef struct kiln_dyn_scope {
     struct kiln_dyn_scope *parent;
     kiln_value with_object;
     int has_with_object;
+    int strict;
 } kiln_dyn_scope;
 
 static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
@@ -97,6 +106,7 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->parent = parent;
     scope->with_object = kiln_c99_undefined();
     scope->has_with_object = 0;
+    scope->strict = parent != NULL ? parent->strict : 0;
 }
 
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
@@ -127,33 +137,52 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
     scope->bindings[scope->count].name = dup;
     scope->bindings[scope->count].name_len = name_len;
     scope->bindings[scope->count].value = val;
-    scope->bindings[scope->count].read_only = 0;
+    scope->bindings[scope->count].restriction = KILN_DYN_BINDING_MUTABLE;
     scope->count++;
     return 1;
 }
 
-static int kiln_dyn_scope_mark_readonly(kiln_dyn_scope *scope, const char *name,
-                                        size_t name_len) {
+static int kiln_dyn_scope_mark_restriction(kiln_dyn_scope *scope, const char *name,
+                                           size_t name_len, unsigned char restriction) {
     for (size_t i = 0; i < scope->count; ++i) {
         if (scope->bindings[i].name_len == name_len &&
             memcmp(scope->bindings[i].name, name, name_len) == 0) {
-            scope->bindings[i].read_only = 1;
+            scope->bindings[i].restriction = restriction;
             return 1;
         }
     }
     return 0;
 }
 
-static int kiln_dyn_scope_is_readonly(kiln_dyn_scope *scope, const char *name,
-                                      size_t name_len) {
+static unsigned char kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
+                                                size_t name_len) {
     for (kiln_dyn_scope *curr = scope; curr != NULL; curr = curr->parent) {
         for (size_t i = 0; i < curr->count; ++i) {
             if (curr->bindings[i].name_len == name_len &&
                 memcmp(curr->bindings[i].name, name, name_len) == 0)
-                return curr->bindings[i].read_only;
+                return curr->bindings[i].restriction;
         }
     }
-    return 0;
+    return KILN_DYN_BINDING_MUTABLE;
+}
+
+/* Returns one when an assignment to this binding is a sloppy named-function write that must
+ * evaluate its RHS but leave the immutable name binding unchanged. */
+static int kiln_dyn_scope_check_write(kiln_dyn_scope *scope, const char *name,
+                                      size_t name_len, int *ignore_write,
+                                      kiln_value *thrown) {
+    unsigned char restriction = kiln_dyn_scope_restriction(scope, name, name_len);
+    *ignore_write = 0;
+    if (restriction == KILN_DYN_BINDING_FUNCTION_NAME) {
+        if (!scope->strict) {
+            *ignore_write = 1;
+            return KILN_C99_OK;
+        }
+    } else if (restriction == KILN_DYN_BINDING_MUTABLE) {
+        return KILN_C99_OK;
+    }
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                "Assignment to constant variable.");
 }
 
 /* The dynamic evaluator's lexer and binding table are UTF-8 text APIs.  Stored object keys are
@@ -792,10 +821,11 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
             status = kiln_c99_put(host, env_obj, s->bindings[i].name,
                                   s->bindings[i].name_len, s->bindings[i].value, 0, thrown);
             if (status != KILN_C99_OK) return status;
-            if (s->bindings[i].read_only) {
+            if (s->bindings[i].restriction != KILN_DYN_BINDING_MUTABLE) {
                 char *marker = (char *)malloc(s->bindings[i].name_len + 1);
                 if (marker == NULL) return KILN_C99_OUT_OF_MEMORY;
-                marker[0] = '\001';
+                marker[0] = s->bindings[i].restriction == KILN_DYN_BINDING_READ_ONLY
+                                ? '\001' : '\002';
                 memcpy(marker + 1, s->bindings[i].name, s->bindings[i].name_len);
                 status = kiln_c99_put(host, env_obj, marker, s->bindings[i].name_len + 1,
                                       kiln_c99_boolean(1), 0, thrown);
@@ -803,6 +833,12 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 if (status != KILN_C99_OK) return status;
             }
         }
+    }
+    if (scope != NULL && scope->strict) {
+        const char marker[] = {'\003'};
+        int status = kiln_c99_put(host, env_obj, marker, sizeof marker,
+                                  kiln_c99_boolean(1), 0, thrown);
+        if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
 }
@@ -1192,12 +1228,40 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         upvals[1] = kiln_c99_copy_text(&lex->src[bstart], blen);
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
+        int status;
+        int function_strict = scope->strict ||
+                              kiln_dyn_body_has_use_strict(&lex->src[bstart], blen);
+        kiln_dyn_scope function_scope;
+        kiln_dyn_scope_init(&function_scope, scope);
+        function_scope.strict = function_strict;
+        kiln_value self_cell = kiln_c99_undefined();
+        if (explicit_name) {
+            status = kiln_c99_make_cell(&self_cell);
+            if (status != KILN_C99_OK) {
+                kiln_dyn_scope_destroy(&function_scope);
+                return status;
+            }
+            kiln_c99_gc_keep_alive(&self_cell);
+            if (!kiln_dyn_scope_set(&function_scope, fn_name, fn_name_len, self_cell)) {
+                kiln_dyn_scope_destroy(&function_scope);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            (void)kiln_dyn_scope_mark_restriction(&function_scope, fn_name, fn_name_len,
+                                                  KILN_DYN_BINDING_FUNCTION_NAME);
+        }
         kiln_value env_obj;
-        int status = kiln_c99_new_object(&env_obj);
-        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_new_object(&env_obj);
+        if (status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&function_scope);
+            return status;
+        }
         kiln_c99_gc_keep_alive(&env_obj);
-        status = kiln_dyn_capture_environment(host, scope, env_obj, 0, thrown);
-        if (status != KILN_C99_OK) return status;
+        status = kiln_dyn_capture_environment(host, explicit_name ? &function_scope : scope,
+                                              env_obj, 0, thrown);
+        if (status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&function_scope);
+            return status;
+        }
         kiln_c99_gc_keep_alive(&upvals[0]);
         kiln_c99_gc_keep_alive(&upvals[1]);
         kiln_c99_gc_keep_alive(&env_obj);
@@ -1212,14 +1276,23 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                        closure_name,
                                        "", 0,
                                        "eval", 0, 0, 0, asynchronous, 0, 0, 0,
-                                       kiln_dyn_body_has_use_strict(&lex->src[bstart], blen),
+                                       function_strict,
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
-        if (status != KILN_C99_OK) return status;
+        if (status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&function_scope);
+            return status;
+        }
+        kiln_c99_gc_keep_alive(&upvals[0]);
+        kiln_c99_gc_keep_alive(&upvals[1]);
+        kiln_c99_gc_keep_alive(&env_obj);
+        if (explicit_name) kiln_c99_gc_keep_alive(&self_cell);
         kiln_c99_heap_store_value(kiln_c99_closure_of(*out), &kiln_c99_closure_of(*out)->source_value, upvals[1]);
         if (explicit_name) {
-            (void)kiln_c99_put(host, env_obj, fn_name, fn_name_len, *out, 0, NULL);
+            kiln_c99_val_store_cell(kiln_c99_cell_of(self_cell),
+                                    kiln_val_from_boundary(*out));
         }
+        kiln_dyn_scope_destroy(&function_scope);
         return KILN_C99_OK;
     }
 
@@ -1713,11 +1786,12 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                                                  &cur_val, &found, thrown);
                 if (status != KILN_C99_OK) return status;
             }
-            if (kiln_dyn_scope_is_readonly(scope, name, name_len))
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "Assignment to constant variable.");
+            int ignore_write = 0;
+            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+            if (status != KILN_C99_OK) return status;
             double n = kiln_c99_as_number(cur_val);
-            if (!kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n + 1.0))) {
+            if (!ignore_write &&
+                !kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n + 1.0))) {
                 int status = kiln_dyn_scope_set_with(host, scope, name, name_len,
                                                      kiln_c99_number(n + 1.0), depth, &found,
                                                      thrown);
@@ -1737,11 +1811,12 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                                                  &cur_val, &found, thrown);
                 if (status != KILN_C99_OK) return status;
             }
-            if (kiln_dyn_scope_is_readonly(scope, name, name_len))
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "Assignment to constant variable.");
+            int ignore_write = 0;
+            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+            if (status != KILN_C99_OK) return status;
             double n = kiln_c99_as_number(cur_val);
-            if (!kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n - 1.0))) {
+            if (!ignore_write &&
+                !kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n - 1.0))) {
                 int status = kiln_dyn_scope_set_with(host, scope, name, name_len,
                                                      kiln_c99_number(n - 1.0), depth, &found,
                                                      thrown);
@@ -1791,10 +1866,10 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                 default: break;
                 }
             }
-            if (kiln_dyn_scope_is_readonly(scope, name, name_len))
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "Assignment to constant variable.");
-            if (!kiln_dyn_scope_update(scope, name, name_len, rhs)) {
+            int ignore_write = 0;
+            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!ignore_write && !kiln_dyn_scope_update(scope, name, name_len, rhs)) {
                 int with_found = 0;
                 status = kiln_dyn_scope_set_with(host, scope, name, name_len, rhs, depth,
                                                  &with_found, thrown);
@@ -1942,8 +2017,10 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
             goto direct_eval_done;
         }
         if (read_only_flags[index])
-            (void)kiln_dyn_scope_mark_readonly(&scope, names[index], name_lengths[index]);
+            (void)kiln_dyn_scope_mark_restriction(&scope, names[index], name_lengths[index],
+                                                  KILN_DYN_BINDING_READ_ONLY);
     }
+    scope.strict = strict_context != 0;
     memset(&lex, 0, sizeof(lex));
     lex.src = (const char *)source_owned;
     lex.len = source_len;
@@ -2730,6 +2807,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_VAR || lex->curr.kind == KILN_DYN_KW_LET || lex->curr.kind == KILN_DYN_KW_CONST) {
+        int is_const = lex->curr.kind == KILN_DYN_KW_CONST;
         kiln_dyn_lexer_next(lex);
         for (;;) {
             if (lex->curr.kind != KILN_DYN_IDENT) {
@@ -2746,7 +2824,12 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                                                 &init, thrown);
                 if (status != KILN_C99_OK) return status;
             }
-            kiln_dyn_scope_set(scope, name, name_len, init);
+            if (!kiln_dyn_scope_set(scope, name, name_len, init))
+                return KILN_C99_OUT_OF_MEMORY;
+            if (is_const &&
+                !kiln_dyn_scope_mark_restriction(scope, name, name_len,
+                                                 KILN_DYN_BINDING_READ_ONLY))
+                return KILN_C99_INTERNAL_ERROR;
             if (lex->curr.kind != KILN_DYN_COMMA) break;
             kiln_dyn_lexer_next(lex);
         }
@@ -2810,10 +2893,14 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                 kiln_dyn_scope_destroy(&captured_scope);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (key_len > 1 && key_bytes[0] == 1) {
-                (void)kiln_dyn_scope_mark_readonly(&captured_scope,
-                                                   (const char *)key_bytes + 1,
-                                                   key_len - 1);
+            if (key_len == 1 && key_bytes[0] == 3) {
+                captured_scope.strict = kiln_c99_truthy(
+                    kiln_val_to_boundary(pobj->properties[i].value));
+            } else if (key_len > 1 && (key_bytes[0] == 1 || key_bytes[0] == 2)) {
+                (void)kiln_dyn_scope_mark_restriction(
+                    &captured_scope, (const char *)key_bytes + 1, key_len - 1,
+                    key_bytes[0] == 1 ? KILN_DYN_BINDING_READ_ONLY
+                                      : KILN_DYN_BINDING_FUNCTION_NAME);
             } else {
                 kiln_dyn_scope_set_key(&captured_scope, pobj->properties[i].key,
                                        pobj->properties[i].value);
@@ -2821,6 +2908,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
             free(key_bytes);
         }
     }
+    scope.strict = captured_scope.strict;
 
 
 
