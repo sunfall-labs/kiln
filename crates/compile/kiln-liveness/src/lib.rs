@@ -595,7 +595,12 @@ pub fn retained_method_groups(
     let uses_math_number = members
         .builtins
         .iter()
-        .any(|name| name == "Math" || name == "Number");
+        .any(|name| {
+            matches!(name.as_str(), "Math" | "Number" | "ArrayBuffer" | "SharedArrayBuffer")
+        })
+        // SharedArrayBuffer is installed as a TypeScript global; its constructor performs
+        // ToIndex through Number and Math.trunc even when the program never names Math.
+        || members.globals.iter().any(|name| name == "SharedArrayBuffer");
 
     // Imported node builtins, from resolved graph edges: ESM imports and CJS
     // literal requires alike. Unknown `node:*` specifiers bail: failing closed

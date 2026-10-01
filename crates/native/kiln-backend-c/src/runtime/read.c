@@ -183,14 +183,16 @@ static int kiln_c99_builtin_custom_prototype_read(
  * `join`, a number's `toFixed` -- inherits them from a prototype built-in, and a member the program
  * wrote onto that built-in (`String.prototype.trim = f`) shadows the table's, exactly as it does
  * in the language. So before a table answers, the prototype's store is asked -- only once the
- * program has written onto it (`kiln_c99_program_wrote_builtin`), which in a realm that has never
+ * realm has written onto it (including the shared bootstrap), which in a realm that has never
  * written onto a built-in is one compare. */
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
                                            const kiln_string *key, const kiln_string *ikey,
                                            kiln_value *out, int depth, kiln_value *thrown,
                                            int *found) {
     *found = 0;
-    if (KILN_LIKELY(!kiln_c99_program_wrote_builtin((uint32_t)prototype))) return KILN_C99_OK;
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (heap != NULL && !kiln_c99_realm_marked_builtin(heap, (uint32_t)prototype))
+        return KILN_C99_OK;
     return kiln_c99_prototype_store_read(host, prototype, key, ikey, out, depth, thrown, found);
 }
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
@@ -1268,8 +1270,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         uint64_t code;
         /* `length` is the string's own; every other name here is String.prototype's, where a
          * member the program wrote comes first. */
-        if (KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) &&
-            !kiln_c99_same_name_key(key, "length")) {
+        if (!kiln_c99_same_name_key(key, "length")) {
             KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_STRING_PROTOTYPE);
         }
         if (kiln_c99_same_name_key(key, "@@iterator")) {
