@@ -256,6 +256,8 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size);
 static double kiln_c99_as_number(kiln_value value);
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
                                       kiln_value *thrown);
+int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_value *out,
+                              int depth, kiln_value *thrown);
 static int kiln_c99_truthy(kiln_value value);
 static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);

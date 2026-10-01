@@ -2722,10 +2722,20 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 }
                 if (!scope_found) {
                     kiln_value globals = kiln_c99_undefined();
-                    int st = kiln_c99_global_object(&globals);
-                    if (st != KILN_C99_OK || kiln_c99_get(host, globals, key_name, key_len,
-                                                        &val, depth, thrown) != KILN_C99_OK) {
-                        val = kiln_c99_undefined();
+                    int present = 0;
+                    status = kiln_c99_global_object(&globals);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_has_property(host, globals, key_name, key_len,
+                                                       &present, depth, thrown);
+                    if (status == KILN_C99_OK && !present)
+                        status = kiln_dyn_throw_unresolvable_reference(thrown, key_name, key_len);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_get(host, globals, key_name, key_len, &val, depth, thrown);
+                    kiln_c99_gc_keep_alive(&globals);
+                    if (status != KILN_C99_OK) {
+                        free(owned_key);
+                        return status;
+                    }
                 }
             }
             int non_ascii_key = 0;
