@@ -101,7 +101,28 @@ const annexBFunctionBeforeStatement = Function(
   "switch (0) { case 0: return typeof annexed; function annexed() {} }",
 );
 if (annexBFunctionBeforeStatement() !== "function") {
-  throw new Error("selected sloppy switch functions alias the var environment on clause entry");
+  throw new Error("selected sloppy switch functions initialize their var alias at declaration");
+}
+const annexBBreakBeforeDeclaration = Function(
+  "switch (0) { case 0: break; function annexed() {} } return typeof annexed;",
+);
+if (annexBBreakBeforeDeclaration() !== "undefined") {
+  throw new Error("a switch break before a function declaration leaves its Annex B alias undefined");
+}
+globalThis.__switchGlobalAlias = function existingGlobalAlias() {};
+const annexBUnreachableSwitch = Function(
+  "return typeof __switchGlobalAlias; switch (0) { case 0: function __switchGlobalAlias() {} }",
+);
+if (annexBUnreachableSwitch() !== "undefined") {
+  throw new Error("Annex B aliases are hoisted before unreachable switch statements");
+}
+delete globalThis.__switchGlobalAlias;
+const annexBCapturedOuterLexical = Function(
+  "let shadowed = 123; return function() { " +
+    "switch (0) { case 0: function shadowed() {} } return typeof shadowed; }();",
+);
+if (annexBCapturedOuterLexical() !== "function") {
+  throw new Error("a CaseBlock alias is local to its function despite captured outer lexical names");
 }
 const annexBUnselectedFunction = Function(
   "switch (1) { case 0: function annexed() {} } return typeof annexed;",

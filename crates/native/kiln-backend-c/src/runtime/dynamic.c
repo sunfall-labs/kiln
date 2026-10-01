@@ -109,6 +109,9 @@ typedef struct kiln_dyn_scope {
     const char **function_declaration_sites;
     size_t function_declaration_count;
     size_t function_declaration_capacity;
+    const char **annex_b_declaration_sites;
+    size_t annex_b_declaration_count;
+    size_t annex_b_declaration_capacity;
 } kiln_dyn_scope;
 
 static int kiln_dyn_has_line_terminator(const char *source, size_t start, size_t end) {
@@ -137,6 +140,9 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->function_declaration_sites = NULL;
     scope->function_declaration_count = 0;
     scope->function_declaration_capacity = 0;
+    scope->annex_b_declaration_sites = NULL;
+    scope->annex_b_declaration_count = 0;
+    scope->annex_b_declaration_capacity = 0;
 }
 
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
@@ -213,6 +219,31 @@ static int kiln_dyn_scope_has_function_declaration(kiln_dyn_scope *scope,
     for (kiln_dyn_scope *current = scope; current != NULL; current = current->parent) {
         for (size_t index = 0; index < current->function_declaration_count; ++index) {
             if (current->function_declaration_sites[index] == site) return 1;
+        }
+    }
+    return 0;
+}
+
+static int kiln_dyn_scope_add_annex_b_declaration(kiln_dyn_scope *scope,
+                                                   const char *site) {
+    if (scope->annex_b_declaration_count == scope->annex_b_declaration_capacity) {
+        size_t capacity = scope->annex_b_declaration_capacity == 0
+                              ? 4 : scope->annex_b_declaration_capacity * 2;
+        const char **sites = (const char **)realloc(
+            scope->annex_b_declaration_sites, capacity * sizeof *sites);
+        if (sites == NULL) return 0;
+        scope->annex_b_declaration_sites = sites;
+        scope->annex_b_declaration_capacity = capacity;
+    }
+    scope->annex_b_declaration_sites[scope->annex_b_declaration_count++] = site;
+    return 1;
+}
+
+static int kiln_dyn_scope_has_annex_b_declaration(kiln_dyn_scope *scope,
+                                                   const char *site) {
+    for (kiln_dyn_scope *current = scope; current != NULL; current = current->parent) {
+        for (size_t index = 0; index < current->annex_b_declaration_count; ++index) {
+            if (current->annex_b_declaration_sites[index] == site) return 1;
         }
     }
     return 0;
@@ -374,6 +405,7 @@ static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
     }
     free(scope->bindings);
     free(scope->function_declaration_sites);
+    free(scope->annex_b_declaration_sites);
 }
 
 typedef enum {
@@ -3476,7 +3508,8 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
                 ? scope->var_target->bindings[slot].restriction
                 : KILN_DYN_BINDING_MUTABLE;
             int outer_lexical = 0;
-            for (kiln_dyn_scope *outer = scope->var_target->parent; outer != NULL;
+            for (kiln_dyn_scope *outer = scope->parent;
+                 outer != NULL && outer != scope->var_target;
                  outer = outer->parent) {
                 for (size_t outer_slot = 0; outer_slot < outer->count; ++outer_slot) {
                     if (outer->bindings[outer_slot].name_len == bindings[index].name_len &&
@@ -3499,6 +3532,9 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
                 if (!kiln_dyn_scope_mark_restriction(scope->var_target, bindings[index].name,
                                                      bindings[index].name_len,
                                                      KILN_DYN_BINDING_ANNEX_B_VAR))
+                    return KILN_C99_OUT_OF_MEMORY;
+                if (!kiln_dyn_scope_add_annex_b_declaration(scope,
+                                                            bindings[index].function_site))
                     return KILN_C99_OUT_OF_MEMORY;
                 bindings[index].annex_b_alias = 1;
             }
@@ -3551,6 +3587,7 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     const char *site = lex->curr.start;
     if (!kiln_dyn_scope_has_function_declaration(scope, site))
         KILN_C99_REFUSE("block-level function declarations in a dynamic Function body");
+    int annex_b_alias = kiln_dyn_scope_has_annex_b_declaration(scope, site);
     if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
         kiln_dyn_lexer_next(lex);
         if (lex->curr.kind != KILN_DYN_KW_FUNCTION)
@@ -3562,6 +3599,22 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     if (lex->curr.kind != KILN_DYN_IDENT)
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected function declaration name");
+    const char *function_name = lex->curr.start;
+    size_t function_name_len = lex->curr.len;
+    if (annex_b_alias) {
+        kiln_value function = kiln_c99_undefined();
+        int found = 0;
+        int status = kiln_dyn_scope_get(scope, function_name, function_name_len,
+                                        &function, &found, thrown);
+        if (status != KILN_C99_OK || !found) {
+            if (status == KILN_C99_OK) status = KILN_C99_INVALID_ARGUMENT;
+            return status;
+        }
+        kiln_c99_gc_keep_alive(&function);
+        if (scope->var_target == NULL ||
+            !kiln_dyn_scope_set(scope->var_target, function_name, function_name_len, function))
+            return KILN_C99_OUT_OF_MEMORY;
+    }
     kiln_dyn_lexer_next(lex);
     if (lex->curr.kind != KILN_DYN_LPAREN)
         return kiln_dyn_throw_parse_error(lex, thrown,
@@ -3960,28 +4013,6 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         if (selected_clause == SIZE_MAX) selected_clause = default_clause;
         for (size_t index = selected_clause; index < clause_count && selected_clause != SIZE_MAX;
              ++index) {
-            for (size_t binding = 0; binding < binding_count; ++binding) {
-                if (!bindings[binding].annex_b_alias ||
-                    bindings[binding].clause_index != index)
-                    continue;
-                kiln_value function = kiln_c99_undefined();
-                int found = 0;
-                status = kiln_dyn_scope_get(&switch_scope, bindings[binding].name,
-                                            bindings[binding].name_len, &function, &found,
-                                            thrown);
-                if (status != KILN_C99_OK || !found) {
-                    if (status == KILN_C99_OK) status = KILN_C99_INVALID_ARGUMENT;
-                    break;
-                }
-                kiln_c99_gc_keep_alive(&function);
-                if (!kiln_dyn_scope_set(switch_scope.var_target, bindings[binding].name,
-                                        bindings[binding].name_len, function)) {
-                    status = KILN_C99_OUT_OF_MEMORY;
-                    break;
-                }
-                kiln_c99_gc_keep_alive(&function);
-            }
-            if (status != KILN_C99_OK) break;
             kiln_dyn_lexer clause_lex;
             memset(&clause_lex, 0, sizeof clause_lex);
             clause_lex.src = clauses[index].body;
@@ -4540,6 +4571,106 @@ static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
     return kind == KILN_DYN_EOF || kind == KILN_DYN_SEMI || kind == KILN_DYN_RBRACE;
 }
 
+/* Add eligible sloppy CaseBlock function names to the function environment at declaration
+ * instantiation time. Their values remain undefined until execution reaches the declaration. */
+static int kiln_dyn_hoist_switch_aliases(kiln_dyn_lexer *source_lex, kiln_dyn_scope *scope,
+                                         kiln_dyn_var_declaration **vars, size_t *var_count,
+                                         size_t *var_capacity) {
+    if (source_lex->curr.kind != KILN_DYN_KW_SWITCH || scope->strict) return 1;
+    kiln_dyn_lexer scan = *source_lex;
+    kiln_dyn_lexer_next(&scan);
+    if (scan.curr.kind != KILN_DYN_LPAREN) {
+        kiln_dyn_token_free(&scan.curr);
+        return 1;
+    }
+    int parens = 1, brackets = 0, braces = 0;
+    kiln_dyn_lexer_next(&scan);
+    while (scan.curr.kind != KILN_DYN_EOF && parens != 0) {
+        if (scan.curr.kind == KILN_DYN_LPAREN) parens++;
+        else if (scan.curr.kind == KILN_DYN_RPAREN) parens--;
+        else if (scan.curr.kind == KILN_DYN_LBRACKET) brackets++;
+        else if (scan.curr.kind == KILN_DYN_RBRACKET && brackets > 0) brackets--;
+        else if (scan.curr.kind == KILN_DYN_LBRACE) braces++;
+        else if (scan.curr.kind == KILN_DYN_RBRACE && braces > 0) braces--;
+        kiln_dyn_lexer_next(&scan);
+    }
+    if (scan.curr.kind != KILN_DYN_RPAREN) {
+        kiln_dyn_token_free(&scan.curr);
+        return 1;
+    }
+    kiln_dyn_lexer_next(&scan);
+    const char *body = NULL;
+    size_t body_len = 0;
+    if (!kiln_dyn_capture_block(&scan, &body, &body_len)) {
+        kiln_dyn_token_free(&scan.curr);
+        return 1;
+    }
+    kiln_dyn_switch_clause *clauses = NULL;
+    size_t clause_count = 0;
+    int clause_status = kiln_dyn_switch_clauses(body, body_len, &clauses, &clause_count);
+    if (clause_status <= 0) {
+        free(clauses);
+        kiln_dyn_token_free(&scan.curr);
+        return clause_status < 0 ? -1 : 1;
+    }
+    kiln_dyn_switch_binding *bindings = NULL;
+    size_t binding_count = 0;
+    int binding_status = kiln_dyn_switch_bindings(clauses, clause_count,
+                                                   &bindings, &binding_count);
+    free(clauses);
+    kiln_dyn_token_free(&scan.curr);
+    if (binding_status <= 0) {
+        free(bindings);
+        return binding_status < 0 ? -1 : 1;
+    }
+    for (size_t index = 0; index < binding_count; ++index) {
+        if (!bindings[index].is_function) continue;
+        unsigned char restriction = KILN_DYN_BINDING_MUTABLE;
+        int local = 0;
+        for (size_t slot = 0; slot < scope->count; ++slot) {
+            if (scope->bindings[slot].name_len == bindings[index].name_len &&
+                memcmp(scope->bindings[slot].name, bindings[index].name,
+                       bindings[index].name_len) == 0) {
+                restriction = scope->bindings[slot].restriction;
+                local = 1;
+                break;
+            }
+        }
+        if (local && restriction != KILN_DYN_BINDING_MUTABLE &&
+            restriction != KILN_DYN_BINDING_ANNEX_B_VAR)
+            continue;
+        int duplicate = 0;
+        for (size_t prior = 0; prior < *var_count; ++prior) {
+            if ((*vars)[prior].name_len == bindings[index].name_len &&
+                memcmp((*vars)[prior].name, bindings[index].name,
+                       bindings[index].name_len) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (*var_count == *var_capacity) {
+            size_t capacity = *var_capacity == 0 ? 8 : *var_capacity * 2;
+            if (capacity <= *var_capacity || capacity > SIZE_MAX / sizeof **vars) {
+                free(bindings);
+                return -1;
+            }
+            kiln_dyn_var_declaration *next = realloc(*vars, capacity * sizeof *next);
+            if (next == NULL) {
+                free(bindings);
+                return -1;
+            }
+            *vars = next;
+            *var_capacity = capacity;
+        }
+        (*vars)[(*var_count)++] = (kiln_dyn_var_declaration){
+            .name = bindings[index].name, .name_len = bindings[index].name_len,
+        };
+    }
+    free(bindings);
+    return 1;
+}
+
 /* Function declarations are initialized before the first body statement. Pre-create their
  * mutable cells, then make each closure against that shared scope so forward and mutual
  * references resolve to the initialized declaration. This scanner intentionally recognizes
@@ -4582,6 +4713,14 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
         size_t token_start = scan.curr.start == NULL
                                  ? scan.pos
                                  : (size_t)(scan.curr.start - source);
+        if (kind == KILN_DYN_KW_SWITCH && callable_depth == 0 && !scope->strict) {
+            int alias_status = kiln_dyn_hoist_switch_aliases(&scan, scope, &vars,
+                                                              &var_count, &var_capacity);
+            if (alias_status < 0) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+        }
         int line_terminated = previous_end <= token_start && previous_end < source_len &&
                               memchr(source + previous_end, '\n', token_start - previous_end) !=
                                   NULL &&
