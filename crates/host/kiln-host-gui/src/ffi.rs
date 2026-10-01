@@ -436,6 +436,15 @@ pub unsafe extern "C" fn kiln_gui_appkit_widget_remove_child(parent_id: u64, chi
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_widget_destroy(id: u64) -> i32 {
+    ffi_guard!({
+        crate::appkit::widget_destroy(id);
+        0
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_pump_events(wait_ms: f64) -> i32 {
     ffi_guard!({
         if crate::appkit::pump_events(wait_ms) {

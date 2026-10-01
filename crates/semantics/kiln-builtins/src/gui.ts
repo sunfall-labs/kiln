@@ -573,6 +573,7 @@ export class AppKitDriver implements PlatformDriver {
         kiln_gui_appkit_widget_set_property: { arguments: ["u64", "pointer", "pointer", "f64"], return: "i32" },
         kiln_gui_appkit_widget_add_child: { arguments: ["u64", "u64"], return: "i32" },
         kiln_gui_appkit_widget_remove_child: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_widget_destroy: { arguments: ["u64"], return: "i32" },
         kiln_gui_appkit_pump_events: { arguments: ["f64"], return: "i32" },
         kiln_gui_appkit_poll_event: { arguments: ["pointer", "pointer", "u64", "pointer", "u64"], return: "i32" },
       });
@@ -842,6 +843,10 @@ export class AppKitDriver implements PlatformDriver {
       if (node.tag === "window" && this.appkit) {
         try {
           this.appkit.functions.kiln_gui_appkit_window_close(handle);
+        } catch (_) {}
+      } else if (this.appkit && this.appkit.functions.kiln_gui_appkit_widget_destroy) {
+        try {
+          this.appkit.functions.kiln_gui_appkit_widget_destroy(handle);
         } catch (_) {}
       }
       this.nodeByHandle.delete(handle);

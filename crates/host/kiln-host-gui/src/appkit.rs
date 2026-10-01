@@ -295,6 +295,21 @@ fn get_or_create_flipped_clip_class() -> *const Class {
     }
 }
 
+fn get_widget_id_for_view(view: *mut Object) -> Option<u64> {
+    if view.is_null() {
+        return None;
+    }
+    let wids = WIDGETS.lock().unwrap();
+    wids.as_ref().and_then(|m| {
+        for (&id, entry) in m.iter() {
+            if entry.view.0 == view {
+                return Some(id);
+            }
+        }
+        None
+    })
+}
+
 fn get_or_create_flipped_view_class() -> &'static Class {
     if let Some(cls) = Class::get("KilnFlippedView") {
         cls
@@ -304,11 +319,22 @@ fn get_or_create_flipped_view_class() -> &'static Class {
         extern "C" fn is_flipped(_this: &Object, _cmd: Sel) -> i8 {
             1
         }
+        extern "C" fn flipped_layout(this: &Object, _cmd: Sel) {
+            unsafe {
+                let superclass = class!(NSView);
+                let () = msg_send![super(this, superclass), layout];
+                let view_ptr = this as *const Object as *mut Object;
+                if let Some(id) = get_widget_id_for_view(view_ptr) {
+                    layout_taffy_children(id, view_ptr);
+                }
+            }
+        }
         unsafe {
             decl.add_method(
                 sel!(isFlipped),
                 is_flipped as extern "C" fn(&Object, Sel) -> i8,
             );
+            decl.add_method(sel!(layout), flipped_layout as extern "C" fn(&Object, Sel));
         }
         decl.register()
     }
@@ -644,6 +670,17 @@ pub fn window_set_content(win_id: u64, child_id: u64) {
                 let () = msg_send![effect, addSubview: view];
             } else {
                 let () = msg_send![win, setContentView: view];
+            }
+
+            let is_taffy = {
+                let wids = WIDGETS.lock().unwrap();
+                wids.as_ref()
+                    .and_then(|m| m.get(&child_id))
+                    .map(|e| e.tag == "box" || e.tag == "grid")
+                    .unwrap_or(false)
+            };
+            if is_taffy {
+                layout_taffy_children(child_id, view);
             }
         }
     }
@@ -1478,6 +1515,20 @@ pub fn widget_remove_child(parent_id: u64, child_id: u64) {
                 let () = msg_send![parent_view, setDocumentView: ptr::null_mut::<Object>()];
             }
             let () = msg_send![child_view, removeFromSuperview];
+        }
+    }
+}
+
+pub fn widget_destroy(id: u64) {
+    crate::layout::with_layout_engine(|engine| {
+        engine.remove_node(id);
+    });
+    let mut wids = WIDGETS.lock().unwrap();
+    if let Some(map) = wids.as_mut() {
+        if let Some(entry) = map.remove(&id) {
+            unsafe {
+                let () = msg_send![entry.view.0, removeFromSuperview];
+            }
         }
     }
 }
