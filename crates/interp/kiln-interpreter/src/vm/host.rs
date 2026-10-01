@@ -3566,23 +3566,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::ResponseEnd { id, reusable } => {
-                    let release = unsafe {
-                        ActiveHttpRuntime::release_client_connection(
-                            &mut *runtime,
-                            resource,
-                            reusable,
+                    let agent_retains_socket = unsafe {
+                        ActiveHttpRuntime::client_connection_can_retain(
+                            &*runtime, resource, reusable,
                         )
                     };
-                    let agent_reuses_socket =
-                        matches!(release, AgentRelease::Idle | AgentRelease::Dispatch { .. });
-                    self.dispatch_http_response_event(
+                    let end_result = self.dispatch_http_response_event(
                         owner,
                         resource,
                         id,
                         HttpResponseEvent::End,
                         instruction,
-                        agent_reuses_socket,
-                    )?;
+                        agent_retains_socket,
+                    );
                     if let Some(stream) = owner
                         .borrow_mut()
                         .streams
@@ -3591,10 +3587,26 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     {
                         stream.client_responses.remove(&id);
                         stream.client_requests.remove(&id);
-                        stream.request = None;
-                        stream.response = None;
+                        if stream.client_responses.is_empty() && stream.client_requests.is_empty() {
+                            stream.request = None;
+                            stream.response = None;
+                        }
                     }
                     self.remove_http_client_request(id);
+                    let transport_reusable = reusable
+                        && owner
+                            .borrow()
+                            .streams
+                            .iter()
+                            .find(|stream| stream.resource() == resource)
+                            .is_some_and(|stream| !stream.closed && !stream.driver.is_closing());
+                    let release = unsafe {
+                        ActiveHttpRuntime::release_client_connection(
+                            &mut *runtime,
+                            resource,
+                            transport_reusable,
+                        )
+                    };
                     if let AgentRelease::Dispatch { request } = release {
                         let queued = self.http_client_request(request).ok_or_else(|| {
                             ExecutionError::Host {
@@ -3616,6 +3628,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             )
                         };
                     }
+                    end_result?;
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
                     let request = owner
