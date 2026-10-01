@@ -267,9 +267,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     EvalAccess::Upvalue(index) => self.upvalue(index)?,
                 };
                 let readonly_kind = match binding.declaration {
-                    kiln_ir::EvalDeclaration::Const => Some(super::ReadonlyCellKind::Const),
+                    kiln_ir::EvalDeclaration::Const => Some(crate::vm::ReadonlyCellKind::Const),
                     kiln_ir::EvalDeclaration::FunctionName => {
-                        Some(super::ReadonlyCellKind::FunctionName)
+                        Some(crate::vm::ReadonlyCellKind::FunctionName)
                     }
                     kiln_ir::EvalDeclaration::Var | kiln_ir::EvalDeclaration::Let => None,
                 };

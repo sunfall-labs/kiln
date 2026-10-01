@@ -96,7 +96,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             module_suspension: None,
             module_completion: None,
             self_bindings: Vec::new(),
-            readonly_cells: Rc::new(RefCell::new(ReadonlyCellRegistry::default())),
+            readonly_cells: Rc::new(RefCell::new(crate::vm::ReadonlyCellRegistry::default())),
             self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
             symbols: Vec::new(),

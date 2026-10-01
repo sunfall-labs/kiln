@@ -2657,7 +2657,7 @@ pub(super) fn own_property_names_units(
         Value::Function(closure) => {
             let mut keys = from_store(&closure.properties.borrow());
             if has_prototype_property(closure) {
-                keys.retain(|key| !key.matches_ascii("prototype"));
+                keys.retain(|key| *key != "prototype");
                 let statics = keys.split_off(2.min(keys.len()));
                 keys.push(StringUnits::from("prototype"));
                 keys.extend(statics);
@@ -2743,7 +2743,7 @@ pub(super) fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -
             // After `length` and `name`, which the closure stores, and before whatever the
             // program hung on the function itself -- the order the specification lists them in.
             if has_prototype_property(closure) {
-                keys.retain(|key| !key.matches_ascii("prototype"));
+                keys.retain(|key| *key != "prototype");
                 let statics = keys.split_off(2.min(keys.len()));
                 keys.push(StringUnits::from("prototype"));
                 keys.extend(statics);
