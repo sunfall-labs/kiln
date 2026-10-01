@@ -7,7 +7,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let key = Rc::as_ptr(cell) as usize;
         let readonly = self.readonly_cells.borrow_mut().kind(cell);
         if let Some(kind) = readonly {
             if self.strict || kind == ReadonlyCellKind::Const {
