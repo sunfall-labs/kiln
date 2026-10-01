@@ -2680,7 +2680,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                          : kiln_c99_node_emit(server->host, server->object, "connection",
                                               socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
-            if (server->closing || socket->closing) return KILN_C99_OK;
+            if (socket->closing || (server->closing && server->protocol_http))
+                return KILN_C99_OK;
             status = server->protocol_http
                          ? kiln_c99_get(server->host, server->object, "httpAllowHalfOpen", 17,
                                         &allow_half_close, 0, exception)
@@ -2692,7 +2693,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                     socket->resource,
                     (kiln_c99_truthy(allow_half_close) ? 1 : 0) | (server->fetch_mode ? 2 : 0),
                     kiln_c99_node_http_event, kiln_c99_node_drop_http_connection, socket);
-            if (status != KILN_C99_OK || server->closing) return status;
+            if (status != KILN_C99_OK || (server->closing && server->protocol_http)) return status;
             if (!server->protocol_http) {
                 kiln_node_completion *read =
                     (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
@@ -2705,6 +2706,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                                              &socket->read_request);
                 if (status != KILN_C99_OK) return status;
             }
+            if (server->closing) return KILN_C99_OK;
             accept = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
                                                                 sizeof *accept);
             if (accept == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -5099,7 +5101,9 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (server->accept_request != 0) {
                 kiln_c99_node_cancel_request(&server->accept_request);
             }
-            for (socket = server->sockets; socket != NULL; socket = socket->next) {
+            for (socket = server->protocol_http ? server->sockets : NULL;
+                 socket != NULL; socket = socket->next) {
+                // Raw TCP connections drain naturally after the listener stops accepting.
                 // HTTP responses may still have a write in flight. The socket helper keeps
                 // that final write ordered before closing; for an idle keep-alive connection it
                 // cancels the read and closes immediately. This is the native equivalent of the

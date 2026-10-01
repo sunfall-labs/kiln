@@ -1734,26 +1734,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // arm closes each accepted stream.
                 let protocol = state.borrow().protocol;
                 match protocol {
-                    ServerProtocol::Net => {
-                        let streams = {
-                            let mut state = state.borrow_mut();
-                            state
-                                .streams
-                                .iter_mut()
-                                .map(|stream| (stream.resource(), stream.driver.close_actions()))
-                                .collect::<Vec<_>>()
-                        };
-                        for (resource, actions) in streams {
-                            for action in actions {
-                                self.start_http_stream_action(
-                                    &state,
-                                    resource,
-                                    action,
-                                    instruction,
-                                )?;
-                            }
-                        }
-                    }
+                    // Stop accepting, then let existing raw connections finish naturally.
+                    ServerProtocol::Net => {}
                     ServerProtocol::Http => {
                         // Mark every current connection first. A request handler can call
                         // `server.close()` before it calls `response.end()`; keep that active
@@ -1993,11 +1975,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // is draining (realms issue 23). The last connection's `Closed` emits it.
                 {
                     let mut server = state.borrow_mut();
-                    if server.protocol == ServerProtocol::Http
-                        && server.streams.iter().any(|stream| {
-                            !stream.closed && stream.runtime_http && !stream.upgrading
-                        })
-                    {
+                    if server.streams.iter().any(|stream| {
+                        !stream.closed
+                            && (server.protocol == ServerProtocol::Net
+                                || (stream.runtime_http && !stream.upgrading))
+                    }) {
                         server.close_deferred = true;
                         return Ok(());
                     }
@@ -2388,6 +2370,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         &[Value::String("close".into())],
                         instruction,
                     )?;
+                }
+                let emit_close = {
+                    let mut state = server.borrow_mut();
+                    let ready = state.protocol == ServerProtocol::Net
+                        && state.close_deferred
+                        && state.streams.iter().all(|stream| stream.closed);
+                    if ready {
+                        state.close_deferred = false;
+                    }
+                    ready
+                };
+                if emit_close {
+                    self.emit_http_server(server, "close", vec![], instruction)?;
                 }
                 Ok(())
             }
@@ -4878,7 +4873,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             upgrading: false,
                             socket: Some(Rc::clone(&socket_state)),
                             socket_object: Some(socket.clone()),
-                            request: Some(request.clone()),
+                            request: (protocol != ServerProtocol::Net).then(|| request.clone()),
                             response: None,
                             client_requests: std::collections::BTreeMap::new(),
                             client_responses: std::collections::BTreeMap::new(),
