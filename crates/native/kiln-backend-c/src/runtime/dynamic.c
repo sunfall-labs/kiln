@@ -124,6 +124,7 @@ typedef struct {
 static int kiln_dyn_scope_predeclare_lexicals(kiln_dyn_scope *scope,
                                                const char *source, size_t source_len,
                                                size_t target_scope_id);
+static int kiln_dyn_source_may_have_function_declaration(const char *source, size_t source_len);
 
 static int kiln_dyn_has_line_terminator(const char *source, size_t start, size_t end) {
     for (size_t index = start; index < end; ++index) {
@@ -5785,38 +5786,40 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             kiln_dyn_scope_destroy(&block_scope);
             return status;
         }
-        kiln_dyn_switch_clause block_clause = {
-            .test = NULL, .test_len = 0, .body = body, .body_len = body_len,
-            .is_default = 0,
-        };
-        kiln_dyn_switch_binding *block_bindings = NULL;
-        size_t block_binding_count = 0;
-        int binding_status = kiln_dyn_switch_bindings(&block_clause, 1,
-                                                       &block_bindings,
-                                                       &block_binding_count);
-        if (binding_status <= 0) {
+        if (kiln_dyn_source_may_have_function_declaration(body, body_len)) {
+            kiln_dyn_switch_clause block_clause = {
+                .test = NULL, .test_len = 0, .body = body, .body_len = body_len,
+                .is_default = 0,
+            };
+            kiln_dyn_switch_binding *block_bindings = NULL;
+            size_t block_binding_count = 0;
+            int binding_status = kiln_dyn_switch_bindings(&block_clause, 1,
+                                                           &block_bindings,
+                                                           &block_binding_count);
+            if (binding_status <= 0) {
+                free(block_bindings);
+                kiln_dyn_scope_destroy(&block_scope);
+                return binding_status < 0
+                           ? KILN_C99_OUT_OF_MEMORY
+                           : kiln_dyn_throw_parse_error(
+                                 lex, thrown, "Invalid or duplicate block lexical declaration");
+            }
+            size_t function_count = 0;
+            for (size_t index = 0; index < block_binding_count; ++index) {
+                if (!block_bindings[index].is_function) continue;
+                if (function_count != index)
+                    block_bindings[function_count] = block_bindings[index];
+                function_count++;
+            }
+            if (function_count != 0) {
+                status = kiln_dyn_switch_predeclare(&block_scope, block_bindings, function_count);
+                if (status == KILN_C99_OK)
+                    status = kiln_dyn_switch_initialize_functions(
+                        host, &block_scope, &block_clause, 1, block_bindings, function_count,
+                        receiver, args, argc, depth, thrown);
+            }
             free(block_bindings);
-            kiln_dyn_scope_destroy(&block_scope);
-            return binding_status < 0
-                       ? KILN_C99_OUT_OF_MEMORY
-                       : kiln_dyn_throw_parse_error(
-                             lex, thrown, "Invalid or duplicate block lexical declaration");
         }
-        size_t function_count = 0;
-        for (size_t index = 0; index < block_binding_count; ++index) {
-            if (!block_bindings[index].is_function) continue;
-            if (function_count != index)
-                block_bindings[function_count] = block_bindings[index];
-            function_count++;
-        }
-        if (function_count != 0) {
-            status = kiln_dyn_switch_predeclare(&block_scope, block_bindings, function_count);
-            if (status == KILN_C99_OK)
-                status = kiln_dyn_switch_initialize_functions(
-                    host, &block_scope, &block_clause, 1, block_bindings, function_count,
-                    receiver, args, argc, depth, thrown);
-        }
-        free(block_bindings);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&block_scope);
             return status;
@@ -6059,6 +6062,18 @@ static int kiln_dyn_scope_predeclare_lexicals(kiln_dyn_scope *scope,
     }
     free(lexicals);
     return KILN_C99_OK;
+}
+
+/* Most dynamic blocks contain no function declarations. Avoid building the full declaration
+ * inventory for those blocks; this token-spelling precheck is intentionally permissive (comments
+ * and strings may cause a false positive) but cannot skip a real function declaration. */
+static int kiln_dyn_source_may_have_function_declaration(const char *source, size_t source_len) {
+    static const char keyword[] = "function";
+    if (source_len < sizeof keyword - 1) return 0;
+    for (size_t index = 0; index <= source_len - (sizeof keyword - 1); ++index) {
+        if (memcmp(source + index, keyword, sizeof keyword - 1) == 0) return 1;
+    }
+    return 0;
 }
 
 /* Add eligible sloppy CaseBlock function names to the function environment at declaration
