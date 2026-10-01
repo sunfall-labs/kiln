@@ -3302,7 +3302,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     request.ended = true;
                     request.socket.clone()
                 };
-                if let Some(socket) = socket {
+                if let Some(socket) = socket
+                    && socket.borrow().resource.is_some()
+                {
                     self.flush_http_client_request(&state, &socket, instruction)?;
                 }
                 Ok(receiver.clone())
