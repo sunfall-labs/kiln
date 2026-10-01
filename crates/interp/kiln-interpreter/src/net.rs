@@ -105,8 +105,40 @@ pub(crate) fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value 
         Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
     );
     data.set(
+        "addListener",
+        Value::Native(Native::NodeEventOn, RealmId::PRIMARY),
+    );
+    data.set(
         "emit",
         Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+    );
+    data.set(
+        "listeners",
+        Value::Native(Native::NodeEventListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "listenerCount",
+        Value::Native(Native::NodeEventListenerCount, RealmId::PRIMARY),
+    );
+    data.set(
+        "eventNames",
+        Value::Native(Native::NodeEventNames, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeListener",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "off",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeAllListeners",
+        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "setMaxListeners",
+        Value::Native(Native::NodeEventSetMaxListeners, RealmId::PRIMARY),
     );
     data.set(
         "removeListener",
