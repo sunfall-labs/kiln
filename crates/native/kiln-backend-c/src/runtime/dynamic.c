@@ -1329,8 +1329,18 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             }
             const char *key_name = NULL;
             size_t key_len = 0;
+            char *owned_key = NULL;
             if (kiln_dyn_is_ident_name(lex->curr.kind) || lex->curr.kind == KILN_DYN_STR) {
-                key_name = lex->curr.kind == KILN_DYN_STR ? lex->curr.str_val : lex->curr.start;
+                if (lex->curr.kind == KILN_DYN_STR) {
+                    /* The lexer frees decoded string storage on its next advance. Object
+                     * values and method bodies are evaluated before the key is installed, so
+                     * transfer ownership of the decoded key until this property is complete. */
+                    owned_key = lex->curr.str_val;
+                    lex->curr.str_val = NULL;
+                    key_name = owned_key;
+                } else {
+                    key_name = lex->curr.start;
+                }
                 key_len = lex->curr.kind == KILN_DYN_STR ? lex->curr.str_len : lex->curr.len;
                 kiln_dyn_lexer_next(lex);
             } else {
@@ -1353,37 +1363,55 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     }
                     kiln_dyn_lexer_next(lex);
                 }
-                if (nesting != 0)
+                if (nesting != 0) {
+                    free(owned_key);
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                       "Expected ')' after method parameters");
+                }
                 kiln_dyn_lexer_next(lex);
-                if (lex->curr.kind != KILN_DYN_LBRACE)
+                if (lex->curr.kind != KILN_DYN_LBRACE) {
+                    free(owned_key);
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                       "Expected '{' for method body");
+                }
                 const char *body = NULL;
                 size_t body_len = 0;
-                if (!kiln_dyn_capture_block(lex, &body, &body_len))
+                if (!kiln_dyn_capture_block(lex, &body, &body_len)) {
+                    free(owned_key);
                     return kiln_dyn_throw_parse_error(lex, thrown,
                                                       "Unterminated method body");
+                }
                 status = kiln_dyn_make_closure(host, scope, key_name, key_len, params,
                                                params_len, body, body_len, receiver, 0, 0, 1,
                                                &val, thrown);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) {
+                    free(owned_key);
+                    return status;
+                }
                 kiln_c99_gc_keep_alive(&val);
             } else if (lex->curr.kind == KILN_DYN_COLON) {
                 kiln_dyn_lexer_next(lex);
                 status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &val, thrown);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) {
+                    free(owned_key);
+                    return status;
+                }
             } else {
                 int scope_found = 0;
                 status = kiln_dyn_scope_get(scope, key_name, key_len, &val, &scope_found,
                                             thrown);
-                if (status != KILN_C99_OK) return status;
+                if (status != KILN_C99_OK) {
+                    free(owned_key);
+                    return status;
+                }
                 if (!scope_found) {
                     int with_found = 0;
                     status = kiln_dyn_scope_get_with(host, scope, key_name, key_len, depth, &val,
                                                      &with_found, thrown);
-                    if (status != KILN_C99_OK) return status;
+                    if (status != KILN_C99_OK) {
+                        free(owned_key);
+                        return status;
+                    }
                     if (!with_found) {
                         kiln_value globals = kiln_c99_undefined();
                         int st = kiln_c99_global_object(&globals);
@@ -1395,6 +1423,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                 }
             }
             status = kiln_c99_put(host, *out, key_name, key_len, val, 0, thrown);
+            free(owned_key);
             if (status != KILN_C99_OK) return status;
             if (lex->curr.kind == KILN_DYN_COMMA) {
                 kiln_dyn_lexer_next(lex);
@@ -2444,7 +2473,9 @@ static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t
 
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
                                        size_t *body_len) {
-    size_t start = lex->pos;
+    size_t start = lex->curr.start == NULL
+                       ? lex->pos
+                       : (size_t)(lex->curr.start - lex->src);
     size_t pos = start;
     int parens = 0, brackets = 0, braces = 0;
     while (pos < lex->len) {
