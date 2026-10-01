@@ -177,6 +177,18 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                // The resolved property points at the final CommonJS provider, but an ESM
+                // barrel still owns the import slot that supplies this re-export. Preserve that
+                // edge just as for ESM-backed exports before demanding the provider itself.
+                mark_reexport_import_live(
+                    graph,
+                    namespace,
+                    name,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                );
                 let newly_live = live.insert(module.clone());
                 let newly_demanded = live_export_slots
                     .entry(module.clone())
@@ -458,6 +470,15 @@ pub fn select_executable_modules<'a>(
                     }
                 }
                 Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                    mark_reexport_import_live(
+                        graph,
+                        &dependency.target,
+                        &import.imported,
+                        &mut live,
+                        &mut live_imports,
+                        &mut live_export_slots,
+                        &mut queue,
+                    );
                     let newly_demanded = live_export_slots
                         .entry(module.clone())
                         .or_default()
@@ -552,6 +573,15 @@ pub fn select_executable_modules<'a>(
                         }
                     }
                     Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                        mark_reexport_import_live(
+                            graph,
+                            &path,
+                            &name,
+                            &mut live,
+                            &mut live_imports,
+                            &mut live_export_slots,
+                            &mut queue,
+                        );
                         let newly_demanded = live_export_slots
                             .entry(module.clone())
                             .or_default()

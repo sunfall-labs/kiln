@@ -4615,6 +4615,95 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
 }
 
 #[test]
+fn executable_graph_commonjs_named_reexport_keeps_chained_backing_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-commonjs-named-reexport-demand");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write side-effect-free root package metadata");
+    fs::create_dir(project.path.join("provider")).expect("create CommonJS provider directory");
+    fs::write(
+        project.path.join("provider/package.json"),
+        r#"{"type":"commonjs"}"#,
+    )
+    .expect("write CommonJS package metadata");
+    fs::write(
+        project.path.join("provider/index.js"),
+        "module.exports = { answer: 42 };",
+    )
+    .expect("write CommonJS provider");
+    let first_barrel = project.path.join("first.mjs");
+    fs::write(
+        &first_barrel,
+        "export { answer as first } from './provider/index.js';",
+    )
+    .expect("write first ESM barrel");
+    let second_barrel = project.path.join("second.mjs");
+    fs::write(
+        &second_barrel,
+        "export { first as selected } from './first.mjs';",
+    )
+    .expect("write second ESM barrel");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { selected } from './second.mjs'; console.log(selected);",
+    )
+    .expect("write named CommonJS re-export consumer");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+
+    for barrel in [first_barrel, second_barrel] {
+        let barrel = fs::canonicalize(barrel).expect("canonical barrel");
+        let barrel_node = graph.module(&barrel).expect("barrel node");
+        let backing_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
+            .expect("re-export has a backing import");
+        assert!(
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
+            "CommonJS named re-export backing import must be linked"
+        );
+        assert!(
+            selected.modules.iter().any(|module| module.path == barrel),
+            "CommonJS named re-export owner must stay in the selected graph"
+        );
+    }
+    let provider = fs::canonicalize(project.path.join("provider/index.js"))
+        .expect("canonical CommonJS provider");
+    assert!(
+        selected
+            .modules
+            .iter()
+            .any(|module| module.path == provider)
+    );
+    assert!(
+        selected
+            .live_export_slots
+            .get(&provider)
+            .is_some_and(|slots| slots.contains(&0))
+    );
+}
+
+#[test]
 fn release_graph_selects_the_production_arm_of_an_exact_commonjs_dispatcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
