@@ -19,4 +19,7 @@ console.log(JSON.stringify({
   afterClear: [flags.active, flags._bits],
   shifts: [1 << 31, -1 >> 1, -1 >>> 1],
   precedence: [1 + 2 << 2, 1 | 2 & 4, 1 === 1 & 0],
+  regexAfterCompound: new Function("var x = 1; x &= /a/.test('a'); return x;")(),
+  regexAfterShiftCompound: new Function("var x = 1; x <<= /a/.test('a') ? 2 : 0; return x;")(),
+  regexAfterBitNot: new Function("return ~/a/.test('a');")(),
 }));

@@ -651,6 +651,18 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                             lex->prev_kind == KILN_DYN_BIT_AND ||
                             lex->prev_kind == KILN_DYN_BIT_OR ||
                             lex->prev_kind == KILN_DYN_BIT_XOR ||
+                            lex->prev_kind == KILN_DYN_LSHIFT_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_RSHIFT_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_URSHIFT_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_BIT_AND_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_BIT_OR_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_BIT_XOR_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_PLUS_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_MINUS_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_STAR_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_SLASH_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_PERCENT_ASSIGN ||
+                            lex->prev_kind == KILN_DYN_BIT_NOT ||
                             lex->prev_kind == KILN_DYN_AND ||
                             lex->prev_kind == KILN_DYN_OR ||
                             lex->prev_kind == KILN_DYN_NULLISH ||
