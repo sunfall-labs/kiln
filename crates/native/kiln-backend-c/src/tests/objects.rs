@@ -1532,7 +1532,8 @@ int main(void) {
         read.tag != KILN_VALUE_METHOD || read.bits != KILN_C99_METHOD_NODE_READABLE) return 4;
     if (kiln_c99_get(NULL, buffer, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_OBJECT || read.bits != constants.bits) return 5;
-    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) == KILN_C99_OK) return 6;
+    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 6;
     return 0;
 }
 "#;
@@ -1565,9 +1566,11 @@ int main(void) {
     if (kiln_c99_get(NULL, first, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "first", 5))
         return 3;
-    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 4;
-    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 5;
     return 0;
 }
