@@ -1510,9 +1510,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             /* Once the TypeScript-owned iterator prototype exists, its ordinary [[Get]] is
              * authoritative. Do not probe membership first: a proxy can observe that extra
              * operation, and accessors must receive the generator as `this`. */
-            return kiln_c99_get_with_receiver(host, function_prototype,
-                                              kiln_c99_key_value(key, ikey), target, out,
-                                              depth, thrown);
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, function_prototype, property_key,
+                                              target, out, depth, thrown);
         }
         if (shared_prototype.tag == KILN_VALUE_OBJECT &&
             function_prototype.tag == KILN_VALUE_NULL) {
