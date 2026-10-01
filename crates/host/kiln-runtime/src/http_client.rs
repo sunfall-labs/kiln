@@ -584,7 +584,15 @@ async fn exchange(
         let dispatched = dispatcher.dispatch(&event);
         drop(scratch);
         if !dispatched {
-            return Err(Failure::Closed);
+            if let Some(transfer) = upgraded.borrow_mut().remove(&shared.dispatcher.resource) {
+                transfer.write_completion.complete(Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "HTTP upgrade dispatch failed before transport adoption",
+                )));
+                return Err(Failure::Closed);
+            }
+            shared.request_done(id);
+            return Ok(ExchangeOutcome::Transferred);
         }
         shared.request_done(id);
         return Ok(ExchangeOutcome::Transferred);

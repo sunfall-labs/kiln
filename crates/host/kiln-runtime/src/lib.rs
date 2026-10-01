@@ -4149,15 +4149,7 @@ impl RealmHostProvider for TokioHost {
         self.pending.clear();
         self.ready.clear();
         #[cfg(feature = "http")]
-        for resource in self.resources.values() {
-            if let HostResource::TcpUpgraded {
-                prefix_abort: Some(abort),
-                ..
-            } = resource
-            {
-                abort.abort();
-            }
-        }
+        self.abort_upgrade_prefixes();
         self.resources.clear();
         self.listen_tickets.clear();
         #[cfg(target_os = "linux")]

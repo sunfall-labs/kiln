@@ -1753,15 +1753,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             })
                     };
                     if let Some((socket, actions)) = upgraded_socket {
+                        for action in actions {
+                            self.start_http_stream_action(server, resource, action, instruction)?;
+                        }
                         self.dispatch_node_event(
                             Native::NodeEventEmit,
                             &socket,
                             &[Value::String("error".into()), error],
                             instruction,
                         )?;
-                        for action in actions {
-                            self.start_http_stream_action(server, resource, action, instruction)?;
-                        }
                     } else {
                         self.emit_http_server(server, "clientError", vec![error], instruction)?;
                     }

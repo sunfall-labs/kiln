@@ -504,13 +504,13 @@ impl UpgradeWrite {
         }
         let mut raw = self.raw_head.borrow_mut();
         raw.extend_from_slice(data);
-        if raw.len() > 64 * 1024 {
-            return None;
-        }
         let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
-            return Some(None);
+            return (raw.len() <= 64 * 1024).then_some(None);
         };
         let end = end + 4;
+        if end > 64 * 1024 {
+            return None;
+        }
         let (status, headers) = parse_upgrade_response_head(&raw[..end])?;
         let trailing = raw[end..].to_vec();
         raw.clear();
@@ -1359,7 +1359,18 @@ async fn serve(
                                 data: &head,
                                 ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
                             });
-                            if upgrade_dispatched {
+                            if !upgrade_dispatched {
+                                if let Some(transfer) =
+                                    upgraded.borrow_mut().remove(&shared.resource)
+                                {
+                                    transfer.write_completion.complete(Err(std::io::Error::new(
+                                        std::io::ErrorKind::NotConnected,
+                                        "HTTP upgrade dispatch failed before transport adoption",
+                                    )));
+                                } else {
+                                    transferred = true;
+                                }
+                            } else {
                                 match write_completion.wait().await {
                                     Ok(())
                                         if writes
@@ -1380,8 +1391,8 @@ async fn serve(
                                         });
                                     }
                                 }
+                                transferred = true;
                             }
-                            transferred = true;
                         }
                         Err(_) => {
                             let message = b"HTTP upgrade returned an unexpected transport";
