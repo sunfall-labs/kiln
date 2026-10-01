@@ -4679,14 +4679,16 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                     break_loop = 1;
                     break;
                 }
-                if (flow == 3 && lex->break_label != NULL) {
-                    if (kiln_dyn_label_matches(my_labels, lex->break_label,
-                                               lex->break_label_len)) {
-                        lex->break_label = NULL;
-                        lex->break_label_len = 0;
-                    } else {
-                        *returned = 3;
-                        break_loop = 1;
+                if (flow == 3) {
+                    if (lex->break_label != NULL) {
+                        if (kiln_dyn_label_matches(my_labels, lex->break_label,
+                                                   lex->break_label_len)) {
+                            lex->break_label = NULL;
+                            lex->break_label_len = 0;
+                        } else {
+                            *returned = 3;
+                            break_loop = 1;
+                        }
                     }
                     break;
                 }
