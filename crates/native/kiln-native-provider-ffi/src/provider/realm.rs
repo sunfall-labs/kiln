@@ -721,7 +721,7 @@ struct CompletionWork {
     continuation: Option<AsyncContinuation>,
     payload: CompletionPayload,
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
-    queued: Rc<RefCell<HashSet<RequestId>>>,
+    queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
 }
 
 unsafe extern "C" fn run_completion(
@@ -803,7 +803,7 @@ struct NativeRealm {
     #[cfg(feature = "realm-http")]
     http_callback_failure: Cell<i32>,
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
-    queued: Rc<RefCell<HashSet<RequestId>>>,
+    queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
     symbols: RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
     symbol_keys: RefCell<HashMap<u64, StringUnits>>,
     callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
@@ -1317,7 +1317,7 @@ impl NativeRealm {
             #[cfg(feature = "realm-http")]
             http_callback_failure: Cell::new(0),
             cancelled: Rc::new(RefCell::new(HashSet::new())),
-            queued: Rc::new(RefCell::new(HashSet::new())),
+            queued: Rc::new(RefCell::new(HashMap::new())),
             symbols: RefCell::new(hashbrown::HashMap::with_hasher(
                 std::collections::hash_map::RandomState::new(),
             )),
@@ -2264,7 +2264,18 @@ fn route_completion(realm: &NativeRealm, completion: kiln_host_abi::Completion) 
         cancelled: Rc::clone(&realm.cancelled),
         queued: Rc::clone(&realm.queued),
     });
-    realm.queued.borrow_mut().insert(completion.request);
+    // Resource creation remains owned by the completion until its language callback starts.
+    // A same-turn callback can cancel another completion already queued by the provider.
+    let owned_resource = (completion_work.payload.status == 0
+        && matches!(
+            completion_work.payload.value_kind,
+            VALUE_RESOURCE | VALUE_ACCEPTED_STREAM
+        ))
+    .then(|| ResourceId::new(completion_work.payload.resource));
+    realm
+        .queued
+        .borrow_mut()
+        .insert(completion.request, owned_resource);
     let pointer = Box::into_raw(completion_work).cast::<c_void>();
     let Some(work) = NativeMicrotask::with_roots(
         pointer,
@@ -4162,7 +4173,22 @@ pub unsafe extern "C" fn kiln_realm_cancel_request(handle: u64, request: u64) ->
             return RUNTIME_ERROR;
         };
         let removed = realm.continuations.borrow_mut().remove(&request).is_some();
-        let queued = realm.queued.borrow().contains(&request);
+        let (queued, owned_resource) = {
+            let mut queued = realm.queued.borrow_mut();
+            match queued.get_mut(&request) {
+                Some(resource) => (true, resource.take()),
+                None => (false, None),
+            }
+        };
+        if let Some(resource) = owned_resource {
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
+            // The host has already handed this completion to our queue, so cancelling the
+            // original request cannot close its undelivered resource. Retire that ownership
+            // here; ordinary ResourceState queries never own the resource they describe.
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+        }
         if canceled || removed || queued {
             realm.cancelled.borrow_mut().insert(request);
             0
