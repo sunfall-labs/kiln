@@ -706,6 +706,14 @@ impl UpgradeWrite {
         (header, trailing)
     }
 
+    fn fence_order(&self) -> Vec<u64> {
+        self.fences
+            .borrow()
+            .iter()
+            .map(|boundary| boundary.fence)
+            .collect()
+    }
+
     fn take_trailing(&self) -> Vec<u8> {
         std::mem::take(&mut *self.trailing.borrow_mut())
     }
@@ -1655,12 +1663,15 @@ async fn serve(
         }
         result.map_err(|error| error.to_string())
     };
-    if !transferred
-        && let Some(writes) = shared
+    let failed_writes = if !transferred {
+        shared
             .upgrade_writes
             .borrow_mut()
             .remove(&shared.upgrade_request_id.get())
-    {
+    } else {
+        None
+    };
+    if let Some(writes) = failed_writes {
         let message = result
             .as_ref()
             .err()
@@ -2099,6 +2110,52 @@ pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn upgrade_write_fences_preserve_order_and_fail_pending_waiters_once() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let completion = UpgradeWriteCompletion::pending();
+            completion.register_fence(1);
+            completion.register_fence(2);
+
+            // A later physical write cannot satisfy an earlier append's callback.
+            completion.complete_fence(2, Ok(()));
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(1),
+                    completion.wait_fence(1),
+                )
+                .await
+                .is_err()
+            );
+
+            completion.complete_fence(1, Ok(()));
+            assert!(completion.wait_fence(1).await.is_ok());
+            assert!(completion.wait_fence(2).await.is_ok());
+
+            let cancelled = UpgradeWriteCompletion::pending();
+            cancelled.register_fence(3);
+            cancelled.register_fence(4);
+            cancelled.complete_fence(3, Ok(()));
+            cancelled.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "prefix writer cancelled",
+            )));
+
+            // Cancellation leaves already-flushed callbacks successful and releases every
+            // outstanding waiter with the same failure.
+            assert!(cancelled.wait_fence(3).await.is_ok());
+            assert_eq!(
+                cancelled.wait_fence(4).await.unwrap_err().kind(),
+                std::io::ErrorKind::Interrupted,
+            );
+            assert_eq!(
+                cancelled.wait().await.unwrap_err().kind(),
+                std::io::ErrorKind::Interrupted,
+            );
+        });
+    }
 
     struct Recording {
         events: RefCell<Vec<(HttpEventKind, u64, Vec<u8>)>>,
