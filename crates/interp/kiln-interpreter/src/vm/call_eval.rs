@@ -274,7 +274,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     kiln_ir::EvalDeclaration::Var | kiln_ir::EvalDeclaration::Let => None,
                 };
                 if let Some(kind) = readonly_kind {
-                    self.readonly_cells.borrow_mut().mark(&cell, kind);
+                    let initializer_program =
+                        (kind == crate::vm::ReadonlyCellKind::Const).then_some(&self.program);
+                    self.readonly_cells
+                        .borrow_mut()
+                        .mark(&cell, kind, initializer_program);
                 }
                 locals[slot] = Value::Cell(cell);
             }

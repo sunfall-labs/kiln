@@ -39,34 +39,87 @@ pub(crate) enum ReadonlyCellKind {
 
 #[derive(Default)]
 pub(crate) struct ReadonlyCellRegistry {
-    entries: std::collections::HashMap<usize, (Weak<RefCell<Value>>, ReadonlyCellKind)>,
+    entries: std::collections::HashMap<usize, ReadonlyCellEntry>,
     sweep: std::collections::VecDeque<usize>,
     queued: std::collections::HashSet<usize>,
+}
+
+struct ReadonlyCellEntry {
+    cell: Weak<RefCell<Value>>,
+    kind: ReadonlyCellKind,
+    /// A later lexical declaration in the caller may still need its one initialization store.
+    /// Only that exact program may consume the exception; eval writes and escaped closures may
+    /// not initialize the binding early.
+    initializer_program: Option<Weak<Program>>,
 }
 
 pub(crate) type SharedReadonlyCellRegistry = Rc<RefCell<ReadonlyCellRegistry>>;
 
 impl ReadonlyCellRegistry {
-    pub(crate) fn mark(&mut self, cell: &Cell, kind: ReadonlyCellKind) {
+    pub(crate) fn mark(
+        &mut self,
+        cell: &Cell,
+        kind: ReadonlyCellKind,
+        initializer_program: Option<&Rc<Program>>,
+    ) {
         let key = Rc::as_ptr(cell) as usize;
-        if let Some((weak, existing_kind)) = self.entries.get_mut(&key) {
-            if weak.upgrade().is_some_and(|known| Rc::ptr_eq(&known, cell)) {
-                *existing_kind = kind;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry
+                .cell
+                .upgrade()
+                .is_some_and(|known| Rc::ptr_eq(&known, cell))
+            {
+                entry.kind = kind;
+                if entry.initializer_program.is_none()
+                    && matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+                {
+                    entry.initializer_program = initializer_program.map(Rc::downgrade);
+                }
                 return;
             }
         }
-        self.entries.insert(key, (Rc::downgrade(cell), kind));
+        let initializer_program =
+            matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+                .then(|| initializer_program.map(Rc::downgrade))
+                .flatten();
+        self.entries.insert(
+            key,
+            ReadonlyCellEntry {
+                cell: Rc::downgrade(cell),
+                kind,
+                initializer_program,
+            },
+        );
         if self.queued.insert(key) {
             self.sweep.push_back(key);
         }
         self.sweep_dead(16);
     }
 
-    pub(crate) fn kind(&mut self, cell: &Cell) -> Option<ReadonlyCellKind> {
+    pub(crate) fn kind_for_write(
+        &mut self,
+        cell: &Cell,
+        program: &Rc<Program>,
+        initializing_store: bool,
+    ) -> Option<ReadonlyCellKind> {
         let key = Rc::as_ptr(cell) as usize;
-        match self.entries.get(&key) {
-            Some((weak, kind)) => match weak.upgrade() {
-                Some(known) if Rc::ptr_eq(&known, cell) => Some(*kind),
+        match self.entries.get_mut(&key) {
+            Some(entry) => match entry.cell.upgrade() {
+                Some(known) if Rc::ptr_eq(&known, cell) => {
+                    let is_uninitialized =
+                        matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _));
+                    let is_owner_initializer = entry
+                        .initializer_program
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .is_some_and(|owner| Rc::ptr_eq(&owner, program));
+                    if initializing_store && is_uninitialized && is_owner_initializer {
+                        entry.initializer_program = None;
+                        None
+                    } else {
+                        Some(entry.kind)
+                    }
+                }
                 Some(_) | None => {
                     self.entries.remove(&key);
                     None
@@ -82,10 +135,10 @@ impl ReadonlyCellRegistry {
                 break;
             };
             self.queued.remove(&key);
-            let Some((weak, _)) = self.entries.get(&key) else {
+            let Some(entry) = self.entries.get(&key) else {
                 continue;
             };
-            if weak.strong_count() == 0 {
+            if entry.cell.strong_count() == 0 {
                 self.entries.remove(&key);
             } else if self.queued.insert(key) {
                 self.sweep.push_back(key);

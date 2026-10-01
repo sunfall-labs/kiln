@@ -6,10 +6,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         cell: &Cell,
         value: Value,
         instruction: usize,
+        initializing_store: bool,
     ) -> Result<bool, ExecutionError> {
-        let readonly = self.readonly_cells.borrow_mut().kind(cell);
+        let program = Rc::clone(&self.program);
+        let readonly =
+            self.readonly_cells
+                .borrow_mut()
+                .kind_for_write(cell, &program, initializing_store);
         if let Some(kind) = readonly {
-            if self.strict || kind == ReadonlyCellKind::Const {
+            if kind == ReadonlyCellKind::Const
+                && matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+            {
+                self.throw_error(
+                    ErrorKind::Reference,
+                    "cannot access a binding before its declaration".to_owned(),
+                    instruction,
+                )?;
+            } else if self.strict || kind == ReadonlyCellKind::Const {
                 self.throw_error(
                     ErrorKind::Type,
                     "Assignment to constant variable.".to_owned(),
@@ -1948,13 +1961,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::StoreCell(slot) => {
                     let value = self.pop(current)?;
                     let cell = self.cell(*slot as usize)?;
-                    self.write_cell(&cell, value, current)?;
+                    self.write_cell(&cell, value, current, true)?;
                 }
                 Instruction::MarkCellFunctionName(slot) => {
                     let cell = self.cell(*slot as usize)?;
-                    self.readonly_cells
-                        .borrow_mut()
-                        .mark(&cell, ReadonlyCellKind::FunctionName);
+                    self.readonly_cells.borrow_mut().mark(
+                        &cell,
+                        ReadonlyCellKind::FunctionName,
+                        None,
+                    );
                 }
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();
@@ -1971,7 +1986,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::StoreUpvalue(index) => {
                     let value = self.pop(current)?;
                     let cell = self.upvalue(*index)?;
-                    self.write_cell(&cell, value, current)?;
+                    self.write_cell(&cell, value, current, false)?;
                 }
                 Instruction::Call { argc } => {
                     let argc = *argc;
