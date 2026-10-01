@@ -803,5 +803,28 @@
 
   B.poolSize = 8192;
 
+  // Node's Buffer[Symbol.species] is FastBuffer: it is a Uint8Array subclass whose prototype
+  // is Buffer.prototype, and whose constructor returns a branded Buffer view. Typed-array
+  // methods pass a length; Buffer.prototype.subarray passes (ArrayBuffer, offset, length).
+  // Preserve both forms so generic typed-array species operations and Node's internal Buffer
+  // consumers use the same allocation authority.
+  function FastBuffer(this: any, source: any, byteOffset?: any, length?: any): Uint8Array {
+    if (new.target === undefined) throw new TypeError("Class constructor FastBuffer cannot be invoked without 'new'");
+    if (typeof source === "number") return rawAlloc(source);
+    if (source === undefined) throw new TypeError("The \"buffer\" argument must be an instance of ArrayBuffer");
+    return rawFrom(source, byteOffset, length);
+  }
+  Object.defineProperty(FastBuffer, "name", { value: "FastBuffer", configurable: true });
+  Object.defineProperty(FastBuffer, "length", { value: 1, configurable: true });
+  FastBuffer.prototype = proto;
+  Object.setPrototypeOf(FastBuffer, U8);
+  Object.defineProperty(B, Symbol.species, {
+    configurable: true,
+    enumerable: false,
+    get: function species(): typeof FastBuffer {
+      return FastBuffer;
+    },
+  });
+
   B.prototype = proto;
 })();

@@ -10,3 +10,14 @@ const g = Buffer.alloc(8); g.writeBigUInt64BE(0x0102030405060708n); console.log(
 const s = b.subarray(0, 2); s[0] = 65; console.log(b.toString().slice(0, 1), b.fill("ab").toString(), Buffer.from("abc").toString("latin1", 1), new Uint8Array([1, 2]).toString(), typeof new Uint8Array(1).equals);
 console.log(Buffer.from(new Uint8Array([9, 8])).equals(Buffer.from([9, 8])), Buffer.from(b.buffer, 2, 3).length, Buffer.byteLength("aGk=", "base64"), Buffer.isEncoding("utf8"), Buffer.isEncoding("nope"), Buffer.from("x").write("yz", 0), Buffer.alloc(2).fill(0x41).toString());
 console.log(Buffer.from("hi", "utf16le").toString("hex"), Buffer.alloc(4, "ab").toString(), Buffer("xy").toString(), Buffer.from("ff", "hex").toString("hex"));
+const FastBuffer = Buffer[Symbol.species];
+if (typeof FastBuffer !== "function" || FastBuffer.name !== "FastBuffer" || FastBuffer === Buffer) throw new Error("Buffer species identity");
+if (Object.getPrototypeOf(FastBuffer) !== Uint8Array || FastBuffer.prototype !== Buffer.prototype || Object.getPrototypeOf(FastBuffer.prototype) !== Uint8Array.prototype) throw new Error("Buffer species prototype chain");
+const speciesBacking = new ArrayBuffer(5);
+const speciesView = new FastBuffer(speciesBacking, 1, 3);
+speciesView[0] = 71;
+const speciesSized = new FastBuffer(2);
+const speciesSlice = Buffer.from(speciesBacking).subarray(1, 4);
+if (!Buffer.isBuffer(speciesView) || speciesView.buffer !== speciesBacking || speciesView.byteOffset !== 1 || speciesBackingBytes(speciesBacking)[1] !== 71) throw new Error("FastBuffer must return a shared Buffer view");
+if (!Buffer.isBuffer(speciesSized) || speciesSized.length !== 2 || !Buffer.isBuffer(speciesSlice)) throw new Error("Buffer typed-array species construction");
+function speciesBackingBytes(buffer) { return new Uint8Array(buffer); }
