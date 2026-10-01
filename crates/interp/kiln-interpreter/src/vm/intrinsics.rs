@@ -450,6 +450,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeCryptoGetHashes
             | Native::NodeCryptoGetRandomValues
             | Native::NodeCryptoTimingSafeEqual
+            | Native::NodeCryptoKeyImport
+            | Native::NodeCryptoKeyPublic
+            | Native::NodeCryptoKeyInfo
+            | Native::NodeCryptoKeyExport
             | Native::NodeCryptoCreateHash
             | Native::NodeCryptoCreateHmac
             | Native::NodeHashUpdate

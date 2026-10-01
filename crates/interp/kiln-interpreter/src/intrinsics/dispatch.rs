@@ -2796,6 +2796,10 @@ pub(crate) fn call_native(
         | Native::NodeCryptoCreateHash
         | Native::NodeCryptoCreateHmac
         | Native::NodeCryptoTimingSafeEqual
+        | Native::NodeCryptoKeyImport
+        | Native::NodeCryptoKeyPublic
+        | Native::NodeCryptoKeyInfo
+        | Native::NodeCryptoKeyExport
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder

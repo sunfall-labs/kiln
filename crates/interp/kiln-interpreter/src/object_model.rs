@@ -277,6 +277,7 @@ pub(super) enum NodeObject {
     Url(Rc<UrlState>),
     UrlSearchParams(Rc<UrlState>),
     Hash(Rc<RefCell<crypto::HashState>>),
+    CryptoKey(Rc<kiln_key_core::ImportedKey>),
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
     Zlib(Rc<zlib::ZlibState>),

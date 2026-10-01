@@ -865,6 +865,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "__kilnBufferToString",
                 Value::Native(Native::NodeBufferToString, realm),
             );
+            globals.set_non_enumerable(
+                "__kilnCryptoKeyImport",
+                Value::Native(Native::NodeCryptoKeyImport, realm),
+            );
+            globals.set_non_enumerable(
+                "__kilnCryptoKeyPublic",
+                Value::Native(Native::NodeCryptoKeyPublic, realm),
+            );
+            globals.set_non_enumerable(
+                "__kilnCryptoKeyInfo",
+                Value::Native(Native::NodeCryptoKeyInfo, realm),
+            );
+            globals.set_non_enumerable(
+                "__kilnCryptoKeyExport",
+                Value::Native(Native::NodeCryptoKeyExport, realm),
+            );
         }
         // Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
         // `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by

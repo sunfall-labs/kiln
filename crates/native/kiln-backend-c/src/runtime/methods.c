@@ -235,6 +235,10 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_STRING_LOCALE_CASE_RAW: return "__kilnHostStringLocaleCase";
     case KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW: return "__kilnIntlDateTimeFormat";
+    case KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW: return "__kilnCryptoKeyImport";
+    case KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW: return "__kilnCryptoKeyPublic";
+    case KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW: return "__kilnCryptoKeyInfo";
+    case KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW: return "__kilnCryptoKeyExport";
     case KILN_C99_METHOD_UINT8_TO_HEX_RAW: return "__kilnUint8ToHex";
     case KILN_C99_METHOD_BUFFER_TO_STRING_RAW: return "__kilnBufferToString";
     case KILN_C99_METHOD_URL_PARSE_RAW: return "__kilnUrlParse";

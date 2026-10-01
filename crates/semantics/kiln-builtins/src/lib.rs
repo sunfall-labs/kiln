@@ -669,6 +669,7 @@ declare_ts_builtins! {
             "createHash",
             "createHmac",
             "createPrivateKey",
+            "createPublicKey",
             "createSecretKey",
             "default",
             "getHashes",

@@ -801,6 +801,10 @@ struct NativeRealm {
     symbol_keys: RefCell<HashMap<u64, StringUnits>>,
     callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
     value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
+    /// Parsed asymmetric keys belong to this realm and are discarded with it. Handles are opaque
+    /// integers; generated code never receives a Rust pointer or a copy of private components.
+    crypto_keys: RefCell<HashMap<u64, kiln_key_core::ImportedKey>>,
+    next_crypto_key: Cell<u64>,
     /// The command line this realm's launcher was started with, copied out of `main`'s
     /// `argv` before the realm is entered. Each element is its own allocation so that a
     /// pointer handed to generated C stays put for as long as the realm holds the vector.
@@ -1301,6 +1305,8 @@ impl NativeRealm {
             symbol_keys: RefCell::new(HashMap::new()),
             callable_stores: RefCell::new(HashMap::new()),
             value_slots: RefCell::new(HashMap::new()),
+            crypto_keys: RefCell::new(HashMap::new()),
+            next_crypto_key: Cell::new(1),
             argv: RefCell::new(Vec::new()),
             entropy: Cell::new(None),
             entered: Cell::new(false),
@@ -1617,6 +1623,24 @@ fn attach_realm(handle: u64, detached: DetachedRealm) {
 
 fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn active_crypto_key_insert(key: kiln_key_core::ImportedKey) -> Option<u64> {
+    let realm = active_realm()?;
+    let handle = realm.next_crypto_key.get();
+    let next = handle.checked_add(1)?;
+    realm.crypto_keys.try_borrow_mut().ok()?.insert(handle, key);
+    realm.next_crypto_key.set(next);
+    Some(handle)
+}
+
+pub(crate) fn with_active_crypto_key<R>(
+    handle: u64,
+    use_key: impl FnOnce(&kiln_key_core::ImportedKey) -> R,
+) -> Option<R> {
+    let realm = active_realm()?;
+    let keys = realm.crypto_keys.try_borrow().ok()?;
+    keys.get(&handle).map(use_key)
 }
 
 pub(crate) fn active_clock_is_virtual() -> bool {

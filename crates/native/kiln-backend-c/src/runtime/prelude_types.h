@@ -3539,6 +3539,12 @@ int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *
                           uint64_t capacity, uint64_t *out_len);
 int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds,
                               uint32_t operation, const uint8_t **out, uint64_t *out_len);
+int kiln_crypto_key_import(const uint8_t *data, size_t length, uint32_t kind,
+                           uint64_t *out_handle);
+int kiln_crypto_key_public(uint64_t handle, uint64_t *out_handle);
+int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits);
+int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
+                           uint8_t *output, size_t capacity, size_t *out_length);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions

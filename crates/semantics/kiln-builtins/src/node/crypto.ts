@@ -347,24 +347,64 @@ export class Hash {
   }
 }
 
-/** Node's opaque key handle used by APIs such as jsonwebtoken. The current backend supports
- * symmetric key material here; asymmetric key import remains owned by the crypto provider. */
+const cryptoKeyImportBridge = (globalThis as any).__kilnCryptoKeyImport;
+const cryptoKeyPublicBridge = (globalThis as any).__kilnCryptoKeyPublic;
+const cryptoKeyInfoBridge = (globalThis as any).__kilnCryptoKeyInfo;
+const cryptoKeyExportBridge = (globalThis as any).__kilnCryptoKeyExport;
+delete (globalThis as any).__kilnCryptoKeyImport;
+delete (globalThis as any).__kilnCryptoKeyPublic;
+delete (globalThis as any).__kilnCryptoKeyInfo;
+delete (globalThis as any).__kilnCryptoKeyExport;
+
+const asymmetricKeyHandles = new WeakMap<KeyObject, any>();
+
+/** Node's opaque key handle. Asymmetric values carry a parsed key-core handle in a WeakMap;
+ * private material is never stored as an ordinary JavaScript byte property. */
 export class KeyObject {
   readonly type: string;
   readonly symmetricKeySize: number | undefined;
+  readonly asymmetricKeyType: string | undefined;
+  readonly asymmetricKeyDetails: any;
   private _key: Uint8Array;
 
-  constructor(key: any, type: string = 'secret') {
+  constructor(key: any, type: string = 'secret', asymmetricKeyType?: string, asymmetricKeyDetails?: any) {
     this.type = type;
-    this._key = toUint8Array(key).slice();
+    this._key = type === 'secret' ? toUint8Array(key).slice() : new Uint8Array(0);
     this.symmetricKeySize = type === 'secret' ? this._key.length : undefined;
+    this.asymmetricKeyType = asymmetricKeyType;
+    this.asymmetricKeyDetails = asymmetricKeyDetails;
   }
 
   get [Symbol.toStringTag](): string { return 'KeyObject'; }
 
-  export(): any {
+  export(options?: any): any {
+    const handle = asymmetricKeyHandles.get(this);
+    if (handle !== undefined) {
+      if (options === undefined || options === null || typeof options !== 'object' || options.format === undefined) {
+        throw new TypeError('The "options.format" property is required');
+      }
+      const format = String(options.format);
+      if (format !== 'der' && format !== 'pem') {
+        throw new TypeError(`The key export format "${format}" is not supported`);
+      }
+      const type = options.type === undefined
+        ? (this.type === 'private' ? 'pkcs8' : 'spki')
+        : String(options.type);
+      const bytes = cryptoKeyExportBridge(handle, type, format);
+      return format === 'pem' ? Buffer.from(bytes).toString('utf8') : Buffer.from(bytes);
+    }
+    if (options !== undefined) {
+      throw new TypeError('The options argument is not supported for secret keys');
+    }
     return Buffer.from(this._key);
   }
+}
+
+function makeAsymmetricKey(handle: any): KeyObject {
+  const info = cryptoKeyInfoBridge(handle);
+  const key = new KeyObject(undefined, info.type, info.asymmetricKeyType, info.asymmetricKeyDetails);
+  asymmetricKeyHandles.set(key, handle);
+  return key;
 }
 
 export function createSecretKey(key: any, encoding?: string): KeyObject {
@@ -377,8 +417,53 @@ export function createSecretKey(key: any, encoding?: string): KeyObject {
   return new KeyObject(key, 'secret');
 }
 
-export function createPrivateKey(_key: any): KeyObject {
-  throw new TypeError('Private key import is not supported by this crypto provider');
+function importKeyInput(input: any): { bytes: Uint8Array; format: string } {
+  let key = input;
+  let format = 'pem';
+  let encoding: string | undefined;
+  if (key && typeof key === 'object' && !(key instanceof Uint8Array) && !(key instanceof KeyObject) && 'key' in key) {
+    format = key.format === undefined ? 'pem' : String(key.format);
+    encoding = key.encoding === undefined ? undefined : String(key.encoding);
+    key = key.key;
+  }
+  if (key instanceof KeyObject) {
+    throw new TypeError(`The key argument must be key material, not a ${key.type} KeyObject`);
+  }
+  if (format === 'jwk') {
+    if (!key || typeof key !== 'object') throw new TypeError('The key argument must be an RSA JWK object');
+    return { bytes: new TextEncoder().encode(JSON.stringify(key)), format };
+  }
+  if (format !== 'pem' && format !== 'der') {
+    throw new TypeError(`The key format "${format}" is not supported`);
+  }
+  const bytes = typeof key === 'string'
+    ? toUint8Array(key, encoding)
+    : key instanceof Uint8Array
+      ? key
+      : key && key.buffer instanceof ArrayBuffer
+        ? new Uint8Array(key.buffer, key.byteOffset || 0, key.byteLength)
+        : undefined;
+  if (!bytes) throw new TypeError('The key argument must be a string, Buffer, TypedArray, or key options object');
+  return { bytes, format };
+}
+
+export function createPrivateKey(input: any): KeyObject {
+  const { bytes, format } = importKeyInput(input);
+  return makeAsymmetricKey(cryptoKeyImportBridge(bytes, format, 'private'));
+}
+
+export function createPublicKey(input: any): KeyObject {
+  if (input instanceof KeyObject) {
+    const handle = asymmetricKeyHandles.get(input);
+    if (handle === undefined) throw new TypeError('The key argument must be an asymmetric KeyObject');
+    if (input.type !== 'private') {
+      throw new TypeError('The "key" argument must be a private KeyObject');
+    }
+    return makeAsymmetricKey(cryptoKeyPublicBridge(handle));
+  }
+  const { bytes, format } = importKeyInput(input);
+  const imported = cryptoKeyImportBridge(bytes, format, 'auto');
+  return makeAsymmetricKey(cryptoKeyPublicBridge(imported));
 }
 
 export class Hmac {
@@ -389,6 +474,9 @@ export class Hmac {
   constructor(algorithm: string, key: any) {
     if (key === undefined || key === null) {
       throw new TypeError('The "key" argument must be of type string or an instance of Buffer or TypedArray');
+    }
+    if (key instanceof KeyObject && key.type !== 'secret') {
+      throw new TypeError(`Invalid key object type ${key.type}, expected secret`);
     }
     const norm = String(algorithm || '').toLowerCase().replace(/-/g, '');
     if (norm !== 'sha256' && norm !== 'md5' && norm !== 'sha1' && norm !== 'sha512') {
@@ -532,6 +620,7 @@ const cryptoDefault = {
   Hash,
   Hmac,
   KeyObject,
+  createPublicKey,
   createSecretKey,
   createPrivateKey,
   createHash,

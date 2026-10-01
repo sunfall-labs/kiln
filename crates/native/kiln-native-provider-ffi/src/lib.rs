@@ -285,6 +285,18 @@ macro_rules! assert_root_provider_export {
     (date, kiln_date_parse, date_parse) => {
         const _: unsafe extern "C" fn(*const KilnString) -> f64 = kiln_date_parse;
     };
+    (crypto, kiln_crypto_key_import, crypto_key_import) => {
+        const _: unsafe extern "C" fn(*const u8, usize, u32, *mut u64) -> i32 = kiln_crypto_key_import;
+    };
+    (crypto, kiln_crypto_key_public, crypto_key_public) => {
+        const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_crypto_key_public;
+    };
+    (crypto, kiln_crypto_key_info, crypto_key_info) => {
+        const _: unsafe extern "C" fn(u64, *mut u32, *mut u32) -> i32 = kiln_crypto_key_info;
+    };
+    (crypto, kiln_crypto_key_export, crypto_key_export) => {
+        const _: unsafe extern "C" fn(u64, u32, u32, *mut u8, usize, *mut usize) -> i32 = kiln_crypto_key_export;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -296,6 +308,16 @@ kiln_native_provider_contract::provider_abi_registry!(assert_root_provider_expor
 #[path = "provider/date.rs"]
 mod date;
 use date::kiln_date_parse;
+
+#[cfg(feature = "realm")]
+#[path = "provider/keys.rs"]
+mod keys;
+#[cfg(not(feature = "realm"))]
+#[path = "provider/key_stubs.rs"]
+mod keys;
+use keys::{
+    kiln_crypto_key_export, kiln_crypto_key_import, kiln_crypto_key_info, kiln_crypto_key_public,
+};
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can

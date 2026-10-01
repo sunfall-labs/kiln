@@ -239,6 +239,10 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeCryptoCreateHash => Some("createHash"),
         Native::NodeCryptoCreateHmac => Some("createHmac"),
         Native::NodeCryptoTimingSafeEqual => Some("timingSafeEqual"),
+        Native::NodeCryptoKeyImport => Some("__kilnCryptoKeyImport"),
+        Native::NodeCryptoKeyPublic => Some("__kilnCryptoKeyPublic"),
+        Native::NodeCryptoKeyInfo => Some("__kilnCryptoKeyInfo"),
+        Native::NodeCryptoKeyExport => Some("__kilnCryptoKeyExport"),
         Native::NodeHashUpdate => Some("update"),
         Native::NodeHashDigest => Some("digest"),
         _ => None,
@@ -483,6 +487,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeCryptoCreateHash => node_hash(arguments),
             Native::NodeCryptoCreateHmac => node_hmac(arguments),
+            Native::NodeCryptoKeyImport => node_crypto_key_import(arguments),
+            Native::NodeCryptoKeyPublic => node_crypto_key_public(arguments),
+            Native::NodeCryptoKeyInfo => node_crypto_key_info(arguments),
+            Native::NodeCryptoKeyExport => node_crypto_key_export(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();
@@ -527,5 +535,121 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "Invalid native crypto operation".into(),
             }),
         }
+    }
+}
+
+fn node_crypto_key_import(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let Some(input) = arguments.first() else {
+        return Err(crypto_key_type_error(
+            "The \"key\" argument must contain RSA key material",
+        ));
+    };
+    let bytes = node_body_bytes(Some(input))?;
+    let encoding = match arguments.get(1).map(Value::to_display_string).as_deref() {
+        Some("der") => kiln_key_core::KeyEncoding::Der,
+        Some("jwk") => {
+            let key = kiln_key_core::import_rsa_jwk_json(&bytes).map_err(key_import_error)?;
+            if arguments
+                .get(2)
+                .is_some_and(|kind| kind.to_display_string() == "private")
+                && key.key_type() != kiln_key_core::KeyType::Private
+            {
+                return Err(crypto_key_type_error(
+                    "The JWK does not contain a private key",
+                ));
+            }
+            return Ok(crypto_key_value(key));
+        }
+        _ => kiln_key_core::KeyEncoding::Pem,
+    };
+    let expected = match arguments.get(2).map(Value::to_display_string).as_deref() {
+        Some("private") => Some(kiln_key_core::KeyType::Private),
+        Some("public") => Some(kiln_key_core::KeyType::Public),
+        _ => None,
+    };
+    let key = match expected {
+        Some(kind) => kiln_key_core::import_rsa(&bytes, encoding, kind),
+        None => kiln_key_core::import_rsa_any(&bytes, encoding),
+    }
+    .map_err(key_import_error)?;
+    Ok(crypto_key_value(key))
+}
+
+fn node_crypto_key_public(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    Ok(crypto_key_value(key.public_key()))
+}
+
+fn node_crypto_key_info(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    let mut details = ObjectData::default();
+    details.set("modulusLength", Value::Number(key.modulus_bits() as f64));
+    let mut info = ObjectData::default();
+    info.set(
+        "type",
+        Value::String(match key.key_type() {
+            kiln_key_core::KeyType::Public => "public".into(),
+            kiln_key_core::KeyType::Private => "private".into(),
+        }),
+    );
+    info.set("asymmetricKeyType", Value::String("rsa".into()));
+    info.set(
+        "asymmetricKeyDetails",
+        Value::Object(Rc::new(RefCell::new(details))),
+    );
+    Ok(Value::Object(Rc::new(RefCell::new(info))))
+}
+
+fn node_crypto_key_export(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    let format = match arguments.get(1).map(Value::to_display_string).as_deref() {
+        Some("pkcs1") => kiln_key_core::KeyFormat::Pkcs1,
+        Some("pkcs8") => kiln_key_core::KeyFormat::Pkcs8,
+        _ => kiln_key_core::KeyFormat::Spki,
+    };
+    let encoding = match arguments.get(2).map(Value::to_display_string).as_deref() {
+        Some("pem") => kiln_key_core::KeyEncoding::Pem,
+        _ => kiln_key_core::KeyEncoding::Der,
+    };
+    let bytes = key.export(format, encoding).map_err(key_import_error)?;
+    Ok(node_bytes_value(bytes))
+}
+
+fn crypto_key_value(key: kiln_key_core::ImportedKey) -> Value {
+    let data = ObjectData {
+        node_object: Some(NodeObject::CryptoKey(Rc::new(key))),
+        ..Default::default()
+    };
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn crypto_key_argument(
+    value: Option<&Value>,
+) -> Result<Rc<kiln_key_core::ImportedKey>, ExecutionError> {
+    match value {
+        Some(Value::Object(object)) => match object.borrow().node_object.as_ref() {
+            Some(NodeObject::CryptoKey(key)) => Ok(Rc::clone(key)),
+            _ => Err(crypto_key_type_error(
+                "The key argument must be a KeyObject",
+            )),
+        },
+        _ => Err(crypto_key_type_error(
+            "The key argument must be a KeyObject",
+        )),
+    }
+}
+
+fn key_import_error(error: kiln_key_core::KeyError) -> ExecutionError {
+    let message = match error {
+        kiln_key_core::KeyError::InvalidKey => "Invalid RSA key material",
+        kiln_key_core::KeyError::UnsupportedKeyType => "Unsupported asymmetric key type",
+        kiln_key_core::KeyError::UnsupportedEncoding => "Unsupported asymmetric key encoding",
+    };
+    crypto_key_type_error(message)
+}
+
+fn crypto_key_type_error(message: &str) -> ExecutionError {
+    ExecutionError::TypeErrorMessage {
+        message: message.into(),
     }
 }
