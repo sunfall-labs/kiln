@@ -528,6 +528,37 @@ fn demanded_interface(
         .collect()
 }
 
+/// Opt-in release-graph export-slot trace. Set `KILN_DEBUG_MODULE_DEMANDS` to a module path
+/// substring (for example, `acorn-typescript`) to compare export slots and demand at each graph
+/// transformation boundary. This is out-of-band and does not affect cache keys or emission.
+fn debug_module_demands(stage: &str, graph: &ModuleGraph, demand: &kiln_module_graph::LiveDemand) {
+    let Ok(filter) = std::env::var("KILN_DEBUG_MODULE_DEMANDS") else {
+        return;
+    };
+    if filter.is_empty() {
+        return;
+    }
+    for node in graph
+        .modules()
+        .filter(|node| node.path.to_string_lossy().contains(filter.as_str()))
+    {
+        let exports = node
+            .program
+            .exports
+            .iter()
+            .map(|export| format!("{}={}", export.exported, export.local_slot))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "kiln: module-demand stage={stage} path={} live={} demanded={:?} exports=[{}]",
+            node.path.display(),
+            demand.live.contains(&node.path),
+            demand.slots.get(&node.path),
+            exports
+        );
+    }
+}
+
 /// Alternate source-level DCE and graph selection until removing wrappers no longer narrows the
 /// demanded module interface. Export slots are deliberately compared by public name: recompiling
 /// a module may renumber its private slots even when the observable fixed point is unchanged.
@@ -2451,15 +2482,21 @@ impl NativeBuilder {
         // so the emitter and launcher below only ever see live modules and
         // live edges. With everything live this is the identity transform.
         let demand = selected.demand();
+        debug_module_demands("selected", graph, &demand);
         let (reduced, demand) = reduced_graph(graph, &demand)?;
+        debug_module_demands("reduced", &reduced, &demand);
         let (reduced, demand) = if matches!(
             options.profile,
             NativeProfile::Release | NativeProfile::ReleaseSize
         ) {
-            dce_release_graph_to_fixpoint(reduced, demand, &selection)?
+            let (reduced, demand) = dce_release_graph_to_fixpoint(reduced, demand, &selection)?;
+            debug_module_demands("release-dce", &reduced, &demand);
+            (reduced, demand)
         } else {
             // Non-release: re-parse for native import.meta without DCE.
-            (native_import_meta_reparse(&reduced), demand)
+            let reduced = native_import_meta_reparse(&reduced);
+            debug_module_demands("import-meta", &reduced, &demand);
+            (reduced, demand)
         };
         let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,
