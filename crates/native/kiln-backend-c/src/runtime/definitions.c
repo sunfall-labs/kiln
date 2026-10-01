@@ -1316,6 +1316,36 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             return status;
         }
     }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        int enumerable;
+        kiln_value value;
+        int typed_found = 0;
+        /* Integer-indexed properties are stored in the view's backing buffer, not its ordinary
+         * named-property store. Object spread snapshots these keys and then asks for a fresh
+         * descriptor; treating the view like only its named store made every element look as if
+         * it had disappeared. Keep the existing integer-index validity and read authorities in
+         * charge, and project the language descriptor from their result. */
+        kiln_c99_typed_own_key(target, view, &typed_found, &enumerable);
+        if (typed_found) {
+            status = kiln_c99_get_key(host, target, view, stable, &value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                      kiln_c99_boolean(enumerable), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+            if (status == KILN_C99_OK) {
+                *found = 1;
+                *out = built;
+            }
+            return status;
+        }
+    }
     {
         kiln_value *slot = kiln_c99_exotic_store(target);
         if (slot != NULL) {
