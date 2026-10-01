@@ -172,7 +172,7 @@ pub unsafe extern "C" fn kiln_regexp_compile(
     // Share Unicode identity-escape validation and UnicodeSets normalization with the
     // interpreter. Regress accepts a raw lone-surrogate identity escape in v mode; validation
     // here keeps every constructor path on the same grammar authority.
-    let Some(pattern) = kiln_regexp::normalize_pattern_for_flags(&pattern, flags.as_str()) else {
+    let Some(pattern) = kiln_regexp::normalize_pattern_for_flags(pattern, flags.as_str()) else {
         return INVALID_ARGUMENT;
     };
     let Some(compiled) = compile_pattern(pattern, flags.as_str()) else {

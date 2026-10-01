@@ -52,25 +52,25 @@ pub fn normalize_unicode_sets_pattern(pattern: &[u32]) -> Vec<u32> {
 /// identity escape under `u` and `v`; the regexp parser accepts this extension, so both engines
 /// must reject it before parsing. Keeping this beside the `v` normalization gives construction
 /// one shared grammar gate.
-pub fn normalize_pattern_for_flags(pattern: &[u32], flags: &str) -> Option<Vec<u32>> {
+pub fn normalize_pattern_for_flags(pattern: Vec<u32>, flags: &str) -> Option<Vec<u32>> {
     let unicode = flags.contains('u') || flags.contains('v');
     if unicode {
-        let mut consecutive_backslashes = 0usize;
-        for &character in pattern {
+        let mut escaped = false;
+        for &character in &pattern {
             if character == u32::from('\\') {
-                consecutive_backslashes = consecutive_backslashes.saturating_add(1);
+                escaped = !escaped;
                 continue;
             }
-            if (0xD800..=0xDFFF).contains(&character) && consecutive_backslashes % 2 == 1 {
+            if (0xD800..=0xDFFF).contains(&character) && escaped {
                 return None;
             }
-            consecutive_backslashes = 0;
+            escaped = false;
         }
     }
     Some(if flags.contains('v') {
-        normalize_unicode_sets_pattern(pattern)
+        normalize_unicode_sets_pattern(&pattern)
     } else {
-        pattern.to_vec()
+        pattern
     })
 }
 
@@ -154,15 +154,15 @@ mod tests {
     #[test]
     fn unicode_identity_escape_rejects_only_odd_backslash_lone_surrogates() {
         let lone = u32::from(0xD800u16);
-        assert!(normalize_pattern_for_flags(&[u32::from('\\'), lone], "u").is_none());
-        assert!(normalize_pattern_for_flags(&[u32::from('\\'), lone], "v").is_none());
+        assert!(normalize_pattern_for_flags(vec![u32::from('\\'), lone], "u").is_none());
+        assert!(normalize_pattern_for_flags(vec![u32::from('\\'), lone], "v").is_none());
         assert_eq!(
-            normalize_pattern_for_flags(&[u32::from('\\'), u32::from('\\'), lone], "v"),
+            normalize_pattern_for_flags(vec![u32::from('\\'), u32::from('\\'), lone], "v"),
             Some(vec![u32::from('\\'), u32::from('\\'), lone]),
         );
         // A well-formed UTF-16 pair is one scalar by the time it reaches this shared gate.
         assert_eq!(
-            normalize_pattern_for_flags(&[0x1F600], "v"),
+            normalize_pattern_for_flags(vec![0x1F600], "v"),
             Some(vec![0x1F600]),
         );
     }
