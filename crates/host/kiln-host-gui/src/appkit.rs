@@ -169,6 +169,131 @@ extern "C" fn window_will_close(_this: &Object, _cmd: Sel, notification: *mut Ob
     }
 }
 
+extern "C" fn segmented_action(_this: &Object, _cmd: Sel, sender: *mut Object) {
+    unsafe {
+        let tag: isize = msg_send![sender, tag];
+        let seg: isize = msg_send![sender, selectedSegment];
+        if tag > 0 {
+            if let Ok(mut events) = PENDING_EVENTS.lock() {
+                events.push((tag as u64, "change".to_string(), seg.to_string()));
+            }
+        }
+    }
+}
+
+extern "C" fn select_action(_this: &Object, _cmd: Sel, sender: *mut Object) {
+    unsafe {
+        let tag: isize = msg_send![sender, tag];
+        let idx: isize = msg_send![sender, indexOfSelectedItem];
+        let title_obj: *mut Object = msg_send![sender, titleOfSelectedItem];
+        let utf8: *const c_char = if !title_obj.is_null() {
+            msg_send![title_obj, UTF8String]
+        } else {
+            ptr::null()
+        };
+        let title = if utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        };
+        if tag > 0 {
+            if let Ok(mut events) = PENDING_EVENTS.lock() {
+                events.push((
+                    tag as u64,
+                    "change".to_string(),
+                    format!("{}:{}", idx, title),
+                ));
+            }
+        }
+    }
+}
+
+fn parse_items_json_or_csv(s: &str) -> Vec<String> {
+    if s.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(s)
+            .unwrap_or_else(|_| s.split(',').map(|item| item.trim().to_string()).collect())
+    } else {
+        s.split(',').map(|item| item.trim().to_string()).collect()
+    }
+}
+
+fn setup_segmented_items(seg: *mut Object, s: &str) {
+    let items = parse_items_json_or_csv(s);
+    if !items.is_empty() {
+        unsafe {
+            let count = items.len() as isize;
+            let () = msg_send![seg, setSegmentCount: count];
+            for (i, label) in items.iter().enumerate() {
+                let label_obj = ns_string(label);
+                let () = msg_send![seg, setLabel: label_obj forSegment: i as isize];
+            }
+            let () = msg_send![seg, setSelectedSegment: 0isize];
+        }
+    }
+}
+
+fn setup_popup_items(popup: *mut Object, s: &str) {
+    let items = parse_items_json_or_csv(s);
+    unsafe {
+        let () = msg_send![popup, removeAllItems];
+        for item in items {
+            let label_obj = ns_string(&item);
+            let () = msg_send![popup, addItemWithTitle: label_obj];
+        }
+    }
+}
+
+fn set_image_from_symbol_or_path(img_view: *mut Object, name: &str) {
+    let symbol_name = match name {
+        "settings" => "gearshape",
+        "search" => "magnifyingglass",
+        "play" => "play.fill",
+        "pause" => "pause.fill",
+        "stop" => "stop.fill",
+        "refresh" => "arrow.clockwise",
+        "terminal" => "terminal.fill",
+        "cpu" => "cpu",
+        "memory" => "memorychip",
+        "check" | "checkmark" | "success" => "checkmark.circle.fill",
+        "error" | "danger" => "exclamationmark.triangle.fill",
+        "info" => "info.circle.fill",
+        "folder" => "folder.fill",
+        "file" => "doc.text.fill",
+        other => other,
+    };
+    unsafe {
+        let img_cls = class!(NSImage);
+        let sym_ns = ns_string(symbol_name);
+        let img: *mut Object = msg_send![
+            img_cls,
+            imageWithSystemSymbolName: sym_ns
+            accessibilityDescription: ptr::null_mut::<Object>()
+        ];
+        if !img.is_null() {
+            let () = msg_send![img_view, setImage: img];
+        }
+    }
+}
+
+fn get_or_create_flipped_clip_class() -> *const Class {
+    if let Some(cls) = Class::get("KilnFlippedClipView") {
+        cls
+    } else {
+        let superclass = class!(NSClipView);
+        let mut decl = ClassDecl::new("KilnFlippedClipView", superclass).unwrap();
+        extern "C" fn is_flipped(_this: &Object, _cmd: Sel) -> i8 {
+            1
+        }
+        unsafe {
+            decl.add_method(
+                sel!(isFlipped),
+                is_flipped as extern "C" fn(&Object, Sel) -> i8,
+            );
+        }
+        decl.register()
+    }
+}
+
 fn get_or_create_action_target() -> *mut Object {
     let mut guard = ACTION_TARGET.lock().unwrap();
     if !guard.0.is_null() {
@@ -200,6 +325,14 @@ fn get_or_create_action_target() -> *mut Object {
             decl.add_method(
                 sel!(windowWillClose:),
                 window_will_close as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.add_method(
+                sel!(segmentedAction:),
+                segmented_action as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.add_method(
+                sel!(selectAction:),
+                select_action as extern "C" fn(&Object, Sel, *mut Object),
             );
         }
         decl.register()
@@ -372,6 +505,40 @@ pub fn window_set_title(id: u64, title: &str) {
     }
 }
 
+pub fn window_snapshot(id: u64, path: &str) -> bool {
+    let win_ptr = {
+        let wins = WINDOWS.lock().unwrap();
+        wins.as_ref().and_then(|m| m.get(&id)).map(|e| e.window.0)
+    };
+    if let Some(win) = win_ptr {
+        unsafe {
+            let content_view: *mut Object = msg_send![win, contentView];
+            if content_view.is_null() {
+                return false;
+            }
+            let bounds: CGRect = msg_send![content_view, bounds];
+            let rep: *mut Object = msg_send![
+                content_view,
+                bitmapImageRepForCachingDisplayInRect: bounds
+            ];
+            if rep.is_null() {
+                return false;
+            }
+            let () = msg_send![content_view, cacheDisplayInRect: bounds toBitmapImageRep: rep];
+            let dict: *mut Object = msg_send![class!(NSDictionary), dictionary];
+            let png_data: *mut Object =
+                msg_send![rep, representationUsingType: 4usize properties: dict]; // NSPNGFileType = 4
+            if png_data.is_null() {
+                return false;
+            }
+            let path_obj = ns_string(path);
+            let success: bool = msg_send![png_data, writeToFile: path_obj atomically: YES];
+            return success;
+        }
+    }
+    false
+}
+
 pub fn window_set_content(win_id: u64, child_id: u64) {
     let (win_ptr, root_effect_ptr) = {
         let wins = WINDOWS.lock().unwrap();
@@ -488,6 +655,8 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                 };
                 let () = msg_send![box_view, setContentViewMargins: margins];
                 let () = msg_send![box_view, setWantsLayer: YES];
+                let () =
+                    msg_send![box_view, setContentHuggingPriority: 250.0f32 forOrientation: 1isize];
                 let width_anchor: *mut Object = msg_send![box_view, widthAnchor];
                 let constraint: *mut Object =
                     msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 480.0f64];
@@ -599,6 +768,151 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                     btn
                 };
                 sw
+            }
+            "spacer" => {
+                let alloc: *mut Object = msg_send![class!(NSView), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                };
+                let view: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let () = msg_send![view, setTranslatesAutoresizingMaskIntoConstraints: NO];
+                let () = msg_send![view, setContentHuggingPriority: 1.0f32 forOrientation: 0isize];
+                let () = msg_send![view, setContentHuggingPriority: 1.0f32 forOrientation: 1isize];
+                let () = msg_send![
+                    view,
+                    setContentCompressionResistancePriority: 1.0f32 forOrientation: 0isize
+                ];
+                let () = msg_send![
+                    view,
+                    setContentCompressionResistancePriority: 1.0f32 forOrientation: 1isize
+                ];
+                view
+            }
+            "scroll" | "scrollview" => {
+                let alloc: *mut Object = msg_send![class!(NSScrollView), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 588.0,
+                        height: 440.0,
+                    },
+                };
+                let scroll: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let clip_cls = get_or_create_flipped_clip_class();
+                let clip_alloc: *mut Object = msg_send![clip_cls, alloc];
+                let clip: *mut Object = msg_send![clip_alloc, initWithFrame: rect];
+                let () = msg_send![clip, setDrawsBackground: NO];
+                let () = msg_send![scroll, setContentView: clip];
+
+                let () = msg_send![scroll, setHasVerticalScroller: YES];
+                let () = msg_send![scroll, setHasHorizontalScroller: NO];
+                let () = msg_send![scroll, setAutohidesScrollers: YES];
+                let () = msg_send![scroll, setDrawsBackground: NO];
+                let () = msg_send![scroll, setTranslatesAutoresizingMaskIntoConstraints: NO];
+                let width_anchor: *mut Object = msg_send![scroll, widthAnchor];
+                let w_constraint: *mut Object =
+                    msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 480.0f64];
+                let () = msg_send![w_constraint, setActive: YES];
+                let height_anchor: *mut Object = msg_send![scroll, heightAnchor];
+                let h_constraint: *mut Object =
+                    msg_send![height_anchor, constraintGreaterThanOrEqualToConstant: 320.0f64];
+                let () = msg_send![h_constraint, setActive: YES];
+                scroll
+            }
+            "segmented" => {
+                let alloc: *mut Object = msg_send![class!(NSSegmentedControl), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 260.0,
+                        height: 28.0,
+                    },
+                };
+                let seg: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let () = msg_send![seg, setSegmentStyle: 2isize]; // NSSegmentStyleRounded = 2
+                let () = msg_send![seg, setTarget: target];
+                let () = msg_send![seg, setAction: sel!(segmentedAction:)];
+                let () = msg_send![seg, setTag: id as isize];
+                let () = msg_send![seg, setWantsLayer: YES];
+                if !text.is_empty() {
+                    setup_segmented_items(seg, text);
+                }
+                seg
+            }
+            "progressbar" | "progress" => {
+                let alloc: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 220.0,
+                        height: 16.0,
+                    },
+                };
+                let bar: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let () = msg_send![bar, setStyle: 0usize]; // NSProgressIndicatorBarStyle = 0
+                let () = msg_send![bar, setIndeterminate: NO];
+                let () = msg_send![bar, setMinValue: 0.0f64];
+                let () = msg_send![bar, setMaxValue: 100.0f64];
+                let () = msg_send![bar, setDoubleValue: 0.0f64];
+                let () = msg_send![bar, setWantsLayer: YES];
+                let width_anchor: *mut Object = msg_send![bar, widthAnchor];
+                let constraint: *mut Object =
+                    msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 160.0f64];
+                let () = msg_send![constraint, setActive: YES];
+                bar
+            }
+            "select" | "dropdown" => {
+                let alloc: *mut Object = msg_send![class!(NSPopUpButton), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 180.0,
+                        height: 26.0,
+                    },
+                };
+                let popup: *mut Object = msg_send![alloc, initWithFrame: rect pullsDown: NO];
+                let () = msg_send![popup, setTarget: target];
+                let () = msg_send![popup, setAction: sel!(selectAction:)];
+                let () = msg_send![popup, setTag: id as isize];
+                let () = msg_send![popup, setWantsLayer: YES];
+                let () = msg_send![popup, setBezelStyle: 1isize];
+                if !text.is_empty() {
+                    setup_popup_items(popup, text);
+                }
+                popup
+            }
+            "checkbox" => {
+                let title_obj = ns_string(text);
+                let btn: *mut Object = msg_send![
+                    class!(NSButton),
+                    checkboxWithTitle: title_obj
+                    target: target
+                    action: sel!(switchAction:)
+                ];
+                let () = msg_send![btn, setTag: id as isize];
+                let () = msg_send![btn, setWantsLayer: YES];
+                btn
+            }
+            "icon" | "image" => {
+                let alloc: *mut Object = msg_send![class!(NSImageView), alloc];
+                let rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
+                        width: 24.0,
+                        height: 24.0,
+                    },
+                };
+                let img_view: *mut Object = msg_send![alloc, initWithFrame: rect];
+                let () = msg_send![img_view, setWantsLayer: YES];
+                let () = msg_send![img_view, setImageScaling: 2usize]; // NSImageScaleProportionallyUpOrDown = 2
+                if !text.is_empty() {
+                    set_image_from_symbol_or_path(img_view, text);
+                }
+                img_view
             }
             _ => {
                 let alloc: *mut Object = msg_send![class!(NSView), alloc];
@@ -725,6 +1039,83 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         let () = msg_send![view, setBezelColor: red];
                     }
                 }
+                ("button", "icon") => {
+                    let sym_ns = ns_string(match val_str {
+                        "settings" => "gearshape",
+                        "search" => "magnifyingglass",
+                        "play" => "play.fill",
+                        "pause" => "pause.fill",
+                        "stop" => "stop.fill",
+                        "refresh" => "arrow.clockwise",
+                        "terminal" => "terminal.fill",
+                        other => other,
+                    });
+                    let img: *mut Object = msg_send![
+                        class!(NSImage),
+                        imageWithSystemSymbolName: sym_ns
+                        accessibilityDescription: ptr::null_mut::<Object>()
+                    ];
+                    if !img.is_null() {
+                        let () = msg_send![view, setImage: img];
+                        let () = msg_send![view, setImagePosition: 2usize]; // NSImageLeft = 2
+                    }
+                }
+                ("segmented", "items") => {
+                    setup_segmented_items(view, val_str);
+                }
+                ("segmented", "selectedIndex") | ("segmented", "value") => {
+                    let () = msg_send![view, setSelectedSegment: val_num as isize];
+                }
+                ("progressbar", "value") | ("progress", "value") => {
+                    let () = msg_send![view, setDoubleValue: val_num];
+                }
+                ("progressbar", "max") | ("progress", "max") => {
+                    let () = msg_send![view, setMaxValue: val_num];
+                }
+                ("progressbar", "min") | ("progress", "min") => {
+                    let () = msg_send![view, setMinValue: val_num];
+                }
+                ("progressbar", "indeterminate") | ("progress", "indeterminate") => {
+                    let is_indet = val_str == "true" || val_num > 0.0;
+                    let () = msg_send![view, setIndeterminate: if is_indet { YES } else { NO }];
+                    if is_indet {
+                        let () = msg_send![view, startAnimation: ptr::null_mut::<Object>()];
+                    } else {
+                        let () = msg_send![view, stopAnimation: ptr::null_mut::<Object>()];
+                    }
+                }
+                ("select", "options")
+                | ("select", "items")
+                | ("dropdown", "options")
+                | ("dropdown", "items") => {
+                    setup_popup_items(view, val_str);
+                }
+                ("select", "selectedIndex")
+                | ("select", "value")
+                | ("dropdown", "selectedIndex")
+                | ("dropdown", "value") => {
+                    let () = msg_send![view, selectItemAtIndex: val_num as isize];
+                }
+                ("checkbox", "checked") => {
+                    let state = if val_str == "true" || val_num > 0.0 {
+                        1isize
+                    } else {
+                        0isize
+                    };
+                    let () = msg_send![view, setState: state];
+                    let () = msg_send![view, setNeedsDisplay: YES];
+                }
+                ("checkbox", "title") | ("checkbox", "label") | ("checkbox", "text") => {
+                    let ns = ns_string(val_str);
+                    let () = msg_send![view, setTitle: ns];
+                }
+                ("icon", "name")
+                | ("icon", "symbol")
+                | ("image", "name")
+                | ("image", "symbol")
+                | ("image", "src") => {
+                    set_image_from_symbol_or_path(view, val_str);
+                }
                 ("slider", "value") => {
                     let () = msg_send![view, setDoubleValue: val_num];
                 }
@@ -741,6 +1132,7 @@ pub fn widget_set_property(id: u64, name: &str, val_str: &str, val_num: f64) {
                         0isize
                     };
                     let () = msg_send![view, setState: state];
+                    let () = msg_send![view, setNeedsDisplay: YES];
                 }
                 ("vstack", "spacing") | ("hstack", "spacing") => {
                     let () = msg_send![view, setSpacing: val_num];
@@ -809,6 +1201,26 @@ pub fn widget_add_child(parent_id: u64, child_id: u64) {
             } else if parent_tag == "card" || parent_tag == "box" {
                 let () = msg_send![child_view, setAutoresizingMask: 18usize];
                 let () = msg_send![parent_view, setContentView: child_view];
+            } else if parent_tag == "scroll" || parent_tag == "scrollview" {
+                let () = msg_send![parent_view, setDocumentView: child_view];
+                let () = msg_send![child_view, setTranslatesAutoresizingMaskIntoConstraints: NO];
+                let content_view: *mut Object = msg_send![parent_view, contentView];
+                let child_leading: *mut Object = msg_send![child_view, leadingAnchor];
+                let clip_leading: *mut Object = msg_send![content_view, leadingAnchor];
+                let c_leading: *mut Object =
+                    msg_send![child_leading, constraintEqualToAnchor: clip_leading];
+                let () = msg_send![c_leading, setActive: YES];
+
+                let child_trailing: *mut Object = msg_send![child_view, trailingAnchor];
+                let clip_trailing: *mut Object = msg_send![content_view, trailingAnchor];
+                let c_trailing: *mut Object =
+                    msg_send![child_trailing, constraintEqualToAnchor: clip_trailing];
+                let () = msg_send![c_trailing, setActive: YES];
+
+                let child_top: *mut Object = msg_send![child_view, topAnchor];
+                let clip_top: *mut Object = msg_send![content_view, topAnchor];
+                let c_top: *mut Object = msg_send![child_top, constraintEqualToAnchor: clip_top];
+                let () = msg_send![c_top, setActive: YES];
             } else {
                 let () = msg_send![parent_view, addSubview: child_view];
             }
@@ -827,6 +1239,8 @@ pub fn widget_remove_child(parent_id: u64, child_id: u64) {
         unsafe {
             if parent_tag == "vstack" || parent_tag == "hstack" {
                 let () = msg_send![parent_view, removeArrangedSubview: child_view];
+            } else if parent_tag == "scroll" || parent_tag == "scrollview" {
+                let () = msg_send![parent_view, setDocumentView: ptr::null_mut::<Object>()];
             }
             let () = msg_send![child_view, removeFromSuperview];
         }

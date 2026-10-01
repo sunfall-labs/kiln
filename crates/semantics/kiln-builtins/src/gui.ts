@@ -62,6 +62,7 @@ export interface PlatformDriver {
   reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
   disposeWidget(node: Node): void;
   pumpEvents(waitMs?: number): boolean;
+  snapshotWindow?(win: Window, path: string): boolean;
 }
 
 function toCStr(ffi: any, str: string): bigint {
@@ -567,6 +568,7 @@ export class AppKitDriver implements PlatformDriver {
         kiln_gui_appkit_window_close: { arguments: ["u64"], return: "i32" },
         kiln_gui_appkit_window_set_title: { arguments: ["u64", "pointer"], return: "i32" },
         kiln_gui_appkit_window_set_content: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_window_snapshot: { arguments: ["u64", "pointer"], return: "i32" },
         kiln_gui_appkit_widget_create: { arguments: ["u64", "pointer", "pointer"], return: "i32" },
         kiln_gui_appkit_widget_set_property: { arguments: ["u64", "pointer", "pointer", "f64"], return: "i32" },
         kiln_gui_appkit_widget_add_child: { arguments: ["u64", "u64"], return: "i32" },
@@ -653,20 +655,41 @@ export class AppKitDriver implements PlatformDriver {
     }
   }
 
+  snapshotWindow(win: Window, path: string): boolean {
+    if (!this.appkit) return false;
+    const handle = this.handles.get(win.id);
+    if (!handle) return false;
+    try {
+      if (this.appkit.functions.kiln_gui_appkit_window_snapshot) {
+        return this.appkit.functions.kiln_gui_appkit_window_snapshot(handle, toCStr(this.ffi, path)) === 0;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   createWidget(node: Node): bigint | null {
     if (!this.appkit) return null;
     let handle = this.handles.get(node.id);
     if (handle) return handle;
 
     try {
-      let text = "";
+      let text = (node as any).text || "";
       if (node.tag === "button") {
-        text = String(node.getProperty("label") || "");
+        text = String(node.getProperty("label") || text);
       } else if (node.tag === "text") {
-        text = String(node.getProperty("text") || "");
+        text = String(node.getProperty("text") || text);
       } else if (node.tag === "textinput") {
-        text = String(node.getProperty("value") || "");
+        text = String(node.getProperty("value") || text);
+      } else if (node.tag === "segmented") {
+        text = String(node.getProperty("items") || text);
+      } else if (node.tag === "select" || node.tag === "dropdown") {
+        text = String(node.getProperty("options") || text);
+      } else if (node.tag === "checkbox") {
+        text = String(node.getProperty("label") || text);
+      } else if (node.tag === "icon" || node.tag === "image") {
+        text = String(node.getProperty("name") || node.getProperty("symbol") || text);
       }
+
       const res = this.appkit.functions.kiln_gui_appkit_widget_create(
         BigInt(node.id),
         toCStr(this.ffi, node.tag),
@@ -684,7 +707,7 @@ export class AppKitDriver implements PlatformDriver {
           if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
           const max = node.getProperty("max");
           if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
-        } else if (node.tag === "toggle") {
+        } else if (node.tag === "toggle" || node.tag === "checkbox") {
           const chk = node.getProperty("checked");
           if (chk !== undefined) this.updateProperty(handle, node.tag, "checked", chk);
         } else if (node.tag === "text") {
@@ -697,23 +720,47 @@ export class AppKitDriver implements PlatformDriver {
         } else if (node.tag === "button") {
           const variant = node.getProperty("variant");
           if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
+          const icon = node.getProperty("icon");
+          if (icon !== undefined) this.updateProperty(handle, node.tag, "icon", icon);
         } else if (node.tag === "textinput") {
           const placeholder = node.getProperty("placeholder");
           if (placeholder !== undefined) this.updateProperty(handle, node.tag, "placeholder", placeholder);
-        } else if (node.tag === "vstack" || node.tag === "hstack") {
+        } else if (node.tag === "segmented") {
+          const items = node.getProperty("items");
+          if (items !== undefined) this.updateProperty(handle, node.tag, "items", items);
+          const idx = node.getProperty("selectedIndex");
+          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
+        } else if (node.tag === "select" || node.tag === "dropdown") {
+          const opts = node.getProperty("options");
+          if (opts !== undefined) this.updateProperty(handle, node.tag, "options", opts);
+          const idx = node.getProperty("selectedIndex");
+          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
+        } else if (node.tag === "progressbar" || node.tag === "progress") {
+          const val = node.getProperty("value");
+          if (val !== undefined) this.updateProperty(handle, node.tag, "value", val);
+          const max = node.getProperty("max");
+          if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
+          const min = node.getProperty("min");
+          if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
+          const ind = node.getProperty("indeterminate");
+          if (ind !== undefined) this.updateProperty(handle, node.tag, "indeterminate", ind);
+        }
+
+        const isContainer =
+          node.tag === "vstack" ||
+          node.tag === "hstack" ||
+          node.tag === "card" ||
+          node.tag === "box" ||
+          node.tag === "scroll" ||
+          node.tag === "scrollview";
+
+        if (isContainer) {
           const spacing = node.getProperty("spacing");
           if (spacing !== undefined) this.updateProperty(handle, node.tag, "spacing", spacing);
           const alignment = node.getProperty("alignment");
           if (alignment !== undefined) this.updateProperty(handle, node.tag, "alignment", alignment);
           const padding = node.getProperty("padding");
           if (padding !== undefined) this.updateProperty(handle, node.tag, "padding", padding);
-          for (let i = 0; i < node.children.length; i++) {
-            const childHandle = this.createWidget(node.children[i]);
-            if (childHandle) {
-              this.appkit.functions.kiln_gui_appkit_widget_add_child(handle, childHandle);
-            }
-          }
-        } else if (node.tag === "card") {
           for (let i = 0; i < node.children.length; i++) {
             const childHandle = this.createWidget(node.children[i]);
             if (childHandle) {
@@ -739,7 +786,7 @@ export class AppKitDriver implements PlatformDriver {
         this.appkit.functions.kiln_gui_appkit_window_set_title(handle, toCStr(this.ffi, String(value)));
       } else {
         const valStr = typeof value === "string" ? value : String(value ?? "");
-        const valNum = typeof value === "number" ? value : 0;
+        const valNum = typeof value === "number" ? value : (typeof value === "boolean" ? (value ? 1 : 0) : 0);
         this.appkit.functions.kiln_gui_appkit_widget_set_property(
           handle,
           toCStr(this.ffi, name),
@@ -918,6 +965,300 @@ export function getActiveDriver(): PlatformDriver {
   return activeDriver;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Fine-grained Reactive System (SolidJS 2.0 Async-First Core)
+// ─────────────────────────────────────────────────────────────
+
+interface Computation {
+  id: number;
+  fn: () => any;
+  apply?: (val: any) => void | (() => void);
+  cleanups: (() => void)[];
+  sources: Set<Signal<any> | Memo<any>>;
+  stale: boolean;
+  pending: boolean;
+  epoch: number;
+  disposed: boolean;
+}
+
+let nextCompId = 1;
+let currentListener: Computation | null = null;
+let batchDepth = 0;
+let isFlushPending = false;
+const pendingComputations: Set<Computation> = new Set();
+
+export function untrack<T>(fn: () => T): T {
+  const prev = currentListener;
+  currentListener = null;
+  try {
+    return fn();
+  } finally {
+    currentListener = prev;
+  }
+}
+
+function scheduleFlush(): void {
+  if (batchDepth > 0) return;
+  if (!isFlushPending) {
+    isFlushPending = true;
+    if (typeof queueMicrotask === "function") {
+      queueMicrotask(flush);
+    } else {
+      Promise.resolve().then(flush);
+    }
+  }
+}
+
+export function flush(): void {
+  isFlushPending = false;
+  while (pendingComputations.size > 0) {
+    const list = Array.from(pendingComputations);
+    pendingComputations.clear();
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      if (c.stale && !c.disposed) {
+        runComputation(c);
+      }
+    }
+  }
+}
+
+class Signal<T> {
+  value: T;
+  subscribers: Set<Computation> = new Set();
+
+  constructor(value: T) {
+    this.value = value;
+  }
+
+  read(): T {
+    if (currentListener && !currentListener.disposed) {
+      this.subscribers.add(currentListener);
+      currentListener.sources.add(this);
+    }
+    return this.value;
+  }
+
+  write(next: T | ((prev: T) => T)): void {
+    const val = typeof next === "function" ? (next as any)(this.value) : next;
+    if (val !== this.value) {
+      this.value = val;
+      const subs = Array.from(this.subscribers);
+      for (let i = 0; i < subs.length; i++) {
+        subs[i].stale = true;
+        pendingComputations.add(subs[i]);
+      }
+      scheduleFlush();
+    }
+  }
+}
+
+class Memo<T> {
+  computation: Computation;
+  value: T;
+  subscribers: Set<Computation> = new Set();
+
+  constructor(fn: () => T | Promise<T>) {
+    this.value = undefined as any;
+    this.computation = {
+      id: nextCompId++,
+      fn,
+      cleanups: [],
+      sources: new Set(),
+      stale: true,
+      pending: false,
+      epoch: 0,
+      disposed: false,
+    };
+    runComputation(this.computation, (res) => {
+      this.value = res;
+    });
+  }
+
+  read(): T {
+    if (currentListener && !currentListener.disposed) {
+      this.subscribers.add(currentListener);
+      currentListener.sources.add(this);
+    }
+    if (this.computation.stale) {
+      runComputation(this.computation, (res) => {
+        this.value = res;
+      });
+    }
+    return this.value;
+  }
+
+  notifySubscribers(): void {
+    const subs = Array.from(this.subscribers);
+    for (let i = 0; i < subs.length; i++) {
+      subs[i].stale = true;
+      pendingComputations.add(subs[i]);
+    }
+    scheduleFlush();
+  }
+}
+
+function runComputation(c: Computation, onResult?: (val: any) => void): void {
+  if (c.disposed) return;
+
+  for (let i = 0; i < c.cleanups.length; i++) {
+    c.cleanups[i]();
+  }
+  c.cleanups = [];
+
+  const srcs = Array.from(c.sources);
+  for (let i = 0; i < srcs.length; i++) {
+    srcs[i].subscribers.delete(c);
+  }
+  c.sources.clear();
+  c.stale = false;
+
+  const currentEpoch = ++c.epoch;
+  const prev = currentListener;
+  currentListener = c;
+  let raw: any;
+  try {
+    raw = c.fn();
+  } finally {
+    currentListener = prev;
+  }
+
+  // Handle Promise (Solid 2.0 First-Class Async)
+  if (raw && typeof raw.then === "function") {
+    c.pending = true;
+    raw.then(
+      (resolved: any) => {
+        if (c.disposed || c.epoch !== currentEpoch) return;
+        c.pending = false;
+        if (c.apply) {
+          const cleanup = c.apply(resolved);
+          if (typeof cleanup === "function") c.cleanups.push(cleanup);
+        } else if (typeof resolved === "function") {
+          c.cleanups.push(resolved);
+        }
+        if (onResult) onResult(resolved);
+      },
+      (err: any) => {
+        if (c.disposed || c.epoch !== currentEpoch) return;
+        c.pending = false;
+        console.error("Async computation rejected:", err);
+      }
+    );
+  } else {
+    c.pending = false;
+    if (c.apply) {
+      const cleanup = c.apply(raw);
+      if (typeof cleanup === "function") c.cleanups.push(cleanup);
+    } else if (typeof raw === "function") {
+      c.cleanups.push(raw);
+    }
+    if (onResult) onResult(raw);
+  }
+}
+
+export function createSignal<T>(initialValue: T): [() => T, (value: T | ((prev: T) => T)) => void] {
+  const s = new Signal(initialValue);
+  return [() => s.read(), (v) => s.write(v)];
+}
+
+export function createMemo<T>(fn: () => T | Promise<T>): () => T {
+  const m = new Memo<T>(fn);
+  m.computation.apply = (val) => {
+    m.value = val;
+    m.notifySubscribers();
+  };
+  return () => m.read();
+}
+
+export function isPending(accessor: () => any): boolean {
+  let pending = false;
+  const prev = currentListener;
+  const tempComp: Computation = {
+    id: nextCompId++,
+    fn: accessor,
+    cleanups: [],
+    sources: new Set(),
+    stale: false,
+    pending: false,
+    epoch: 0,
+    disposed: false,
+  };
+  currentListener = tempComp;
+  try {
+    accessor();
+    for (const src of tempComp.sources) {
+      if (src instanceof Memo && src.computation.pending) {
+        pending = true;
+        break;
+      }
+    }
+  } finally {
+    currentListener = prev;
+    const srcs = Array.from(tempComp.sources);
+    for (let i = 0; i < srcs.length; i++) {
+      srcs[i].subscribers.delete(tempComp);
+    }
+  }
+  return pending;
+}
+
+export function latest<T>(accessor: () => T): T {
+  flush();
+  return accessor();
+}
+
+export function createEffect<T>(
+  depsOrFn: () => T | Promise<T>,
+  apply?: (value: T) => void | (() => void)
+): () => void {
+  const isSplit = typeof apply === "function";
+  const c: Computation = {
+    id: nextCompId++,
+    fn: depsOrFn,
+    apply: isSplit ? apply : undefined,
+    cleanups: [],
+    sources: new Set(),
+    stale: false,
+    pending: false,
+    epoch: 0,
+    disposed: false,
+  };
+
+  runComputation(c);
+
+  return () => {
+    c.disposed = true;
+    for (let i = 0; i < c.cleanups.length; i++) {
+      c.cleanups[i]();
+    }
+    c.cleanups = [];
+    const srcs = Array.from(c.sources);
+    for (let i = 0; i < srcs.length; i++) {
+      srcs[i].subscribers.delete(c);
+    }
+    c.sources.clear();
+    pendingComputations.delete(c);
+  };
+}
+
+export function batch<T>(fn: () => T): T {
+  batchDepth++;
+  try {
+    return fn();
+  } finally {
+    batchDepth--;
+    if (batchDepth === 0) {
+      flush();
+    }
+  }
+}
+
+export function onCleanup(fn: () => void): void {
+  if (currentListener) {
+    currentListener.cleanups.push(fn);
+  }
+}
+
 export class Node {
   readonly id: number;
   readonly tag: string;
@@ -925,6 +1266,7 @@ export class Node {
   children: Node[] = [];
   properties: Record<string, any> = {};
   private listeners: Record<string, Function[]> = {};
+  private propertyCleanups: Map<string, () => void> = new Map();
 
   constructor(tag: string) {
     this.id = nextNodeId++;
@@ -933,6 +1275,10 @@ export class Node {
   }
 
   dispose(): void {
+    for (const cleanup of this.propertyCleanups.values()) {
+      cleanup();
+    }
+    this.propertyCleanups.clear();
     nodeRegistry.delete(this.id);
     const driver = getActiveDriver();
     if (driver) {
@@ -1034,7 +1380,12 @@ export class Node {
   }
 
   setProperty(name: string, value: any): void {
-    this.properties[name] = value;
+    const existingCleanup = this.propertyCleanups.get(name);
+    if (existingCleanup) {
+      existingCleanup();
+      this.propertyCleanups.delete(name);
+    }
+
     if (name.startsWith("on") && typeof value === "function") {
       let eventName = name.slice(2).toLowerCase();
       if (eventName === "press") eventName = "click";
@@ -1042,7 +1393,25 @@ export class Node {
       if (eventName === "change") {
         this.addEventListener("input", value);
       }
+      return;
     }
+
+    // Solid 2.0: If value is a reactive signal or accessor function, bind reactively
+    if (typeof value === "function") {
+      const stop = createEffect(value, (resolvedVal: any) => {
+        this.applyRawProperty(name, resolvedVal);
+      });
+      if (stop) {
+        this.propertyCleanups.set(name, stop);
+      }
+      return;
+    }
+
+    this.applyRawProperty(name, value);
+  }
+
+  private applyRawProperty(name: string, value: any): void {
+    this.properties[name] = value;
     const driver = getActiveDriver();
     const handle = driver.getHandle(this.id);
     if (handle) {
@@ -1067,6 +1436,10 @@ export class Node {
     }
   }
 
+  on(event: string, handler: Function): void {
+    this.addEventListener(event, handler);
+  }
+
   removeEventListener(event: string, handler: Function): void {
     const list = this.listeners[event];
     if (list) {
@@ -1075,6 +1448,10 @@ export class Node {
         list.splice(index, 1);
       }
     }
+  }
+
+  off(event: string, handler: Function): void {
+    this.removeEventListener(event, handler);
   }
 
   dispatchEvent(event: string, ...args: any[]): void {
@@ -1170,6 +1547,14 @@ export class Window extends Node {
     if (typeof G.__kilnGuiCloseWindow === "function") {
       G.__kilnGuiCloseWindow(this.id);
     }
+  }
+
+  snapshot(path: string): boolean {
+    const driver = getActiveDriver();
+    if (typeof (driver as any).snapshotWindow === "function") {
+      return (driver as any).snapshotWindow(this, path);
+    }
+    return false;
   }
 
   maximize(): void {
@@ -1317,9 +1702,9 @@ export class Divider extends Node {
 }
 
 export class Text extends Node {
-  constructor(textOrOptions?: string | { text?: string; variant?: string; color?: string; size?: number; bold?: boolean; width?: number; height?: number }) {
+  constructor(textOrOptions?: string | (() => string | Promise<string>) | { text?: string | (() => string | Promise<string>); variant?: string; color?: string | (() => string); size?: number; bold?: boolean; width?: number; height?: number }) {
     super("text");
-    if (typeof textOrOptions === "string") {
+    if (typeof textOrOptions === "string" || typeof textOrOptions === "function") {
       this.text = textOrOptions;
     } else if (textOrOptions) {
       if (textOrOptions.text !== undefined) this.text = textOrOptions.text;
@@ -1335,15 +1720,15 @@ export class Text extends Node {
   get text(): string {
     return this.properties.text || "";
   }
-  set text(val: string) {
+  set text(val: string | (() => string | Promise<string>)) {
     this.setProperty("text", val);
   }
 }
 
 export class Button extends Node {
-  constructor(labelOrOptions?: string | (ButtonOptions & { width?: number; height?: number })) {
+  constructor(labelOrOptions?: string | (() => string) | (ButtonOptions & { width?: number; height?: number; icon?: string; disabled?: boolean | (() => boolean) })) {
     super("button");
-    if (typeof labelOrOptions === "string") {
+    if (typeof labelOrOptions === "string" || typeof labelOrOptions === "function") {
       this.label = labelOrOptions;
     } else if (labelOrOptions) {
       if (labelOrOptions.label !== undefined) this.label = labelOrOptions.label;
@@ -1351,6 +1736,7 @@ export class Button extends Node {
       if (labelOrOptions.size !== undefined) this.size = labelOrOptions.size;
       if (labelOrOptions.disabled !== undefined) this.disabled = labelOrOptions.disabled;
       if (labelOrOptions.platform !== undefined) this.platform = labelOrOptions.platform;
+      if ((labelOrOptions as any).icon !== undefined) this.setProperty("icon", (labelOrOptions as any).icon);
       if ((labelOrOptions as any).width !== undefined) this.setProperty("width", (labelOrOptions as any).width);
       if ((labelOrOptions as any).height !== undefined) this.setProperty("height", (labelOrOptions as any).height);
       if (labelOrOptions.onPress) this.onPress = labelOrOptions.onPress;
@@ -1360,7 +1746,7 @@ export class Button extends Node {
   get label(): string {
     return this.properties.label || "";
   }
-  set label(val: string) {
+  set label(val: string | (() => string)) {
     this.setProperty("label", val);
   }
 
@@ -1435,7 +1821,7 @@ export class TextInput extends Node {
 }
 
 export class Slider extends Node {
-  constructor(options?: { min?: number; max?: number; value?: number; width?: number; height?: number; onChange?: (val: number) => void; onInput?: (val: number) => void }) {
+  constructor(options?: { min?: number | (() => number); max?: number | (() => number); value?: number | (() => number); width?: number; height?: number; onChange?: (val: number) => void; onInput?: (val: number) => void }) {
     super("slider");
     if (options) {
       if (options.min !== undefined) this.setProperty("min", options.min);
@@ -1451,27 +1837,27 @@ export class Slider extends Node {
   get value(): number {
     return this.properties.value !== undefined ? this.properties.value : 0;
   }
-  set value(val: number) {
+  set value(val: number | (() => number)) {
     this.setProperty("value", val);
   }
 
   get min(): number {
     return this.properties.min !== undefined ? this.properties.min : 0;
   }
-  set min(val: number) {
+  set min(val: number | (() => number)) {
     this.setProperty("min", val);
   }
 
   get max(): number {
     return this.properties.max !== undefined ? this.properties.max : 100;
   }
-  set max(val: number) {
+  set max(val: number | (() => number)) {
     this.setProperty("max", val);
   }
 }
 
 export class Toggle extends Node {
-  constructor(options?: { checked?: boolean; width?: number; height?: number; onToggle?: (checked: boolean) => void }) {
+  constructor(options?: { checked?: boolean | (() => boolean); width?: number; height?: number; onToggle?: (checked: boolean) => void }) {
     super("toggle");
     if (options) {
       if (options.checked !== undefined) this.checked = options.checked;
@@ -1482,12 +1868,240 @@ export class Toggle extends Node {
   }
 
   get checked(): boolean {
-    return !!this.properties.checked;
+    return this.properties.checked === true || this.properties.checked === "true" || this.properties.checked === 1;
   }
-  set checked(val: boolean) {
-    this.setProperty("checked", val);
+  set checked(val: boolean | (() => boolean)) {
+    this.setProperty("checked", typeof val === "function" ? val : Boolean(val));
   }
 }
+
+export class Spacer extends Node {
+  constructor(options?: { minWidth?: number; minHeight?: number }) {
+    super("spacer");
+    if (options) {
+      if (options.minWidth !== undefined) this.setProperty("width", options.minWidth);
+      if (options.minHeight !== undefined) this.setProperty("height", options.minHeight);
+    }
+  }
+}
+
+export class ScrollView extends Node {
+  constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
+    super("scroll");
+    if (options) {
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+      if (options.child) {
+        this.appendChild(options.child);
+      } else if (options.children) {
+        const inner = new VStack({ spacing: 12, children: options.children });
+        this.appendChild(inner);
+      }
+    }
+  }
+}
+
+export class SegmentedControl extends Node {
+  constructor(options?: { items: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, label: string) => void }) {
+    super("segmented");
+    if (options) {
+      if (options.items) {
+        this.text = JSON.stringify(options.items);
+        this.setProperty("items", JSON.stringify(options.items));
+      }
+      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.onChange) {
+        this.on("change", (e: any) => {
+          const raw = typeof e === "string" ? e : (e?.value ?? "0");
+          const idx = parseInt(raw, 10);
+          const label = options.items[idx] ?? "";
+          options.onChange!(idx, label);
+        });
+      }
+    }
+  }
+
+  get selectedIndex(): number {
+    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
+  }
+  set selectedIndex(val: number) {
+    this.setProperty("selectedIndex", val);
+  }
+}
+
+export class ProgressBar extends Node {
+  constructor(options?: { value?: number | (() => number); max?: number | (() => number); min?: number | (() => number); indeterminate?: boolean | (() => boolean); width?: number; height?: number }) {
+    super("progressbar");
+    if (options) {
+      if (options.value !== undefined) this.value = options.value;
+      if (options.max !== undefined) this.max = options.max;
+      if (options.min !== undefined) this.setProperty("min", options.min);
+      if (options.indeterminate !== undefined) this.setProperty("indeterminate", options.indeterminate);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+    }
+  }
+
+  get value(): number {
+    return this.properties.value !== undefined ? this.properties.value : 0;
+  }
+  set value(val: number | (() => number)) {
+    this.setProperty("value", val);
+  }
+
+  setValue(val: number | (() => number)): void {
+    this.value = val;
+  }
+
+  get max(): number {
+    return this.properties.max !== undefined ? this.properties.max : 100;
+  }
+  set max(val: number | (() => number)) {
+    this.setProperty("max", val);
+  }
+}
+
+export class Select extends Node {
+  constructor(options?: { options: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, value: string) => void }) {
+    super("select");
+    if (options) {
+      if (options.options) {
+        this.text = JSON.stringify(options.options);
+        this.setProperty("options", JSON.stringify(options.options));
+      }
+      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.onChange) {
+        this.on("change", (e: any) => {
+          const raw = typeof e === "string" ? e : (e?.value ?? "0:");
+          const colon = raw.indexOf(":");
+          let idx = 0;
+          let val = raw;
+          if (colon !== -1) {
+            idx = parseInt(raw.slice(0, colon), 10);
+            val = raw.slice(colon + 1);
+          }
+          options.onChange!(idx, val);
+        });
+      }
+    }
+  }
+
+  get selectedIndex(): number {
+    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
+  }
+  set selectedIndex(val: number) {
+    this.setProperty("selectedIndex", val);
+  }
+}
+
+export class Checkbox extends Node {
+  constructor(labelOrOptions?: string | (() => string) | { label?: string | (() => string); checked?: boolean | (() => boolean); width?: number; onToggle?: (checked: boolean) => void }) {
+    super("checkbox");
+    if (typeof labelOrOptions === "string" || typeof labelOrOptions === "function") {
+      this.text = labelOrOptions;
+    } else if (labelOrOptions) {
+      if (labelOrOptions.label !== undefined) this.text = labelOrOptions.label;
+      if (labelOrOptions.checked !== undefined) this.checked = labelOrOptions.checked;
+      if (labelOrOptions.width !== undefined) this.setProperty("width", labelOrOptions.width);
+      if (labelOrOptions.onToggle) {
+        this.on("toggle", (e: any) => {
+          const checked = typeof e === "boolean" ? e : (typeof e === "string" ? e === "true" : Boolean(e?.checked ?? e?.value === "true"));
+          labelOrOptions.onToggle!(checked);
+        });
+      }
+    }
+  }
+
+  get checked(): boolean {
+    const val = this.properties.checked;
+    return val === true || val === "true" || val === 1;
+  }
+  set checked(val: boolean | (() => boolean)) {
+    this.setProperty("checked", typeof val === "function" ? val : Boolean(val));
+  }
+}
+
+export class Icon extends Node {
+  constructor(nameOrOptions?: string | { name?: string; symbol?: string; width?: number; height?: number }) {
+    super("icon");
+    if (typeof nameOrOptions === "string") {
+      this.text = nameOrOptions;
+    } else if (nameOrOptions) {
+      const name = nameOrOptions.name || nameOrOptions.symbol || "";
+      if (name) this.text = name;
+      if (nameOrOptions.width !== undefined) this.setProperty("width", nameOrOptions.width);
+      if (nameOrOptions.height !== undefined) this.setProperty("height", nameOrOptions.height);
+    }
+  }
+}
+
+export const widgetConstructors: Record<string, new (...args: any[]) => Node> = {
+  window: Window,
+  vstack: VStack,
+  hstack: HStack,
+  card: Card,
+  box: Card,
+  divider: Divider,
+  separator: Divider,
+  button: Button,
+  text: Text,
+  textinput: TextInput,
+  slider: Slider,
+  toggle: Toggle,
+  spacer: Spacer,
+  scroll: ScrollView,
+  scrollview: ScrollView,
+  segmented: SegmentedControl,
+  progressbar: ProgressBar,
+  progress: ProgressBar,
+  select: Select,
+  dropdown: Select,
+  checkbox: Checkbox,
+  icon: Icon,
+  image: Icon,
+};
+
+// Canonical 10-method host operation contract for SolidJS official 'solid-js/universal' createRenderer
+export const universalDriver = {
+  createElement: (tag: string): Node => {
+    const lower = tag.toLowerCase();
+    const Ctor = widgetConstructors[lower] || Node;
+    return new Ctor(lower);
+  },
+  createTextNode: (value: string): Node => {
+    return new Text(value);
+  },
+  isTextNode: (node: Node): boolean => {
+    return node instanceof Text;
+  },
+  replaceText: (node: Node, value: string): void => {
+    if (node instanceof Text) {
+      node.text = value;
+    } else {
+      node.setProperty("text", value);
+    }
+  },
+  insertNode: (parent: Node, node: Node, anchor?: Node | null): void => {
+    parent.insertBefore(node, anchor || null);
+  },
+  removeNode: (parent: Node, node: Node): void => {
+    parent.removeChild(node);
+  },
+  setProperty: (node: Node, name: string, value: any): void => {
+    node.setProperty(name, value);
+  },
+  getParentNode: (node: Node): Node | null => {
+    return node.parent;
+  },
+  getFirstChild: (node: Node): Node | null => {
+    return node.firstChild;
+  },
+  getNextSibling: (node: Node): Node | null => {
+    return node.nextSibling;
+  },
+};
 
 // Universal Renderer implementation for SolidJS 2.0 (@solidjs/universal interface)
 export function createRenderer<T extends Node = Node>(config?: any): {
@@ -1503,58 +2117,9 @@ export function createRenderer<T extends Node = Node>(config?: any): {
   getFirstChild: (node: T) => T | null;
   getNextSibling: (node: T) => T | null;
 } {
-  const widgetConstructors: Record<string, new (...args: any[]) => Node> = {
-    window: Window,
-    vstack: VStack,
-    hstack: HStack,
-    card: Card,
-    box: Card,
-    divider: Divider,
-    separator: Divider,
-    button: Button,
-    text: Text,
-    textinput: TextInput,
-    slider: Slider,
-    toggle: Toggle,
-  };
-
-  const renderer = {
-    createElement: (tag: string): T => {
-      const lower = tag.toLowerCase();
-      const Ctor = widgetConstructors[lower] || Node;
-      return new Ctor(lower) as T;
-    },
-    createTextNode: (value: string): T => {
-      return new Text(value) as unknown as T;
-    },
-    isTextNode: (node: T): boolean => {
-      return node instanceof Text;
-    },
-    replaceText: (node: T, value: string): void => {
-      if (node instanceof Text) {
-        node.text = value;
-      } else {
-        node.setProperty("text", value);
-      }
-    },
-    insertNode: (parent: T, node: T, anchor?: T | null): void => {
-      parent.insertBefore(node, anchor || null);
-    },
-    removeNode: (parent: T, node: T): void => {
-      parent.removeChild(node);
-    },
-    setProperty: (node: T, name: string, value: any): void => {
-      node.setProperty(name, value);
-    },
-    getParentNode: (node: T): T | null => {
-      return node.parent as T | null;
-    },
-    getFirstChild: (node: T): T | null => {
-      return node.firstChild as T | null;
-    },
-    getNextSibling: (node: T): T | null => {
-      return node.nextSibling as T | null;
-    },
+  const driver = config || universalDriver;
+  return {
+    ...driver,
     render: (code: () => T, container: T): (() => void) => {
       const root = code();
       container.appendChild(root);
@@ -1563,8 +2128,6 @@ export function createRenderer<T extends Node = Node>(config?: any): {
       };
     },
   };
-
-  return renderer;
 }
 
 const defaultRenderer = createRenderer();
@@ -2321,6 +2884,7 @@ export const turnMailbox = {
           target.dispatchEvent(item.event, ...item.args);
         }
       }
+      flush();
     } finally {
       isExecutingTurn = false;
     }
@@ -2330,135 +2894,6 @@ export const turnMailbox = {
   },
 };
 
-// Fine-grained Reactive System (SolidJS 2.0 primitives)
-interface Computation {
-  fn: () => void | (() => void);
-  cleanups: (() => void)[];
-  sources: Set<Signal<any>>;
-  stale: boolean;
-}
-
-let currentListener: Computation | null = null;
-let batchDepth = 0;
-const pendingComputations: Set<Computation> = new Set();
-
-class Signal<T> {
-  value: T;
-  subscribers: Set<Computation> = new Set();
-
-  constructor(value: T) {
-    this.value = value;
-  }
-
-  read(): T {
-    if (currentListener) {
-      this.subscribers.add(currentListener);
-      currentListener.sources.add(this);
-    }
-    return this.value;
-  }
-
-  write(next: T | ((prev: T) => T)): void {
-    const val = typeof next === "function" ? (next as any)(this.value) : next;
-    if (val !== this.value) {
-      this.value = val;
-      const subs = Array.from(this.subscribers);
-      for (let i = 0; i < subs.length; i++) {
-        const sub = subs[i];
-        sub.stale = true;
-        if (batchDepth > 0) {
-          pendingComputations.add(sub);
-        } else {
-          runComputation(sub);
-        }
-      }
-    }
-  }
-}
-
-function runComputation(c: Computation): void {
-  for (let i = 0; i < c.cleanups.length; i++) {
-    c.cleanups[i]();
-  }
-  c.cleanups = [];
-
-  const srcs = Array.from(c.sources);
-  for (let i = 0; i < srcs.length; i++) {
-    srcs[i].subscribers.delete(c);
-  }
-  c.sources.clear();
-  c.stale = false;
-
-  const prevListener = currentListener;
-  currentListener = c;
-  try {
-    const cleanup = c.fn();
-    if (typeof cleanup === "function") {
-      c.cleanups.push(cleanup);
-    }
-  } finally {
-    currentListener = prevListener;
-  }
-}
-
-export function createSignal<T>(initialValue: T): [() => T, (value: T | ((prev: T) => T)) => void] {
-  const s = new Signal(initialValue);
-  return [() => s.read(), (v) => s.write(v)];
-}
-
-export function createEffect(fn: () => void | (() => void)): void {
-  const c: Computation = {
-    fn,
-    cleanups: [],
-    sources: new Set(),
-    stale: false,
-  };
-  runComputation(c);
-}
-
-export function createMemo<T>(fn: () => T): () => T {
-  const [get, set] = createSignal<T>(undefined as any);
-  createEffect(() => {
-    set(fn());
-  });
-  return get;
-}
-
-export function batch<T>(fn: () => T): T {
-  batchDepth++;
-  try {
-    return fn();
-  } finally {
-    batchDepth--;
-    if (batchDepth === 0) {
-      const pending = Array.from(pendingComputations);
-      pendingComputations.clear();
-      for (let i = 0; i < pending.length; i++) {
-        const c = pending[i];
-        if (c.stale) {
-          runComputation(c);
-        }
-      }
-    }
-  }
-}
-
-export function untrack<T>(fn: () => T): T {
-  const prev = currentListener;
-  currentListener = null;
-  try {
-    return fn();
-  } finally {
-    currentListener = prev;
-  }
-}
-
-export function onCleanup(fn: () => void): void {
-  if (currentListener) {
-    currentListener.cleanups.push(fn);
-  }
-}
-
 export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
   return new Promise((resolve) => {
     let currentInterval = intervalMs;
@@ -2467,6 +2902,7 @@ export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
     const tick = () => {
       const waitMs = currentInterval > intervalMs ? 20 : 0;
       const hadEvents = turnMailbox.pumpEvents(waitMs);
+      flush();
       if (win && !win.visible) {
         if (timerId !== null) clearInterval(timerId);
         resolve();
@@ -2495,6 +2931,13 @@ export default {
   HStack,
   Card,
   Divider,
+  Spacer,
+  ScrollView,
+  SegmentedControl,
+  ProgressBar,
+  Select,
+  Checkbox,
+  Icon,
   Text,
   Button,
   TextInput,
@@ -2524,7 +2967,11 @@ export default {
   batch,
   untrack,
   onCleanup,
+  isPending,
+  flush,
+  latest,
   runLoop,
   getActiveDriver,
+  universalDriver,
 };
 

@@ -66,11 +66,17 @@ win.show();
 
 * `kiln:gui` is an extension module subject to ADR 0068: it is guarded by `KILN_EXTENSIONS` and
   absent when `--no-kiln-extensions` is specified.
-* High-level declarative frameworks sit entirely in userland or secondary packages. Specifically,
-  the primary declarative bridge is `@kiln/solid-gui`, built on SolidJS 2.0's `@solidjs/universal`
-  (`createRenderer`). Because Solid 2.0 executes components only once and binds fine-grained reactive
-  signals directly to native node properties, it operates with zero Virtual DOM overhead, zero tree diffing,
-  and negligible GC allocation pressure during user interactions.
+* High-level declarative frameworks sit entirely in userland or standard npm packages. Rather than
+  inventing a bespoke proprietary UI framework, Kiln directly targets official **`solid-js/universal`**
+  (`createRenderer`). The native built-in `kiln:gui` exports the canonical 10-method universal host
+  driver (`universalDriver`: `createElement`, `createTextNode`, `isTextNode`, `replaceText`, `insertNode`,
+  `removeNode`, `setProperty`, `getParentNode`, `getFirstChild`, `getNextSibling`) as well as pre-wired
+  Solid JSX primitives (`render`, `createElement`, `createSignal`, `createMemo`, `createEffect`).
+  Developers can either point their JSX compiler (`babel-preset-solid` / Oxc / Vite) directly at `kiln:gui`
+  for zero-install native desktop apps, or import `createRenderer` from official `solid-js/universal`
+  with Kiln's host driver (`createRenderer(universalDriver)`). Because Solid executes components only
+  once and binds fine-grained reactive signals directly to native node properties, it operates with zero
+  Virtual DOM overhead, zero tree diffing, and negligible GC allocation pressure during user interactions.
 * Component definitions, layout property names (`padding`, `spacing`, `alignment`), and event
   signatures adopt standardized, cross-platform TypeScript contracts.
 
