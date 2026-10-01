@@ -1038,16 +1038,16 @@ static void kiln_c99_prepared_graph_drop(void *payload) {
     free(arena);
 }
 
-/* Builtin namespaces and callable builtins answer own keys through the same table/store
- * authority used by Object.keys and descriptors. They do not have an ordinary object store to
- * walk directly, so perform CopyDataProperties using a snapshot, a fresh descriptor check and
- * [[Get]] for each still-enumerable key. */
-static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_value source,
-                                   int depth, kiln_value *thrown) {
+/* Arrays and builtin callables/namespaces do not expose one ordinary property store to walk:
+ * arrays combine indexed elements with a named store, while builtins use a table plus an
+ * ordinary store. CopyDataProperties takes their full own-key snapshot first, then checks each
+ * current descriptor and performs [[Get]]. */
+static int kiln_c99_spread_snapshot_keys(kiln_host *host, kiln_value target, kiln_value source,
+                                         int depth, kiln_value *thrown) {
     kiln_value keys;
     size_t index;
     size_t length;
-    int status = kiln_c99_own_keys(host, source, &keys, depth, thrown);
+    int status = kiln_c99_all_own_keys(host, source, &keys, depth, thrown);
     if (status != KILN_C99_OK) return status;
     length = kiln_c99_array_of(keys)->count;
     for (index = 0; index < length; ++index) {
@@ -1059,20 +1059,32 @@ static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_valu
 
         status = kiln_c99_describe_property_value(host, source, key, &descriptor, &found,
                                                   depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
         if (status != KILN_C99_OK) return status;
         if (!found) continue;
         status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
         if (status != KILN_C99_OK) return status;
         if (!kiln_c99_truthy(enumerable)) continue;
 
         /* CopyDataProperties performs Get after its descriptor check. Besides preserving live
          * namespace bindings, this invokes any accessor with the builtin itself as receiver. */
         status = kiln_c99_get_computed(host, source, key, &copied, depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
+        kiln_c99_gc_keep_alive(&keys);
         if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_value source,
+                                   int depth, kiln_value *thrown) {
+    return kiln_c99_spread_snapshot_keys(host, target, source, depth, thrown);
 }
 
 /* The JavaScript handle is only a weak key. It contains no graph pointer, and its collection
@@ -1269,6 +1281,9 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
     if (source.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_spread_builtin(host, target, source, depth, thrown);
     }
+    if (source.tag == KILN_VALUE_ARRAY) {
+        return kiln_c99_spread_snapshot_keys(host, target, source, depth, thrown);
+    }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
      * `{...5}` is `{}`, not an error. A string is the exception and is handled below, because
      * its indices *are* own properties. */
@@ -1276,8 +1291,7 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
         source.tag == KILN_VALUE_SYMBOL || source.tag == KILN_VALUE_BIGINT) {
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_TYPED_ARRAY ||
-        source.tag == KILN_VALUE_STRING) {
+    if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_STRING) {
         /* An indexed value spreads as its own enumerable properties, and those are its indices:
          * `{...[7, 8]}` is `{"0": 7, "1": 8}` and `{..."hi"}` is `{"0": "h", "1": "i"}`.
          *
@@ -1286,10 +1300,7 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
          * elements and `{...[1, , 3]}` has two properties. */
         size_t count = 0;
         size_t at;
-        if (source.tag == KILN_VALUE_ARRAY) {
-            kiln_array *elements = kiln_c99_array_of(source);
-            count = elements->count;
-        } else if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+        if (source.tag == KILN_VALUE_TYPED_ARRAY) {
             count = kiln_c99_typed_array_of(source)->length;
         } else {
             uint16_t *units = NULL;
@@ -1303,10 +1314,6 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
             kiln_value element;
             kiln_value name;
             int status;
-            if (source.tag == KILN_VALUE_ARRAY &&
-                kiln_c99_array_of(source)->elements[at] == KILN_VAL_HOLE) {
-                continue;
-            }
             status = kiln_c99_get_computed(host, source, kiln_c99_number((double)at), &element,
                                            depth, thrown);
             if (status != KILN_C99_OK) {
@@ -1334,9 +1341,6 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
          * `Object.keys` already reported it while the spread beside it dropped it. `length` is
          * not among them, because it is not enumerable. A string and a typed array have no
          * named store to walk, so for those this falls straight through. */
-        if (source.tag == KILN_VALUE_ARRAY) {
-            named = kiln_c99_array_of(source)->properties;
-        }
     } else if (source.tag == KILN_VALUE_OBJECT) {
         named = source;
     } else if (source.tag == KILN_VALUE_FUNCTION || source.tag == KILN_VALUE_METHOD ||
