@@ -3283,6 +3283,7 @@ struct kiln_node_socket {
     kiln_value upgrade_write_callbacks;
     int http_upgrade_pending;
     int http_upgraded;
+    int http_client_owned;
     int connecting;
     int pending_http_attach;
     int pending_read_after_write;

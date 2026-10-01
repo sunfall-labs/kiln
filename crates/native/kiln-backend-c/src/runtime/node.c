@@ -27,6 +27,7 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
                                                       kiln_c99_node_drop_http_connection,
                                                       socket);
         if (status != KILN_C99_OK) return status;
+        socket->http_client_owned = 1;
     }
     status = kiln_c99_node_client_emit_socket(request, thrown);
     return status;
@@ -1109,6 +1110,7 @@ static int kiln_c99_node_client_activate(kiln_node_client_request *request,
                                                   kiln_c99_node_drop_http_connection,
                                                   socket);
     if (status != KILN_C99_OK) return status;
+    socket->http_client_owned = 1;
     socket->pending_http_attach = 0;
     return kiln_c99_node_client_try_start(request);
 }
@@ -1646,6 +1648,13 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
             socket->close_after_write = 1;
             return KILN_C99_OK;
         }
+        return kiln_realm_http_server_close_active(
+            socket->resource,
+            force ? KILN_REALM_HTTP_CLOSE_ABORT : KILN_REALM_HTTP_CLOSE_GRACEFUL);
+    }
+    if (socket->http_client_owned && !socket->http_upgraded) {
+        /* The HTTP client engine owns the transport until its terminal Closed event, even
+         * when the JavaScript Agent has temporarily idled the socket between requests. */
         return kiln_realm_http_server_close_active(
             socket->resource,
             force ? KILN_REALM_HTTP_CLOSE_ABORT : KILN_REALM_HTTP_CLOSE_GRACEFUL);

@@ -1081,6 +1081,9 @@ pub struct RealmState<H> {
     /// Protocol events parked by the queued adapter for a loop that drains them at its
     /// checkpoint, and the signal that wakes that loop.
     queued_http: Rc<QueuedHttp>,
+    /// Accepted HTTP closes remain referenced until their terminal event reaches the adapter.
+    #[cfg(feature = "http")]
+    closing_http_resources: HashSet<ResourceId>,
     lifecycle: RealmRuntimeLifecycle,
 }
 
@@ -1453,6 +1456,8 @@ impl<H: RealmHostProvider> RealmState<H> {
             #[cfg(not(feature = "http"))]
             http_client: (),
             queued_http: Rc::new(QueuedHttp::default()),
+            #[cfg(feature = "http")]
+            closing_http_resources: HashSet::new(),
             lifecycle: RealmRuntimeLifecycle::Open,
         }
     }
@@ -1632,7 +1637,12 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// callback sees that on its next turn. Expects the executor's context.
     #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
-        self.http_server.close(resource, mode) || self.http_client.close(resource, mode)
+        let accepted = self.http_server.close(resource, mode)
+            || self.http_client.close(resource, mode);
+        if accepted {
+            self.closing_http_resources.insert(resource);
+        }
+        accepted
     }
 
     /// Without `http` no engine can own a transport, so there is nothing to stop.
@@ -1893,6 +1903,7 @@ impl<H: RealmHostProvider> RealmState<H> {
     pub fn has_live_http_work(&self) -> bool {
         self.http_server.requests_in_flight() != 0
             || self.http_client.requests_in_flight() != 0
+            || !self.closing_http_resources.is_empty()
             || self.queued_http.has_pending_admissions()
             || self.queued_http.has_events()
     }
@@ -1945,6 +1956,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         if events.contains(&RuntimeHttpEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            self.closing_http_resources.remove(&resource);
         }
         events
     }
@@ -1990,6 +2002,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             }
             if events.contains(&RuntimeHttpEvent::Closed) {
                 let _ = self.host.release_transport(*resource);
+                self.closing_http_resources.remove(resource);
             }
         }
         all
@@ -2073,6 +2086,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         if events.contains(&RuntimeHttpClientEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            self.closing_http_resources.remove(&resource);
         }
         events
     }
