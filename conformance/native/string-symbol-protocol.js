@@ -99,15 +99,18 @@ RegExp.prototype[Symbol.search] = oldSearch;
 const savedApply = Reflect.apply;
 const savedTypeError = globalThis.TypeError;
 const savedIndexOf = String.prototype.indexOf;
+const savedSymbol = globalThis.Symbol;
+const matchKey = savedSymbol.match;
 try {
   Reflect.apply = () => { throw new Error("mutable Reflect.apply was consulted"); };
   globalThis.TypeError = function PatchedTypeError() {};
   String.prototype.indexOf = () => { throw new Error("mutable String#indexOf was consulted"); };
-  const method = { [Symbol.match](value) { return value; } };
-  assert(String.prototype.match.call("subject", method) === "subject",
-    "protocol method invocation does not consult mutable Reflect.apply");
+  globalThis.Symbol = function PatchedSymbol() {};
+  const matchMethod = { [matchKey](value) { return value; } };
+  assert(String.prototype.match.call("subject", matchMethod) === "subject",
+    "protocol invocation and lookup use captured intrinsics");
   let receiverError;
-  try { String.prototype.match.call(null, method); } catch (error) { receiverError = error; }
+  try { String.prototype.match.call(null, matchMethod); } catch (error) { receiverError = error; }
   assert(receiverError instanceof savedTypeError,
     "null receiver failure uses the captured TypeError constructor");
   assert(Array.from(String.prototype.matchAll.call("a", /a/g)).length === 1,
@@ -116,5 +119,6 @@ try {
   Reflect.apply = savedApply;
   globalThis.TypeError = savedTypeError;
   String.prototype.indexOf = savedIndexOf;
+  globalThis.Symbol = savedSymbol;
 }
 console.log("String protocol delegation and raw RegExp fallback pass");

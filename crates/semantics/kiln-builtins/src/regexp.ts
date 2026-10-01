@@ -15,6 +15,12 @@
   };
   delete G.__kilnRawStringProtocols;
   const IntrinsicRegExp = RegExp;
+  const IntrinsicSymbol = Symbol;
+  const matchKey = IntrinsicSymbol.match;
+  const matchAllKey = IntrinsicSymbol.matchAll;
+  const replaceKey = IntrinsicSymbol.replace;
+  const searchKey = IntrinsicSymbol.search;
+  const splitKey = IntrinsicSymbol.split;
   const apply = Reflect.apply;
   const TypeErrorCtor = TypeError;
   const stringIndexOf = String.prototype.indexOf;
@@ -33,18 +39,18 @@
     "use strict";
     requireReceiver(this, "match");
     if (isObject(regexp)) {
-      const matcher = regexp[Symbol.match];
+      const matcher = regexp[matchKey];
       if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
-    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.match, [subject]);
+    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), matchKey, [subject]);
   } }.match;
   const matchAll = { matchAll(this: any, regexp: any): any {
     "use strict";
     requireReceiver(this, "matchAll");
     let isRegExp = false;
     if (isObject(regexp)) {
-      const matcher = regexp[Symbol.match];
+      const matcher = regexp[matchKey];
       isRegExp = matcher === undefined ? regexp instanceof IntrinsicRegExp : !!matcher;
       if (isRegExp) {
         const flags = regexp.flags;
@@ -54,18 +60,18 @@
       }
     }
     if (isObject(regexp)) {
-      const matcher = regexp[Symbol.matchAll];
+      const matcher = regexp[matchAllKey];
       if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
     const created = new IntrinsicRegExp(regexp, "g");
-    return invokeRegExpProtocol(created, Symbol.matchAll, [subject]);
+    return invokeRegExpProtocol(created, matchAllKey, [subject]);
   } }.matchAll;
   const replace = { replace(this: any, searchValue: any, replaceValue: any): any {
     "use strict";
     requireReceiver(this, "replace");
     if (isObject(searchValue)) {
-      const replacer = searchValue[Symbol.replace];
+      const replacer = searchValue[replaceKey];
       if (replacer !== null && replacer !== undefined) return apply(replacer, searchValue, [this, replaceValue]);
     }
     return apply(rawString.replace, this, [searchValue, replaceValue]);
@@ -74,7 +80,7 @@
     "use strict";
     requireReceiver(this, "replaceAll");
     if (isObject(searchValue)) {
-      const matcher = searchValue[Symbol.match];
+      const matcher = searchValue[matchKey];
       const isRegExp = matcher === undefined ? searchValue instanceof IntrinsicRegExp : !!matcher;
       if (isRegExp) {
         const flags = searchValue.flags;
@@ -82,7 +88,7 @@
           throw new TypeErrorCtor("String.prototype.replaceAll must be called with a global RegExp");
         }
       }
-      const replacer = searchValue[Symbol.replace];
+      const replacer = searchValue[replaceKey];
       if (replacer !== null && replacer !== undefined) return apply(replacer, searchValue, [this, replaceValue]);
     }
     return apply(rawString.replaceAll, this, [searchValue, replaceValue]);
@@ -91,17 +97,17 @@
     "use strict";
     requireReceiver(this, "search");
     if (isObject(regexp)) {
-      const matcher = regexp[Symbol.search];
+      const matcher = regexp[searchKey];
       if (matcher !== null && matcher !== undefined) return apply(matcher, regexp, [this]);
     }
     const subject = `${this}`;
-    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), Symbol.search, [subject]);
+    return invokeRegExpProtocol(new IntrinsicRegExp(regexp), searchKey, [subject]);
   } }.search;
   const split = { split(this: any, separator: any, limit: any): any {
     "use strict";
     requireReceiver(this, "split");
     if (isObject(separator)) {
-      const splitter = separator[Symbol.split];
+      const splitter = separator[splitKey];
       if (splitter !== null && splitter !== undefined) return apply(splitter, separator, [this, limit]);
     }
     return apply(rawString.split, this, [separator, limit]);
