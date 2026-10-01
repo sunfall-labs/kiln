@@ -15,6 +15,8 @@ import {
   Window,
   VStack,
   HStack,
+  Box,
+  Grid,
   Card,
   Divider,
   Spacer,
@@ -44,7 +46,7 @@ console.log(`Active Platform Driver: ${getActiveDriver().name}`);
 const win = new Window({
   title: '⚡ Kiln Developer Studio • macOS AppKit',
   width: 660,
-  height: 680,
+  height: 780,
 });
 
 // Fine-grained reactive state
@@ -72,15 +74,53 @@ const tabSwitcher = new SegmentedControl({
   },
 });
 
-const headerTopRow = new HStack({
-  spacing: 12,
-  children: [titleLabel, new Spacer(), tabSwitcher],
+const headerTopRow = new Box({
+  style: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    height: 42,
+  },
+  children: [titleLabel, tabSwitcher],
 });
 
 const subtitleLabel = new Text({
-  text: 'SolidJS 2.0 Reactive Signals • Native macOS Cocoa • Metal CA Layers',
+  text: 'SolidJS 2.0 Reactive Signals • Native macOS Cocoa • Taffy 0.14 Layout',
   variant: 'subheadline',
   color: 'secondary',
+});
+
+// ── Responsive 3-Column Metrics (Taffy 0.14 CSS Grid) ─────────
+const heapMetricCard = new Card({
+  children: [
+    new Text({ text: 'ALLOCATED HEAP', variant: 'caption', color: 'secondary' }),
+    new Text({ text: () => `${workers() * 64} MB`, variant: 'headline', color: 'blue' }),
+  ],
+});
+
+const archMetricCard = new Card({
+  children: [
+    new Text({ text: 'TARGET ARCHITECTURE', variant: 'caption', color: 'secondary' }),
+    new Text({ text: () => targetArch().split('-')[0], variant: 'headline' }),
+  ],
+});
+
+const engineMetricCard = new Card({
+  children: [
+    new Text({ text: 'LAYOUT ENGINE', variant: 'caption', color: 'secondary' }),
+    new Text({ text: 'Taffy 0.14 Grid', variant: 'headline', color: 'green' }),
+  ],
+});
+
+const metricsGrid = new Grid({
+  columns: '1fr 1fr 1fr',
+  gap: 12,
+  style: {
+    width: '100%',
+    height: 76,
+  },
+  children: [heapMetricCard, archMetricCard, engineMetricCard],
 });
 
 // ── Card 1: Worker & Memory Allocation ───────────────────────
@@ -344,9 +384,24 @@ const closeBtn = new Button({
   },
 });
 
-const footerActionRow = new HStack({
-  spacing: 10,
-  children: [themeInfo, new Spacer(), simulateBtn, resetAllBtn, closeBtn],
+const footerButtonBox = new Box({
+  style: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  children: [simulateBtn, resetAllBtn, closeBtn],
+});
+
+const footerActionRow = new Box({
+  style: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    height: 36,
+  },
+  children: [themeInfo, footerButtonBox],
 });
 
 // ── Assemble Root Content View ───────────────────────────────
@@ -355,6 +410,7 @@ win.content = new VStack({
   children: [
     headerTopRow,
     subtitleLabel,
+    metricsGrid,
     computeCard,
     targetCard,
     profileCard,
@@ -370,7 +426,8 @@ if (process.env.KILN_SNAPSHOT) {
   setTimeout(() => {
     win.snapshot(process.env.KILN_SNAPSHOT!);
     console.log(`Studio snapshot saved to: ${process.env.KILN_SNAPSHOT}`);
-  }, 300);
+    process.exit(0);
+  }, 400);
 }
 console.log('Window active! Event loop listening...');
 
