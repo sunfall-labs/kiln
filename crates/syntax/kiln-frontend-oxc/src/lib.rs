@@ -2369,6 +2369,9 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
 #[derive(Default)]
 struct AnnexBFunctionScope {
     sloppy: bool,
+    // Lexical bindings before this index belong to outer function environments and cannot block
+    // an Annex B var alias in this environment.
+    lexical_start: usize,
 }
 
 struct AnnexBBlockedAliasVisitor {
@@ -2423,6 +2426,7 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             program.source_type.is_script() && !Self::strict_directives(&program.directives);
         self.scopes.push(AnnexBFunctionScope {
             sloppy,
+            lexical_start: self.lexical_scopes.len(),
         });
         self.lexical_scopes
             .push(Self::lexical_names(&program.body));
@@ -2437,10 +2441,12 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             walk::walk_function(self, function, flags);
             return;
         };
+        let lexical_start = self.lexical_scopes.len();
         self.scopes.push(AnnexBFunctionScope {
             sloppy: inherited_sloppy
                 && !flags.is_strict_mode()
                 && !Self::strict_directives(&body.directives),
+            lexical_start,
         });
         self.lexical_scopes
             .push(Self::lexical_names(&body.statements));
@@ -2456,10 +2462,12 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
         let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
         let body = match &function.body {
             oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => Some(body.as_ref()),
-            oxc_ast::ast::ArrowFunctionBody::Expression(_) => None,
+            _ => None,
         };
+        let lexical_start = self.lexical_scopes.len();
         self.scopes.push(AnnexBFunctionScope {
             sloppy: inherited_sloppy && !function.has_use_strict_directive(),
+            lexical_start,
         });
         self.lexical_scopes.push(body.map_or_else(HashMap::new, |body| {
             Self::lexical_names(&body.statements)
@@ -2472,13 +2480,20 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
     fn visit_class_body(&mut self, body: &oxc_ast::ast::ClassBody<'ast>) {
         // Class bodies are strict, including methods and field initializers. The heritage
         // expression is visited before ClassBody and retains the surrounding function's mode.
-        self.scopes.push(AnnexBFunctionScope { sloppy: false });
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: false,
+            lexical_start: self.lexical_scopes.len(),
+        });
         walk::walk_class_body(self, body);
         self.scopes.pop();
     }
 
     fn visit_static_block(&mut self, block: &oxc_ast::ast::StaticBlock<'ast>) {
-        self.scopes.push(AnnexBFunctionScope { sloppy: false });
+        let lexical_start = self.lexical_scopes.len();
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: false,
+            lexical_start,
+        });
         self.lexical_scopes.push(Self::lexical_names(&block.body));
         walk::walk_static_block(self, block);
         self.lexical_scopes.pop();
@@ -2550,6 +2565,7 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
                     let Some(lexical_span) = self
                         .lexical_scopes
                         .iter()
+                        .skip(scope.lexical_start)
                         .rev()
                         .find_map(|names| names.get(identifier.name.as_str()))
                     else {
@@ -6044,6 +6060,18 @@ mod tests {
             arrow_body.diagnostics.is_empty(),
             "an arrow's lexical scope must participate in Annex B suppression: {:?}",
             arrow_body.diagnostics
+        );
+
+        let captured_outer_name = parse_with_goal(
+            "case.js",
+            "function outer() { let lexicalName; return function inner() { \
+             switch (0) { case 0: function lexicalName() {} } return typeof lexicalName; }; }",
+            SourceGoal::Script,
+        );
+        assert!(
+            captured_outer_name.diagnostics.is_empty(),
+            "an outer lexical binding must not block an inner function's Annex B alias: {:?}",
+            captured_outer_name.diagnostics
         );
     }
 
