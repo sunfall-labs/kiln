@@ -300,9 +300,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // No fallback for `name` or `length`: both are stored on the closure, and
                     // answering them from the proto as well would resurrect one a program had
                     // just deleted -- which is precisely the observation `configurable: true`
-                    // promises it can make.
+                    // promises it can make. `Function.prototype` is only the implicit
+                    // [[Prototype]] of a fresh closure. Once a program sets an explicit
+                    // [[Prototype]] (including `null`), a miss must stop there instead of
+                    // leaking the intrinsic function methods back into the lookup.
                     .unwrap_or_else(|| {
-                        function_property(&self.intrinsics, name, value_realm(target))
+                        if closure.properties.borrow().prototype().is_some() {
+                            Value::Undefined
+                        } else {
+                            function_property(&self.intrinsics, name, value_realm(target))
+                        }
                     })
             }
             // A bound function reports the arity still to be supplied and the name of what it

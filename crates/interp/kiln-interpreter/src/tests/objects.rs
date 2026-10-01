@@ -2274,6 +2274,25 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
         vm.read_property(&async_proto, &to_string_tag_key, 0).unwrap(),
         Value::String("AsyncFunction".into())
     );
+    let Value::Function(async_closure) = &async_fn else {
+        unreachable!("async function closure")
+    };
+    async_closure
+        .properties
+        .borrow_mut()
+        .set_prototype(Value::Null);
+    assert_eq!(
+        vm.read_property(&async_fn, "constructor", 0).unwrap(),
+        Value::Undefined
+    );
+    assert_eq!(
+        vm.read_property(&async_fn, "toString", 0).unwrap(),
+        Value::Undefined
+    );
+    assert_eq!(
+        vm.read_property(&async_fn, "length", 0).unwrap(),
+        Value::Number(0.0)
+    );
 
     // 1. GeneratorFunction prototype and constructor checks
     let gen_proto = prototype_of(&gen_fn);
