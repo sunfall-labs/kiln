@@ -530,6 +530,64 @@ fn native_import_meta_reparse(
             }
             imports.push(import);
         }
+
+        // DCE may lower an imported local export as a fresh local binding, while the previous
+        // graph represented it as an indirect export backed by a synthetic import slot. Preserve
+        // that link relation by public export name; matching only the generated local name is
+        // insufficient because the synthetic `*reexportN*` names are renumbered when exports are
+        // removed. Without this edge, relinking silently turns the export into an uninitialized
+        // local in the barrel and imports resolve to that slot instead of the original provider.
+        for export in &program.exports {
+            let Some(previous_export) = node
+                .program
+                .exports
+                .iter()
+                .find(|previous| previous.exported == export.exported)
+            else {
+                continue;
+            };
+            let Some((previous_index, previous_import)) = node
+                .program
+                .imports
+                .iter()
+                .enumerate()
+                .find(|(_, import)| import.local_slot == previous_export.local_slot)
+            else {
+                continue;
+            };
+
+            let new_index = if let Some(index) = imports
+                .iter()
+                .position(|import| import.local_slot == export.local_slot)
+            {
+                index
+            } else {
+                let local = format!(
+                    "{}native-import-meta-{}*",
+                    kiln_ir::REEXPORT_LOCAL_PREFIX,
+                    imports.len()
+                );
+                imports.push(kiln_ir::ImportBinding {
+                    source: previous_import.source.clone(),
+                    imported: previous_import.imported.clone(),
+                    local,
+                    local_slot: export.local_slot,
+                });
+                imports.len() - 1
+            };
+            imports[new_index]
+                .source
+                .clone_from(&previous_import.source);
+            imports[new_index]
+                .imported
+                .clone_from(&previous_import.imported);
+            if demand
+                .live_imports
+                .contains(&(node.path.clone(), previous_index))
+            {
+                remapped_imports.insert((node.path.clone(), new_index));
+            }
+        }
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
         let demanded_names = demand
