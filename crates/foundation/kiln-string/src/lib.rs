@@ -106,6 +106,18 @@ impl StringUnits {
         }
     }
 
+    /// Copy a range of UTF-16 code units without widening or traversing the prefix.
+    pub fn slice_units(&self, start: usize, end: usize) -> Option<Self> {
+        match &self.0 {
+            Repr::Latin1(bytes) => bytes
+                .get(start..end)
+                .map(|slice| Self(Repr::Latin1(Arc::from(slice)))),
+            Repr::Utf16(units) => units
+                .get(start..end)
+                .map(|slice| Self(Repr::Utf16(Arc::from(slice)))),
+        }
+    }
+
     pub fn units(&self) -> UnitIter<'_> {
         match &self.0 {
             Repr::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),

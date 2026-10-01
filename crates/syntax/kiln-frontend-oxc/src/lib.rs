@@ -2130,14 +2130,21 @@ fn lower_parsed_in_context(
         inline_eval_calls,
     };
     let body = lowerer.statements(&parsed.program.body);
+    let source_origin = source_units.and_then(|(units, map)| {
+        SourceOrigin::from_parser_transport(units, map)
+    });
+    if source_units.is_some() && source_origin.is_none() {
+        diagnostics.push(Diagnostic {
+            message: "dynamic source origin exceeds supported parser span bounds".into(),
+            span: None,
+        });
+    }
 
     let module = Module {
         module_id: Arc::from(path.unwrap_or_default()),
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
-        source_origin: source_units.and_then(|(units, map)| {
-            SourceOrigin::from_parser_transport(units, map)
-        }),
+        source_origin,
         source_kind: source_kind(source_type),
         source_goal: if source_type.is_module() {
             SourceGoal::Module

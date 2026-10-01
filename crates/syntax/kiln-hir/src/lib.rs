@@ -65,6 +65,9 @@ impl SourceOrigin {
     /// spans. Those conditions indicate an invalid transport, so callers should omit the origin
     /// rather than retain a map that could produce the wrong function source.
     pub fn from_parser_transport(units: &[u16], byte_to_unit: &[usize]) -> Option<Arc<Self>> {
+        // Folding an odd backslash before a lone surrogate removes the source backslash and maps
+        // every byte of its replacement escape to the source range start, so boundaries repeat
+        // but remain monotone.
         if byte_to_unit.is_empty()
             || byte_to_unit.first() != Some(&0)
             || byte_to_unit.last() != Some(&units.len())
@@ -90,14 +93,7 @@ impl SourceOrigin {
         if start > end || end > self.units.len() {
             return None;
         }
-        Some(StringUnits::from_units(
-            &self
-                .units
-                .units()
-                .skip(start)
-                .take(end - start)
-                .collect::<Vec<_>>(),
-        ))
+        self.units.slice_units(start, end)
     }
 }
 
