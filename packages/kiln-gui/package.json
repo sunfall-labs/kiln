@@ -1,0 +1,12 @@
+{
+  "name": "@kiln/gui",
+  "version": "0.1.0",
+  "description": "TypeScript type declarations and ambient JSX definitions for Kiln's native GUI extension (kiln:gui) and SolidJS universal renderer.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": "./index.js"
+  }
+}
