@@ -47,6 +47,7 @@ delete (globalThis as any).__kilnSharedBuffer;
     const speciesDescriptor = Object.getOwnPropertyDescriptor({
       get [Symbol.species]() { return this; },
     }, Symbol.species)!;
+    speciesDescriptor.enumerable = false;
     Object.defineProperty(ArrayBuffer, Symbol.species, speciesDescriptor);
     if (typeof SharedArrayBuffer !== "undefined") {
       Object.defineProperty(SharedArrayBuffer, Symbol.species, speciesDescriptor);
