@@ -79,6 +79,34 @@ const switchIgnoresNestedFunctionVar = Function(
 if (switchIgnoresNestedFunctionVar() !== 2) {
   throw new Error("nested function vars do not conflict with the switch CaseBlock");
 }
+const switchFunctionInstantiation = Function(
+  "switch (0) { case 0: let outer = 2; function nested() { return outer; } return nested(); }",
+);
+if (switchFunctionInstantiation() !== 2) {
+  throw new Error("switch function declarations are initialized in the CaseBlock scope");
+}
+const unselectedSwitchFunction = Function(
+  "switch (1) { case 0: function hoisted() {} case 1: return typeof hoisted; }",
+);
+if (unselectedSwitchFunction() !== "function") {
+  throw new Error("switch function declarations initialize before clause selection");
+}
+const strictSwitchFunction = Function(
+  '"use strict"; switch (0) { case 0: function scoped() {} } return typeof scoped;',
+);
+if (strictSwitchFunction() !== "undefined") {
+  throw new Error("switch function declarations stay inside the CaseBlock environment");
+}
+globalThis.__switchFunctionConflictCount = 0;
+let functionConflictThrew = false;
+try {
+  Function("switch ((globalThis.__switchFunctionConflictCount++, 0)) { " +
+    "case 0: function duplicate() {} default: let duplicate; }")();
+} catch (error) { functionConflictThrew = error.name === "SyntaxError"; }
+if (!functionConflictThrew || globalThis.__switchFunctionConflictCount !== 0) {
+  throw new Error("switch function declarations conflict with lexical names before evaluation");
+}
+delete globalThis.__switchFunctionConflictCount;
 const switchCaseTdz = Function(
   "outer", "switch (0) { case outer: let outer = 23; } return outer;",
 );
