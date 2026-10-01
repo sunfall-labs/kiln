@@ -424,6 +424,9 @@ pub(super) enum PendingNodeRequest {
         request: RequestId,
         target: PendingConnect,
     },
+    CloseResource {
+        request: RequestId,
+    },
 }
 
 pub(super) enum PendingConnect {
@@ -436,7 +439,8 @@ impl PendingNodeRequest {
         match self {
             Self::Server { request, .. }
             | Self::Stream { request, .. }
-            | Self::Connect { request, .. } => *request,
+            | Self::Connect { request, .. }
+            | Self::CloseResource { request } => *request,
         }
     }
 }

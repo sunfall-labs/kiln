@@ -325,6 +325,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeResponseEnd => Some("end"),
         Native::NodeClientRequestWrite => Some("write"),
         Native::NodeClientRequestEnd => Some("end"),
+        Native::NodeClientRequestAssignSocket => Some("assignSocket"),
         _ => None,
     }
 }

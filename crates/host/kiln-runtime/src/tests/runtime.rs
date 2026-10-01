@@ -2936,7 +2936,7 @@ fn realm_shutdown_aborts_engine_connections_and_rejects_new_admission() {
         AgentRelease::Retire
     );
     assert_eq!(
-        runtime.client_connection_failed(&origin),
+        runtime.client_connection_failed(&origin, 1),
         AgentFailure::Empty
     );
     assert_eq!(runtime.client_connection_closed(resource), None);

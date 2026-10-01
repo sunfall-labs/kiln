@@ -874,6 +874,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeHttpFetchRespond
                 | Native::NodeClientRequestWrite
                 | Native::NodeClientRequestEnd
+                | Native::NodeClientRequestAssignSocket
                 | Native::NodeServerListen
                 | Native::NodeServerClose
                 | Native::NodeServerAddress

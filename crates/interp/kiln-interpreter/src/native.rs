@@ -342,6 +342,7 @@ pub enum Native {
     NodeHttpServerResponse,
     NodeClientRequestWrite,
     NodeClientRequestEnd,
+    NodeClientRequestAssignSocket,
     NodeBuffer,
     /// The *global* `Buffer`, as distinct from the `node:buffer` namespace above.
     ///

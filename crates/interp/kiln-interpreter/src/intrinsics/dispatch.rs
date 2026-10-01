@@ -2880,6 +2880,7 @@ pub(crate) fn call_native(
         | Native::NodeHttpFetchRespond
         | Native::NodeClientRequestWrite
         | Native::NodeClientRequestEnd
+        | Native::NodeClientRequestAssignSocket
         | Native::NodeBuffer
         | Native::NodeBufferGlobal
         | Native::NodeBufferFrom

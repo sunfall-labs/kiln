@@ -1325,6 +1325,7 @@ static int kiln_c99_node_client_start_connect(kiln_node_client_request *request,
         return KILN_C99_OUT_OF_MEMORY;
     }
     connect->kind = KILN_REALM_OP_TCP_CONNECT;
+    kiln_c99_heap_store_pointer(connect, &connect->socket, socket);
     kiln_c99_heap_store_pointer(connect, &connect->client_request, request);
     status = kiln_c99_node_start(KILN_REALM_OP_TCP_CONNECT, 0, request->port,
                                  request->host_name, request->host_name_len, NULL, 0,
@@ -1343,7 +1344,7 @@ static int kiln_c99_node_client_connect_failed(kiln_node_client_request *request
     uint64_t next_request_id = 0;
     int decision = kiln_realm_http_agent_connect_failed_active(
         (const uint8_t *)request->host_name, request->host_name_len, request->port,
-        &next_request_id);
+        request->request_id, &next_request_id);
     if (decision == 0) return KILN_C99_OK;
     if (decision != 1)
         KILN_C99_REFUSE("an HTTP agent connect-failure decision this backend does not model");
@@ -2077,7 +2078,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                 "socket");
             status = kiln_c99_node_client_attach(next, socket, 0, exception);
             if (status != KILN_C99_OK) return status;
-            return kiln_c99_node_client_try_start(next);
+            return KILN_C99_OK;
         }
         if (release != KILN_REALM_HTTP_AGENT_IDLE &&
             release != KILN_REALM_HTTP_AGENT_RETIRE)
@@ -2207,7 +2208,21 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_node_socket *socket = request->socket;
             kiln_node_completion *write;
             int status;
-            if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
+            if (socket == NULL || socket->closed) {
+                socket = work->socket;
+                if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
+                socket->resource = completion->resource;
+                socket->connecting = 0;
+                socket->closed = 1;
+                write = (kiln_node_completion *)kiln_c99_gc_calloc(
+                    KILN_GC_NODE_COMPLETION, sizeof *write);
+                if (write == NULL) return KILN_C99_OUT_OF_MEMORY;
+                write->kind = KILN_REALM_OP_CLOSE_RESOURCE;
+                kiln_c99_heap_store_pointer(write, &write->socket, socket);
+                return kiln_c99_node_start(KILN_REALM_OP_CLOSE_RESOURCE,
+                                           completion->resource, 0, NULL, 0, NULL, 0,
+                                           write, &socket->close_request);
+            }
             socket->resource = completion->resource;
             socket->connecting = 0;
             status = kiln_c99_put(NULL, socket->object, "connecting", 10,
@@ -4480,12 +4495,51 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             status = kiln_c99_node_socket_ready_state(socket, "closed", 6);
             if (status != KILN_C99_OK) return status;
             if ((socket->connecting && socket->resource == 0) || socket->pending_http_attach) {
+                kiln_node_client_request *request = socket->client_requests;
                 socket->connecting = 0;
                 socket->closed = 1;
                 status = kiln_c99_put(NULL, socket->object, "connecting", 10,
                                       kiln_c99_boolean(0), 0, NULL);
                 if (status != KILN_C99_OK) return status;
+                if (socket->resource != 0 && socket->pending_http_attach) {
+                    uint64_t ignored_request_id = 0;
+                    socket->pending_http_attach = 0;
+                    (void)kiln_realm_http_agent_release_active(socket->resource, 0,
+                                                               &ignored_request_id);
+                    if (request != NULL) {
+                        kiln_c99_node_client_request_unlink_socket(request);
+                        kiln_c99_node_client_request_unregister(request);
+                    }
+                    status = kiln_c99_node_close_socket(socket, 1);
+                    if (status != KILN_C99_OK) return status;
+                    *result = receiver;
+                    return KILN_C99_OK;
+                }
                 kiln_c99_node_cancel_request(&socket->connect_request);
+                if (request != NULL) {
+                    request->connect_request = 0;
+                    uint64_t next_request_id = 0;
+                    int decision = kiln_realm_http_agent_cancel_connect_active(
+                        (const uint8_t *)request->host_name, request->host_name_len,
+                        request->port, request->request_id, &next_request_id);
+                    if (decision < 0 || decision > 3)
+                        KILN_C99_REFUSE("an HTTP agent connect-cancellation decision this backend does not model");
+                    kiln_c99_node_client_request_unlink_socket(request);
+                    kiln_c99_node_client_request_unregister(request);
+                    if (decision == 3) {
+                        kiln_node_client_request *next =
+                            kiln_c99_node_client_request_find(next_request_id);
+                        if (next == NULL)
+                            KILN_C99_REFUSE("the HTTP agent retried a canceled connection with an unrooted request");
+                        status = kiln_c99_node_client_start_connect(next, thrown);
+                        if (status != KILN_C99_OK) {
+                            kiln_c99_node_client_request_unlink_socket(next);
+                            kiln_c99_node_client_request_unregister(next);
+                            (void)kiln_c99_node_client_connect_failed(next, thrown);
+                            return status;
+                        }
+                    }
+                }
                 status = kiln_c99_enqueue_next_tick(
                     kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK),
                     &receiver, 1);

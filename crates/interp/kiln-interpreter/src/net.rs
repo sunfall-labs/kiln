@@ -18,6 +18,12 @@ pub(crate) struct NetSocketState {
     pub(crate) resource: Option<kiln_host_abi::ResourceId>,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
+    pub(crate) connecting: bool,
+    pub(crate) pending_write: Vec<u8>,
+    pub(crate) end_requested: bool,
+    pub(crate) destroyed: bool,
+    pub(crate) connect_request: Option<kiln_host_abi::RequestId>,
+    pub(crate) http_agent_request: Option<(String, u16, u64)>,
 }
 
 #[derive(Debug)]
@@ -147,6 +153,10 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
     );
     data.set("readyState", Value::String("open".into()));
+    data.set("connecting", Value::Boolean(state.borrow().connecting));
+    if state.borrow().connecting {
+        data.set("readyState", Value::String("opening".into()));
+    }
     data.set("readable", Value::Boolean(true));
     data.set("writable", Value::Boolean(true));
     data.set("destroyed", Value::Boolean(false));

@@ -20,7 +20,7 @@ use kiln_runtime::{
     RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
     duration_from_milliseconds,
     node_http::HttpResponseEvent,
-    node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
+    node_http_agent::{AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };

@@ -107,7 +107,9 @@ use tokio::net::{
 use tokio::sync::oneshot;
 use tokio_util::task::JoinMap;
 
-use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
+use crate::node_http_agent::{
+    AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin,
+};
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
@@ -213,7 +215,8 @@ pub trait ActiveHttpRuntime {
         request: u64,
     ) -> bool;
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
-    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure;
+    fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure;
+    fn cancel_client_connection(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation;
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64>;
     /// Attach the server engine to an accepted stream. False if the host cannot hand its
     /// transport over or the resource is already attached.
@@ -1749,11 +1752,22 @@ impl<H: RealmHostProvider> RealmState<H> {
     }
 
     /// Tell the agent a connect to `origin` failed.
-    pub fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+    pub fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure {
         if self.is_shutdown() {
             return AgentFailure::Empty;
         }
-        self.http_agent.connect_failed(origin)
+        self.http_agent.connect_failed(origin, request)
+    }
+
+    pub fn cancel_client_connection(
+        &mut self,
+        origin: &HttpOrigin,
+        request: u64,
+    ) -> AgentCancellation {
+        if self.is_shutdown() {
+            return AgentCancellation::Missing;
+        }
+        self.http_agent.cancel_connect(origin, request)
     }
 
     /// Tell the agent a client connection closed.
@@ -2382,8 +2396,12 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.state.release_client_connection(resource, reusable)
     }
 
-    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
-        self.state.client_connection_failed(origin)
+    fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure {
+        self.state.client_connection_failed(origin, request)
+    }
+
+    fn cancel_client_connection(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation {
+        self.state.cancel_client_connection(origin, request)
     }
 
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {

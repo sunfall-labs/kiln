@@ -150,6 +150,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    fn close_late_connect_resource(
+        &mut self,
+        resource: kiln_host_abi::ResourceId,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let host = self.async_host.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:net requires the Node execution Adapter".into(),
+        })?;
+        let request = unsafe {
+            ActiveAsyncHostOps::start(&mut *host, AsyncHostOp::CloseResource { resource }, false)
+        };
+        self.push_pending_node(PendingNodeRequest::CloseResource { request });
+        Ok(())
+    }
+
     pub(crate) fn push_pending_host(&mut self, pending: PendingHostRequest) {
         if let Some(realm) = &self.module_realm {
             realm.borrow_mut().pending_host.push(pending);
@@ -284,6 +300,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     resource: None,
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                    connecting: true,
+                    pending_write: Vec::new(),
+                    end_requested: false,
+                    destroyed: false,
+                    connect_request: None,
+                    http_agent_request: None,
                 }));
                 let socket = node_socket_object(&state);
                 if let Some(callback) = callback {
@@ -326,6 +348,119 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_net_socket_state(receiver)?;
+        let (connecting, resource, destroyed, connect_request, agent_request) = {
+            let state = state.borrow();
+            (
+                state.connecting,
+                state.resource,
+                state.destroyed,
+                state.connect_request,
+                state.http_agent_request.clone(),
+            )
+        };
+        if connecting && resource.is_none() {
+            match native {
+                Native::NodeSocketWrite => {
+                    let bytes = node_stream_write_bytes(arguments.first())?;
+                    let mut state = state.borrow_mut();
+                    if state.end_requested {
+                        drop(state);
+                        self.schedule_node_write_after_end(receiver, arguments, instruction)?;
+                        return Ok(Value::Boolean(false));
+                    }
+                    state.pending_write.extend(bytes);
+                    return Ok(Value::Boolean(true));
+                }
+                Native::NodeSocketEnd => {
+                    let data = arguments
+                        .first()
+                        .filter(|value| !matches!(value, Value::Undefined))
+                        .map(|value| node_body_bytes(Some(value)))
+                        .transpose()?;
+                    let mut state = state.borrow_mut();
+                    if let Some(data) = data {
+                        state.pending_write.extend(data);
+                    }
+                    state.end_requested = true;
+                    if let Value::Object(object) = receiver {
+                        object
+                            .borrow_mut()
+                            .set("readyState", Value::String("readOnly".into()));
+                        object.borrow_mut().set("writable", Value::Boolean(false));
+                    }
+                    return Ok(receiver.clone());
+                }
+                Native::NodeSocketDestroy => {
+                    if destroyed {
+                        return Ok(receiver.clone());
+                    }
+                    {
+                        let mut state = state.borrow_mut();
+                        state.destroyed = true;
+                        state.connecting = false;
+                    }
+                    if let Value::Object(object) = receiver {
+                        let mut object = object.borrow_mut();
+                        object.set("connecting", Value::Boolean(false));
+                        object.set("destroyed", Value::Boolean(true));
+                        object.set("readyState", Value::String("closed".into()));
+                    }
+                    if let Some(request) = connect_request {
+                        let canceled = if let Some(host) = self.async_host {
+                            unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) }
+                        } else {
+                            false
+                        };
+                        if canceled {
+                            if let Some(realm) = &self.module_realm {
+                                realm
+                                    .borrow_mut()
+                                    .pending_node
+                                    .retain(|pending| pending.request() != request);
+                            } else {
+                                self.pending_node
+                                    .retain(|pending| pending.request() != request);
+                            }
+                        }
+                    }
+                    if let Some((host, port, request_id)) = agent_request {
+                        if let Some(runtime) = self.http_runtime {
+                            let cancellation = unsafe {
+                                ActiveHttpRuntime::cancel_client_connection(
+                                    &mut *runtime,
+                                    &HttpOrigin::http(&host, port),
+                                    request_id,
+                                )
+                            };
+                            if let AgentCancellation::Connecting {
+                                next: Some(next_id),
+                            } = cancellation
+                            {
+                                let queued = self.http_client_request(next_id).ok_or_else(|| {
+                                    ExecutionError::Host {
+                                        instruction,
+                                        message: "HTTP Agent lost a queued ClientRequest after socket cancellation".into(),
+                                    }
+                                })?;
+                                self.start_http_client_connection(&queued, instruction)?;
+                            }
+                            self.remove_http_client_request(request_id);
+                        }
+                    }
+                    let emit = self.read_property(receiver, "emit", instruction)?;
+                    let callback = Value::Bound(Rc::new(BoundFunction {
+                        target: emit,
+                        this_value: receiver.clone(),
+                        arguments: vec![Value::String("close".into())],
+                        properties: RefCell::new(ObjectData::default()),
+                    }));
+                    let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+                    self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                    return Ok(receiver.clone());
+                }
+                _ => {}
+            }
+        }
         let (server, resource) = {
             let state = state.borrow();
             let server = state
@@ -1011,15 +1146,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     )
                 } {
                     AgentDecision::Connect => {
+                        self.prepare_http_client_socket(&state, instruction)?;
                         self.start_http_client_connection(&state, instruction)?
                     }
                     AgentDecision::Reuse(resource) => {
-                        self.attach_http_client_request_to_resource(
-                            &state,
-                            resource,
-                            instruction,
-                            true,
-                        )?;
+                        self.attach_http_client_request_to_resource(&state, resource, instruction)?;
                     }
                     AgentDecision::Queued => {}
                 }
@@ -1027,6 +1158,40 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Native::NodeClientRequestWrite | Native::NodeClientRequestEnd => {
                 self.dispatch_node_client_request(native, receiver, arguments, instruction)
+            }
+            Native::NodeClientRequestAssignSocket => {
+                let request_state = node_http_client_request(receiver)?;
+                let socket_value =
+                    arguments
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                            message: "ClientRequest socket assignment requires a socket".into(),
+                        })?;
+                let Value::Object(request_object) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "ClientRequest socket assignment requires a request".into(),
+                    });
+                };
+                request_object
+                    .borrow_mut()
+                    .set("socket", socket_value.clone());
+                request_object
+                    .borrow_mut()
+                    .set("connection", socket_value.clone());
+                let emit = self.read_property(receiver, "emit", instruction)?;
+                self.call_value(
+                    &emit,
+                    receiver.clone(),
+                    vec![Value::String("socket".into()), socket_value],
+                    instruction,
+                )?;
+                if let Some(socket) = request_state.borrow().socket.clone()
+                    && socket.borrow().resource.is_some()
+                {
+                    self.flush_http_client_request(&request_state, &socket, instruction)?;
+                }
+                Ok(Value::Undefined)
             }
             Native::NodeHttpFetchRespond => self.http_fetch_respond(arguments, instruction),
             Native::NodeHttpServer
@@ -1259,6 +1424,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         state: &Rc<RefCell<HttpClientRequestState>>,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        self.prepare_http_client_socket(state, instruction)?;
         let (host, port) = {
             let state = state.borrow();
             (state.host.clone(), state.port)
@@ -1283,6 +1449,59 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             request,
             target: PendingConnect::Http(Rc::clone(state)),
         });
+        if let Some(socket) = state.borrow().socket.clone() {
+            socket.borrow_mut().connect_request = Some(request);
+        }
+        Ok(())
+    }
+
+    fn prepare_http_client_socket(
+        &mut self,
+        state: &Rc<RefCell<HttpClientRequestState>>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if state.borrow().socket.is_some() {
+            return Ok(());
+        }
+        let socket_state = Rc::new(RefCell::new(NetSocketState {
+            owner: None,
+            resource: None,
+            object: None,
+            readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+            connecting: true,
+            pending_write: Vec::new(),
+            end_requested: false,
+            destroyed: false,
+            connect_request: None,
+            http_agent_request: None,
+        }));
+        let socket = node_socket_object(&socket_state);
+        let request = state
+            .borrow()
+            .object
+            .as_ref()
+            .map(|object| Value::Object(Rc::clone(object)))
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP client request lost its JavaScript object".into(),
+            })?;
+        {
+            let mut request_state = state.borrow_mut();
+            socket_state.borrow_mut().http_agent_request = Some((
+                request_state.host.clone(),
+                request_state.port,
+                request_state.request_id,
+            ));
+            request_state.socket = Some(Rc::clone(&socket_state));
+        }
+        let callback = Value::Bound(Rc::new(BoundFunction {
+            target: Value::Native(Native::NodeClientRequestAssignSocket, RealmId::PRIMARY),
+            this_value: request,
+            arguments: vec![socket],
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
         Ok(())
     }
 
@@ -1383,6 +1602,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     resource: Some(accepted.resource.id),
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                    connecting: false,
+                    pending_write: Vec::new(),
+                    end_requested: false,
+                    destroyed: false,
+                    connect_request: None,
+                    http_agent_request: None,
                 }));
                 let socket = node_socket_object(&socket_state);
                 if protocol == ServerProtocol::Http {
@@ -2148,7 +2373,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &queued,
                             resource,
                             instruction,
-                            false,
                         )?;
                     } else if release == AgentRelease::Retire {
                         let _ = unsafe {
@@ -3092,7 +3316,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         state: &Rc<RefCell<HttpClientRequestState>>,
         resource: kiln_host_abi::ResourceId,
         instruction: usize,
-        defer_socket_event: bool,
     ) -> Result<(), ExecutionError> {
         let owner = self
             .http_server_for_stream(resource)
@@ -3111,23 +3334,25 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP Agent connection lost its JavaScript socket".into(),
             })?;
         let request_id = state.borrow().request_id;
-        let (request, request_object) = state
+        let request = state
             .borrow()
             .object
             .as_ref()
-            .map(|object| (Value::Object(Rc::clone(object)), Rc::clone(object)))
+            .map(|object| Value::Object(Rc::clone(object)))
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "HTTP client request lost its JavaScript object".into(),
             })?;
         state.borrow_mut().socket = Some(Rc::clone(&socket));
-        let socket_value = socket_object;
-        request_object
-            .borrow_mut()
-            .set("socket", socket_value.clone());
-        request_object
-            .borrow_mut()
-            .set("connection", socket_value.clone());
+        socket.borrow_mut().connecting = false;
+        if let Value::Object(socket_object) = &socket_object {
+            socket_object
+                .borrow_mut()
+                .set("connecting", Value::Boolean(false));
+            socket_object
+                .borrow_mut()
+                .set("readyState", Value::String("open".into()));
+        }
         let inserted = owner
             .borrow_mut()
             .streams
@@ -3141,21 +3366,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP Agent connection disappeared during attachment".into(),
             });
         }
-        let emit = self.read_property(&request, "emit", instruction)?;
-        let event_arguments = vec![Value::String("socket".into()), socket_value];
-        if defer_socket_event {
-            let callback = Value::Bound(Rc::new(BoundFunction {
-                target: emit,
-                this_value: request,
-                arguments: event_arguments,
-                properties: RefCell::new(ObjectData::default()),
-            }));
-            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
-            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
-        } else {
-            self.call_value(&emit, request, event_arguments, instruction)?;
-        }
-        self.flush_http_client_request(state, &socket, instruction)
+        let callback = Value::Bound(Rc::new(BoundFunction {
+            target: Value::Native(Native::NodeClientRequestAssignSocket, RealmId::PRIMARY),
+            this_value: request,
+            arguments: vec![socket_object],
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        Ok(())
     }
 
     pub(crate) fn flush_http_client_request(
@@ -3875,11 +4094,25 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     Ok(())
                 }
+                PendingNodeRequest::CloseResource { .. } => Ok(()),
                 PendingNodeRequest::Connect { target, .. } => match completion.result {
                     Ok(AsyncHostValue::Resource(resource)) => {
                         let resource = resource.id;
+                        let destroyed = match &target {
+                            PendingConnect::Net(state) => state.borrow().destroyed,
+                            PendingConnect::Http(state) => state
+                                .borrow()
+                                .socket
+                                .as_ref()
+                                .is_some_and(|socket| socket.borrow().destroyed),
+                        };
+                        if destroyed {
+                            return self.close_late_connect_resource(resource, self.instruction);
+                        }
                         let (socket_state, socket, protocol, request) = match &target {
                             PendingConnect::Net(state) => {
+                                state.borrow_mut().connecting = false;
+                                state.borrow_mut().connect_request = None;
                                 let socket = state
                                     .borrow()
                                     .object
@@ -3895,20 +4128,37 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 )
                             }
                             PendingConnect::Http(state) => {
-                                let socket_state = Rc::new(RefCell::new(NetSocketState {
-                                    owner: None,
-                                    resource: None,
-                                    object: None,
-                                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
-                                }));
-                                let socket = node_socket_object(&socket_state);
+                                let socket_state =
+                                    state.borrow().socket.clone().ok_or_else(|| {
+                                        ExecutionError::Host {
+                                            instruction: self.instruction,
+                                            message:
+                                                "HTTP connect completed without its pending socket"
+                                                    .into(),
+                                        }
+                                    })?;
+                                let socket = socket_state
+                                    .borrow()
+                                    .object
+                                    .as_ref()
+                                    .and_then(Weak::upgrade)
+                                    .map(Value::Object)
+                                    .unwrap_or(Value::Undefined);
+                                socket_state.borrow_mut().connecting = false;
+                                socket_state.borrow_mut().resource = Some(resource);
+                                socket_state.borrow_mut().connect_request = None;
+                                if let Value::Object(object) = &socket {
+                                    object.borrow_mut().set("connecting", Value::Boolean(false));
+                                    object
+                                        .borrow_mut()
+                                        .set("readyState", Value::String("open".into()));
+                                }
                                 let request = state
                                     .borrow()
                                     .object
                                     .as_ref()
                                     .map(|object| Value::Object(Rc::clone(object)))
                                     .unwrap_or(Value::Undefined);
-                                state.borrow_mut().socket = Some(Rc::clone(&socket_state));
                                 let runtime =
                                     self.http_runtime.ok_or_else(|| ExecutionError::Host {
                                         instruction: self.instruction,
@@ -3978,7 +4228,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             }
                         }
                         let net_actions = if protocol == ServerProtocol::Net {
-                            connection.driver.start_reading()
+                            let mut actions = Vec::new();
+                            let (pending_write, end_requested) = {
+                                let mut socket = socket_state.borrow_mut();
+                                (
+                                    std::mem::take(&mut socket.pending_write),
+                                    socket.end_requested,
+                                )
+                            };
+                            if !pending_write.is_empty() {
+                                actions.extend(connection.driver.write(pending_write).1);
+                            }
+                            if end_requested {
+                                actions.extend(connection.driver.end(None).1);
+                            }
+                            actions.extend(connection.driver.start_reading());
+                            actions
                         } else {
                             Vec::new()
                         };
@@ -3997,6 +4262,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             socket_state.owner = Some(Rc::downgrade(&owner));
                             socket_state.resource = Some(resource);
                         }
+                        if protocol == ServerProtocol::Net
+                            && let Value::Object(object) = &socket
+                        {
+                            object.borrow_mut().set("connecting", Value::Boolean(false));
+                            object
+                                .borrow_mut()
+                                .set("readyState", Value::String("open".into()));
+                        }
                         self.register_node_server(&owner);
                         if protocol == ServerProtocol::Net {
                             self.dispatch_node_event(
@@ -4005,10 +4278,70 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 &[Value::String("connect".into())],
                                 self.instruction,
                             )?;
-                        } else if let PendingConnect::Http(state) = &target
-                            && state.borrow().ended
-                        {
-                            self.flush_http_client_request(state, &socket_state, self.instruction)?;
+                        } else if let PendingConnect::Http(state) = &target {
+                            self.dispatch_node_event(
+                                Native::NodeEventEmit,
+                                &socket,
+                                &[Value::String("connect".into())],
+                                self.instruction,
+                            )?;
+                            let pending_write = {
+                                let mut socket = socket_state.borrow_mut();
+                                std::mem::take(&mut socket.pending_write)
+                            };
+                            if !pending_write.is_empty() {
+                                let actions = {
+                                    let mut owner = owner.borrow_mut();
+                                    let connection = owner
+                                        .streams
+                                        .iter_mut()
+                                        .find(|stream| stream.resource() == resource)
+                                        .ok_or_else(|| ExecutionError::Host {
+                                            instruction: self.instruction,
+                                            message: "HTTP client lost its stream before flushing socket writes".into(),
+                                        })?;
+                                    connection.driver.write(pending_write).1
+                                };
+                                for action in actions {
+                                    self.start_http_stream_action(
+                                        &owner,
+                                        resource,
+                                        action,
+                                        self.instruction,
+                                    )?;
+                                }
+                            }
+                            let end_socket = socket_state.borrow().end_requested;
+                            if end_socket {
+                                let actions = {
+                                    let mut owner = owner.borrow_mut();
+                                    let connection = owner
+                                        .streams
+                                        .iter_mut()
+                                        .find(|stream| stream.resource() == resource)
+                                        .ok_or_else(|| ExecutionError::Host {
+                                            instruction: self.instruction,
+                                            message:
+                                                "HTTP client lost its stream before socket end"
+                                                    .into(),
+                                        })?;
+                                    connection.driver.end(None).1
+                                };
+                                for action in actions {
+                                    self.start_http_stream_action(
+                                        &owner,
+                                        resource,
+                                        action,
+                                        self.instruction,
+                                    )?;
+                                }
+                            } else if state.borrow().ended {
+                                self.flush_http_client_request(
+                                    state,
+                                    &socket_state,
+                                    self.instruction,
+                                )?;
+                            }
                         }
                         for action in net_actions {
                             self.start_http_stream_action(
@@ -4025,6 +4358,62 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         message: "node:net connect returned a non-stream resource".into(),
                     }),
                     Err(error) => {
+                        let destroyed = match &target {
+                            PendingConnect::Net(state) => state.borrow().destroyed,
+                            PendingConnect::Http(state) => state
+                                .borrow()
+                                .socket
+                                .as_ref()
+                                .is_some_and(|socket| socket.borrow().destroyed),
+                        };
+                        if destroyed {
+                            return Ok(());
+                        }
+                        let socket_value = match &target {
+                            PendingConnect::Net(state) => {
+                                state.borrow_mut().connecting = false;
+                                state.borrow_mut().connect_request = None;
+                                state
+                                    .borrow()
+                                    .object
+                                    .as_ref()
+                                    .and_then(Weak::upgrade)
+                                    .map(Value::Object)
+                            }
+                            PendingConnect::Http(state) => {
+                                let socket = state.borrow().socket.clone();
+                                if let Some(socket) = &socket {
+                                    socket.borrow_mut().connecting = false;
+                                    socket.borrow_mut().connect_request = None;
+                                }
+                                socket.and_then(|socket| {
+                                    socket
+                                        .borrow()
+                                        .object
+                                        .as_ref()
+                                        .and_then(Weak::upgrade)
+                                        .map(Value::Object)
+                                })
+                            }
+                        };
+                        if let Some(socket) = socket_value {
+                            if let Value::Object(object) = &socket {
+                                object.borrow_mut().set("connecting", Value::Boolean(false));
+                                object.borrow_mut().set("destroyed", Value::Boolean(true));
+                                object
+                                    .borrow_mut()
+                                    .set("readyState", Value::String("closed".into()));
+                            }
+                            let emit = self.read_property(&socket, "emit", self.instruction)?;
+                            let callback = Value::Bound(Rc::new(BoundFunction {
+                                target: emit,
+                                this_value: socket,
+                                arguments: vec![Value::String("close".into())],
+                                properties: RefCell::new(ObjectData::default()),
+                            }));
+                            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                        }
                         let retry = if let PendingConnect::Http(state) = &target {
                             let origin = {
                                 let state = state.borrow();
@@ -4036,8 +4425,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     message: "node:http client requires the realm HTTP runtime"
                                         .into(),
                                 })?;
+                            let request_id = state.borrow().request_id;
                             Some(unsafe {
-                                ActiveHttpRuntime::client_connection_failed(&mut *runtime, &origin)
+                                ActiveHttpRuntime::client_connection_failed(
+                                    &mut *runtime,
+                                    &origin,
+                                    request_id,
+                                )
                             })
                         } else {
                             None
