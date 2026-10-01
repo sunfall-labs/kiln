@@ -2855,10 +2855,124 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     if (lex->curr.kind == KILN_DYN_KW_CONTINUE) {
         kiln_dyn_lexer_next(lex);
         if (lex->curr.kind == KILN_DYN_IDENT) {
+            lex->break_label = lex->curr.start;
+            lex->break_label_len = lex->curr.len;
             kiln_dyn_lexer_next(lex);
+        } else {
+            lex->break_label = NULL;
+            lex->break_label_len = 0;
         }
         if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
         *returned = 3;
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 5 &&
+        memcmp(lex->curr.start, "while", 5) == 0) {
+        const char *my_label = lex->active_label;
+        size_t my_label_len = lex->active_label_len;
+        lex->active_label = NULL;
+        lex->active_label_len = 0;
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_LPAREN) {
+            return kiln_dyn_throw_parse_error(lex, thrown, "Expected '(' after while");
+        }
+        kiln_dyn_lexer_next(lex);
+        size_t cond_start = lex->curr.start != NULL
+                                ? (size_t)(lex->curr.start - lex->src)
+                                : lex->pos;
+        int parens = 1;
+        while (lex->curr.kind != KILN_DYN_EOF && parens != 0) {
+            if (lex->curr.kind == KILN_DYN_LPAREN) parens++;
+            else if (lex->curr.kind == KILN_DYN_RPAREN) parens--;
+            if (parens != 0) kiln_dyn_lexer_next(lex);
+        }
+        if (parens != 0) {
+            return kiln_dyn_throw_parse_error(lex, thrown, "Expected ')' after while condition");
+        }
+        size_t cond_end = lex->curr.start != NULL
+                              ? (size_t)(lex->curr.start - lex->src)
+                              : lex->pos;
+        kiln_dyn_lexer_next(lex);
+        size_t body_start = lex->curr.start != NULL
+                                ? (size_t)(lex->curr.start - lex->src)
+                                : lex->pos;
+        kiln_dyn_skip_statement(lex);
+        size_t body_end = lex->curr.start != NULL
+                              ? (size_t)(lex->curr.start - lex->src)
+                              : lex->len;
+        const char *cond_src = &lex->src[cond_start];
+        size_t cond_len = cond_end > cond_start ? cond_end - cond_start : 0;
+        const char *body_src = &lex->src[body_start];
+        size_t body_len = body_end > body_start ? body_end - body_start : 0;
+        int break_loop = 0;
+        while (!break_loop) {
+            kiln_dyn_lexer clex;
+            memset(&clex, 0, sizeof clex);
+            clex.src = cond_src;
+            clex.len = cond_len;
+            kiln_dyn_lexer_next(&clex);
+            kiln_value condition;
+            int status = kiln_dyn_eval_expr(host, &clex, scope, receiver, args, argc, depth,
+                                            &condition, thrown);
+            kiln_dyn_token_free(&clex.curr);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(condition)) break;
+
+            kiln_dyn_lexer blex;
+            memset(&blex, 0, sizeof blex);
+            blex.src = body_src;
+            blex.len = body_len;
+            blex.break_label = lex->break_label;
+            blex.break_label_len = lex->break_label_len;
+            kiln_dyn_lexer_next(&blex);
+            while (blex.curr.kind != KILN_DYN_EOF) {
+                int flow = 0;
+                status = kiln_dyn_eval_stmt(host, &blex, scope, receiver, args, argc,
+                                            depth, result, &flow, thrown);
+                lex->break_label = blex.break_label;
+                lex->break_label_len = blex.break_label_len;
+                if (status != KILN_C99_OK || flow == 1) {
+                    *returned = flow;
+                    kiln_dyn_token_free(&blex.curr);
+                    return status;
+                }
+                if (flow == 2) {
+                    if (lex->break_label != NULL) {
+                        if (my_label != NULL && my_label_len == lex->break_label_len &&
+                            strncmp(my_label, lex->break_label, my_label_len) == 0) {
+                            lex->break_label = NULL;
+                            lex->break_label_len = 0;
+                        } else {
+                            *returned = 2;
+                        }
+                    }
+                    break_loop = 1;
+                    break;
+                }
+                if (flow == 3) {
+                    if (lex->break_label != NULL) {
+                        if (my_label != NULL && my_label_len == lex->break_label_len &&
+                            strncmp(my_label, lex->break_label, my_label_len) == 0) {
+                            lex->break_label = NULL;
+                            lex->break_label_len = 0;
+                        } else {
+                            *returned = 3;
+                            break_loop = 1;
+                        }
+                    }
+                    break;
+                }
+            }
+            kiln_dyn_token_free(&blex.curr);
+            if (*returned == 2 || *returned == 3) return KILN_C99_OK;
+        }
+        if (*returned == 2 && lex->break_label != NULL && my_label != NULL &&
+            my_label_len == lex->break_label_len &&
+            strncmp(my_label, lex->break_label, my_label_len) == 0) {
+            lex->break_label = NULL;
+            lex->break_label_len = 0;
+            *returned = 0;
+        }
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_FOR) {
@@ -2949,11 +3063,21 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                                     break;
                                 }
                                 if (flow == 3) {
+                                    if (lex->break_label != NULL) {
+                                        if (my_label != NULL && my_label_len == lex->break_label_len &&
+                                            strncmp(my_label, lex->break_label, my_label_len) == 0) {
+                                            lex->break_label = NULL;
+                                            lex->break_label_len = 0;
+                                        } else {
+                                            *returned = 3;
+                                        }
+                                    }
                                     kiln_dyn_token_free(&blex.curr);
                                     break;
                                 }
                             }
                             kiln_dyn_token_free(&blex.curr);
+                            if (*returned == 3) return KILN_C99_OK;
                             if (break_loop) break;
                         }
                     }
@@ -2999,11 +3123,21 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                                     break;
                                 }
                                 if (flow == 3) {
+                                    if (lex->break_label != NULL) {
+                                        if (my_label != NULL && my_label_len == lex->break_label_len &&
+                                            strncmp(my_label, lex->break_label, my_label_len) == 0) {
+                                            lex->break_label = NULL;
+                                            lex->break_label_len = 0;
+                                        } else {
+                                            *returned = 3;
+                                        }
+                                    }
                                     kiln_dyn_token_free(&blex.curr);
                                     break;
                                 }
                             }
                             kiln_dyn_token_free(&blex.curr);
+                            if (*returned == 3) return KILN_C99_OK;
                             if (break_loop) break;
                         }
                     }
@@ -3112,11 +3246,21 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                         break;
                     }
                     if (flow == 3) {
+                        if (lex->break_label != NULL) {
+                            if (my_label != NULL && my_label_len == lex->break_label_len &&
+                                strncmp(my_label, lex->break_label, my_label_len) == 0) {
+                                lex->break_label = NULL;
+                                lex->break_label_len = 0;
+                            } else {
+                                *returned = 3;
+                            }
+                        }
                         kiln_dyn_token_free(&blex.curr);
                         break;
                     }
                 }
                 kiln_dyn_token_free(&blex.curr);
+                if (*returned == 3) return KILN_C99_OK;
                 if (break_loop) break;
             }
             if (step_len > 0) {

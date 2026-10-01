@@ -39,6 +39,29 @@ const whileVarCapture = Function(
 );
 console.log("while var capture:", whileVarCapture());
 
+const whileZeroIterations = Function(
+  "var count = 0; while (false) { count = 1; } return count;",
+);
+console.log("while zero iterations:", whileZeroIterations());
+
+const whileFlow = Function(
+  "var count = 0; while (count < 3) { count++; if (count === 1) continue; " +
+    "if (count === 2) break; } return count;",
+);
+console.log("while break and continue:", whileFlow());
+
+const whileReturn = Function("while (true) { return 51; } return 0;");
+console.log("while return:", whileReturn());
+
+const labeledWhileBreak = Function("outer: while (true) { break outer; } return 52;");
+console.log("labeled while break:", labeledWhileBreak());
+
+const labeledWhileContinue = Function(
+  "var count = 0; outer: while (count < 3) { count++; " +
+    "while (true) { continue outer; } count = 99; } return count;",
+);
+console.log("labeled while continue:", labeledWhileContinue());
+
 const nestedVarDoesNotLeak = Function(
   "function inner() { var hidden = 43; } inner(); " +
     "try { return hidden; } catch (error) { return error.name; }",
