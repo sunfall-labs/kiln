@@ -516,7 +516,7 @@ pub fn proven_types_with_bounds(
                     },
                     GraphOp::Unary { op, value } => match op {
                         UnaryOp::Not => Some(Proven::Boolean),
-                        UnaryOp::TypeOf => Some(Proven::String),
+                        UnaryOp::TypeOf | UnaryOp::ToString => Some(Proven::String),
                         UnaryOp::Void => Some(Proven::Undefined),
                         UnaryOp::BitwiseNot => number(&state, value).then_some(Proven::Int),
                         UnaryOp::Increment

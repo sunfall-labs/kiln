@@ -209,7 +209,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
                     if *operator == UnaryOp::ToString {
-                        let converted = self.as_string_units(&value, current);
+                        let converted = self.as_text_units(&value, current);
                         if let Some(text) = self.catchable(converted, current)? {
                             self.stack.push(Value::String(text));
                         }

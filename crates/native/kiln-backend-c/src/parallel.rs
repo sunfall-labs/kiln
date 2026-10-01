@@ -815,7 +815,7 @@ impl Proof<'_> {
                     | GraphOp::CheckTdz { .. } => None,
                     // `Math` is a value; every other built-in is a placeholder, held to its uses.
                     GraphOp::LoadBuiltin(_) => None,
-                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
+                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf | UnaryOp::ToString)
                         .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
                     GraphOp::Binary { op, .. } => {
                         matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)

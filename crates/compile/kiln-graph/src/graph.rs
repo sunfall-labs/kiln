@@ -383,7 +383,8 @@ impl GraphOp {
                 | UnaryOp::Negate
                 | UnaryOp::ToNumeric
                 | UnaryOp::Increment
-                | UnaryOp::Decrement => Effects::UNKNOWN,
+                | UnaryOp::Decrement
+                | UnaryOp::ToString => Effects::UNKNOWN,
             },
 
             Self::Binary { op, .. } => match op {
@@ -471,8 +472,8 @@ impl GraphOp {
     }
 
     /// Refine coercion effects only when the graph's type proof establishes numeric operands.
-    /// Unknown values must retain the full effect set: ToPrimitive/ToNumeric can invoke user
-    /// code, allocate, mutate, or throw. Numeric specialization is safe because it bypasses that
+    /// Unknown values must retain the full effect set: primitive/numeric/string coercion can invoke
+    /// user code, allocate, mutate, or throw. Numeric specialization is safe because it bypasses that
     /// conversion path, and is shared by DCE, LICM, and parallel-map admission.
     pub fn effects_with_proven_numbers(&self, proven_numbers: &HashSet<ValueId>) -> Effects {
         let numeric = |value: &ValueId| proven_numbers.contains(value);
@@ -604,6 +605,7 @@ mod effect_tests {
             UnaryOp::Plus,
             UnaryOp::Negate,
             UnaryOp::ToNumeric,
+            UnaryOp::ToString,
             UnaryOp::Increment,
             UnaryOp::Decrement,
         ] {

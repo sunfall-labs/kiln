@@ -312,7 +312,10 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Cannot convert a Symbol value to a string");
         }
+        kiln_c99_gc_keep_alive(&value);
         *out = kiln_c99_text(value);
+        kiln_c99_gc_keep_alive(&value);
+        kiln_c99_gc_keep_alive(out);
         return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
     }
     int numeric = operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
