@@ -17,3 +17,16 @@ if (instance.constructor !== DerivedField) throw new Error("derived instance con
 if (instance.min !== 0) throw new Error("derived instance getter used the base constructor");
 if (DerivedField.constraints.min !== 0) throw new Error("inherited static getter returned the wrong min");
 console.log("derived-static-accessors:ok");
+
+for (const key of ["name", "length"]) {
+  Object.defineProperty(DerivedField, key, {
+    configurable: true,
+    get() {
+      if (this !== DerivedField) throw new Error("callable metadata getter lost its receiver");
+      return key === "name" ? "renamed" : 7;
+    },
+  });
+}
+if (DerivedField.name !== "renamed" || DerivedField.length !== 7) {
+  throw new Error("callable metadata getter overrides were ignored");
+}
