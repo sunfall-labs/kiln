@@ -2605,6 +2605,18 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         status = kiln_c99_node_emit(socket->host, socket->object, "connect",
                                     kiln_c99_undefined(), 0, 0, exception);
         if (status != KILN_C99_OK || socket->closing) return status;
+        /* Reading and writing are independent halves. A connect listener may immediately
+         * end the writer; the reply and peer EOF still need their own live read request. */
+        if (!socket->read_paused && !socket->read_closed && socket->read_request == 0) {
+            read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                            sizeof *read);
+            if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+            read->kind = KILN_REALM_OP_TCP_READ;
+            kiln_c99_heap_store_pointer(read, &read->socket, socket);
+            status = kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                                         NULL, 0, NULL, 0, read, &socket->read_request);
+            if (status != KILN_C99_OK) return status;
+        }
         if (socket->pending_write_len != 0 ||
             (socket->write_callbacks.tag == KILN_VALUE_ARRAY &&
              (kiln_c99_array_of(socket->write_callbacks))->count != 0)) {
@@ -2622,14 +2634,16 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_c99_heap_store_value(socket, &socket->write_callbacks,
                                       kiln_c99_undefined());
             if (status != KILN_C99_OK) return status;
-            socket->pending_read_after_write = !socket->shutdown_after_write;
+            socket->pending_read_after_write = 0;
             free(socket->pending_write_bytes);
             socket->pending_write_bytes = NULL;
             socket->pending_write_len = 0;
             socket->pending_write_capacity = 0;
             return KILN_C99_OK;
         }
-        if (socket->shutdown_after_write) {
+        if (socket->shutdown_after_write && socket->write_request == 0 &&
+            socket->shutdown_request == 0) {
+            socket->shutdown_after_write = 0;
             kiln_node_completion *shutdown = (kiln_node_completion *)kiln_c99_gc_calloc(
                 KILN_GC_NODE_COMPLETION, sizeof *shutdown);
             if (shutdown == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -2638,12 +2652,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             return kiln_c99_node_start(shutdown->kind, socket->resource, 0, NULL, 0,
                                        NULL, 0, shutdown, &socket->shutdown_request);
         }
-        read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
-        if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
-        read->kind = KILN_REALM_OP_TCP_READ;
-        kiln_c99_heap_store_pointer(read, &read->socket, socket);
-        return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
-                                   NULL, 0, NULL, 0, read, &socket->read_request);
+        return KILN_C99_OK;
     }
     if (work->server != NULL) {
         kiln_node_server *server = work->server;
