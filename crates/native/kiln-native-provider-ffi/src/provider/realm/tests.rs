@@ -2856,6 +2856,12 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
     use std::net::TcpStream;
     use std::time::Duration;
 
+    struct NoopWake;
+    impl std::task::Wake for NoopWake {
+        fn wake(self: std::sync::Arc<Self>) {}
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {}
+    }
+
     struct Exchange {
         handle: u64,
         stage: u8,
@@ -3100,18 +3106,6 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
                 if status != 0 {
                     return status;
                 }
-                struct NoopWake;
-                impl std::task::Wake for NoopWake {
-                    fn wake(self: std::sync::Arc<Self>) {}
-                    fn wake_by_ref(self: &std::sync::Arc<Self>) {}
-                }
-                let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
-                if let Some(realm) = active_realm() {
-                    realm.runtime.executor().poll_local_once(&waker);
-                    realm.runtime.executor().poll_local_once(&waker);
-                } else {
-                    return INVALID_ARGUMENT;
-                }
                 0
             }
             2 => {
@@ -3214,6 +3208,19 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
             },
             0
         );
+        // Drive the local TCP accept outside `kiln_realm_enter`. Enter already runs the entry
+        // callback inside this Realm's Tokio runtime; polling the executor from that callback
+        // would attempt to start a nested runtime. Keeping these polls between submission and
+        // `drive` makes the accept completion available for cancellation while its callback is
+        // still queued, which is the state this regression exercises.
+        if stage == 1 {
+            let Some(realm) = realm(handle) else {
+                panic!("the test Realm disappeared before queued cancellation");
+            };
+            let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+            realm.runtime.executor().poll_local_once(&waker);
+            realm.runtime.executor().poll_local_once(&waker);
+        }
         assert_eq!(
             unsafe {
                 kiln_realm_drive(
