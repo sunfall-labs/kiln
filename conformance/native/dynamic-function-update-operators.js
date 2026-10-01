@@ -29,6 +29,14 @@ const updateWith = new Function("outer", "inner",
   "with (outer) { with (inner) { return value++; } }");
 console.log(updateWith(outer, inner), inner.value, outer.value);
 
+function updateWithLexicalShadow() {
+  const value = 100;
+  const object = { value: 5 };
+  const result = eval("(function() { with (object) { return value++; } })()");
+  return [result, object.value, value];
+}
+console.log(updateWithLexicalShadow().join(","));
+
 let missingThrows = false;
 try { new Function("return ++dynamicUpdateMissing;")(); }
 catch (error) { missingThrows = error instanceof ReferenceError; }

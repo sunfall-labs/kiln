@@ -1703,6 +1703,71 @@ typedef enum {
     KILN_DYN_UPDATE_GLOBAL,
 } kiln_dyn_update_reference;
 
+static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *scope,
+                                            const char *name, size_t name_len, int depth,
+                                            int allow_missing, kiln_value *current,
+                                            kiln_dyn_update_reference *reference,
+                                            kiln_dyn_scope **binding_scope,
+                                            kiln_value *with_target,
+                                            kiln_value *global_target,
+                                            int *unresolvable,
+                                            kiln_value *thrown) {
+    *unresolvable = 0;
+    for (kiln_dyn_scope *environment = scope; environment != NULL;
+         environment = environment->parent) {
+        for (size_t index = 0; index < environment->count; ++index) {
+            kiln_dyn_binding *binding = &environment->bindings[index];
+            if (binding->name_len != name_len || memcmp(binding->name, name, name_len) != 0)
+                continue;
+            if (binding->value.tag == KILN_VALUE_CELL) {
+                kiln_val *cell = kiln_c99_cell_of(binding->value);
+                int status = kiln_c99_val_check_tdz(*cell, thrown);
+                if (status != KILN_C99_OK) return status;
+                *current = kiln_val_to_boundary(*cell);
+            } else {
+                *current = binding->value;
+            }
+            *binding_scope = environment;
+            *reference = KILN_DYN_UPDATE_BINDING;
+            return KILN_C99_OK;
+        }
+        if (environment->has_with_object) {
+            int present = 0;
+            int status = kiln_c99_has_property(host, environment->with_object, name, name_len,
+                                               &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present) {
+                *with_target = environment->with_object;
+                kiln_c99_gc_keep_alive(with_target);
+                status = kiln_c99_get(host, *with_target, name, name_len, current, depth,
+                                      thrown);
+                if (status != KILN_C99_OK) return status;
+                *reference = KILN_DYN_UPDATE_WITH;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    int status = kiln_c99_global_object(global_target);
+    if (status != KILN_C99_OK) return status;
+    int present = 0;
+    status = kiln_c99_has_property(host, *global_target, name, name_len, &present, depth,
+                                   thrown);
+    if (status != KILN_C99_OK) return status;
+    if (!present) {
+        if (!allow_missing)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                                        "Variable is not defined");
+        *current = kiln_c99_undefined();
+        *unresolvable = 1;
+    } else {
+        status = kiln_c99_get(host, *global_target, name, name_len, current, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    *reference = KILN_DYN_UPDATE_GLOBAL;
+    kiln_c99_gc_keep_alive(global_target);
+    return KILN_C99_OK;
+}
+
 /* Identifier updates share one reference path for prefix and postfix forms. In particular,
  * resolve the reference before ToNumeric so missing names throw, then preserve the environment's
  * write rules when conversion has side effects. */
@@ -1712,32 +1777,17 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
                                       kiln_value *thrown) {
     kiln_value current = kiln_c99_undefined();
     kiln_value global_target = kiln_c99_undefined();
+    kiln_value with_target = kiln_c99_undefined();
+    kiln_dyn_scope *binding_scope = NULL;
     kiln_dyn_update_reference reference = KILN_DYN_UPDATE_BINDING;
-    int found = 0;
-    int status = kiln_dyn_scope_get(scope, name, name_len, &current, &found, thrown);
+    int unresolvable = 0;
+    int status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 0,
+                                                   &current, &reference, &binding_scope,
+                                                   &with_target, &global_target, &unresolvable,
+                                                   thrown);
     if (status != KILN_C99_OK) return status;
-    if (!found) {
-        status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth, &current,
-                                         &found, thrown);
-        if (status != KILN_C99_OK) return status;
-        if (found) reference = KILN_DYN_UPDATE_WITH;
-    }
-    if (!found) {
-        status = kiln_c99_global_object(&global_target);
-        if (status != KILN_C99_OK) return status;
-        int present = 0;
-        status = kiln_c99_has_property(host, global_target, name, name_len, &present, depth,
-                                       thrown);
-        if (status != KILN_C99_OK) return status;
-        if (!present)
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
-                                        "Variable is not defined");
-        kiln_c99_gc_keep_alive(&global_target);
-        status = kiln_c99_get(host, global_target, name, name_len, &current, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-        reference = KILN_DYN_UPDATE_GLOBAL;
-    }
     kiln_c99_gc_keep_alive(&current);
+    kiln_c99_gc_keep_alive(&with_target);
     kiln_c99_gc_keep_alive(&global_target);
 
     kiln_value numeric = kiln_c99_undefined();
@@ -1753,43 +1803,36 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
 
     int ignore_write = 0;
     if (reference == KILN_DYN_UPDATE_BINDING) {
-        status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+        status = kiln_dyn_scope_check_write(binding_scope, name, name_len, &ignore_write, thrown);
         if (status != KILN_C99_OK) return status;
     } else if (reference == KILN_DYN_UPDATE_WITH) {
         /* A with-environment reference is resolved again when its mutable binding is written.
          * The value's ToPrimitive may have deleted the matching property, allowing an outer
          * with/global/lexical environment to supply SetMutableBinding. */
-        int written = 0;
-        status = kiln_dyn_scope_set_with(host, scope, name, name_len, next, depth,
-                                         &written, thrown);
+        status = kiln_dyn_resolve_update_reference(host, scope, name, name_len, depth, 1,
+                                                   &current, &reference, &binding_scope,
+                                                   &with_target, &global_target, &unresolvable,
+                                                   thrown);
         if (status != KILN_C99_OK) return status;
-        if (written) {
-            *out = prefix ? next : numeric;
-            kiln_c99_gc_keep_alive(out);
-            return KILN_C99_OK;
-        }
-        int binding_found = 0;
-        status = kiln_dyn_scope_get(scope, name, name_len, &current, &binding_found, thrown);
-        if (status != KILN_C99_OK) return status;
-        if (binding_found) {
-            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+        if (reference == KILN_DYN_UPDATE_BINDING) {
+            status = kiln_dyn_scope_check_write(binding_scope, name, name_len, &ignore_write,
+                                                thrown);
             if (status != KILN_C99_OK) return status;
-            if (!ignore_write && !kiln_dyn_scope_update(scope, name, name_len, next))
+            if (!ignore_write && !kiln_dyn_scope_update(binding_scope, name, name_len, next))
                 return KILN_C99_OUT_OF_MEMORY;
-            *out = prefix ? next : numeric;
-            kiln_c99_gc_keep_alive(out);
-            return KILN_C99_OK;
         }
-        reference = KILN_DYN_UPDATE_GLOBAL;
     }
     if (!ignore_write) {
         if (reference == KILN_DYN_UPDATE_BINDING) {
-            if (!kiln_dyn_scope_update(scope, name, name_len, next))
+            if (!kiln_dyn_scope_update(binding_scope, name, name_len, next))
                 return KILN_C99_OUT_OF_MEMORY;
+        } else if (reference == KILN_DYN_UPDATE_WITH) {
+            status = kiln_c99_put(host, with_target, name, name_len, next, 0, thrown);
+            if (status != KILN_C99_OK) return status;
         } else {
-            if (global_target.tag != KILN_VALUE_OBJECT) {
-                status = kiln_c99_global_object(&global_target);
-                if (status != KILN_C99_OK) return status;
+            if (unresolvable && scope->strict) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                                            "Variable is not defined");
             }
             status = kiln_c99_put(host, global_target, name, name_len, next, 0, thrown);
             if (status != KILN_C99_OK) return status;
