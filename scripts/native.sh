@@ -8,7 +8,7 @@
 # if they print different bytes one of them is wrong and there is nothing else it could be. No
 # specification reading, no node version, no locale enters into it.
 #
-# THE THREE OUTCOMES, and only one is a failure:
+# THE THREE ORDINARY OUTCOMES, and only one is a failure:
 #
 #   match     both engines printed the same bytes *and* exited with the same status.
 #   refused   the backend said which instruction it does not implement yet. Not a failure: the
@@ -16,6 +16,10 @@
 #             below is a work queue rather than a defect report.
 #   DIVERGES  both ran to completion and disagreed -- on the bytes, or on the exit status. That
 #             is a compiler bug.
+#
+# `KILN_NATIVE_TIMEOUT_SECONDS`, when set to a positive integer, adds a failed-probe outcome for
+# an invocation that exceeds its deadline. It is never a backend refusal, and the batch continues
+# so the remaining probes still retain their verdicts.
 #
 # THE EXIT STATUS IS PART OF THE ANSWER. This compared output alone for a long time, and a
 # successful CommonJS program that printed the right bytes and then exited 1 was a *match* to it
@@ -78,6 +82,11 @@ done
 # It is minutes rather than seconds, so it is a task of its own (`mise run native-stress`) and
 # not part of `gate-quick`.
 STRESS="${KILN_NATIVE_GC_STRESS:-}"
+NATIVE_TIMEOUT_SECONDS="${KILN_NATIVE_TIMEOUT_SECONDS:-}"
+if [[ -n $NATIVE_TIMEOUT_SECONDS && ! $NATIVE_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]; then
+	echo "native.sh: KILN_NATIVE_TIMEOUT_SECONDS must be a positive integer" >&2
+	exit 2
+fi
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
@@ -92,6 +101,7 @@ fi
 matched=0
 invalid=0
 diverged=0
+timeouts=0
 stress_skipped=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
@@ -110,6 +120,20 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT
+
+# Keep the default path identical: without the opt-in deadline, invoke the command directly.
+# With it, the helper owns a fresh process group so a timed-out kiln run cannot leave children
+# holding pipes open or continue consuming resources after this probe has failed.
+run_invocation() {
+	local timeout_marker="$1"
+	shift
+	if [[ -z $NATIVE_TIMEOUT_SECONDS ]]; then
+		"$@"
+	else
+		python3 "$(kiln_repo_root)/scripts/native_timeout.py" \
+			"$NATIVE_TIMEOUT_SECONDS" "$timeout_marker" -- "$@"
+	fi
+}
 
 run_probe() {
 	trap - EXIT
@@ -135,14 +159,21 @@ run_probe() {
 		read -r -a probe_env <<<"$directive"
 	fi
 
-	local interpreted
-	if ! interpreted="$(env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
+	local interpreted_marker="$WORK_DIR/$name.interpreter-timeout"
+	local interpreted interpreted_status=0
+	interpreted="$(run_invocation "$interpreted_marker" \
+		env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
+		${adapter:+"$adapter"} run "$probe" 2>&1)" || interpreted_status=$?
+	if [[ -f $interpreted_marker ]]; then
+		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.timedout"
+		return 0
+	fi
+	if ((interpreted_status != 0)); then
 		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
 		return 0
 	fi
 	# Zero by construction: a nonzero interpreter took the branch above and is already a failure.
 	# Named anyway, because the comparison below is between the two engines and reads as one.
-	local interpreted_status=0
 
 	# A probe may also ask for more than the default build in its first lines:
 	#
@@ -192,7 +223,14 @@ run_probe() {
 		if [[ -n $STRESS ]]; then
 			run_env+=("KILN_GC_STRESS=$STRESS")
 		fi
-		native="$(env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+		local native_timeout_marker="$WORK_DIR/$name.native-$threads.timeout"
+		native="$(run_invocation "$native_timeout_marker" \
+			env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot \
+			${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+		if [[ -f $native_timeout_marker ]]; then
+			printf '%s\n' "$native" > "$WORK_DIR/$name.timedout"
+			return 0
+		fi
 		if [[ $native != "$interpreted" ]] || ((native_status != interpreted_status)); then
 			[[ $threads != default ]] && native="$native [KILN_PARALLELISM=$threads]"
 			break
@@ -267,7 +305,12 @@ wait || true
 for probe in "${PROBES[@]}"; do
 	name="$(basename -- "$probe")"
 	name="${name%.*}"
-	if [[ -f "$WORK_DIR/$name.failed" ]]; then
+	if [[ -f "$WORK_DIR/$name.timedout" ]]; then
+		kiln_say "FAILED: deadline expired while running $name (KILN_NATIVE_TIMEOUT_SECONDS=$NATIVE_TIMEOUT_SECONDS):"
+		kiln_say "$(<"$WORK_DIR/$name.timedout")"
+		timeouts=$((timeouts + 1))
+		invalid=$((invalid + 1))
+	elif [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
 		kiln_say "$(<"$WORK_DIR/$name.failed")"
 		invalid=$((invalid + 1))
@@ -305,6 +348,9 @@ fi
 
 if ((invalid > 0)); then
 	kiln_say "native: $invalid invalid probes; all collected verdicts are reported above"
+fi
+if ((timeouts > 0)); then
+	kiln_say "native: $timeouts invocation(s) exceeded their opt-in deadline; none were classified as refusals"
 fi
 
 if ((diverged > 0)); then
