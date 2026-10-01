@@ -171,10 +171,10 @@ console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/f
 fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
-    let root = TestDirectory::new("kiln-native-create-require-escaped");
+    let root = TestDirectory::new("kiln-native-create-require #? ü");
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
         .expect("write package metadata");
-    let entry = root.path.join("entry with space.mjs");
+    let entry = root.path.join("entry with #? ü.mjs");
     fs::write(
         &entry,
         r#"import { createRequire } from "node:module";
@@ -183,6 +183,7 @@ function factory() {
   return { load: () => require('./dep.cjs'), require };
 }
 const { load, require } = factory();
+console.log(import.meta.url);
 console.log(`before:${globalThis.__loads || 0}`);
 const first = load();
 const second = load();
@@ -229,8 +230,13 @@ module.exports = { loads: globalThis.__loads };"#,
             },
         )
         .expect("native escaped createRequire graph builds and runs");
+    let expected_url = url::Url::from_file_path(&entry)
+        .expect("special-character entry path becomes a file URL")
+        .to_string();
+    let expected_stdout = format!("{expected_url}\nbefore:0\ntrue:1:1\nfunction\nfunction\n");
     assert_eq!(
-        run.stdout, b"before:0\ntrue:1:1\nfunction\nfunction\n",
+        run.stdout,
+        expected_stdout.as_bytes(),
         "stderr={:?}",
         run.stderr
     );

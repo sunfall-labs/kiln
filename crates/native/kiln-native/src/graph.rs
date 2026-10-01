@@ -1010,12 +1010,16 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
 fn native_import_meta_bootstrap() -> String {
     r#"
 if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
+    const __kilnURLConstructor = URL;
     const __kilnExecPath = globalThis.process.execPath;
-    const __kilnExecUrl = "file://" + __kilnExecPath;
+    // Let URL perform file-URL escaping. Concatenating a raw path makes `#` and `?`
+    // fragments/query delimiters and leaves spaces/non-ASCII bytes noncanonical, which
+    // prevents createRequire(import.meta.url) from matching the graph's captured importer.
+    const __kilnExecUrl = new __kilnURLConstructor("file://" + __kilnExecPath).href;
     const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
     globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
         return {
-            url: isEntry ? __kilnExecUrl : "file://" + sourceFilename,
+            url: isEntry ? __kilnExecUrl : new __kilnURLConstructor("file://" + sourceFilename).href,
             filename: isEntry ? __kilnExecPath : sourceFilename,
             dirname: isEntry ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,

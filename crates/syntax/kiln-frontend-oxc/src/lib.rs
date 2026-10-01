@@ -3845,7 +3845,9 @@ impl Lowerer<'_> {
                             .parent()
                             .map(|parent| parent.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let url_str = format!("file://{filename_str}");
+                        let url_str = url::Url::from_file_path(&abs_path)
+                            .map(|url| url.to_string())
+                            .unwrap_or_else(|_| "file:///unknown".to_string());
                         (url_str, dirname_str, filename_str)
                     } else {
                         (

@@ -29,4 +29,5 @@ oxc_str = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_transformer = { version = "0.147.0", default-features = false }
 serde_json = { workspace = true }
+url = { workspace = true }
 num-bigint = { workspace = true }
