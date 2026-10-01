@@ -4342,7 +4342,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
     size_t *order = NULL;
     size_t index;
     size_t insert_at;
-    int status;
+    int status = KILN_C99_OK;
     int extending = 0;
     if (result == NULL || (count != 0 && (names == NULL || name_lengths == NULL || values == NULL)))
         return KILN_C99_INVALID_ARGUMENT;

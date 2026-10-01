@@ -127,6 +127,9 @@ int main(void) {{
     if (kiln_c99_object_of(namespace_object)->prototype.tag != KILN_VALUE_NULL) return 4;
     if (!kiln_c99_object_of(namespace_object)->module_namespace ||
         kiln_c99_object_of(namespace_object)->frozen) return 5;
+    /* Extending an already-created namespace with no new exports is a valid no-op. */
+    if ({symbol}_namespace_wrapper(&namespace_object, NULL, NULL, NULL, 0) != KILN_C99_OK)
+        return 28;
     if (kiln_c99_object_of(namespace_object)->count != 3 ||
         !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[0].key, "a", 1) ||
         !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[1].key, "z", 1) ||
