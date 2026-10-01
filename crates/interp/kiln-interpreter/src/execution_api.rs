@@ -884,6 +884,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
     if let Some((session, _)) = session.as_ref() {
         vm.module_realm = Some(Rc::clone(&session.shared));
+        vm.readonly_cells = Rc::clone(&session.shared.borrow().readonly_cells);
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
         vm.isolated_graphs = Rc::clone(&session.shared.borrow().isolated_graphs);
         vm.actor_realm_id = session.shared.borrow().actor_realm_id;

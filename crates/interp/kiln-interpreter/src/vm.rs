@@ -32,9 +32,66 @@ mod workers;
 pub(crate) const WORKER_QUANTUM: u64 = 100_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReadonlyCellKind {
+pub(crate) enum ReadonlyCellKind {
     Const,
     FunctionName,
+}
+
+#[derive(Default)]
+pub(crate) struct ReadonlyCellRegistry {
+    entries: std::collections::HashMap<usize, (Weak<RefCell<Value>>, ReadonlyCellKind)>,
+    sweep: std::collections::VecDeque<usize>,
+    queued: std::collections::HashSet<usize>,
+}
+
+pub(crate) type SharedReadonlyCellRegistry = Rc<RefCell<ReadonlyCellRegistry>>;
+
+impl ReadonlyCellRegistry {
+    pub(crate) fn mark(&mut self, cell: &Cell, kind: ReadonlyCellKind) {
+        let key = Rc::as_ptr(cell) as usize;
+        if let Some((weak, existing_kind)) = self.entries.get_mut(&key) {
+            if weak.upgrade().is_some_and(|known| Rc::ptr_eq(&known, cell)) {
+                *existing_kind = kind;
+                return;
+            }
+        }
+        self.entries.insert(key, (Rc::downgrade(cell), kind));
+        if self.queued.insert(key) {
+            self.sweep.push_back(key);
+        }
+        self.sweep_dead(16);
+    }
+
+    pub(crate) fn kind(&mut self, cell: &Cell) -> Option<ReadonlyCellKind> {
+        let key = Rc::as_ptr(cell) as usize;
+        match self.entries.get(&key) {
+            Some((weak, kind)) => match weak.upgrade() {
+                Some(known) if Rc::ptr_eq(&known, cell) => Some(*kind),
+                Some(_) | None => {
+                    self.entries.remove(&key);
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    fn sweep_dead(&mut self, budget: usize) {
+        for _ in 0..budget {
+            let Some(key) = self.sweep.pop_front() else {
+                break;
+            };
+            self.queued.remove(&key);
+            let Some((weak, _)) = self.entries.get(&key) else {
+                continue;
+            };
+            if weak.strong_count() == 0 {
+                self.entries.remove(&key);
+            } else if self.queued.insert(key) {
+                self.sweep.push_back(key);
+            }
+        }
+    }
 }
 
 pub(super) struct Vm<'host, H: HostOps + ?Sized> {
@@ -223,8 +280,7 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) self_bindings: Vec<(Rc<RefCell<Value>>, u32)>,
     /// Immutable direct-eval bindings keyed by cell identity. Weak keys let closures keep the
     /// cells alive naturally without retaining every evaluated function for the VM's lifetime.
-    pub(super) readonly_cells:
-        std::collections::HashMap<usize, (Weak<RefCell<Value>>, ReadonlyCellKind)>,
+    pub(super) readonly_cells: SharedReadonlyCellRegistry,
     /// Namespace objects a module imported from itself, and the slots each name shows. Caught up
     /// from those slots before every instruction, so no read can see one stale.
     pub(super) self_namespaces: Vec<SelfNamespace>,

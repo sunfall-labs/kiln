@@ -8,17 +8,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         let key = Rc::as_ptr(cell) as usize;
-        let readonly = match self.readonly_cells.get(&key) {
-            Some((weak, kind)) => match weak.upgrade() {
-                Some(known) if Rc::ptr_eq(&known, cell) => Some(*kind),
-                Some(_) => None,
-                None => {
-                    self.readonly_cells.remove(&key);
-                    None
-                }
-            },
-            None => None,
-        };
+        let readonly = self.readonly_cells.borrow_mut().kind(cell);
         if let Some(kind) = readonly {
             if self.strict || kind == ReadonlyCellKind::Const {
                 self.throw_error(
@@ -1963,10 +1953,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::MarkCellFunctionName(slot) => {
                     let cell = self.cell(*slot as usize)?;
-                    self.readonly_cells.insert(
-                        Rc::as_ptr(&cell) as usize,
-                        (Rc::downgrade(&cell), ReadonlyCellKind::FunctionName),
-                    );
+                    self.readonly_cells
+                        .borrow_mut()
+                        .mark(&cell, ReadonlyCellKind::FunctionName);
                 }
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();

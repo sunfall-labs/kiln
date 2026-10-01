@@ -1984,6 +1984,8 @@ struct ModuleRealmShared {
     symbol_registry: Vec<(StringUnits, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: TemplateObjectCache,
+    /// Immutable eval bindings travel with closures across module VMs in this graph realm.
+    readonly_cells: vm::SharedReadonlyCellRegistry,
     intrinsics: Rc<Intrinsics>,
     isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
     actor_realm_id: u64,
@@ -2010,6 +2012,7 @@ impl Default for ModuleRealmSession {
                 symbol_registry: Vec::new(),
                 symbols: Vec::new(),
                 template_objects: std::collections::HashMap::new(),
+                readonly_cells: Rc::new(RefCell::new(vm::ReadonlyCellRegistry::default())),
                 intrinsics: Rc::new(Intrinsics::default()),
                 isolated_graphs: Rc::new(RefCell::new(Vec::new())),
                 actor_realm_id: kiln_runtime::workers::actor_request_id(),

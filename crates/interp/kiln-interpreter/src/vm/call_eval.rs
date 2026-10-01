@@ -274,8 +274,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     kiln_ir::EvalDeclaration::Var | kiln_ir::EvalDeclaration::Let => None,
                 };
                 if let Some(kind) = readonly_kind {
-                    self.readonly_cells
-                        .insert(Rc::as_ptr(&cell) as usize, (Rc::downgrade(&cell), kind));
+                    self.readonly_cells.borrow_mut().mark(&cell, kind);
                 }
                 locals[slot] = Value::Cell(cell);
             }
