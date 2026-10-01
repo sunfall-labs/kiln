@@ -1999,7 +1999,7 @@ pub(crate) fn call_native(
                 Native::StringIncludes | Native::StringStartsWith | Native::StringEndsWith => {
                     let haystack: Vec<u16> = text.units().collect();
                     let needle: Vec<u16> = match arguments.first() {
-                        None => Vec::new(),
+                        None => StringUnits::from("undefined").units().collect(),
                         Some(Value::String(value)) => value.encode_utf16().collect(),
                         Some(value) => value.to_string_units_checked()?.encode_utf16().collect(),
                     };
@@ -2195,7 +2195,6 @@ pub(crate) fn call_native(
                     if target <= current {
                         return Ok(Value::String(text.clone().into()));
                     }
-                    bounded_string(target)?;
                     let padding: Vec<u16> = match arguments.get(1) {
                         None | Some(Value::Undefined) => vec![u16::from(b' ')],
                         Some(Value::String(value)) => value.units().collect(),
@@ -2209,6 +2208,7 @@ pub(crate) fn call_native(
                     if padding.is_empty() {
                         Value::String(text.clone().into())
                     } else {
+                        bounded_string(target)?;
                         let mut filler = Vec::new();
                         while filler.len() < target - current {
                             filler.extend_from_slice(&padding);
