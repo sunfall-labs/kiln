@@ -56,11 +56,8 @@ impl super::Compiler {
             // not one to load from.
             Resolution::Local(local) if !local.initialized => {
                 let _ = local;
-                let scratch = self.local_count;
-                self.local_count += 1;
-                self.code.push(Instruction::NewCell(scratch));
-                self.code.push(Instruction::MarkUninitialized(scratch));
-                self.code.push(Instruction::LoadCell(scratch));
+                let check = self.uninitialized_read_check();
+                self.code.extend(check);
             }
             Resolution::Local(local) if local.celled => {
                 self.code.push(Instruction::LoadCell(local.slot))
@@ -92,6 +89,22 @@ impl super::Compiler {
                 }
             },
         }
+    }
+
+    /// Emit a run-time TDZ read using a temporary cell, for an uninitialized ordinary local.
+    ///
+    /// Native graph lowering represents uncaptured locals as SSA values, so a raw `LoadLocal`
+    /// cannot observe the uninitialized marker the way the interpreter can. A fresh cell routes
+    /// the check through the same `LoadCell` operation used for captured bindings in both
+    /// engines.
+    pub(super) fn uninitialized_read_check(&mut self) -> Vec<Instruction> {
+        let scratch = self.local_count;
+        self.local_count += 1;
+        vec![
+            Instruction::NewCell(scratch),
+            Instruction::MarkUninitialized(scratch),
+            Instruction::LoadCell(scratch),
+        ]
     }
 
     /// Evaluate a function declaration whose lexical value was initialized on scope entry.

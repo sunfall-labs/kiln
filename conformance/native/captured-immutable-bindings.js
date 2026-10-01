@@ -27,6 +27,46 @@ function beforeInitialization() {
   const later = 2;
 }
 beforeInitialization();
-if (effects !== 3) throw new Error('TDZ assignment skipped RHS effects');
+function branchBeforeInitialization() {
+  let caught = false;
+  try {
+    if (true) later = (++effects, 3);
+  } catch (error) {
+    if (!(error instanceof ReferenceError)) throw error;
+    caught = true;
+  }
+  const later = 4;
+  if (!caught) throw new Error('branch TDZ assignment accepted a write');
+}
+branchBeforeInitialization();
+function loopBeforeInitialization() {
+  let caught = false;
+  try {
+    while (true) {
+      later = (++effects, 5);
+      break;
+    }
+  } catch (error) {
+    if (!(error instanceof ReferenceError)) throw error;
+    caught = true;
+  }
+  let later = 6;
+  if (!caught) throw new Error('loop TDZ assignment accepted a write');
+}
+loopBeforeInitialization();
+function compoundBeforeInitialization() {
+  let caught = false;
+  try {
+    later += (++effects, 1);
+  } catch (error) {
+    if (!(error instanceof ReferenceError)) throw error;
+    caught = true;
+  }
+  let later = 0;
+  if (!caught || effects !== 5)
+    throw new Error('compound TDZ read ordering changed');
+}
+compoundBeforeInitialization();
+if (effects !== 5) throw new Error('TDZ assignment skipped RHS effects');
 if (false) { const dead = 1; dead = 2; }
 console.log('captured-immutable-bindings:ok', effects);

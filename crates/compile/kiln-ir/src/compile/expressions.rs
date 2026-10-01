@@ -996,21 +996,21 @@ impl super::Compiler {
             // `a ??= b` reads `a`, and assigns only if it is the wrong one -- so `b` may never
             // be evaluated and the store may never happen. The current value is left on the
             // stack as the expression's result when the store is skipped.
-            self.code.push(load.clone());
+            self.code.extend(load.clone());
             let skip = self.emit_jump(short_circuit_jump(operator));
             self.expression(value);
             self.code.push(Instruction::Dup);
             self.code.extend(store);
             let done = self.emit_jump(Instruction::Jump(0));
             self.patch_jump(skip);
-            self.code.push(load);
+            self.code.extend(load);
             self.patch_jump(done);
             return;
         }
         if operator == AssignmentOperator::Assign {
             self.expression(value);
         } else {
-            self.code.push(load);
+            self.code.extend(load);
             self.expression(value);
             self.code
                 .push(Instruction::Binary(compound_operator(operator)));
@@ -1037,7 +1037,7 @@ impl super::Compiler {
         &mut self,
         target: &str,
         span: Span,
-    ) -> Option<(Instruction, Vec<Instruction>)> {
+    ) -> Option<(Vec<Instruction>, Vec<Instruction>)> {
         // Whether the target is a frame local or a module slot decides the store instruction,
         // so it has to be carried alongside the slot rather than assumed.
         enum Place {
@@ -1046,11 +1046,16 @@ impl super::Compiler {
             Upvalue(u32),
             Global(u32),
         }
-        let (place, kind, imported) = match self.resolve_or_capture(target) {
+        let (place, kind, imported, needs_tdz_check) = match self.resolve_or_capture(target) {
             Resolution::Local(local) if local.celled => {
-                (Place::Cell(local.slot), local.kind, local.imported)
+                (Place::Cell(local.slot), local.kind, local.imported, false)
             }
-            Resolution::Local(local) => (Place::Local(local.slot), local.kind, local.imported),
+            Resolution::Local(local) => (
+                Place::Local(local.slot),
+                local.kind,
+                local.imported,
+                !local.initialized,
+            ),
             Resolution::Upvalue(index) => {
                 // Capture addresses do not carry declaration kind. Consult the same nearest
                 // enclosing declaration that resolve_or_capture selected for this upvalue.
@@ -1061,7 +1066,7 @@ impl super::Compiler {
                     .flat_map(|level| level.scopes.iter().rev())
                     .find_map(|scope| scope.get(target))
                     .expect("captured assignment has an owning declaration");
-                (Place::Upvalue(index), owner.kind, owner.imported)
+                (Place::Upvalue(index), owner.kind, owner.imported, false)
             }
             Resolution::Global(slot) => {
                 let module = &self.enclosing[0].scopes[0];
@@ -1069,7 +1074,12 @@ impl super::Compiler {
                     .get(target)
                     .copied()
                     .expect("Global resolution just found this name in module scope");
-                (Place::Global(slot), local.kind, local.imported)
+                (
+                    Place::Global(slot),
+                    local.kind,
+                    local.imported,
+                    !local.initialized,
+                )
             }
             // A `var` this program declared on the global object. `ThrowReference` reads it and
             // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
@@ -1078,7 +1088,7 @@ impl super::Compiler {
             Resolution::GlobalObject => {
                 let name = self.constant_index(Constant::String(target.to_owned().into()));
                 return Some((
-                    Instruction::ThrowReference(name),
+                    vec![Instruction::ThrowReference(name)],
                     vec![Instruction::StoreGlobalBinding(name)],
                 ));
             }
@@ -1102,7 +1112,7 @@ impl super::Compiler {
                     self.code.push(Instruction::RequireGlobalBinding(name));
                 }
                 return Some((
-                    Instruction::ThrowReference(name),
+                    vec![Instruction::ThrowReference(name)],
                     vec![if self.strict {
                         Instruction::StoreGlobalBindingStrict(name)
                     } else {
@@ -1111,24 +1121,37 @@ impl super::Compiler {
                 ));
             }
         };
-        let (load, store): (Instruction, Instruction) = match place {
-            Place::Local(slot) => (Instruction::LoadLocal(slot), Instruction::StoreLocal(slot)),
-            Place::Cell(slot) => (Instruction::LoadCell(slot), Instruction::StoreCell(slot)),
+        let is_upvalue = matches!(&place, Place::Upvalue(_));
+        let (load, store): (Vec<Instruction>, Instruction) = match place {
+            Place::Local(slot) => (
+                vec![Instruction::LoadLocal(slot)],
+                Instruction::StoreLocal(slot),
+            ),
+            Place::Cell(slot) => (
+                vec![Instruction::LoadCell(slot)],
+                Instruction::StoreCell(slot),
+            ),
             Place::Upvalue(index) => (
-                Instruction::LoadUpvalue(index),
+                vec![Instruction::LoadUpvalue(index)],
                 Instruction::StoreUpvalue(index),
             ),
             Place::Global(slot) => (
-                Instruction::LoadGlobal(slot),
+                vec![Instruction::LoadGlobal(slot)],
                 Instruction::StoreGlobal(slot),
             ),
+        };
+        let load = if needs_tdz_check {
+            self.uninitialized_read_check()
+        } else {
+            load
         };
         // PutValue checks TDZ after the RHS has completed. Compound/update forms already
         // check their GetValue first; a simple assignment still observes RHS effects before
         // throwing for an uninitialized lexical binding.
         let mut prefix = Vec::new();
-        if kind != VariableKind::Var || matches!(&load, Instruction::LoadUpvalue(_)) {
-            prefix.extend([load.clone(), Instruction::Pop]);
+        if kind != VariableKind::Var || is_upvalue {
+            prefix.extend(load.iter().cloned());
+            prefix.push(Instruction::Pop);
         }
         let store = if imported
             || matches!(
@@ -1296,7 +1319,7 @@ impl super::Compiler {
             return;
         };
 
-        self.code.push(load);
+        self.code.extend(load);
         // `ToNumeric` first: `x++` where `x` is "5" is 5 then 6, not "5" then "51". Without a
         // conversion the `+ 1` below concatenates, which is the trap the member form fell into --
         // and `ToNumber` is not the conversion an update applies: it narrows a BigInt, so `1n++`
