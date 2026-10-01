@@ -436,6 +436,7 @@ impl Dispatcher {
         self.dispatch.started();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_failed(&self, failed: bool) {
         self.failed.set(failed);
     }
