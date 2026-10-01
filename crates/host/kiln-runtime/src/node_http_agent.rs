@@ -64,6 +64,9 @@ struct OriginPool {
     connecting: BTreeSet<u64>,
     idle: VecDeque<ResourceId>,
     busy: BTreeMap<ResourceId, u64>,
+    /// Connections released as non-reusable remain accounted for until the transport's close
+    /// event. A waiter can only start a new connection after that event retires the old resource.
+    retiring: BTreeSet<ResourceId>,
     waiting: VecDeque<u64>,
 }
 
@@ -82,7 +85,13 @@ impl HttpAgent {
             pool.busy.insert(resource, request);
             return AgentDecision::Reuse(resource);
         }
-        if pool.connecting.len().saturating_add(pool.busy.len()) >= self.max_sockets {
+        if pool
+            .connecting
+            .len()
+            .saturating_add(pool.busy.len())
+            .saturating_add(pool.retiring.len())
+            >= self.max_sockets
+        {
             pool.waiting.push_back(request);
             return AgentDecision::Queued;
         }
@@ -107,8 +116,14 @@ impl HttpAgent {
         let Some(pool) = self.origins.get_mut(&origin) else {
             return AgentRelease::Retire;
         };
-        if pool.busy.remove(&resource).is_none() || !reusable {
-            self.resources.remove(&resource);
+        if pool.busy.remove(&resource).is_none() {
+            return AgentRelease::Retire;
+        }
+        if !reusable {
+            // Keep the resource-to-origin mapping until `closed()`. In particular, a request
+            // queued while this socket was busy must be promoted when a response listener
+            // destroys the socket before the response-end release reaches the transport.
+            pool.retiring.insert(resource);
             return AgentRelease::Retire;
         }
         if let Some(request) = pool.waiting.pop_front() {
@@ -169,6 +184,7 @@ impl HttpAgent {
         let pool = self.origins.get_mut(&origin)?;
         pool.idle.retain(|candidate| *candidate != resource);
         pool.busy.remove(&resource);
+        pool.retiring.remove(&resource);
         let request = pool.waiting.pop_front();
         if let Some(request) = request {
             pool.connecting.insert(request);
@@ -229,6 +245,30 @@ mod tests {
         assert_eq!(agent.acquire(origin, 2), AgentDecision::Queued);
         assert_eq!(agent.release(resource, false), AgentRelease::Retire);
         assert_eq!(agent.closed(resource), None);
+    }
+
+    #[test]
+    fn non_reusable_connection_promotes_waiter_only_after_close() {
+        let mut agent = HttpAgent::new(1);
+        let origin = HttpOrigin::http("example.com", 80);
+        let resource = ResourceId::new(12);
+        assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
+        assert!(agent.connected(origin.clone(), resource, 1));
+        assert_eq!(agent.acquire(origin, 2), AgentDecision::Queued);
+        assert_eq!(agent.release(resource, false), AgentRelease::Retire);
+        assert_eq!(
+            agent.acquire(HttpOrigin::http("example.com", 80), 3),
+            AgentDecision::Queued
+        );
+        assert_eq!(agent.closed(resource), Some(2));
+        assert_eq!(
+            agent.connect_failed(&HttpOrigin::http("example.com", 80), 2),
+            AgentFailure::Connect { request: 3 }
+        );
+        assert_eq!(
+            agent.acquire(HttpOrigin::http("example.com", 80), 4),
+            AgentDecision::Queued
+        );
     }
 
     #[test]

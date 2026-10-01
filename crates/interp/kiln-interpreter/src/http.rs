@@ -133,6 +133,38 @@ pub(crate) fn node_http_client_request_object(
         "emit",
         Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
     );
+    data.set(
+        "addListener",
+        Value::Native(Native::NodeEventOn, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeListener",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "off",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeAllListeners",
+        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "listeners",
+        Value::Native(Native::NodeEventListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "listenerCount",
+        Value::Native(Native::NodeEventListenerCount, RealmId::PRIMARY),
+    );
+    data.set(
+        "eventNames",
+        Value::Native(Native::NodeEventNames, RealmId::PRIMARY),
+    );
+    data.set(
+        "setMaxListeners",
+        Value::Native(Native::NodeEventSetMaxListeners, RealmId::PRIMARY),
+    );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::clone(&object));
     Value::Object(object)

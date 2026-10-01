@@ -2026,6 +2026,7 @@ static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
                                                      kiln_value *thrown) {
     size_t total;
     if (length == 0) {
+        int should_schedule_end = !socket->read_paused || socket->read_demand_active;
         socket->paused_read_eof = 1;
         socket->read_demand_active = 0;
         if (socket->readable_state.tag == KILN_VALUE_OBJECT) {
@@ -2036,8 +2037,14 @@ static int kiln_c99_node_socket_buffer_paused_read(kiln_node_socket *socket,
                                   kiln_c99_boolean(0), 0, NULL);
             if (status != KILN_C99_OK) return status;
         }
-        return kiln_c99_node_emit(socket->host, socket->object, "readable",
-                                  kiln_c99_undefined(), 0, 0, thrown);
+        {
+            int status = kiln_c99_node_emit(socket->host, socket->object, "readable",
+                                            kiln_c99_undefined(), 0, 0, thrown);
+            if (status == KILN_C99_OK && should_schedule_end &&
+                socket->paused_read_len == 0)
+                status = kiln_c99_node_socket_schedule_read_end(socket);
+            return status;
+        }
     }
     if (bytes == NULL || length > SIZE_MAX - socket->paused_read_len)
         return KILN_C99_INVALID_ARGUMENT;
@@ -2878,10 +2885,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_c99_heap_store_pointer(socket, &socket->server, server);
             status = kiln_c99_node_socket_object(socket, exception);
             if (status != KILN_C99_OK) return status;
-            status = server->protocol_http
-                         ? KILN_C99_OK
-                         : kiln_c99_node_emit(server->host, server->object, "connection",
-                                              socket->object, 1, 0, exception);
+            status = kiln_c99_node_emit(server->host, server->object, "connection",
+                                        socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
             if (socket->closing || (server->closing && server->protocol_http))
                 return KILN_C99_OK;

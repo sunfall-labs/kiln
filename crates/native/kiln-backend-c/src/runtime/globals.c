@@ -105,6 +105,10 @@ static int kiln_c99_process_object(kiln_value *out) {
     kiln_value exec_argv;
     kiln_value versions;
     kiln_value stream;
+#if KILN_RETAIN_GROUP_NODE_NET
+    kiln_value native_modules;
+    kiln_value net_module;
+#endif
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
     if (status != KILN_C99_OK) return status;
     if (process->tag == KILN_VALUE_OBJECT) {
@@ -383,6 +387,51 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "__kilnHostProcessCancel", 23,
                               kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW), 0, NULL);
+#if KILN_RETAIN_GROUP_NODE_NET
+    /* The public node:net module is a TypeScript facade. Its per-socket pause/resume/read and
+     * cork methods reach these private kernels through process.__kilnNativeModules.net; keeping
+     * that adapter separate from the public export object lets the facade own the public API. */
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&native_modules);
+        if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&native_modules);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&net_module);
+        if (status == KILN_C99_OK) {
+            kiln_c99_gc_keep_alive(&native_modules);
+            kiln_c99_gc_keep_alive(&net_module);
+        }
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "createServer", 11,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "connect", 7,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "createConnection", 16,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__corkSocket", 12,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_CORK_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__uncorkSocket", 14,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__pauseSocket", 13,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__resumeSocket", 14,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__readSocket", 12,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, native_modules, "net", 3, net_module, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *process, "__kilnNativeModules", 19,
+                              native_modules, 0, NULL);
+#endif
     if (status != KILN_C99_OK) return status;
     *out = *process;
     return KILN_C99_OK;

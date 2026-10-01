@@ -1433,7 +1433,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         state.ended = true;
                         state.reading = false;
                         let emit_end = (state.end_scheduled
-                            || (state.flowing && state.buffer.is_empty()))
+                            || (state.buffer.is_empty()
+                                && (state.flowing || state.read_demand.is_some())))
                             && !state.end_emitted;
                         if emit_end {
                             state.end_emitted = true;
@@ -2513,11 +2514,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     closed: false,
                     applying_read_completion: false,
                 };
-                if protocol == ServerProtocol::Http {
-                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "node:http requires the realm HTTP runtime".into(),
-                    })?;
+                let http_attach = if protocol == ServerProtocol::Http {
                     let allow_half_close = state
                         .borrow()
                         .object
@@ -2525,9 +2522,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .and_then(Weak::upgrade)
                         .and_then(|server| server.borrow().get("httpAllowHalfOpen"))
                         .is_some_and(|value| value.is_truthy());
-                    // ADR 0046: the host hands the accepted socket to the engine, whose task
-                    // queues protocol events for the checkpoint to drain.
-                    let whole_requests = state.borrow().fetch;
+                    Some((allow_half_close, state.borrow().fetch))
+                } else {
+                    None
+                };
+                if let Some((allow_half_close, whole_requests)) = http_attach {
+                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "node:http requires the realm HTTP runtime".into(),
+                    })?;
+                    // Register parser ownership before publishing the socket. Its async task is
+                    // driven only after this synchronous connection event returns, while a
+                    // listener that destroys the socket can already cancel the attached owner.
                     let attached = unsafe {
                         ActiveHttpRuntime::start_connection_with(
                             &mut *runtime,
@@ -2560,8 +2566,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     {
                         connection.request = Some(socket.clone());
                     }
-                    self.emit_http_server(state, "connection", vec![socket.clone()], instruction)?;
                 }
+                // Node emits the shared Server/Net connection event before the HTTP parser can
+                // publish a request. A listener may inspect, pause, or destroy this same socket.
+                self.emit_http_server(state, "connection", vec![socket.clone()], instruction)?;
                 for action in net_actions {
                     if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. })) {
                         let paused = node_net_socket_state(&socket)
