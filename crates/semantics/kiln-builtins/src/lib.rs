@@ -205,6 +205,7 @@ declare_ts_builtins! {
             "runLoop",
             "systemTheme",
             "turnMailbox",
+            "universalDriver",
             "untrack",
         ],
     },

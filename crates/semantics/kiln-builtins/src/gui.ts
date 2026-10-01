@@ -2037,6 +2037,72 @@ export class Icon extends Node {
   }
 }
 
+export const widgetConstructors: Record<string, new (...args: any[]) => Node> = {
+  window: Window,
+  vstack: VStack,
+  hstack: HStack,
+  card: Card,
+  box: Card,
+  divider: Divider,
+  separator: Divider,
+  button: Button,
+  text: Text,
+  textinput: TextInput,
+  slider: Slider,
+  toggle: Toggle,
+  spacer: Spacer,
+  scroll: ScrollView,
+  scrollview: ScrollView,
+  segmented: SegmentedControl,
+  progressbar: ProgressBar,
+  progress: ProgressBar,
+  select: Select,
+  dropdown: Select,
+  checkbox: Checkbox,
+  icon: Icon,
+  image: Icon,
+};
+
+// Canonical 10-method host operation contract for SolidJS official 'solid-js/universal' createRenderer
+export const universalDriver = {
+  createElement: (tag: string): Node => {
+    const lower = tag.toLowerCase();
+    const Ctor = widgetConstructors[lower] || Node;
+    return new Ctor(lower);
+  },
+  createTextNode: (value: string): Node => {
+    return new Text(value);
+  },
+  isTextNode: (node: Node): boolean => {
+    return node instanceof Text;
+  },
+  replaceText: (node: Node, value: string): void => {
+    if (node instanceof Text) {
+      node.text = value;
+    } else {
+      node.setProperty("text", value);
+    }
+  },
+  insertNode: (parent: Node, node: Node, anchor?: Node | null): void => {
+    parent.insertBefore(node, anchor || null);
+  },
+  removeNode: (parent: Node, node: Node): void => {
+    parent.removeChild(node);
+  },
+  setProperty: (node: Node, name: string, value: any): void => {
+    node.setProperty(name, value);
+  },
+  getParentNode: (node: Node): Node | null => {
+    return node.parent;
+  },
+  getFirstChild: (node: Node): Node | null => {
+    return node.firstChild;
+  },
+  getNextSibling: (node: Node): Node | null => {
+    return node.nextSibling;
+  },
+};
+
 // Universal Renderer implementation for SolidJS 2.0 (@solidjs/universal interface)
 export function createRenderer<T extends Node = Node>(config?: any): {
   render: (code: () => T, container: T) => () => void;
@@ -2051,69 +2117,9 @@ export function createRenderer<T extends Node = Node>(config?: any): {
   getFirstChild: (node: T) => T | null;
   getNextSibling: (node: T) => T | null;
 } {
-  const widgetConstructors: Record<string, new (...args: any[]) => Node> = {
-    window: Window,
-    vstack: VStack,
-    hstack: HStack,
-    card: Card,
-    box: Card,
-    divider: Divider,
-    separator: Divider,
-    button: Button,
-    text: Text,
-    textinput: TextInput,
-    slider: Slider,
-    toggle: Toggle,
-    spacer: Spacer,
-    scroll: ScrollView,
-    scrollview: ScrollView,
-    segmented: SegmentedControl,
-    progressbar: ProgressBar,
-    progress: ProgressBar,
-    select: Select,
-    dropdown: Select,
-    checkbox: Checkbox,
-    icon: Icon,
-    image: Icon,
-  };
-
-  const renderer = {
-    createElement: (tag: string): T => {
-      const lower = tag.toLowerCase();
-      const Ctor = widgetConstructors[lower] || Node;
-      return new Ctor(lower) as T;
-    },
-    createTextNode: (value: string): T => {
-      return new Text(value) as unknown as T;
-    },
-    isTextNode: (node: T): boolean => {
-      return node instanceof Text;
-    },
-    replaceText: (node: T, value: string): void => {
-      if (node instanceof Text) {
-        node.text = value;
-      } else {
-        node.setProperty("text", value);
-      }
-    },
-    insertNode: (parent: T, node: T, anchor?: T | null): void => {
-      parent.insertBefore(node, anchor || null);
-    },
-    removeNode: (parent: T, node: T): void => {
-      parent.removeChild(node);
-    },
-    setProperty: (node: T, name: string, value: any): void => {
-      node.setProperty(name, value);
-    },
-    getParentNode: (node: T): T | null => {
-      return node.parent as T | null;
-    },
-    getFirstChild: (node: T): T | null => {
-      return node.firstChild as T | null;
-    },
-    getNextSibling: (node: T): T | null => {
-      return node.nextSibling as T | null;
-    },
+  const driver = config || universalDriver;
+  return {
+    ...driver,
     render: (code: () => T, container: T): (() => void) => {
       const root = code();
       container.appendChild(root);
@@ -2122,8 +2128,6 @@ export function createRenderer<T extends Node = Node>(config?: any): {
       };
     },
   };
-
-  return renderer;
 }
 
 const defaultRenderer = createRenderer();
@@ -2968,5 +2972,6 @@ export default {
   latest,
   runLoop,
   getActiveDriver,
+  universalDriver,
 };
 
