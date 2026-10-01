@@ -1226,19 +1226,27 @@ impl super::Compiler {
     ) {
         let key = self.constant_index(Constant::String(target.to_owned().into()));
         let held = format!("%update{}", self.hidden_bindings);
+        let object = format!("%updateObject{}", self.hidden_bindings);
         self.hidden_bindings += 1;
         let mut found = Vec::with_capacity(scopes.len());
         for with in scopes {
             self.load_with_object(with);
+            self.code.push(Instruction::Dup);
             self.code.push(Instruction::WithHas(key));
             let miss = self.emit_jump(Instruction::JumpIfFalse(0));
-            self.load_with_object(with);
+            // Keep the environment object that supplied the binding. A getter or ToNumeric can
+            // delete the property, but the reference's base remains this object environment for
+            // PutValue, which may recreate that same property after the read completes.
+            self.code.push(Instruction::Dup);
+            self.declare_hidden(&object, span);
+            // The original object is still on the stack after binding the hidden copy. Use it
+            // for GetValue; reloading the environment later would lose the resolved reference.
             self.code.push(Instruction::GetProperty(key));
             // `ToNumeric` first, for the same reason the lexical form does it: `x++` where `x`
             // is "5" is 5 then 6, not "5" then "51".
             self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
             self.declare_hidden(&held, span);
-            self.load_with_object(with);
+            self.load_hidden(&object);
             self.load_hidden(&held);
             self.code.push(Instruction::Unary(if increment {
                 UnaryOp::Increment
@@ -1252,6 +1260,8 @@ impl super::Compiler {
             }
             found.push(self.emit_jump(Instruction::Jump(0)));
             self.patch_jump(miss);
+            // `WithHas` consumes only its duplicate, leaving the original object on a miss.
+            self.code.push(Instruction::Pop);
         }
         self.update_lexically(increment, prefix, target, span);
         for jump in found {
