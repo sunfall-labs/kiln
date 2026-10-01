@@ -960,9 +960,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match target {
             Value::Shared(facade) => facade.own_property(key).map(|(property, _)| property),
             Value::Object(object) => object.borrow().lookup_key(key),
-            Value::Function(closure) if !key.matches_ascii("prototype") => {
-                closure.properties.borrow().lookup_key(key)
+            Value::Function(closure)
+                if key.matches_ascii("prototype") && has_prototype_property(closure) =>
+            {
+                None
             }
+            Value::Function(closure) => closure.properties.borrow().lookup_key(key),
             // An array's non-element properties live in an ordinary store with an ordinary
             // chain, so a subclass's accessor is reachable the same way. An *index* may hold an
             // accessor too, either its own or one the chain carries where the array has a hole.
@@ -2003,13 +2006,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // which is a slot on the closure rather than an ordinary property -- so a write
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
-                if property_key.matches_ascii("prototype") {
-                    if closure.program.functions[closure.function as usize].is_class
-                        || closure.properties.borrow().is_frozen()
+                if property_key.matches_ascii("prototype") && has_prototype_property(closure) {
+                    let attributes = own_attributes_key(&self.intrinsics, target, property_key);
+                    if closure.properties.borrow().is_frozen()
+                        || attributes.is_some_and(|attributes| !attributes.writable)
                     {
                         return Ok(());
                     }
-                    *closure.prototype.borrow_mut() = Some(value);
+                    *closure.prototype.borrow_mut() = Some(value.clone());
+                    if closure
+                        .properties
+                        .borrow()
+                        .get_own_property_key(property_key)
+                        .is_some()
+                    {
+                        closure.properties.borrow_mut().set_key(property_key, value);
+                    }
                     return Ok(());
                 }
                 if self.inherited_setter_key(

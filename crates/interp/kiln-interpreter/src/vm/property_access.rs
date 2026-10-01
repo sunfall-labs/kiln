@@ -371,6 +371,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Function(closure) if name == "prototype" && has_prototype_property(closure) => {
                 prototype_object(closure)
             }
+            // Arrows and async functions do not start with the constructor-only intrinsic slot,
+            // but a program may add an ordinary own `prototype` property to them.
+            Value::Function(closure) if name == "prototype" => closure
+                .properties
+                .borrow()
+                .get(name)
+                .unwrap_or(Value::Undefined),
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.length() as f64),

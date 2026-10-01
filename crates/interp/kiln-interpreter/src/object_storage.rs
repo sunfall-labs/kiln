@@ -813,7 +813,9 @@ pub(super) fn own_property_state_key(
             .get_own_property_key(key)
             .cloned()
             .or_else(|| string_exotic_key(target, key).map(Property::Value)),
-        Value::Function(closure) if key.matches_ascii("prototype") => {
+        Value::Function(closure)
+            if key.matches_ascii("prototype") && has_prototype_property(closure) =>
+        {
             Some(Property::Value(prototype_object(closure)))
         }
         Value::Function(closure) => closure
@@ -999,10 +1001,18 @@ pub(super) fn install_property_key(
 ) -> Result<(), ExecutionError> {
     match target {
         Value::Object(object) => object.borrow_mut().install_key(key, property, attributes),
-        Value::Function(closure) => closure
-            .properties
-            .borrow_mut()
-            .install_key(key, property, attributes),
+        Value::Function(closure) => {
+            if key.matches_ascii("prototype")
+                && has_prototype_property(closure)
+                && let Property::Value(value) = &property
+            {
+                *closure.prototype.borrow_mut() = Some(value.clone());
+            }
+            closure
+                .properties
+                .borrow_mut()
+                .install_key(key, property, attributes);
+        }
         Value::Bound(bound) => bound
             .properties
             .borrow_mut()
