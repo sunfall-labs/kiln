@@ -1740,7 +1740,31 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 RuntimeHttpEvent::Error { id: _, message } => {
                     let error =
                         self.construct_error(ErrorKind::Error, &[Value::String(message.into())]);
-                    self.emit_http_server(server, "clientError", vec![error], instruction)?;
+                    let upgraded_socket = {
+                        let mut state = server.borrow_mut();
+                        state
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource && !stream.runtime_http)
+                            .map(|stream| {
+                                let socket =
+                                    stream.socket_object.clone().unwrap_or(Value::Undefined);
+                                (socket, stream.driver.close_actions())
+                            })
+                    };
+                    if let Some((socket, actions)) = upgraded_socket {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &socket,
+                            &[Value::String("error".into()), error],
+                            instruction,
+                        )?;
+                        for action in actions {
+                            self.start_http_stream_action(server, resource, action, instruction)?;
+                        }
+                    } else {
+                        self.emit_http_server(server, "clientError", vec![error], instruction)?;
+                    }
                 }
                 RuntimeHttpEvent::Closed => {
                     // The engine's last word: the transport is gone and the connection has

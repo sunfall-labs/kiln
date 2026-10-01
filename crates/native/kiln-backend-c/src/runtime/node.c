@@ -1848,7 +1848,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         kiln_value message = kiln_c99_copy_text((const char *)event->data,
                                                 (size_t)event->data_len);
         kiln_value object = client != NULL ? client->object : socket->object;
-        return kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
+        status = kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
+        if (socket->http_upgraded) {
+            int close_status = kiln_c99_node_close_socket(socket, 1);
+            return status != KILN_C99_OK ? status : close_status;
+        }
+        return status;
     }
     if (event->kind == 10) {
         int status;

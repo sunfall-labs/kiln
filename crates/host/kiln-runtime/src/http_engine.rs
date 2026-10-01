@@ -14,6 +14,7 @@ use std::future::Future;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
@@ -92,6 +93,61 @@ pub struct UpgradeTransport {
     /// Bytes written after the 101 response head while Hyper still owned the stream. The host
     /// installs these as a prefix so they precede every later raw-socket write.
     pub pending_write: Vec<u8>,
+    /// Completes when the host has written `pending_write`, allowing the engine to publish
+    /// `Drain` only after those bytes have left the user-space queue.
+    pub write_completion: Arc<UpgradeWriteCompletion>,
+}
+
+#[derive(Clone)]
+struct UpgradeWriteFailure {
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+/// Completion for the first raw-protocol write queued before Hyper released the stream. This
+/// state is shared with the host writer; readers never wait on it, preserving full-duplex I/O.
+pub struct UpgradeWriteCompletion {
+    result: Mutex<Option<Result<(), UpgradeWriteFailure>>>,
+    notify: Notify,
+}
+
+impl UpgradeWriteCompletion {
+    fn pending() -> Arc<Self> {
+        Arc::new(Self {
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        })
+    }
+
+    pub(crate) fn complete(&self, result: std::io::Result<()>) {
+        let result = result.map_err(|error| UpgradeWriteFailure {
+            kind: error.kind(),
+            message: error.to_string(),
+        });
+        if let Ok(mut slot) = self.result.lock()
+            && slot.is_none()
+        {
+            *slot = Some(result);
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait(&self) -> std::io::Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(result) = self.result.lock().ok().and_then(|slot| slot.clone()) {
+                return result
+                    .map_err(|failure| std::io::Error::new(failure.kind, failure.message));
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn completed() -> Arc<Self> {
+        let completion = Self::pending();
+        completion.complete(Ok(()));
+        completion
+    }
 }
 
 impl std::fmt::Debug for HostTransport {
@@ -421,6 +477,7 @@ struct UpgradeWrite {
     trailing: RefCell<Vec<u8>>,
     parsed: Cell<bool>,
     drain_needed: Cell<bool>,
+    completion: Arc<UpgradeWriteCompletion>,
 }
 
 impl UpgradeWrite {
@@ -433,6 +490,7 @@ impl UpgradeWrite {
             trailing: RefCell::new(Vec::new()),
             parsed: Cell::new(false),
             drain_needed: Cell::new(false),
+            completion: UpgradeWriteCompletion::pending(),
         }
     }
 
@@ -1282,22 +1340,46 @@ async fn serve(
                             let pending_write = writes
                                 .as_ref()
                                 .map_or_else(Vec::new, |writes| writes.take_trailing());
+                            let write_completion = writes
+                                .as_ref()
+                                .map_or_else(UpgradeWriteCompletion::completed, |writes| {
+                                    Arc::clone(&writes.completion)
+                                });
                             upgraded.borrow_mut().insert(
                                 shared.resource,
                                 UpgradeTransport {
                                     transport: HostTransport(Box::new(raw)),
                                     head: head.clone(),
                                     pending_write,
+                                    write_completion: Arc::clone(&write_completion),
                                 },
                             );
-                            let _ = shared.dispatch(&HttpEvent {
+                            let upgrade_dispatched = shared.dispatch(&HttpEvent {
                                 id: request_id,
                                 data: &head,
                                 ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
                             });
-                            if writes.is_some_and(|writes| writes.drain_needed.get()) {
-                                let _ = shared
-                                    .dispatch(&HttpEvent::bare(HttpEventKind::Drain, request_id));
+                            if upgrade_dispatched {
+                                match write_completion.wait().await {
+                                    Ok(())
+                                        if writes
+                                            .as_ref()
+                                            .is_some_and(|writes| writes.drain_needed.get()) =>
+                                    {
+                                        let _ = shared.dispatch(&HttpEvent::bare(
+                                            HttpEventKind::Drain,
+                                            request_id,
+                                        ));
+                                    }
+                                    Ok(()) => {}
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        let _ = shared.dispatch(&HttpEvent {
+                                            message: message.as_bytes(),
+                                            ..HttpEvent::bare(HttpEventKind::Error, request_id)
+                                        });
+                                    }
+                                }
                             }
                             transferred = true;
                         }

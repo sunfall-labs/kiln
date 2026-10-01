@@ -571,6 +571,7 @@ async fn exchange(
                 transport: HostTransport(stream),
                 head: head.clone(),
                 pending_write: Vec::new(),
+                write_completion: crate::http_engine::UpgradeWriteCompletion::completed(),
             },
         );
         let event = HttpEvent {
