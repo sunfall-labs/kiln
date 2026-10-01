@@ -258,13 +258,13 @@ fn mark_reexport_import_live(
     else {
         return;
     };
-    live_imports.insert((node.path.clone(), import_index));
+    let newly_imported = live_imports.insert((node.path.clone(), import_index));
     let newly_live = live.insert(node.path.clone());
     let newly_demanded = live_export_slots
         .entry(node.path.clone())
         .or_default()
         .insert(export.local_slot);
-    if newly_live || newly_demanded {
+    if newly_live || newly_demanded || newly_imported {
         queue.push_back(node.path.clone());
     }
 }

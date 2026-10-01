@@ -4591,7 +4591,7 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
             .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
             .expect("re-export has a backing import");
         assert!(
-            selected.live_imports.contains(&(barrel, backing_import)),
+            selected.live_imports.contains(&(barrel.clone(), backing_import)),
             "named re-export backing import must be linked"
         );
         assert!(
