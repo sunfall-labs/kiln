@@ -3926,19 +3926,25 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             uint8_t *host_owned = NULL;
             size_t host_len = 0;
             kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
-            size_t callback_index = argc > 1 && kiln_c99_is_callable(args[1]) ? 1 : 2;
-            kiln_value host_value = callback_index == 1
-                                        ? kiln_c99_copy_text("0.0.0.0", 7)
-                                        : argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED &&
-                                                  args[1].tag != KILN_VALUE_NULL
-                                              ? kiln_c99_text(args[1])
-                                              : kiln_c99_copy_text("0.0.0.0", 7);
+            size_t callback_index = argc > 1 && kiln_c99_is_callable(args[argc - 1])
+                                        ? argc - 1
+                                        : argc;
+            /* Node accepts (port, [host], [backlog], [callback]). The callback is the final
+             * callable argument, so a four-argument call must not mistake its backlog slot for
+             * the callback slot; doing so loses the callback supplied to listen(). A numeric
+             * second argument is the backlog overload and leaves the host at its default. */
+            kiln_value host_value = argc > 1 && callback_index != 1 &&
+                                            args[1].tag != KILN_VALUE_UNDEFINED &&
+                                            args[1].tag != KILN_VALUE_NULL &&
+                                            args[1].tag != KILN_VALUE_NUMBER
+                                        ? kiln_c99_text(args[1])
+                                        : kiln_c99_copy_text("0.0.0.0", 7);
             double port = kiln_c99_as_number(port_value);
             int status;
             if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "Port should be >= 0 and < 65536");
-            if (argc > callback_index && kiln_c99_is_callable(args[callback_index])) {
+            if (callback_index < argc) {
                 kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9),
                                            args[callback_index]};
                 kiln_value ignored;
