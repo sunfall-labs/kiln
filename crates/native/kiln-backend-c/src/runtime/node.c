@@ -4732,7 +4732,7 @@ static int kiln_c99_node_socket_queue_write(kiln_node_socket *socket,
     size_t old_len = socket->pending_write_len;
     size_t offset = socket->pending_write_offset;
     int status;
-    if (offset != 0 && (offset >= old_len || offset >= 16384)) {
+    if (offset != 0 && offset >= old_len) {
         if (old_len != 0)
             memmove(socket->pending_write_bytes,
                     socket->pending_write_bytes + offset, old_len);
