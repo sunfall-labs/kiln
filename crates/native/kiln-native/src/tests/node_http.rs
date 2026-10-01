@@ -151,7 +151,10 @@ server.listen(0, "127.0.0.1", () => {
     ) else {
         return;
     };
-    assert_eq!(output, "client socket event true\n200 false false false\n201 true false\ntrue true\n");
+    assert_eq!(
+        output,
+        "client socket event true\n200 false false false\n201 true false\ntrue true\n"
+    );
 }
 
 #[test]
