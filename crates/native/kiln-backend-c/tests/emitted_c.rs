@@ -1127,7 +1127,9 @@ fn runtime_prelude_size() {
     // dynamic Function syntax/environments (+5,720) and Node transport lifecycle (+2,247).
     // Current emission is 79,010 lines; the remaining growth is generated metadata.
     // The compiled runtime fixtures verify that sections are not emitted twice.
-    const CEILING_LINES: usize = 79_080;
+    // Shared exotic spread snapshots, named array deletion and live namespace enumeration
+    // bring the inspected prelude to 79,082 lines; runtime sections are still emitted once.
+    const CEILING_LINES: usize = 79_100;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
