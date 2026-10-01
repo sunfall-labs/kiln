@@ -4,7 +4,7 @@ function removedListener() {
 }
 const server = net.createServer(removedListener);
 server.removeListener('connection', removedListener);
-server.prependListener('connection', socket => {
+server.on('connection', socket => {
   if (typeof socket.cork !== 'function' || typeof socket.pause !== 'function' || typeof socket.resume !== 'function') {
     throw new Error('host must decorate socket before any connection listener');
   }
