@@ -17,17 +17,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let error = self.construct_error(
-            ErrorKind::Error,
-            &[Value::String("write after end".into())],
-        );
+        let error =
+            self.construct_error(ErrorKind::Error, &[Value::String("write after end".into())]);
         if let Value::Object(error_object) = &error {
             error_object
                 .borrow_mut()
-                .set_non_enumerable(
-                    "code",
-                    Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
-                );
+                .set_non_enumerable("code", Value::String("ERR_STREAM_WRITE_AFTER_END".into()));
         }
         let callback = arguments
             .get(2)
@@ -365,7 +360,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 .streams
                 .iter()
                 .find(|stream| stream.resource() == resource)
-                .is_some_and(|stream| stream.driver.end_requested() || stream.driver.write_closed())
+                .is_some_and(|stream| {
+                    stream.driver.state().end_requested() || stream.driver.state().write_closed()
+                })
         {
             // Keep Node's chunk validation before the asynchronous write-after-end report.
             let _ = node_stream_write_bytes(arguments.first())?;
