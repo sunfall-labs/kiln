@@ -1341,7 +1341,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline,
                                        closure_name,
                                        "", 0,
-                                       "eval", 0, 0, 0, asynchronous, 0, 0, 0,
+                                       /* Async dynamic functions use the generator-backed async
+                                        * call path.  The dynamic body trampoline itself returns
+                                        * normally; the async driver turns that completion into a
+                                        * promise just as it does for compiled async functions. */
+                                       "eval", 0, 0, asynchronous, asynchronous, 0, 0, 0,
                                        function_strict,
                                        KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
                                        0, 16, 0, 0, val_upvals, 3);
