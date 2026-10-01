@@ -481,6 +481,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     corked_callbacks: Vec::new(),
                     queued_write_callbacks: Default::default(),
                     end_callbacks: Vec::new(),
+                    deferred_destroy_callbacks: None,
+                    defer_destroy_callbacks: false,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -1053,7 +1055,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // schedule those before callbacks for writes still held in the driver's queue. Keep
         // `end` callbacks after both groups, matching Writable's destroy ordering.
         if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks {
-            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            let immediate = {
+                let mut socket = state.borrow_mut();
+                if socket.defer_destroy_callbacks {
+                    socket.defer_destroy_callbacks = false;
+                    socket.deferred_destroy_callbacks = Some((write_callbacks, end_callbacks));
+                    None
+                } else {
+                    Some((write_callbacks, end_callbacks))
+                }
+            };
+            if let Some((write_callbacks, end_callbacks)) = immediate {
+                self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            }
         }
         Ok(result)
     }
@@ -2028,6 +2042,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             corked_callbacks: Vec::new(),
             queued_write_callbacks: Default::default(),
             end_callbacks: Vec::new(),
+            deferred_destroy_callbacks: None,
+            defer_destroy_callbacks: false,
             upgrade_write_callbacks: Default::default(),
             shutdown_after_upgrade_fence: None,
             end_requested: false,
@@ -2175,6 +2191,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     corked_callbacks: Vec::new(),
                     queued_write_callbacks: Default::default(),
                     end_callbacks: Vec::new(),
+                    deferred_destroy_callbacks: None,
+                    defer_destroy_callbacks: false,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -2404,27 +2422,73 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
-                unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) };
-                if let Some(PendingNodeRequest::Stream {
-                    write_callbacks, ..
-                }) = self.take_pending_node_request(request)
-                    && !write_callbacks.is_empty()
-                    && node_net_socket_value(server, resource)
-                        .and_then(|socket| node_net_socket_state(&socket).ok())
-                        .is_some_and(|socket| socket.borrow().destroyed)
-                {
-                    // The host can cancel an in-flight write as part of destroy, but Node still
-                    // settles the callback for bytes already accepted by the writable side. A
-                    // queued (not yet submitted) callback is handled separately as
-                    // ERR_STREAM_DESTROYED by the socket's state drain.
-                    for callback in write_callbacks {
-                        let scheduled = self.scheduled(Job::NextTick(callback, vec![Value::Null]));
-                        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                let pending_is_write = if let Some(realm) = &self.module_realm {
+                    realm.borrow().pending_node.iter().any(|pending| {
+                        matches!(pending, PendingNodeRequest::Stream {
+                            request: pending_request,
+                            is_write: true,
+                            ..
+                        } if *pending_request == request)
+                    })
+                } else {
+                    self.pending_node.iter().any(|pending| {
+                        matches!(pending, PendingNodeRequest::Stream {
+                            request: pending_request,
+                            is_write: true,
+                            ..
+                        } if *pending_request == request)
+                    })
+                };
+                match unsafe { ActiveAsyncHostOps::cancel_if_pending(&mut *host, request) } {
+                    kiln_host_abi::PendingCancellation::Cancelled => {
+                        if let Some(PendingNodeRequest::Stream {
+                            write_callbacks, ..
+                        }) = self.take_pending_node_request(request)
+                            && !write_callbacks.is_empty()
+                        {
+                            let error = self.construct_error(
+                                ErrorKind::Error,
+                                &[Value::String("operation canceled".into())],
+                            );
+                            if let Value::Object(object) = &error {
+                                object
+                                    .borrow_mut()
+                                    .set_non_enumerable("code", Value::String("ECANCELED".into()));
+                            }
+                            for callback in write_callbacks {
+                                let callback = Value::Bound(Rc::new(BoundFunction {
+                                    target: callback,
+                                    this_value: Value::Undefined,
+                                    arguments: vec![error.clone()],
+                                    properties: RefCell::new(ObjectData::default()),
+                                }));
+                                let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+                                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                            }
+                        }
+                    }
+                    kiln_host_abi::PendingCancellation::CompletionReady => {
+                        if pending_is_write {
+                            if let Some(socket) = node_net_socket_value(server, resource)
+                                .and_then(|socket| node_net_socket_state(&socket).ok())
+                            {
+                                let destroyed = socket.borrow().destroyed;
+                                if destroyed {
+                                    socket.borrow_mut().defer_destroy_callbacks = true;
+                                }
+                            }
+                        }
+                    }
+                    kiln_host_abi::PendingCancellation::Unknown => {
+                        // The host has neither a pending request nor a ready completion. Retire
+                        // stale bookkeeping without inventing a completion result.
+                        let _ = self.take_pending_node_request(request);
                     }
                 }
                 Ok(())
             }
             StreamAction::Start(operation) => {
+                let is_write = matches!(&operation, AsyncHostOp::TcpWrite { .. });
                 if matches!(operation, AsyncHostOp::TcpRead { .. })
                     && server
                         .borrow()
@@ -2474,7 +2538,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     request,
                     server: Rc::clone(server),
                     resource,
-                    write_callbacks: if matches!(operation, AsyncHostOp::TcpWrite { .. }) {
+                    is_write,
+                    write_callbacks: if is_write {
                         std::mem::take(&mut write_callbacks)
                     } else {
                         Vec::new()
@@ -4920,6 +4985,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 PendingNodeRequest::Stream {
                     server,
                     resource,
+                    is_write,
                     write_callbacks,
                     ..
                 } => {
@@ -4975,6 +5041,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 callback_args.clone(),
                                 self.instruction,
                             )?;
+                        }
+                    }
+                    if is_write {
+                        if let Some(socket) = socket
+                            .as_ref()
+                            .and_then(|socket| node_net_socket_state(socket).ok())
+                        {
+                            let deferred = socket.borrow_mut().deferred_destroy_callbacks.take();
+                            if let Some((write_callbacks, end_callbacks)) = deferred {
+                                self.schedule_node_socket_queued_callbacks(
+                                    write_callbacks,
+                                    end_callbacks,
+                                );
+                            }
                         }
                     }
                     for action in actions {

@@ -3257,11 +3257,13 @@ struct kiln_node_socket {
     uint64_t connect_request;
     uint64_t read_request;
     uint64_t write_request;
+    size_t active_write_len;
     uint64_t shutdown_request;
     uint64_t close_request;
     uint64_t upgrade_request_id;
     uint64_t shutdown_after_upgrade_fence;
     char *pending_write_bytes;
+    size_t pending_write_offset;
     size_t pending_write_len;
     size_t pending_write_capacity;
     /* Writes made between cork/uncork are retained as one ordered byte sequence. */
@@ -3271,6 +3273,7 @@ struct kiln_node_socket {
     unsigned int cork_depth;
     /* FIFO of [byte length, callback batch] entries for writes not yet submitted. */
     kiln_value write_queue;
+    size_t write_queue_head;
     /* The currently submitted batch remains rooted here until its host result arrives. */
     kiln_value active_write_callbacks;
     kiln_value write_callbacks;

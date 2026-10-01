@@ -419,6 +419,7 @@ pub(super) enum PendingNodeRequest {
         request: RequestId,
         server: Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
+        is_write: bool,
         write_callbacks: Vec<Value>,
     },
     Connect {

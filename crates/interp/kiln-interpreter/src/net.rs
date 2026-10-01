@@ -30,6 +30,9 @@ pub(crate) struct NetSocketState {
     /// next transport submission takes callbacks for exactly its own bytes.
     pub(crate) queued_write_callbacks: VecDeque<Vec<Value>>,
     pub(crate) end_callbacks: Vec<Value>,
+    /// Destroy callbacks wait until an already-ready write completion reports its real result.
+    pub(crate) deferred_destroy_callbacks: Option<(Vec<Value>, Vec<Value>)>,
+    pub(crate) defer_destroy_callbacks: bool,
     /// Write callbacks retained until the HTTP upgrade engine confirms each append reached
     /// the transport. Fence values are private runtime sequence numbers.
     pub(crate) upgrade_write_callbacks: std::collections::BTreeMap<u64, Vec<Value>>,
