@@ -1539,9 +1539,6 @@ pub struct EvalSource<'a> {
     pub blocked_var_names: &'a [String],
 }
 
-const DYNAMIC_SOURCE_UNPAIRED_SURROGATE: &str =
-    "dynamic source contains unpaired UTF-16 surrogate code units";
-
 /// Why a run-time compilation produced no program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalCompileError {

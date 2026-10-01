@@ -531,22 +531,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         primitive.to_string_units_checked()
     }
 
-    /// Check and expose dynamic source as scalar UTF-8 for the parser boundary.
-    ///
-    /// The source compiler accepts `&str`, so silently widening malformed UTF-16 would change
-    /// the program before the frontend sees it. ASCII source remains borrowed through the shared
-    /// string representation; scalar non-ASCII source allocates once.
-    pub(crate) fn checked_dynamic_source<'a>(
-        &self,
-        source: &'a StringUnits,
-    ) -> Result<Cow<'a, str>, ExecutionError> {
-        source
-            .to_scalar_cow()
-            .map_err(|_| ExecutionError::EvalUnsupported {
-                message: DYNAMIC_SOURCE_UNPAIRED_SURROGATE.to_owned(),
-            })
-    }
-
     /// `%IteratorPrototype%.reduce` and the seven other methods that consume an iterator.
     pub(crate) fn iterator_terminal(
         &mut self,
