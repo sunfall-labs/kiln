@@ -570,6 +570,7 @@ async fn exchange(
             UpgradeTransport {
                 transport: HostTransport(stream),
                 head: head.clone(),
+                pending_write: Vec::new(),
             },
         );
         let event = HttpEvent {

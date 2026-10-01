@@ -569,6 +569,7 @@ pub trait RealmHostProvider: AsyncHostOps {
         &mut self,
         _resource: ResourceId,
         _transport: HostTransport,
+        _pending_write: Vec<u8>,
     ) -> bool {
         false
     }
@@ -1558,7 +1559,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             return false;
         };
         self.host
-            .adopt_upgrade_transport(resource, upgrade.transport)
+            .adopt_upgrade_transport(resource, upgrade.transport, upgrade.pending_write)
     }
 
     #[cfg(feature = "http")]
@@ -1567,7 +1568,7 @@ impl<H: RealmHostProvider> RealmState<H> {
             return false;
         };
         self.host
-            .adopt_upgrade_transport(resource, upgrade.transport)
+            .adopt_upgrade_transport(resource, upgrade.transport, upgrade.pending_write)
     }
 
     /// Stop the connection on `resource`, whichever engine owns it. The transport is released
@@ -1828,16 +1829,30 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// Drain the server events the queued adapter parked for `resource`. A `Closed` here is
     /// the connection's last word; the transport goes back to the host with it.
     pub fn take_queued_server_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
-        let events = self.queued_http.take_server(resource);
+        let mut events = self.queued_http.take_server(resource);
         #[cfg(feature = "http")]
         if events
             .iter()
             .any(|event| matches!(event, RuntimeHttpEvent::UpgradeReady { .. }))
         {
-            if let Some(upgrade) = self.http_server.take_upgrade(resource) {
-                let _ = self
-                    .host
-                    .adopt_upgrade_transport(resource, upgrade.transport);
+            let adopted = self
+                .http_server
+                .take_upgrade(resource)
+                .is_some_and(|upgrade| {
+                    self.host.adopt_upgrade_transport(
+                        resource,
+                        upgrade.transport,
+                        upgrade.pending_write,
+                    )
+                });
+            if !adopted {
+                let _ = self.host.release_transport(resource);
+                events.clear();
+                events.push(RuntimeHttpEvent::Error {
+                    id: 0,
+                    message: "HTTP upgrade transport could not be adopted".into(),
+                });
+                events.push(RuntimeHttpEvent::Closed);
             }
         }
         if events.contains(&RuntimeHttpEvent::Closed) {
@@ -1848,17 +1863,31 @@ impl<H: RealmHostProvider> RealmState<H> {
 
     /// Drain the server events the queued adapter parked for all resources in a single batch.
     pub fn take_all_queued_server_events(&mut self) -> Vec<(ResourceId, Vec<RuntimeHttpEvent>)> {
-        let all = self.queued_http.take_all_server();
-        for (resource, events) in &all {
+        let mut all = self.queued_http.take_all_server();
+        for (resource, events) in &mut all {
             #[cfg(feature = "http")]
             if events
                 .iter()
                 .any(|event| matches!(event, RuntimeHttpEvent::UpgradeReady { .. }))
             {
-                if let Some(upgrade) = self.http_server.take_upgrade(*resource) {
-                    let _ = self
-                        .host
-                        .adopt_upgrade_transport(*resource, upgrade.transport);
+                let adopted = self
+                    .http_server
+                    .take_upgrade(*resource)
+                    .is_some_and(|upgrade| {
+                        self.host.adopt_upgrade_transport(
+                            *resource,
+                            upgrade.transport,
+                            upgrade.pending_write,
+                        )
+                    });
+                if !adopted {
+                    let _ = self.host.release_transport(*resource);
+                    events.clear();
+                    events.push(RuntimeHttpEvent::Error {
+                        id: 0,
+                        message: "HTTP upgrade transport could not be adopted".into(),
+                    });
+                    events.push(RuntimeHttpEvent::Closed);
                 }
             }
             if events.contains(&RuntimeHttpEvent::Closed) {
@@ -1901,16 +1930,37 @@ impl<H: RealmHostProvider> RealmState<H> {
         &mut self,
         resource: ResourceId,
     ) -> Vec<RuntimeHttpClientEvent> {
-        let events = self.queued_http.take_client(resource);
+        let mut events = self.queued_http.take_client(resource);
         #[cfg(feature = "http")]
         if events
             .iter()
             .any(|event| matches!(event, RuntimeHttpClientEvent::Upgrade { .. }))
         {
-            if let Some(upgrade) = self.http_client.take_upgrade(resource) {
-                let _ = self
-                    .host
-                    .adopt_upgrade_transport(resource, upgrade.transport);
+            let adopted = self
+                .http_client
+                .take_upgrade(resource)
+                .is_some_and(|upgrade| {
+                    self.host.adopt_upgrade_transport(
+                        resource,
+                        upgrade.transport,
+                        upgrade.pending_write,
+                    )
+                });
+            if !adopted {
+                let _ = self.host.release_transport(resource);
+                let id = events
+                    .iter()
+                    .find_map(|event| match event {
+                        RuntimeHttpClientEvent::Upgrade { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                events.clear();
+                events.push(RuntimeHttpClientEvent::Error {
+                    id,
+                    message: "HTTP upgrade transport could not be adopted".into(),
+                });
+                events.push(RuntimeHttpClientEvent::Closed);
             }
         }
         if events.contains(&RuntimeHttpClientEvent::Closed) {
@@ -2659,6 +2709,7 @@ enum HostResource {
     TcpUpgraded {
         reader: Rc<tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn HostIo>>>>,
         writer: Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+        pending_write: Rc<tokio::sync::Mutex<Option<Vec<u8>>>>,
         info: ResourceInfo,
         referenced: bool,
         read_closed: bool,
@@ -2669,7 +2720,11 @@ enum HostResource {
 enum TcpReader {
     Native(Rc<tokio::sync::Mutex<OwnedReadHalf>>),
     #[cfg(feature = "http")]
-    Upgraded(Rc<tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn HostIo>>>>),
+    Upgraded {
+        reader: Rc<tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn HostIo>>>>,
+        writer: Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+        pending_write: Rc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    },
 }
 
 impl TcpReader {
@@ -2677,7 +2732,14 @@ impl TcpReader {
         match self {
             Self::Native(reader) => reader.lock().await.read(bytes).await,
             #[cfg(feature = "http")]
-            Self::Upgraded(reader) => reader.lock().await.read(bytes).await,
+            Self::Upgraded {
+                reader,
+                writer,
+                pending_write,
+            } => {
+                flush_upgrade_prefix(writer, pending_write).await?;
+                reader.lock().await.read(bytes).await
+            }
         }
     }
 }
@@ -2685,7 +2747,10 @@ impl TcpReader {
 enum TcpWriter {
     Native(Rc<tokio::sync::Mutex<OwnedWriteHalf>>),
     #[cfg(feature = "http")]
-    Upgraded(Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>),
+    Upgraded {
+        writer: Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+        pending_write: Rc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    },
 }
 
 impl TcpWriter {
@@ -2693,16 +2758,51 @@ impl TcpWriter {
         match self {
             Self::Native(writer) => writer.lock().await.write_all(bytes).await,
             #[cfg(feature = "http")]
-            Self::Upgraded(writer) => writer.lock().await.write_all(bytes).await,
+            Self::Upgraded {
+                writer,
+                pending_write,
+            } => {
+                let mut writer = writer.lock().await;
+                flush_upgrade_prefix_locked(&mut *writer, pending_write).await?;
+                writer.write_all(bytes).await
+            }
         }
     }
     async fn shutdown(&self) -> std::io::Result<()> {
         match self {
             Self::Native(writer) => writer.lock().await.shutdown().await,
             #[cfg(feature = "http")]
-            Self::Upgraded(writer) => writer.lock().await.shutdown().await,
+            Self::Upgraded {
+                writer,
+                pending_write,
+            } => {
+                let mut writer = writer.lock().await;
+                flush_upgrade_prefix_locked(&mut *writer, pending_write).await?;
+                writer.shutdown().await
+            }
         }
     }
+}
+
+#[cfg(feature = "http")]
+async fn flush_upgrade_prefix(
+    writer: &Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+    pending_write: &Rc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+) -> std::io::Result<()> {
+    let mut writer = writer.lock().await;
+    flush_upgrade_prefix_locked(&mut *writer, pending_write).await
+}
+
+#[cfg(feature = "http")]
+async fn flush_upgrade_prefix_locked<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    pending_write: &Rc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+) -> std::io::Result<()> {
+    let bytes = pending_write.lock().await.take();
+    if let Some(bytes) = bytes {
+        writer.write_all(&bytes).await?;
+    }
+    Ok(())
 }
 
 struct PendingRequest {
@@ -3281,9 +3381,18 @@ impl TokioHost {
                     #[cfg(feature = "http")]
                     Some(HostResource::TcpUpgraded {
                         reader,
+                        writer,
+                        pending_write,
                         read_closed,
                         ..
-                    }) => (TcpReader::Upgraded(Rc::clone(reader)), *read_closed),
+                    }) => (
+                        TcpReader::Upgraded {
+                            reader: Rc::clone(reader),
+                            writer: Rc::clone(writer),
+                            pending_write: Rc::clone(pending_write),
+                        },
+                        *read_closed,
+                    ),
                     _ => {
                         self.insert_immediate(
                             request,
@@ -3338,9 +3447,16 @@ impl TokioHost {
                     #[cfg(feature = "http")]
                     Some(HostResource::TcpUpgraded {
                         writer,
+                        pending_write,
                         write_closed,
                         ..
-                    }) => (TcpWriter::Upgraded(Rc::clone(writer)), *write_closed),
+                    }) => (
+                        TcpWriter::Upgraded {
+                            writer: Rc::clone(writer),
+                            pending_write: Rc::clone(pending_write),
+                        },
+                        *write_closed,
+                    ),
                     _ => {
                         self.insert_immediate(
                             request,
@@ -3389,9 +3505,16 @@ impl TokioHost {
                     #[cfg(feature = "http")]
                     Some(HostResource::TcpUpgraded {
                         writer,
+                        pending_write,
                         write_closed,
                         ..
-                    }) => (TcpWriter::Upgraded(Rc::clone(writer)), *write_closed),
+                    }) => (
+                        TcpWriter::Upgraded {
+                            writer: Rc::clone(writer),
+                            pending_write: Rc::clone(pending_write),
+                        },
+                        *write_closed,
+                    ),
                     _ => {
                         self.insert_immediate(
                             request,
@@ -4026,7 +4149,12 @@ impl RealmHostProvider for TokioHost {
     }
 
     #[cfg(feature = "http")]
-    fn adopt_upgrade_transport(&mut self, resource: ResourceId, transport: HostTransport) -> bool {
+    fn adopt_upgrade_transport(
+        &mut self,
+        resource: ResourceId,
+        transport: HostTransport,
+        pending_write: Vec<u8>,
+    ) -> bool {
         let Some(HostResource::TcpTaken {
             info,
             referenced: _,
@@ -4041,6 +4169,7 @@ impl RealmHostProvider for TokioHost {
             HostResource::TcpUpgraded {
                 reader: Rc::new(tokio::sync::Mutex::new(reader)),
                 writer: Rc::new(tokio::sync::Mutex::new(writer)),
+                pending_write: Rc::new(tokio::sync::Mutex::new(Some(pending_write))),
                 info,
                 referenced: restore_referenced,
                 read_closed: false,

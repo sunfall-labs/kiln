@@ -89,6 +89,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HostIo for T {}
 pub struct UpgradeTransport {
     pub transport: HostTransport,
     pub head: Vec<u8>,
+    /// Bytes written after the 101 response head while Hyper still owned the stream. The host
+    /// installs these as a prefix so they precede every later raw-socket write.
+    pub pending_write: Vec<u8>,
 }
 
 impl std::fmt::Debug for HostTransport {
@@ -371,7 +374,7 @@ impl HttpServerEngine {
             }
             writes.add_trailing(&trailing);
         }
-        let ready = writes.pending_bytes() < 16 * 1024;
+        let ready = writes.pending_bytes() < UpgradeWrite::HIGH_WATER_MARK;
         if !ready {
             writes.drain_needed.set(true);
         }
@@ -421,6 +424,9 @@ struct UpgradeWrite {
 }
 
 impl UpgradeWrite {
+    const MAX_BUFFERED_BYTES: usize = 1024 * 1024;
+    const HIGH_WATER_MARK: usize = 16 * 1024;
+
     fn new() -> Self {
         Self {
             raw_head: RefCell::new(Vec::with_capacity(1024)),
@@ -431,6 +437,9 @@ impl UpgradeWrite {
     }
 
     fn append(&self, data: &[u8]) -> Option<Option<(u16, HeaderMap, Vec<u8>)>> {
+        if self.pending_bytes().checked_add(data.len())? > Self::MAX_BUFFERED_BYTES {
+            return None;
+        }
         if self.parsed.get() {
             self.trailing.borrow_mut().extend_from_slice(data);
             return Some(None);
@@ -1270,41 +1279,27 @@ async fn serve(
                             let request_id = shared.upgrade_request_id.get();
                             let writes = shared.upgrade_writes.borrow_mut().remove(&request_id);
                             let mut raw = parts.io.into_inner();
-                            let trailing = writes
+                            let pending_write = writes
                                 .as_ref()
                                 .map_or_else(Vec::new, |writes| writes.take_trailing());
-                            let flush = if trailing.is_empty() {
-                                Ok(())
-                            } else {
-                                raw.write_all(&trailing).await
-                            };
-                            if let Err(error) = flush {
-                                let message = error.to_string();
-                                let _ = shared.dispatch(&HttpEvent {
-                                    message: message.as_bytes(),
-                                    ..HttpEvent::bare(HttpEventKind::Error, request_id)
-                                });
-                            } else {
-                                upgraded.borrow_mut().insert(
-                                    shared.resource,
-                                    UpgradeTransport {
-                                        transport: HostTransport(Box::new(raw)),
-                                        head: head.clone(),
-                                    },
-                                );
-                                let _ = shared.dispatch(&HttpEvent {
-                                    id: request_id,
-                                    data: &head,
-                                    ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
-                                });
-                                if writes.is_some_and(|writes| writes.drain_needed.get()) {
-                                    let _ = shared.dispatch(&HttpEvent::bare(
-                                        HttpEventKind::Drain,
-                                        request_id,
-                                    ));
-                                }
-                                transferred = true;
+                            upgraded.borrow_mut().insert(
+                                shared.resource,
+                                UpgradeTransport {
+                                    transport: HostTransport(Box::new(raw)),
+                                    head: head.clone(),
+                                    pending_write,
+                                },
+                            );
+                            let _ = shared.dispatch(&HttpEvent {
+                                id: request_id,
+                                data: &head,
+                                ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
+                            });
+                            if writes.is_some_and(|writes| writes.drain_needed.get()) {
+                                let _ = shared
+                                    .dispatch(&HttpEvent::bare(HttpEventKind::Drain, request_id));
                             }
+                            transferred = true;
                         }
                         Err(_) => {
                             let message = b"HTTP upgrade returned an unexpected transport";
@@ -1610,6 +1605,8 @@ async fn handle(
     if is_upgrade && status == hyper::StatusCode::SWITCHING_PROTOCOLS.as_u16() {
         shared.upgrade_accepted.set(true);
         shared.upgrade_request_id.set(id);
+    } else if is_upgrade {
+        shared.upgrade_writes.borrow_mut().remove(&id);
     }
     let is_http2 = parts.version == hyper::Version::HTTP_2;
     let close_delimited = http_10

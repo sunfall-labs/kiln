@@ -4207,6 +4207,12 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
                 .borrow_mut()
                 .adopt_server_upgrade(self.resource);
             if !adopted {
+                realm
+                    .runtime
+                    .state
+                    .borrow_mut()
+                    .retire_http_connection(self.resource);
+                realm.http_connections.borrow_mut().remove(&self.resource);
                 return INVALID_ARGUMENT;
             }
             realm.http_connections.borrow_mut().remove(&self.resource);
@@ -4218,6 +4224,12 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
                 .borrow_mut()
                 .adopt_client_upgrade(self.resource);
             if !adopted {
+                realm
+                    .runtime
+                    .state
+                    .borrow_mut()
+                    .retire_http_connection(self.resource);
+                realm.http_connections.borrow_mut().remove(&self.resource);
                 return INVALID_ARGUMENT;
             }
             realm.http_connections.borrow_mut().remove(&self.resource);
