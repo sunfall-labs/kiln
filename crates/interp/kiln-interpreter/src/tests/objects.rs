@@ -2209,6 +2209,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
                 generator: false,
                 async_generator: false,
                 is_method: false,
+                is_class: false,
                 parameter_count: 0,
                 declared_length: 0,
                 mapped_arguments: false,
