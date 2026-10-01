@@ -2318,9 +2318,25 @@
     if ((groups & KILN_C99_GROUP_STRING_DISPATCH)) {
         if (receiver.tag != KILN_VALUE_STRING) {
             if (!kiln_c99_unwrap_primitive_wrapper(receiver, KILN_C99_WRAPPER_STRING,
-                                                  &receiver))
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "String.prototype method called on an incompatible receiver");
+                                                  &receiver)) {
+                /* String.prototype.toString/valueOf require a String receiver. The other
+                 * String prototype methods are generic: they first require a non-nullish this
+                 * value, then apply abstract ToString (which also preserves user coercion and
+                 * rejects Symbols). */
+                if (code == KILN_C99_METHOD_STRING_TO_STRING ||
+                    code == KILN_C99_METHOD_STRING_VALUE_OF ||
+                    receiver.tag == KILN_VALUE_UNDEFINED ||
+                    receiver.tag == KILN_VALUE_NULL) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "String.prototype method called on an incompatible receiver");
+                }
+                kiln_value converted;
+                status = kiln_c99_to_text_argument(host, receiver, &converted, depth, thrown);
+                kiln_c99_gc_keep_alive(&receiver);
+                if (status != KILN_C99_OK) return status;
+                receiver = converted;
+                kiln_c99_gc_keep_alive(&receiver);
+            }
         }
         return kiln_c99_invoke_string_method(host, result, code, receiver, args, argc, depth,
                                              thrown);
