@@ -5370,6 +5370,47 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     return KILN_C99_OK;
 }
 
+static int kiln_dyn_prepare_block_scope(kiln_host *host, kiln_dyn_scope *parent,
+                                       kiln_dyn_scope *block_scope, const char *body,
+                                       size_t body_len, kiln_value receiver,
+                                       const kiln_value *args, size_t argc, int depth,
+                                       kiln_dyn_lexer *lex, kiln_value *thrown) {
+    kiln_dyn_scope_init(block_scope, parent);
+    block_scope->var_target = parent->var_target != NULL ? parent->var_target : parent;
+    int status = kiln_dyn_scope_predeclare_lexicals(block_scope, body, body_len, SIZE_MAX);
+    if (status != KILN_C99_OK) return status;
+    if (!kiln_dyn_source_may_have_function_declaration(body, body_len)) return KILN_C99_OK;
+
+    kiln_dyn_switch_clause clause = {
+        .test = NULL, .test_len = 0, .body = body, .body_len = body_len, .is_default = 0,
+    };
+    kiln_dyn_switch_binding *bindings = NULL;
+    size_t binding_count = 0;
+    int binding_status = kiln_dyn_switch_bindings(&clause, 1, &bindings, &binding_count);
+    if (binding_status <= 0) {
+        free(bindings);
+        return binding_status < 0
+                   ? KILN_C99_OUT_OF_MEMORY
+                   : kiln_dyn_throw_parse_error(lex, thrown,
+                                                 "Invalid or duplicate block lexical declaration");
+    }
+    size_t function_count = 0;
+    for (size_t index = 0; index < binding_count; ++index) {
+        if (!bindings[index].is_function) continue;
+        if (function_count != index) bindings[function_count] = bindings[index];
+        function_count++;
+    }
+    if (function_count != 0) {
+        status = kiln_dyn_switch_predeclare(block_scope, bindings, function_count);
+        if (status == KILN_C99_OK)
+            status = kiln_dyn_switch_initialize_functions(host, block_scope, &clause, 1,
+                                                          bindings, function_count, receiver,
+                                                          args, argc, depth, thrown);
+    }
+    free(bindings);
+    return status;
+}
+
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *result, int *returned, kiln_value *thrown) {
@@ -5427,28 +5468,74 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         const char *try_body;
         size_t try_len;
         kiln_dyn_lexer block;
+        kiln_dyn_scope try_scope;
         kiln_dyn_lexer_next(lex);
         if (!kiln_dyn_capture_block(lex, &try_body, &try_len)) {
             return kiln_dyn_throw_parse_error(lex, thrown,
                                         "Expected block after try");
         }
+        kiln_dyn_scope_init(&try_scope, scope);
+        try_scope.var_target = scope->var_target != NULL ? scope->var_target : scope;
+        int status = kiln_dyn_scope_predeclare_lexicals(&try_scope, try_body, try_len, SIZE_MAX);
+        if (status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&try_scope);
+            return status;
+        }
+        if (kiln_dyn_source_may_have_function_declaration(try_body, try_len)) {
+            kiln_dyn_switch_clause try_clause = {
+                .test = NULL, .test_len = 0, .body = try_body, .body_len = try_len,
+                .is_default = 0,
+            };
+            kiln_dyn_switch_binding *try_bindings = NULL;
+            size_t try_binding_count = 0;
+            int binding_status = kiln_dyn_switch_bindings(&try_clause, 1, &try_bindings,
+                                                          &try_binding_count);
+            if (binding_status <= 0) {
+                free(try_bindings);
+                kiln_dyn_scope_destroy(&try_scope);
+                return binding_status < 0
+                           ? KILN_C99_OUT_OF_MEMORY
+                           : kiln_dyn_throw_parse_error(
+                                 lex, thrown, "Invalid or duplicate try-block lexical declaration");
+            }
+            size_t function_count = 0;
+            for (size_t index = 0; index < try_binding_count; ++index) {
+                if (!try_bindings[index].is_function) continue;
+                if (function_count != index)
+                    try_bindings[function_count] = try_bindings[index];
+                function_count++;
+            }
+            if (function_count != 0) {
+                status = kiln_dyn_switch_predeclare(&try_scope, try_bindings, function_count);
+                if (status == KILN_C99_OK)
+                    status = kiln_dyn_switch_initialize_functions(
+                        host, &try_scope, &try_clause, 1, try_bindings, function_count,
+                        receiver, args, argc, depth, thrown);
+            }
+            free(try_bindings);
+            if (status != KILN_C99_OK) {
+                kiln_dyn_scope_destroy(&try_scope);
+                return status;
+            }
+        }
         memset(&block, 0, sizeof(block));
         block.src = try_body;
         block.len = try_len;
-        block.strict = scope->strict;
+        block.strict = try_scope.strict;
         block.active_labels = lex->active_labels;
         block.break_label = lex->break_label;
         block.break_label_len = lex->break_label_len;
         kiln_dyn_lexer_next(&block);
-        int status = KILN_C99_OK;
+        status = KILN_C99_OK;
         while (block.curr.kind != KILN_DYN_EOF) {
-            status = kiln_dyn_eval_stmt(host, &block, scope, receiver, args, argc, depth,
+            status = kiln_dyn_eval_stmt(host, &block, &try_scope, receiver, args, argc, depth,
                                         result, returned, thrown);
             if (status != KILN_C99_OK || *returned) break;
         }
         lex->break_label = block.break_label;
         lex->break_label_len = block.break_label_len;
         kiln_dyn_token_free(&block.curr);
+        kiln_dyn_scope_destroy(&try_scope);
         int did_throw = status == KILN_C99_THROWN;
         kiln_value exception = did_throw && thrown != NULL ? *thrown : kiln_c99_undefined();
         int completion_status = status;
@@ -5493,23 +5580,33 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                     kiln_dyn_scope_destroy(&catch_scope);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
+                kiln_dyn_scope catch_block_scope;
+                int catch_prepare_status = kiln_dyn_prepare_block_scope(
+                    host, &catch_scope, &catch_block_scope, catch_body, catch_len, receiver,
+                    args, argc, depth, lex, thrown);
+                if (catch_prepare_status != KILN_C99_OK) {
+                    kiln_dyn_scope_destroy(&catch_block_scope);
+                    kiln_dyn_scope_destroy(&catch_scope);
+                    return catch_prepare_status;
+                }
                 int catch_returned = 0;
                 memset(&block, 0, sizeof(block));
                 block.src = catch_body;
                 block.len = catch_len;
-                block.strict = catch_scope.strict;
+                block.strict = catch_block_scope.strict;
                 block.active_labels = lex->active_labels;
                 block.break_label = lex->break_label;
                 block.break_label_len = lex->break_label_len;
                 kiln_dyn_lexer_next(&block);
                 while (block.curr.kind != KILN_DYN_EOF) {
-                    status = kiln_dyn_eval_stmt(host, &block, &catch_scope, receiver, args,
+                    status = kiln_dyn_eval_stmt(host, &block, &catch_block_scope, receiver, args,
                                                 argc, depth, result, &catch_returned, thrown);
                     if (status != KILN_C99_OK || catch_returned) break;
                 }
                 lex->break_label = block.break_label;
                 lex->break_label_len = block.break_label_len;
                 kiln_dyn_token_free(&block.curr);
+                kiln_dyn_scope_destroy(&catch_block_scope);
                 kiln_dyn_scope_destroy(&catch_scope);
                 completion_status = status;
                 completion_return = catch_returned;
@@ -5531,6 +5628,15 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                                                   "Expected finally block");
             kiln_dyn_scope finally_scope;
             kiln_dyn_scope_init(&finally_scope, scope);
+            kiln_dyn_scope finally_block_scope;
+            int finally_prepare_status = kiln_dyn_prepare_block_scope(
+                host, &finally_scope, &finally_block_scope, finally_body, finally_len, receiver,
+                args, argc, depth, lex, thrown);
+            if (finally_prepare_status != KILN_C99_OK) {
+                kiln_dyn_scope_destroy(&finally_block_scope);
+                kiln_dyn_scope_destroy(&finally_scope);
+                return finally_prepare_status;
+            }
             int finally_returned = 0;
             kiln_value finally_result = kiln_c99_undefined();
             const char *pending_break_label = lex->break_label;
@@ -5538,14 +5644,14 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             memset(&block, 0, sizeof(block));
             block.src = finally_body;
             block.len = finally_len;
-            block.strict = finally_scope.strict;
+            block.strict = finally_block_scope.strict;
             block.active_labels = lex->active_labels;
             block.break_label = lex->break_label;
             block.break_label_len = lex->break_label_len;
             kiln_dyn_lexer_next(&block);
             int finally_status = KILN_C99_OK;
             while (block.curr.kind != KILN_DYN_EOF) {
-                finally_status = kiln_dyn_eval_stmt(host, &block, &finally_scope, receiver,
+                finally_status = kiln_dyn_eval_stmt(host, &block, &finally_block_scope, receiver,
                     args, argc, depth, &finally_result, &finally_returned, thrown);
                 if (finally_status != KILN_C99_OK || finally_returned) break;
             }
@@ -5560,6 +5666,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 lex->break_label_len = pending_break_label_len;
             }
             kiln_dyn_token_free(&block.curr);
+            kiln_dyn_scope_destroy(&finally_block_scope);
             kiln_dyn_scope_destroy(&finally_scope);
             if (finally_status != KILN_C99_OK || finally_returned) {
                 completion_status = finally_status;
