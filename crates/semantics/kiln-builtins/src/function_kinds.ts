@@ -19,9 +19,9 @@
 
     const constructors = [AsyncFunction, GeneratorFunction, AsyncGeneratorFunction];
     const prototypes = [
-      (async function () {}),
-      (function* () {}),
-      (async function* () {}),
+      Object.create(Function.prototype),
+      Object.create(Function.prototype),
+      Object.create(Function.prototype),
     ];
     const tags = ["AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction"];
     for (let kind = 0; kind < constructors.length; kind += 1) {
