@@ -9,6 +9,7 @@
   // @@matchAll. The graph bootstrap's RegExp @@matchAll method captures the raw native method
   // before this wrapper is installed.
   const stringMatchAll = { matchAll(regexp: any): any {
+    "use strict";
     if (this === null || this === undefined) {
       throw new TypeError("String.prototype.matchAll called on null or undefined");
     }
