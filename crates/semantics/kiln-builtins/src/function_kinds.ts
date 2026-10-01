@@ -65,16 +65,21 @@
 
     const asyncGenerator = (async function* () {})();
     const asyncIteratorPrototype = Object.create(Object.prototype);
+    const apply = Reflect.apply;
+    const asyncIteratorSelf = { [Symbol.asyncIterator]() { return this; } }[Symbol.asyncIterator];
     Object.defineProperty(asyncIteratorPrototype, Symbol.asyncIterator, {
-      value: function () { return this; },
+      value: asyncIteratorSelf,
       writable: true,
       configurable: true,
     });
     if (Symbol.asyncDispose !== undefined) {
       Object.defineProperty(asyncIteratorPrototype, Symbol.asyncDispose, {
-        value: async function () {
-          if (typeof this.return === "function") await this.return();
-        },
+        value: {
+          async [Symbol.asyncDispose]() {
+            const close = this.return;
+            if (close !== undefined && close !== null) await apply(close, this, []);
+          },
+        }[Symbol.asyncDispose],
         writable: true,
         configurable: true,
       });
