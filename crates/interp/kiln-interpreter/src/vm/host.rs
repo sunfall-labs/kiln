@@ -3058,12 +3058,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 instruction,
                 message: "HTTP Agent selected a connection without an adapter owner".into(),
             })?;
-        let socket = owner
+        let (socket, socket_object) = owner
             .borrow()
             .streams
             .iter()
             .find(|stream| stream.resource() == resource)
-            .and_then(|stream| stream.socket.clone())
+            .and_then(|stream| stream.socket.clone().zip(stream.socket_object.clone()))
             .ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "HTTP Agent connection lost its JavaScript socket".into(),
@@ -3079,7 +3079,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP client request lost its JavaScript object".into(),
             })?;
         state.borrow_mut().socket = Some(Rc::clone(&socket));
-        let socket_value = Value::Object(Rc::clone(&socket));
+        let socket_value = Value::Object(socket_object);
         request_object
             .borrow_mut()
             .set("socket", socket_value.clone());
