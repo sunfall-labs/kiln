@@ -678,7 +678,8 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
             const char *pattern_text = scan.curr.str_val;
             size_t pattern_len = scan.curr.str_len;
             const char *flags_text = pattern_text + pattern_len + 1;
-            size_t flags_len = strlen(flags_text);
+            /* The token spans both slashes and the original pattern/flags bytes. */
+            size_t flags_len = scan.curr.len - pattern_len - 2;
             kiln_value pattern = kiln_c99_undefined();
             kiln_value flags = kiln_c99_undefined();
             int status = kiln_dyn_source_to_string(pattern_text, pattern_len, &pattern);
