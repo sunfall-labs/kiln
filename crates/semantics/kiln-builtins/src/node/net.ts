@@ -19,8 +19,13 @@ function socketUncork(this: any): any {
 }
 
 const socketPrototypes = new WeakMap<object, object>();
+const decoratedSockets = new WeakSet<object>();
 
 function decorateSocket(socket: any): any {
+  if ((typeof socket !== "object" && typeof socket !== "function") || socket === null) {
+    return socket;
+  }
+  if (decoratedSockets.has(socket)) return socket;
   const base = Object.getPrototypeOf(socket);
   let prototype = socketPrototypes.get(base);
   if (!prototype) {
@@ -32,6 +37,7 @@ function decorateSocket(socket: any): any {
     socketPrototypes.set(base, prototype);
   }
   Object.setPrototypeOf(socket, prototype);
+  decoratedSockets.add(socket);
   return socket;
 }
 
@@ -44,14 +50,29 @@ if (typeof process !== "undefined" && typeof (process as any).__kilnSocketDecora
 
 export function createServer(...args: any[]): any {
   if (nativeModule && typeof nativeModule.createServer === "function") {
-    return nativeModule.createServer(...args);
+    const listenerIndex = args.findIndex((argument) => typeof argument === "function");
+    if (listenerIndex >= 0) {
+      const forwarded = args.slice();
+      const listener = forwarded[listenerIndex];
+      forwarded[listenerIndex] = function (this: any, socket: any, ...rest: any[]): any {
+        return listener.apply(this, [decorateSocket(socket), ...rest]);
+      };
+      return nativeModule.createServer(...forwarded);
+    }
+    const server = nativeModule.createServer(...args);
+    // Install before callers can add listeners so accepted sockets always receive the same
+    // TypeScript-owned methods, including sockets created by HTTP/TLS host projections.
+    if (server && typeof server.on === "function") {
+      server.on("connection", (socket: any) => decorateSocket(socket));
+    }
+    return server;
   }
   throw new Error("node:net requires a net host capability that this realm does not provide");
 }
 
 export function connect(...args: any[]): any {
   if (nativeModule && typeof nativeModule.connect === "function") {
-    return nativeModule.connect(...args);
+    return decorateSocket(nativeModule.connect(...args));
   }
   throw new Error("node:net requires a net host capability that this realm does not provide");
 }

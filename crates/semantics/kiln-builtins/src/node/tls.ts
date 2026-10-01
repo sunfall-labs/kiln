@@ -1,5 +1,5 @@
 // kiln-builtins: node:tls capability facade (ADR 0005).
-import "./net";
+import "node:net";
 // Importing TLS does not acquire a transport. A TLS operation requires the host capability;
 // libraries that support both ws: and wss: can load their ordinary TCP path in every realm.
 const nativeModule = typeof process !== "undefined"

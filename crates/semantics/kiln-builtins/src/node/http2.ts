@@ -1,5 +1,5 @@
 // Deterministic node:http2 implementation (Phase 5.2, ADR 0005)
-import "./net";
+import "node:net";
 
 export const constants = {
   NGHTTP2_SESSION_SERVER: 0,

@@ -1,5 +1,5 @@
 // kiln-builtins: node:http implementation (Phase 5.2, ADR 0005)
-import "./net";
+import "node:net";
 
 import { Writable } from "node:stream";
 
