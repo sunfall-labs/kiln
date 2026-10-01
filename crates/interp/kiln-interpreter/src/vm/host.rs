@@ -2960,12 +2960,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &[Value::String("write after end".into())],
                         );
                         if let Value::Object(error_object) = &error {
-                            error_object
-                                .borrow_mut()
-                                .set_non_enumerable(
-                                    "code",
-                                    Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
-                                );
+                            error_object.borrow_mut().set_non_enumerable(
+                                "code",
+                                Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
+                            );
                         }
                         let callback = arguments.iter().rev().find(|value| is_callable(value));
                         if let Some(callback) = callback {
