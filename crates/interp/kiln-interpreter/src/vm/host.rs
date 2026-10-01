@@ -250,14 +250,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         match native {
             Native::NodeNetCreateServer => {
                 let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
-                if !is_callable(&handler) {
+                if !matches!(handler, Value::Undefined) && !is_callable(&handler) {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "The connection listener must be a function".into(),
                     });
                 }
                 let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
-                    handler,
+                    handler: handler.clone(),
                     protocol: ServerProtocol::Net,
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
@@ -266,6 +266,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     close_deferred: false,
                 }));
                 let object = node_server_object(&state);
+                if is_callable(&handler) {
+                    self.dispatch_node_event(
+                        Native::NodeEventOn,
+                        &object,
+                        &[Value::String("connection".into()), handler],
+                        instruction,
+                    )?;
+                }
                 self.register_node_server(&state);
                 Ok(object)
             }
@@ -1446,8 +1454,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     {
                         connection.request = Some(socket.clone());
                     }
-                    let handler = state.borrow().handler.clone();
-                    self.call_value(&handler, Value::Undefined, vec![socket], instruction)?;
+                    self.emit_http_server(state, "connection", vec![socket], instruction)?;
                 }
                 for action in net_actions {
                     self.start_http_stream_action(

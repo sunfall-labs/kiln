@@ -2159,8 +2159,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             if (status != KILN_C99_OK) return status;
             status = server->protocol_http
                          ? KILN_C99_OK
-                         : kiln_c99_call(server->host, &ignored, server->connection_listener,
-                                         server->object, &socket->object, 1, 0, exception);
+                         : kiln_c99_node_emit(server->host, server->object, "connection",
+                                              socket->object, 1, 0, exception);
             if (status != KILN_C99_OK) return status;
             if (server->closing || socket->closing) return KILN_C99_OK;
             status = server->protocol_http
@@ -4009,7 +4009,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         int status;
         if (!http) {
             listener = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (!kiln_c99_is_callable(listener))
+            if (listener.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(listener))
                 return kiln_c99_throw_not_a(thrown, listener, "function");
         } else {
             kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -4036,6 +4036,11 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (status == KILN_C99_OK)
             status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
                                          server->object, NULL, 0, depth, thrown);
+        if (status == KILN_C99_OK && !http && kiln_c99_is_callable(listener)) {
+            kiln_value on_args[2] = {kiln_c99_copy_text("connection", 10), listener};
+            status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ON,
+                                         server->object, on_args, 2, depth, thrown);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_define_method(server->object, "listen", 6,
                                             kiln_c99_method(KILN_C99_METHOD_NODE_SERVER_LISTEN));
