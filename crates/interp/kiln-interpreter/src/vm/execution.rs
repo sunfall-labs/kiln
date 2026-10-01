@@ -2044,6 +2044,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             self.stack.push(result);
                         }
                         Value::Native(native, realm) => {
+                            // These realm markers back the non-callable objects that sit in the
+                            // function-kind prototype chain. Ordinary `Instruction::Call`
+                            // dispatches natives directly for speed, so it must enforce the same
+                            // [[Call]] check as `call_value`/`invoke_dispatch` before treating a
+                            // marker as a native function. Otherwise `AsyncFunction.prototype()`
+                            // silently returned undefined in the interpreter.
+                            if matches!(
+                                native,
+                                Native::AsyncFunctionPrototype
+                                    | Native::GeneratorFunctionPrototype
+                                    | Native::AsyncGeneratorFunctionPrototype
+                            ) {
+                                self.throw_error(
+                                    ErrorKind::Type,
+                                    "a object is not a function".to_owned(),
+                                    current,
+                                )?;
+                                continue;
+                            }
                             let native = *native;
                             let realm = *realm;
                             let mut arguments = self.take_arguments(argc, current)?;

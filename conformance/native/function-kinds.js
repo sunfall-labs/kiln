@@ -18,6 +18,11 @@ for (const prototype of [AsyncFunction.prototype, GeneratorFunction.prototype, A
   try { prototype(); } catch (error) { rejected = error instanceof TypeError; }
   if (!rejected) throw new Error('function kind prototype objects must not be callable');
 }
+function freezeTarget() {}
+Object.freeze(freezeTarget);
+if (Object.getOwnPropertyDescriptor(freezeTarget, "prototype").writable) {
+  throw new Error("freezing a function must make its implicit prototype slot read-only");
+}
 
 const generatorObjectPrototype = GeneratorFunction.prototype.prototype;
 const asyncGeneratorObjectPrototype = AsyncGeneratorFunction.prototype.prototype;
