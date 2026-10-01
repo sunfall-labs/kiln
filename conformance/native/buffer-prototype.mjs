@@ -12,6 +12,8 @@ console.log(Buffer.from(new Uint8Array([9, 8])).equals(Buffer.from([9, 8])), Buf
 console.log(Buffer.from("hi", "utf16le").toString("hex"), Buffer.alloc(4, "ab").toString(), Buffer("xy").toString(), Buffer.from("ff", "hex").toString("hex"));
 const FastBuffer = Buffer[Symbol.species];
 if (typeof FastBuffer !== "function" || FastBuffer.name !== "FastBuffer" || FastBuffer === Buffer) throw new Error("Buffer species identity");
+const speciesPrototypeDescriptor = Object.getOwnPropertyDescriptor(FastBuffer, "prototype");
+if (FastBuffer.length !== 0 || speciesPrototypeDescriptor.writable || speciesPrototypeDescriptor.configurable || speciesPrototypeDescriptor.enumerable) throw new Error("FastBuffer class constructor metadata");
 if (Object.getPrototypeOf(FastBuffer) !== Uint8Array || FastBuffer.prototype !== Buffer.prototype || Object.getPrototypeOf(FastBuffer.prototype) !== Uint8Array.prototype) throw new Error("Buffer species prototype chain");
 const speciesBacking = new ArrayBuffer(5);
 const speciesView = new FastBuffer(speciesBacking, 1, 3);

@@ -830,8 +830,8 @@
     return result;
   }
   Object.defineProperty(FastBuffer, "name", { value: "FastBuffer", configurable: true });
-  Object.defineProperty(FastBuffer, "length", { value: 1, configurable: true });
-  FastBuffer.prototype = proto;
+  Object.defineProperty(FastBuffer, "length", { value: 0, configurable: true });
+  Object.defineProperty(FastBuffer, "prototype", { value: proto, writable: false });
   Object.setPrototypeOf(FastBuffer, U8);
   Object.defineProperty(B, Symbol.species, {
     configurable: true,
