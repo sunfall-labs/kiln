@@ -450,13 +450,16 @@ fn native_weak_resource_payload_producers_are_audited() {
     // new raw registration call still requires a hidden-reference/lifetime inventory.
     assert_eq!(
         producers,
-        vec![(
-            "runtime/spread.c".to_owned(),
-            "heap,handle,arena,kiln_c99_prepared_graph_drop".to_owned()
-        ), (
-            "runtime/heap.c".to_owned(),
-            "heap,handle,payload,dispose".to_owned()
-        )]
+        vec![
+            (
+                "runtime/spread.c".to_owned(),
+                "heap,handle,arena,kiln_c99_prepared_graph_drop".to_owned()
+            ),
+            (
+                "runtime/heap.c".to_owned(),
+                "heap,handle,payload,dispose".to_owned()
+            )
+        ]
     );
 }
 
