@@ -552,8 +552,10 @@ static int kiln_dyn_with_has_binding(kiln_host *host, kiln_value object, const c
         return status;
     }
     kiln_value symbol = kiln_c99_undefined();
-    status = kiln_c99_symbol_of_key("@@unscopables", 13, &symbol);
-    if (status != KILN_C99_OK) return status;
+    /* The key lookup reports membership, not a runtime status. A recognized well-known
+     * symbol returns 1; forwarding that boolean would stop every resolved with binding. */
+    if (!kiln_c99_symbol_of_key("@@unscopables", 13, &symbol))
+        return KILN_C99_INVALID_ARGUMENT;
     kiln_value unscopables = kiln_c99_undefined();
     status = kiln_c99_get_computed(host, object, symbol, &unscopables, depth, thrown);
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(object));
