@@ -3502,12 +3502,12 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     return kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth, out, thrown);
 }
 
-/* Direct eval cannot compile a new native body at run time. It can, however, build a function
- * expression with the same cell-backed lexical environment the dynamic Function trampoline
- * already understands. This deliberately accepts one expression and requires it to produce a
- * function; statement eval needs declaration-instantiation and is not approximated here. Names
- * arrive in EvalSite order, innermost first; duplicate spellings are ignored after their first
- * binding. */
+/* Direct eval cannot compile a new native body at run time. It can evaluate one expression with
+ * the same cell-backed lexical environment the dynamic Function trampoline understands. This
+ * supports expression forms the dynamic evaluator implements (including invoking a function
+ * expression); statement eval still needs declaration-instantiation and is not approximated here.
+ * Names arrive in EvalSite order, innermost first; duplicate spellings are ignored after their
+ * first binding. */
 int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source,
                                               const char *const *names,
                                               const size_t *name_lengths,
@@ -3560,30 +3560,15 @@ int kiln_c99_dynamic_eval_function_expression(kiln_host *host, kiln_value source
     lex.len = source_len;
     lex.strict = scope.strict;
     kiln_dyn_lexer_next(&lex);
-    /* This seam is for a function expression only, not a general side-effecting expression that
-     * happens to produce a function. Koa/depd constructs exactly this shape at run time. */
-    if (lex.curr.kind == KILN_DYN_LPAREN) {
-        kiln_dyn_lexer_next(&lex);
-        if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
-            goto direct_eval_unsupported;
-        }
-        kiln_dyn_token_free(&lex.curr);
-        memset(&lex, 0, sizeof(lex));
-        lex.src = (const char *)source_owned;
-        lex.len = source_len;
-        lex.strict = scope.strict;
-        kiln_dyn_lexer_next(&lex);
-    } else if (lex.curr.kind != KILN_DYN_KW_FUNCTION) {
-        goto direct_eval_unsupported;
+    if (lex.curr.kind == KILN_DYN_EOF) {
+        *out = kiln_c99_undefined();
+        goto direct_eval_done;
     }
     status = kiln_dyn_eval_expr(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
                                 depth, &completion, thrown);
     if (status == KILN_C99_OK && lex.curr.kind != KILN_DYN_EOF)
         goto direct_eval_unsupported;
-    if (status == KILN_C99_OK && completion.tag != KILN_VALUE_FUNCTION)
-        goto direct_eval_unsupported;
     if (status == KILN_C99_OK) {
-        if (strict_context) kiln_c99_closure_of(completion)->strict = 1;
         *out = completion;
     }
     kiln_dyn_token_free(&lex.curr);
