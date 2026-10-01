@@ -32,22 +32,35 @@ class NativeTimeoutTests(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             self.assertFalse(marker.exists())
 
+    def test_signal_exit_uses_shell_status_convention(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "timed-out"
+            result = subprocess.run(
+                [sys.executable, str(HELPER), "2", str(marker), "--", sys.executable,
+                 "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 143)
+            self.assertFalse(marker.exists())
+
     def test_timeout_keeps_partial_output_and_kills_descendant_group(self):
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "timed-out"
             descendant_marker = Path(temporary) / "descendant-survived"
             grandchild = (
-                "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "os.close(1); os.close(2); "
                 "time.sleep(0.8); open(%r, 'w').write('survived')" % str(descendant_marker)
             )
             parent = (
-                "import signal, subprocess, sys, time; "
+                "import subprocess, sys, time; "
                 "subprocess.Popen([sys.executable, '-c', %r]); "
-                "print('partial output', flush=True); "
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)" % grandchild
+                "print('partial output', flush=True); time.sleep(30)" % grandchild
             )
             result = subprocess.run(
-                [sys.executable, str(HELPER), "1", str(marker), "--", sys.executable,
+                [sys.executable, str(HELPER), "0.15", str(marker), "--", sys.executable,
                  "-c", parent],
                 capture_output=True,
                 text=True,
@@ -59,6 +72,34 @@ class NativeTimeoutTests(unittest.TestCase):
             self.assertIn("KILN_NATIVE_TIMEOUT:", result.stderr)
             time.sleep(1)
             self.assertFalse(descendant_marker.exists(), "the owned process group outlived timeout")
+
+    def test_escaped_child_cannot_hold_timeout_drain_open_or_be_killed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "timed-out"
+            escaped_marker = Path(temporary) / "escaped-child-finished"
+            escaped = (
+                "import os, time; os.setsid(); time.sleep(3); "
+                "open(%r, 'w').write('finished')" % str(escaped_marker)
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                "subprocess.Popen([sys.executable, '-c', %r]); "
+                "print('leader output', flush=True); time.sleep(30)" % escaped
+            )
+            started = time.monotonic()
+            result = subprocess.run(
+                [sys.executable, str(HELPER), "1", str(marker), "--", sys.executable,
+                 "-c", parent],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 124)
+            self.assertTrue(marker.exists())
+            self.assertLess(elapsed, 3, "an escaped pipe owner must not hold the runner open")
+            time.sleep(1.5)
+            self.assertTrue(escaped_marker.exists(), "cleanup must not signal an escaped group")
 
     def test_runner_times_out_one_probe_and_finishes_the_batch(self):
         with tempfile.TemporaryDirectory() as temporary:
