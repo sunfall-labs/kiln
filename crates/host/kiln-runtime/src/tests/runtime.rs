@@ -3638,7 +3638,7 @@ fn pending_only_cancel_preserves_synchronous_tcp_write_success() {
     runtime.start_host_op(
         AsyncHostOp::TcpConnect {
             host: "127.0.0.1".into(),
-            port: u32::from(listener.local_addr().expect("listener address").port()),
+            port: listener.local_addr().expect("listener address").port(),
         },
         true,
     );
