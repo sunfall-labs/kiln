@@ -4109,7 +4109,19 @@ impl AsyncHostOps for TokioHost {
         } else {
             self.tasks.abort(&request);
         }
-        self.ready.remove(&pending.sequence);
+        if let Some(completion) = self.ready.remove(&pending.sequence) {
+            // Promotion allocates a resource before publishing its completion. Until the
+            // language receives that completion, the request still owns the resource: cancelling
+            // a queued accept/connect/listen must retire it along with the completion.
+            let resource = match completion.result {
+                Ok(AsyncHostValue::Resource(resource)) => Some(resource.id),
+                Ok(AsyncHostValue::AcceptedTcpStream(accepted)) => Some(accepted.resource.id),
+                _ => None,
+            };
+            if let Some(resource) = resource {
+                let _ = self.close_resource(resource);
+            }
+        }
         true
     }
 

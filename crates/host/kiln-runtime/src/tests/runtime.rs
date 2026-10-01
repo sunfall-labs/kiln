@@ -870,6 +870,81 @@ fn runtime_metrics_are_exposed_as_a_kiln_owned_snapshot() {
 }
 
 #[test]
+fn cancellation_retires_a_resource_in_an_undelivered_listen_completion() {
+    let mut runtime = RealmRuntime::new().expect("runtime");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = runtime.enter(|| tokio::net::TcpListener::from_std(listener).unwrap());
+    let request = runtime.start_host_op(
+        AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        },
+        true,
+    );
+    let sequence = runtime.host_mut().pending[&request].sequence;
+    runtime.host_mut().promote_completion(HostCompletion {
+        request,
+        sequence,
+        lifecycle: None,
+        result: Ok(HostCompletionValue::TcpListener {
+            listener: HostListener::Tokio(listener),
+            referenced: true,
+        }),
+    });
+    assert_eq!(runtime.host_mut().resources.len(), 1);
+    assert!(runtime.cancel_host_op(request));
+    assert!(runtime.host_mut().resources.is_empty());
+    assert!(AsyncHostOps::next_completion(runtime.host_mut()).is_none());
+    assert!(!AsyncHostOps::has_referenced_work(runtime.host_mut()));
+}
+
+#[test]
+fn cancellation_closes_an_undelivered_connected_or_accepted_socket() {
+    use std::io::Read;
+    for accepted in [false, true] {
+        let mut runtime = RealmRuntime::new().expect("runtime");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut peer = std::net::TcpStream::connect(address).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let (stream, peer_address) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let stream = runtime.enter(|| tokio::net::TcpStream::from_std(stream).unwrap());
+        let request = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: address.port(),
+            },
+            true,
+        );
+        let sequence = runtime.host_mut().pending[&request].sequence;
+        runtime.host_mut().promote_completion(HostCompletion {
+            request,
+            sequence,
+            lifecycle: None,
+            result: Ok(HostCompletionValue::TcpStream {
+                stream,
+                peer: peer_address,
+                referenced: true,
+                accepted,
+                ticket: None,
+            }),
+        });
+        assert_eq!(runtime.host_mut().resources.len(), 1);
+        assert!(runtime.cancel_host_op(request));
+        assert!(runtime.host_mut().resources.is_empty());
+        assert!(!AsyncHostOps::has_referenced_work(runtime.host_mut()));
+        assert_eq!(
+            peer.read(&mut [0u8; 1]).unwrap(),
+            0,
+            "cancelled socket closes its peer"
+        );
+    }
+}
+
+#[test]
 fn stale_completion_queued_after_cancellation_is_rejected() {
     let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
     let request = runtime.start_host_op(
