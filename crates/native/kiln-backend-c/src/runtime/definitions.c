@@ -1426,6 +1426,13 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
             *found = 1;
             return KILN_C99_OK;
         }
+        if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE &&
+            kiln_c99_same_name_key(view, "__proto__")) {
+            /* The legacy accessor is a runtime-linked own member, not a row in the seven
+             * table-defined Object.prototype members or the TypeScript Annex B store. */
+            *found = 1;
+            return KILN_C99_OK;
+        }
         char intrinsic_buffer[256];
         const char *intrinsic_key;
         size_t intrinsic_len;
@@ -1460,7 +1467,8 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         /* The names the table answers to, asked the same way `getOwnPropertyNames` asks so the
          * two cannot disagree. A hit is a member the program can reach and is therefore own; a
          * miss is not proof of absence, because the table is still growing, so it refuses. */
-        if (kiln_c99_builtin_own_keys(target.bits, &names) == KILN_C99_OK) {
+        int names_status = kiln_c99_builtin_own_keys(target.bits, &names);
+        if (names_status == KILN_C99_OK) {
             kiln_array *listed = kiln_c99_array_of(names);
             size_t index;
             for (index = 0; index < listed->count; ++index) {
@@ -1480,6 +1488,13 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                     return KILN_C99_OK;
                 }
             }
+        }
+        if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
+            /* Object.prototype is the one prototype whose own-key authority is complete here:
+             * its seven static rows, the stored Annex B methods, the stored runtime overrides,
+             * and the special __proto__ accessor above. An unknown string or symbol is therefore
+             * absent by construction; other builtins may still have unlisted exotic keys. */
+            return names_status;
         }
         KILN_C99_REFUSE("an own-property question about a built-in member the surface table does "
                         "not list");
