@@ -17,7 +17,12 @@ const speciesBacking = new ArrayBuffer(5);
 const speciesView = new FastBuffer(speciesBacking, 1, 3);
 speciesView[0] = 71;
 const speciesSized = new FastBuffer(2);
+const speciesCoerced = new FastBuffer("2");
+const speciesCopied = new FastBuffer(new Uint16Array([257, 258]));
 const speciesSlice = Buffer.from(speciesBacking).subarray(1, 4);
 if (!Buffer.isBuffer(speciesView) || speciesView.buffer !== speciesBacking || speciesView.byteOffset !== 1 || speciesBackingBytes(speciesBacking)[1] !== 71) throw new Error("FastBuffer must return a shared Buffer view");
-if (!Buffer.isBuffer(speciesSized) || speciesSized.length !== 2 || !Buffer.isBuffer(speciesSlice)) throw new Error("Buffer typed-array species construction");
+if (!Buffer.isBuffer(speciesSized) || speciesSized.length !== 2 || speciesCoerced.length !== 2 || speciesCoerced[0] !== 0 || speciesCopied.toString("hex") !== "0102" || !Buffer.isBuffer(speciesSlice)) throw new Error("Buffer typed-array species construction");
+class DerivedFastBuffer extends FastBuffer {}
+const derivedSpecies = new DerivedFastBuffer(1);
+if (!Buffer.isBuffer(derivedSpecies) || !(derivedSpecies instanceof DerivedFastBuffer)) throw new Error("FastBuffer subclass construction");
 function speciesBackingBytes(buffer) { return new Uint8Array(buffer); }

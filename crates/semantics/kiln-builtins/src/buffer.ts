@@ -810,9 +810,24 @@
   // consumers use the same allocation authority.
   function FastBuffer(this: any, source: any, byteOffset?: any, length?: any): Uint8Array {
     if (new.target === undefined) throw new TypeError("Class constructor FastBuffer cannot be invoked without 'new'");
-    if (typeof source === "number") return rawAlloc(source);
-    if (source === undefined) throw new TypeError("The \"buffer\" argument must be an instance of ArrayBuffer");
-    return rawFrom(source, byteOffset, length);
+    // Delegate argument conversion and overload selection to Uint8Array. In particular, its
+    // length form applies ToIndex, and its array-like/typed-array forms copy elements instead
+    // of treating the input as an ArrayBuffer. Rewrap the resulting byte span only to add the
+    // Buffer brand while preserving a shared ArrayBuffer view when that overload was selected.
+    const view = new U8(source as any, byteOffset as any, length as any);
+    const result = rawFrom(view.buffer, view.byteOffset, view.byteLength);
+    // A subclass supplies the observable prototype for the returned typed array, as it does
+    // when the built-in FastBuffer constructor is subclassed.
+    if (new.target !== FastBuffer) {
+      const candidate = new.target.prototype;
+      Object.setPrototypeOf(
+        result,
+        candidate !== null && (typeof candidate === "object" || typeof candidate === "function")
+          ? candidate
+          : proto,
+      );
+    }
+    return result;
   }
   Object.defineProperty(FastBuffer, "name", { value: "FastBuffer", configurable: true });
   Object.defineProperty(FastBuffer, "length", { value: 1, configurable: true });
