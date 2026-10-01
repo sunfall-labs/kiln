@@ -86,21 +86,20 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
     kiln_value built;
     uint64_t code;
     int status;
-    kiln_value callable_length;
+    double callable_length;
     int is_callable_builtin = 0;
     int has_prototype = 0;
     if (!kiln_c99_is_namespace(builtin) &&
-        kiln_c99_get(NULL, kiln_c99_builtin(builtin), "length", 6,
-                     &callable_length, 0, NULL) == KILN_C99_OK &&
-        callable_length.tag == KILN_VALUE_NUMBER) {
+        kiln_c99_builtin_length(builtin, &callable_length)) {
         /* Callable constructors share the same own-key prefix even when they have no static
-         * rows in the surface table (Boolean and BigInt are examples). Detect that property via
-         * the same read authority used by ordinary property access instead of maintaining a
-         * second constructor inventory here. */
+         * rows in the surface table (Boolean and BigInt are examples). Use the immutable arity
+         * metadata that also answers `fn.length`, rather than observing the mutable `length`
+         * property, so redefining that property cannot change the object's kind. */
         kiln_value prototype;
         is_callable_builtin = 1;
         has_prototype = kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9,
-                                     &prototype, 0, NULL) == KILN_C99_OK;
+                                     &prototype, 0, NULL) == KILN_C99_OK &&
+                        prototype.tag == KILN_VALUE_BUILTIN;
     }
     if (builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
         status = kiln_c99_new_array(&built);
