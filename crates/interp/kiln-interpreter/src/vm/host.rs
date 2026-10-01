@@ -1427,14 +1427,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         match native {
             Native::NodeReadablePush => {
                 let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // Socket read demand is owned by NetSocketState, while this dispatcher may be
+                // handling any ReadableState. Capture it before borrowing the readable state;
+                // generic Readables have no socket demand.
+                let socket_read_demand = node_net_socket_state(receiver)
+                    .ok()
+                    .and_then(|socket| socket.borrow().read_demand)
+                    .is_some();
                 let (event, payload, emit_end, ready, call_read) = {
                     let mut state = state.borrow_mut();
                     if matches!(chunk, Value::Null) {
                         state.ended = true;
                         state.reading = false;
                         let emit_end = (state.end_scheduled
-                            || (state.buffer.is_empty()
-                                && (state.flowing || state.read_demand.is_some())))
+                            || (state.buffer.is_empty() && (state.flowing || socket_read_demand)))
                             && !state.end_emitted;
                         if emit_end {
                             state.end_emitted = true;
