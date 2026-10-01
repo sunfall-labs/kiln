@@ -317,10 +317,12 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
     }
 }
 
-/// Private `node:net` capabilities consumed by the TypeScript facade. Keep the private adapter
-/// methods as stored, non-enumerable properties: Native's public module projection deliberately
-/// exposes only the Node-visible entries, while the facade needs these host operations to
-/// decorate TCP and HTTP-created sockets through one shared implementation.
+/// Private `node:net` capabilities consumed by the TypeScript facade. `Native::NodeNet` also
+/// represents the public builtin namespace; its property materialization uses the `Builtin::Net`
+/// export list, then treats names outside that completed per-realm store as absent. The private
+/// socket operations are intentionally not public exports, so put the facade's adapter on a
+/// separate ordinary object. This also keeps mutations to the private capability table from
+/// changing the public module's intrinsic identity or override store.
 pub(crate) fn native_capabilities() -> Value {
     let mut module = ObjectData::default();
     for name in ["createServer", "connect", "createConnection", "default"] {

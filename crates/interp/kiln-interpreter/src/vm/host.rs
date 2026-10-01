@@ -1601,44 +1601,45 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Native::NodeHttpServer
             | Native::NodeHttpCreateServer
             | Native::NodeHttpCreateFetchServer => {
-                // Node accepts both `createServer(listener)` and
-                // `createServer(options, listener)`. Options are transport policy; the last
-                // callable argument is the request listener on either form. Keeping overload
-                // selection here prevents the HTTP state machine from learning about JavaScript
-                // argument shapes and leaves room for the options object to be lowered into
-                // protocol/transport configuration independently.
+                // Node accepts `createServer()`, `createServer(listener)`, and
+                // `createServer(options, listener)`. The listener is the first argument when
+                // callable, otherwise it occupies the second slot; trailing arguments do not
+                // replace it. Keep this normalization at the adapter boundary so transport state
+                // sees only an optional listener.
                 let (options, handler) = match arguments {
                     [handler, ..] if is_callable(handler) => (None, handler.clone()),
-                    [options, rest @ ..] => (
-                        Some(options),
-                        rest.iter()
-                            .find(|value| is_callable(value))
-                            .cloned()
-                            .unwrap_or(Value::Undefined),
-                    ),
+                    [options, listener, ..] => (Some(options), listener.clone()),
+                    [options] => (Some(options), Value::Undefined),
                     [] => (None, Value::Undefined),
                 };
                 if options
-                    .is_some_and(|options| !matches!(options, Value::Undefined | Value::Object(_)))
+                    .is_some_and(|options| {
+                        !matches!(options, Value::Undefined | Value::Null | Value::Object(_))
+                    })
                 {
                     return self.throw_node_invalid_arg_type(
                         "The \"options\" argument must be of type object",
                     );
                 }
-                let handler = arguments
-                    .iter()
-                    .rev()
-                    .find(|value| is_callable(value))
-                    .cloned()
-                    .unwrap_or(handler);
-                if !is_callable(&handler) {
+                if !matches!(handler, Value::Undefined | Value::Null) && !is_callable(&handler) {
+                    return self.throw_node_invalid_arg_type(&format!(
+                        "The \"listener\" argument must be of type function. Received type {}",
+                        handler.type_name(),
+                    ));
+                }
+                if native == Native::NodeHttpCreateFetchServer && !is_callable(&handler) {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "The request listener must be a function".into(),
                     });
                 }
+                let handler = if is_callable(&handler) {
+                    handler
+                } else {
+                    Value::Undefined
+                };
                 let state = Rc::new(RefCell::new(NodeServerState {
                     driver: TcpServerDriver::default(),
-                    handler,
+                    handler: handler.clone(),
                     protocol: ServerProtocol::Http,
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
@@ -1647,6 +1648,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     close_deferred: false,
                 }));
                 let object = node_server_object(&state);
+                if native != Native::NodeHttpCreateFetchServer && is_callable(&handler) {
+                    self.dispatch_node_event(
+                        Native::NodeEventOn,
+                        &object,
+                        &[Value::String("request".into()), handler],
+                        instruction,
+                    )?;
+                }
                 self.register_node_server(&state);
                 Ok(object)
             }
@@ -3611,12 +3620,33 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let state = server.borrow();
             state.handler.clone()
         };
-        self.call_value(
-            &handler,
-            Value::Undefined,
-            vec![incoming.clone(), response],
-            instruction,
-        )?;
+        let server_object = server
+            .borrow()
+            .object
+            .clone()
+            .and_then(|object| object.upgrade())
+            .map(Value::Object);
+        if let Some(server_object) = server_object {
+            self.dispatch_node_event(
+                Native::NodeEventEmit,
+                &server_object,
+                &[
+                    Value::String("request".into()),
+                    incoming.clone(),
+                    response,
+                ],
+                instruction,
+            )?;
+        } else if is_callable(&handler) {
+            // The host may keep a listening server alive after its JS wrapper is collected. The
+            // captured listener still handles that request, though no server receiver remains.
+            self.call_value(
+                &handler,
+                Value::Undefined,
+                vec![incoming.clone(), response],
+                instruction,
+            )?;
+        }
         // A Node callback is one JavaScript turn. An async request listener may reach its first
         // `await` before returning; drain the resulting promise reactions before waiting for
         // another host completion, or a response that depends on that continuation can never be
