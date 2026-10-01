@@ -1981,6 +1981,7 @@ dependencies = [
  "oxc_syntax",
  "oxc_transformer",
  "serde_json",
+ "url",
 ]
 
 [[package]]
