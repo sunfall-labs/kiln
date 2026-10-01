@@ -1559,7 +1559,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         uint64_t callable;
         kiln_value store;
         int stored;
-        if (kiln_c99_same_name_key(key, "constructor")) {
+        /* A bound function normally inherits Function.prototype.constructor, but its [[Prototype]]
+         * is mutable. In particular, Callable-derived classes bind their implementation function
+         * and set the bound function's prototype to the subclass prototype; ordinary Get must
+         * then reach that prototype's constructor. The bound branch below performs that lookup,
+         * including own properties and an explicit null prototype. Keep this shortcut for the
+         * other synthetic callable tags handled by this shared case. */
+        if (target.tag != KILN_VALUE_BOUND &&
+            kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
