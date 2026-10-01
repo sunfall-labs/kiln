@@ -1433,7 +1433,11 @@ async fn serve(
     } else {
         let mut builder = hyper::server::conn::http1::Builder::new();
         builder.auto_date_header(false);
-        builder.pipeline_flush(true);
+        // Hyper's pipeline batching skips flushing while its read buffer is nonempty.
+        // On an upgrade those bytes belong to the next protocol: they never drain through
+        // HTTP, and into_parts discards the unflushed HTTP output. Keep ordinary flushing
+        // so every response is on the wire before handing the transport to the upgrade.
+        builder.pipeline_flush(false);
         builder.half_close(true);
         let mut connection = builder.serve_connection(TokioIo::new(io), service);
         enum H1Progress {
@@ -2043,6 +2047,79 @@ mod tests {
         fn whole_requests(&self) -> bool {
             true
         }
+    }
+
+    struct PipelinedUpgrade {
+        engine: Rc<RefCell<HttpServerEngine>>,
+        resource: ResourceId,
+        head: RefCell<Vec<u8>>,
+    }
+
+    impl HttpDispatch for PipelinedUpgrade {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
+            match event.kind {
+                HttpEventKind::RequestEnd => {
+                    let mut engine = self.engine.borrow_mut();
+                    assert!(engine.start_response(self.resource, event.id, 200, b"", 1024));
+                    engine.end_response(self.resource, event.id, b"ok").unwrap();
+                }
+                HttpEventKind::UpgradeRequest => {
+                    let response = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: kiln-probe\r\n\r\n\x00\xa5\xff";
+                    assert!(
+                        self.engine
+                            .borrow_mut()
+                            .write_upgrade(self.resource, event.id, response,)
+                            .is_some()
+                    );
+                }
+                HttpEventKind::UpgradeReady => {
+                    self.head.borrow_mut().extend_from_slice(event.data);
+                    let transfer = self
+                        .engine
+                        .borrow_mut()
+                        .take_upgrade(self.resource)
+                        .unwrap();
+                    tokio::task::spawn_local(async move {
+                        let mut io = transfer.transport.0;
+                        let result = io.write_all(&transfer.pending_write).await;
+                        transfer.write_completion.complete(result);
+                        io.shutdown().await.unwrap();
+                    });
+                }
+                _ => {}
+            }
+            0
+        }
+
+        fn checkpoint(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn pipelined_upgrade_flushes_http_responses_before_raw_transport_handoff() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let (mut client, server) = tokio::io::duplex(1 << 16);
+                let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+                let resource = ResourceId::new(19);
+                let dispatch = Rc::new(PipelinedUpgrade {
+                    engine: Rc::clone(&engine), resource, head: RefCell::new(Vec::new()),
+                });
+                assert!(engine.borrow_mut().attach(
+                    resource, HostTransport(Box::new(server)), false, dispatch.clone(),
+                ));
+                client.write_all(b"GET /ordinary HTTP/1.1\r\nHost: localhost\r\n\r\nGET /upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: kiln-probe\r\n\r\n\x00\xa5\xff").await.unwrap();
+                let mut received = Vec::new();
+                client.read_to_end(&mut received).await.unwrap();
+                let ordinary = received.windows(12).position(|bytes| bytes == b"HTTP/1.1 200").expect("ordinary response");
+                let switching = received.windows(12).position(|bytes| bytes == b"HTTP/1.1 101").expect("upgrade response");
+                assert!(ordinary < switching);
+                assert!(received.ends_with(b"\x00\xa5\xff"));
+                assert_eq!(&*dispatch.head.borrow(), b"\x00\xa5\xff");
+            }).await.expect("pipelined upgrade completes");
+        });
     }
 
     #[test]
