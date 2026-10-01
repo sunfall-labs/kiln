@@ -2885,11 +2885,6 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_c99_heap_store_pointer(socket, &socket->server, server);
             status = kiln_c99_node_socket_object(socket, exception);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_node_emit(server->host, server->object, "connection",
-                                        socket->object, 1, 0, exception);
-            if (status != KILN_C99_OK) return status;
-            if (socket->closing || (server->closing && server->protocol_http))
-                return KILN_C99_OK;
             status = server->protocol_http
                          ? kiln_c99_get(server->host, server->object, "httpAllowHalfOpen", 17,
                                         &allow_half_close, 0, exception)
@@ -2902,6 +2897,14 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                     (kiln_c99_truthy(allow_half_close) ? 1 : 0) | (server->fetch_mode ? 2 : 0),
                     kiln_c99_node_http_event, kiln_c99_node_drop_http_connection, socket);
             if (status != KILN_C99_OK || (server->closing && server->protocol_http)) return status;
+            /* Publish only after the HTTP runtime owns the accepted resource. A connection
+             * listener may destroy the socket synchronously; its close path must already be
+             * able to retire the attached HTTP owner. */
+            status = kiln_c99_node_emit(server->host, server->object, "connection",
+                                        socket->object, 1, 0, exception);
+            if (status != KILN_C99_OK) return status;
+            if (socket->closing || (server->closing && server->protocol_http))
+                return KILN_C99_OK;
             if (!server->protocol_http) {
                 kiln_node_completion *read =
                     (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
