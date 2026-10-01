@@ -2033,7 +2033,11 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// undrained queue would keep that loop waiting forever; the events of a connection the
     /// language has let go of are of no use to it.
     pub fn discard_queued_http_events_except(&mut self, known: &[ResourceId]) -> usize {
-        self.queued_http.retain_resources(known)
+        let discarded = self.queued_http.retain_resources(known);
+        #[cfg(feature = "http")]
+        self.closing_http_resources
+            .retain(|resource| known.contains(resource));
+        discarded
     }
 
     /// Drain the client events the queued adapter parked for `resource`.
@@ -2100,6 +2104,8 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// published `Closed` and forgotten the connection, and a table that kept the resource
     /// would grow with connections ever accepted rather than connections open.
     pub fn retire_http_connection(&mut self, resource: ResourceId) -> bool {
+        #[cfg(feature = "http")]
+        self.closing_http_resources.remove(&resource);
         self.host.release_transport(resource)
     }
 }
