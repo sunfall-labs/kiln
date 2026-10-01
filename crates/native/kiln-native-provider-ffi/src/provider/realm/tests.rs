@@ -3593,10 +3593,22 @@ fn http_callback_failure_terminates_the_parked_realm_drive() {
         }),
         whole_requests: false,
     };
-    let event = kiln_runtime::HttpEvent::bare(kiln_runtime::HttpEventKind::UpgradeResponse, 1);
+    let event = kiln_runtime::HttpEvent {
+        kind: kiln_runtime::HttpEventKind::UpgradeResponse,
+        id: 1,
+        keep_alive: false,
+        version_minor: 1,
+        status: 101,
+        method: &[],
+        target: &[],
+        reason: &[],
+        headers: &[],
+        data: &[],
+        message: &[],
+    };
     assert_eq!(dispatch.event(&event), -7);
     // Another connection's callback cannot replace the first language failure.
     status = -2;
-    assert_eq!(dispatch.event(&event), -2);
+    assert_eq!(dispatch.event(&event), -7);
     assert!(matches!(drive_one_ready_turn(&realm), DriveStep::Done(-7)));
 }

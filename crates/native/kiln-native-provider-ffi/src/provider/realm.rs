@@ -4251,6 +4251,9 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let Some(realm) = self.realm.upgrade() else {
             return INVALID_ARGUMENT;
         };
+        if realm.http_callback_failure.get() != 0 {
+            return realm.http_callback_failure.get();
+        }
         // The engine calls the language while the drive is parked (offline, see `reclaim`).
         let _online = reclaim::online();
         tick_clock(&realm);
@@ -4372,6 +4375,9 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let Some(realm) = self.realm.upgrade() else {
             return INVALID_ARGUMENT;
         };
+        if realm.http_callback_failure.get() != 0 {
+            return realm.http_callback_failure.get();
+        }
         if !realm_has_queued_work(&realm) {
             return 0;
         }
