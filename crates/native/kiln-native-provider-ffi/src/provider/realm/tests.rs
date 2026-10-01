@@ -3570,6 +3570,10 @@ mod realm_ffi {
 fn http_callback_failure_terminates_the_parked_realm_drive() {
     use kiln_runtime::HttpDispatch;
 
+    struct CallbackState {
+        status: i32,
+        calls: usize,
+    }
     unsafe extern "C" fn fail_http_event(
         status: *mut c_void,
         _event: *const HttpEventView,
@@ -3577,17 +3581,22 @@ fn http_callback_failure_terminates_the_parked_realm_drive() {
         _thrown: *mut c_void,
     ) -> i32 {
         // The stack status stays alive for the complete synchronous event dispatch.
-        unsafe { *status.cast::<i32>() }
+        let state = unsafe { &mut *status.cast::<CallbackState>() };
+        state.calls += 1;
+        state.status
     }
     unsafe extern "C" fn leave_borrowed_status(_status: *mut c_void) {}
 
     let realm = Rc::new(NativeRealm::new().expect("create realm"));
-    let mut status = -7_i32;
+    let mut state = CallbackState {
+        status: -7,
+        calls: 0,
+    };
     let dispatch = NativeHttpDispatch {
         realm: Rc::downgrade(&realm),
         resource: kiln_host_abi::ResourceId::new(1),
         owner: Rc::new(HttpEventOwner {
-            pointer: (&raw mut status).cast(),
+            pointer: (&raw mut state).cast(),
             run: fail_http_event,
             drop: leave_borrowed_status,
         }),
@@ -3608,7 +3617,11 @@ fn http_callback_failure_terminates_the_parked_realm_drive() {
     };
     assert_eq!(dispatch.event(&event), -7);
     // Another connection's callback cannot replace the first language failure.
-    status = -2;
+    state.status = -2;
     assert_eq!(dispatch.event(&event), -7);
+    assert_eq!(
+        state.calls, 1,
+        "another callback must not overwrite the exception"
+    );
     assert!(matches!(drive_one_ready_turn(&realm), DriveStep::Done(-7)));
 }
