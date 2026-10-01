@@ -577,13 +577,13 @@ mod tests {
         };
         let mut handle = core::ptr::null_mut();
         // SAFETY: views point at live arrays for this compile call; the output slot is writable.
-        assert_eq!(unsafe { kiln_regexp_compile(&rejected, &flags, &mut handle) }, INVALID_ARGUMENT);
+        assert_eq!(
+            unsafe { kiln_regexp_compile(&rejected, &flags, &mut handle) },
+            INVALID_ARGUMENT
+        );
         assert!(handle.is_null());
 
-        let accepted_cases = [
-            [b'\\' as u16, b'\\' as u16, 0xD800],
-            [0xD83D, 0xDE00, 0],
-        ];
+        let accepted_cases = [[b'\\' as u16, b'\\' as u16, 0xD800], [0xD83D, 0xDE00, 0]];
         for (index, units) in accepted_cases.iter().enumerate() {
             let unit_count = if index == 0 { 3 } else { 2 };
             let pattern = super::super::KilnString {
@@ -593,7 +593,10 @@ mod tests {
             };
             handle = core::ptr::null_mut();
             // SAFETY: the selected prefix of the unit array and flags view remain live; handle is writable.
-            assert_eq!(unsafe { kiln_regexp_compile(&pattern, &flags, &mut handle) }, 0);
+            assert_eq!(
+                unsafe { kiln_regexp_compile(&pattern, &flags, &mut handle) },
+                0
+            );
             assert!(!handle.is_null());
             // SAFETY: the preceding successful compile produced this owned live handle.
             unsafe { kiln_regexp_free(handle) };
