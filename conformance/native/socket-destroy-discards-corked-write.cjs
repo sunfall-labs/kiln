@@ -5,7 +5,10 @@ server.listen(0, '127.0.0.1', () => {
   const socket = net.connect(server.address().port, '127.0.0.1');
   socket.on('connect', () => {
     socket.cork();
-    socket.write('discard', error => {
+    socket.write('discard', function (error) {
+      if (arguments.length !== 1 || error !== null) {
+        throw new Error('accepted write callback must receive one null error');
+      }
       console.log('write callback', error && error.code);
     });
     socket.end(function (error) {

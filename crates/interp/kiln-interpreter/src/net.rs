@@ -3,6 +3,7 @@
 //! Provides TCP server and socket state tracking and methods.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 
 use kiln_runtime::node_net::TcpServerDriver;
@@ -24,6 +25,10 @@ pub(crate) struct NetSocketState {
     pub(crate) cork_depth: usize,
     pub(crate) corked_write: Vec<u8>,
     pub(crate) corked_callbacks: Vec<Value>,
+    /// Callback groups for writes already queued in the duplex driver's ordered write queue.
+    /// Each entry corresponds to one queued write, including writes with no callback, so the
+    /// next transport submission takes callbacks for exactly its own bytes.
+    pub(crate) queued_write_callbacks: VecDeque<Vec<Value>>,
     pub(crate) end_callbacks: Vec<Value>,
     /// Write callbacks retained until the HTTP upgrade engine confirms each append reached
     /// the transport. Fence values are private runtime sequence numbers.

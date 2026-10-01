@@ -325,12 +325,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .borrow()
                 .get(name)
                 .or_else(|| identity_property(target, name))
-                .unwrap_or_else(|| {
-                    if name == "prototype" {
-                        return self.property(&prototype_of(&bound.target), name);
-                    }
-                    function_property(&self.intrinsics, name, value_realm(target))
-                }),
+                .unwrap_or_else(|| self.property(&prototype_of(target), name)),
             // A wrapped function answers from its own store first -- which is where the `name`
             // and `length` copied off the target live -- and from `Function.prototype`
             // otherwise, so `call`, `apply`, `bind` and `toString` all work on one. No

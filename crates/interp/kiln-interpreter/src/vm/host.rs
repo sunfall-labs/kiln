@@ -15,13 +15,27 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         state: &Rc<RefCell<crate::net::NetSocketState>>,
     ) -> (Vec<Value>, Vec<Value>) {
         let mut state = state.borrow_mut();
-        let write_callbacks = std::mem::take(&mut state.corked_callbacks);
+        let mut write_callbacks = Vec::new();
+        for callbacks in std::mem::take(&mut state.queued_write_callbacks) {
+            write_callbacks.extend(callbacks);
+        }
+        write_callbacks.extend(std::mem::take(&mut state.corked_callbacks));
         let end_callbacks = std::mem::take(&mut state.end_callbacks);
         state.pending_write.clear();
         state.corked_write.clear();
         state.cork_depth = 0;
         state.shutdown_after_upgrade_fence = None;
         (write_callbacks, end_callbacks)
+    }
+
+    fn take_next_queued_write_callbacks(
+        state: &Rc<RefCell<crate::net::NetSocketState>>,
+    ) -> Vec<Value> {
+        state
+            .borrow_mut()
+            .queued_write_callbacks
+            .pop_front()
+            .unwrap_or_default()
     }
 
     fn schedule_node_socket_queued_callbacks(
@@ -210,6 +224,26 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             realm.borrow_mut().pending_node.push(pending);
         } else {
             self.pending_node.push(pending);
+        }
+    }
+
+    fn take_pending_node_request(
+        &mut self,
+        request: kiln_host_abi::RequestId,
+    ) -> Option<PendingNodeRequest> {
+        if let Some(realm) = &self.module_realm {
+            let mut realm = realm.borrow_mut();
+            let index = realm
+                .pending_node
+                .iter()
+                .position(|pending| pending.request() == request)?;
+            Some(realm.pending_node.remove(index))
+        } else {
+            let index = self
+                .pending_node
+                .iter()
+                .position(|pending| pending.request() == request)?;
+            Some(self.pending_node.remove(index))
         }
     }
 
@@ -445,6 +479,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    queued_write_callbacks: Default::default(),
                     end_callbacks: Vec::new(),
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
@@ -786,6 +821,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             })?;
             (server, resource)
         };
+        let mut destroyed_queued_callbacks = None;
         if native == Native::NodeSocketDestroy {
             if destroyed {
                 return Ok(receiver.clone());
@@ -795,8 +831,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 socket_state.destroyed = true;
                 socket_state.connecting = false;
             }
-            let (write_callbacks, end_callbacks) = Self::take_node_socket_queued_state(&state);
-            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            destroyed_queued_callbacks = Some(Self::take_node_socket_queued_state(&state));
             if let Value::Object(object) = receiver {
                 let mut object = object.borrow_mut();
                 object.set("destroyed", Value::Boolean(true));
@@ -821,6 +856,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let _ = unsafe {
                 ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Abort)
             };
+            if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks.take() {
+                self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
+            }
             return Ok(receiver.clone());
         }
         if native == Native::NodeSocketWrite
@@ -931,6 +969,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             return Ok(Value::Boolean(receipt.disposition.ready));
         }
+        let mut deferred_write = native == Native::NodeSocketWrite;
         let (result, actions) = {
             let mut server_state = server.borrow_mut();
             let connection = server_state
@@ -965,6 +1004,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                         data = Some(bytes);
                     }
+                    deferred_write = data.as_ref().is_some_and(|data| !data.is_empty());
                     let (_, actions) = connection.driver.end(data);
                     (receiver.clone(), actions)
                 }
@@ -973,8 +1013,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
         };
         sync_node_socket_ready_state(&server, resource);
+        let mut write_submitted = false;
         for action in actions {
             if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
+                write_submitted = true;
                 self.start_http_stream_action_with_callbacks(
                     &server,
                     resource,
@@ -986,6 +1028,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             } else {
                 self.start_http_stream_action(&server, resource, action, instruction)?;
             }
+        }
+        if deferred_write && !write_submitted {
+            // The driver accepted the bytes but another write is still in flight. Keep this
+            // callback group paired with that queue entry; the next TCP_WRITE action consumes
+            // exactly one group when it is submitted.
+            state
+                .borrow_mut()
+                .queued_write_callbacks
+                .push_back(write_callbacks);
+        }
+        // Cancellation actions above extract callbacks attached to the in-flight write and
+        // schedule those before callbacks for writes still held in the driver's queue. Keep
+        // `end` callbacks after both groups, matching Writable's destroy ordering.
+        if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks {
+            self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
         }
         Ok(result)
     }
@@ -1958,6 +2015,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             cork_depth: 0,
             corked_write: Vec::new(),
             corked_callbacks: Vec::new(),
+            queued_write_callbacks: Default::default(),
             end_callbacks: Vec::new(),
             upgrade_write_callbacks: Default::default(),
             shutdown_after_upgrade_fence: None,
@@ -2104,6 +2162,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     cork_depth: 0,
                     corked_write: Vec::new(),
                     corked_callbacks: Vec::new(),
+                    queued_write_callbacks: Default::default(),
                     end_callbacks: Vec::new(),
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
@@ -2302,12 +2361,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         action: StreamAction,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        let write_callbacks =
+            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
+                node_net_socket_value(server, resource)
+                    .and_then(|socket| node_net_socket_state(&socket).ok())
+                    .map(|state| Self::take_next_queued_write_callbacks(&state))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         self.start_http_stream_action_with_callbacks(
             server,
             resource,
             action,
             instruction,
-            Vec::new(),
+            write_callbacks,
         )
     }
 
@@ -2326,14 +2394,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
                 unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) };
-                if let Some(realm) = &self.module_realm {
-                    realm
-                        .borrow_mut()
-                        .pending_node
-                        .retain(|pending| pending.request() != request);
-                } else {
-                    self.pending_node
-                        .retain(|pending| pending.request() != request);
+                if let Some(PendingNodeRequest::Stream {
+                    write_callbacks, ..
+                }) = self.take_pending_node_request(request)
+                    && !write_callbacks.is_empty()
+                    && node_net_socket_value(server, resource)
+                        .and_then(|socket| node_net_socket_state(&socket).ok())
+                        .is_some_and(|socket| socket.borrow().destroyed)
+                {
+                    // The host can cancel an in-flight write as part of destroy, but Node still
+                    // settles the callback for bytes already accepted by the writable side. A
+                    // queued (not yet submitted) callback is handled separately as
+                    // ERR_STREAM_DESTROYED by the socket's state drain.
+                    for callback in write_callbacks {
+                        let scheduled = self.scheduled(Job::NextTick(callback, vec![Value::Null]));
+                        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                    }
                 }
                 Ok(())
             }
@@ -2680,7 +2756,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             self.construct_error(ErrorKind::Error, &[Value::String(message.into())])
                         });
                         for callback in callbacks {
-                            let arguments = error.clone().into_iter().collect();
+                            let arguments = vec![error.clone().unwrap_or(Value::Null)];
                             self.call_value(&callback, Value::Undefined, arguments, instruction)?;
                         }
                         if end_after_fence {
@@ -2884,7 +2960,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if let Some(socket) = socket {
                         let (write_callbacks, end_callbacks) = {
                             let mut state = socket.borrow_mut();
-                            let callbacks = std::mem::take(&mut state.corked_callbacks);
+                            let mut callbacks = Vec::new();
+                            for batch in std::mem::take(&mut state.queued_write_callbacks) {
+                                callbacks.extend(batch);
+                            }
+                            callbacks.extend(std::mem::take(&mut state.corked_callbacks));
                             let end_callbacks = std::mem::take(&mut state.end_callbacks);
                             state.pending_write.clear();
                             state.corked_write.clear();
@@ -4855,7 +4935,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     drop(server_state);
                     if !write_callbacks.is_empty() {
                         let callback_args = match &callback_result {
-                            Ok(_) => Vec::new(),
+                            // Writable callbacks receive the error slot even on success; Node
+                            // supplies `null`, which code commonly tests with `err && err.code`.
+                            Ok(_) => vec![Value::Null],
                             Err(error) => {
                                 let value = self.construct_error(
                                     ErrorKind::Error,
