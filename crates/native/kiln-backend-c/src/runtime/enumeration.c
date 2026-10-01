@@ -277,11 +277,16 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     const char *intrinsic_key = NULL;
     size_t intrinsic_len = 0;
     kiln_value current = target;
-    size_t steps;
+    size_t steps = 0;
     *answer = 0;
     if (kiln_c99_is_node_hidden_key_key(key)) {
         return KILN_C99_OK;
     }
+kiln_has_next_prototype:
+    if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH)
+        KILN_C99_REFUSE("a property-membership prototype chain beyond the traversal limit");
+    current = target;
+    if (target.tag == KILN_VALUE_NULL) return KILN_C99_OK;
     if (target.tag == KILN_VALUE_PROXY) {
         kiln_value exposed = kiln_c99_key_value(key, &ikey);
         if (exposed.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
@@ -352,35 +357,25 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
-        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
-        /* A closure answers from its own store, then from the members every callable has. Same
-         * reason as the promise above: `"call" in fn` was false about a member `fn.call`
-         * produces. */
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
-            int carried = 0;
-            int status = kiln_c99_has_property_key(host, kiln_c99_closure_store(closure), key, ikey, &carried,
-                                               depth, thrown);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            if (carried) {
-                *answer = 1;
-                return KILN_C99_OK;
-            }
+        kiln_value store = kiln_c99_closure_store(closure);
+        /* Membership asks only about own slots and then the actual [[Prototype]]. Reading an
+         * inherited static symbol already follows this chain; `in` must follow it too without
+         * invoking a getter. Callable methods belong to Function.prototype, so an explicit null
+         * prototype must also end their membership rather than synthesizing them here. */
+        if (kiln_c99_store_has(store, key, ikey) ||
+            kiln_c99_same_name_key(key, "name") || kiln_c99_same_name_key(key, "length") ||
+            (kiln_c99_same_name_key(key, "prototype") &&
+             kiln_c99_function_owns_prototype(closure))) {
+            *answer = 1;
+            return KILN_C99_OK;
         }
-        *answer = kiln_c99_callable_method(intrinsic_key, intrinsic_len) != 0 ||
-                  kiln_c99_same_name_key(key, "name") ||
-                  kiln_c99_same_name_key(key, "length") ||
-                  /* Method syntax carries no `prototype` unless it is a generator, and cannot be
-                   * constructed -- the same condition the read applies, so a `hasOwnProperty` and
-                   * an `in` about `obj.m.prototype` cannot disagree. */
-                  (kiln_c99_same_name_key(key, "prototype") &&
-                   (!closure->is_method || closure->generator)) ||
-                  kiln_c99_same_name_key(key, "constructor") ||
-                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
-        return KILN_C99_OK;
+        target = store.tag == KILN_VALUE_OBJECT
+                     ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
+        if (target.tag == KILN_VALUE_UNDEFINED)
+            target = kiln_c99_function_kind_prototype(closure);
+        ++steps;
+        goto kiln_has_next_prototype;
     }
     if (target.tag == KILN_VALUE_DATE) {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -593,7 +588,7 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
         const kiln_string *canonical = ikey != NULL ? ikey : kiln_c99_interned_key_in(heap, key);
-        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        for (; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_property property;
             if (current.tag != KILN_VALUE_OBJECT) {
                 break;
@@ -604,6 +599,12 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
             }
             current = kiln_c99_object_prototype_read(current);
         }
+    }
+    if (current.tag == KILN_VALUE_FUNCTION || current.tag == KILN_VALUE_BUILTIN ||
+        current.tag == KILN_VALUE_PROXY) {
+        target = current;
+        ++steps;
+        goto kiln_has_next_prototype;
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
     if (target.tag == KILN_VALUE_OBJECT &&

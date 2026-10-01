@@ -660,7 +660,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let Some(key) = self.catchable(key.property_key_units_checked(), current)?
+                    let Some(key_units) =
+                        self.catchable(key.property_key_units_checked(), current)?
                     else {
                         continue;
                     };
@@ -673,7 +674,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     let defined = self.define_own_operation_key(
                         &target,
-                        PropertyKeyRef::Units(&key),
+                        PropertyKeyRef::from_value(&key, &key_units),
                         &descriptor,
                         current,
                     );
