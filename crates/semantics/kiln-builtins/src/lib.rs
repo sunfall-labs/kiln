@@ -1406,8 +1406,10 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
-/// Numeric namespace and BigInt static methods over the existing typed-array and BigInt kernels.
-pub const NUMERIC_BOOTSTRAP_SOURCE: &str = include_str!("numeric.ts");
+/// `Math.f16round` over the existing Float16Array element conversion.
+pub const NUMERIC_MATH_BOOTSTRAP_SOURCE: &str = include_str!("numeric_math.ts");
+/// BigInt width truncation over existing arbitrary-precision operators.
+pub const NUMERIC_BIGINT_BOOTSTRAP_SOURCE: &str = include_str!("numeric_bigint.ts");
 /// The parallel collection family (ADR 0068, ADR 0069): kiln extensions on `Array.prototype`
 /// and `%TypedArray%.prototype`, after `typedarray.ts`, whose intrinsics it borrows.
 pub const PARALLEL_BOOTSTRAP_SOURCE: &str = include_str!("parallel.ts");
@@ -1488,7 +1490,9 @@ pub mod native_bootstrap_family {
     pub const STRING_LOCALE: u32 = 1 << 10;
     pub const INTL_DATETIME: u32 = 1 << 11;
     pub const JSON: u32 = 1 << 12;
-    pub const ALL: u32 = (1 << 13) - 1;
+    pub const NUMERIC_MATH: u32 = 1 << 13;
+    pub const NUMERIC_BIGINT: u32 = 1 << 14;
+    pub const ALL: u32 = (1 << 15) - 1;
 
     /// The native web-global bootstrap is installed in every realm. MessagePort delivery
     /// captures `__kilnStructuredClone`, whose transfer path in turn captures the ArrayBuffer
@@ -1510,7 +1514,8 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         FUNCTION_KINDS_BOOTSTRAP_SOURCE,
         selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
-        NUMERIC_BOOTSTRAP_SOURCE,
+        selected(family::NUMERIC_MATH, NUMERIC_MATH_BOOTSTRAP_SOURCE),
+        selected(family::NUMERIC_BIGINT, NUMERIC_BIGINT_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
         selected(family::JSON, JSON_BOOTSTRAP_SOURCE),
@@ -1600,6 +1605,16 @@ mod web_tests {
         let source = common_bootstrap_source_selected(0);
         assert!(!source.contains("installDatePrototype"));
         assert!(!source.contains("installTypedArrayPrototype"));
+        assert!(!source.contains("installMathNumericBuiltins"));
+        assert!(!source.contains("installBigIntNumericBuiltins"));
+        let math = common_bootstrap_source_selected(
+            native_bootstrap_family::NUMERIC_MATH | native_bootstrap_family::TYPED_ARRAY,
+        );
+        assert!(math.contains("installMathNumericBuiltins"));
+        assert!(!math.contains("installBigIntNumericBuiltins"));
+        let bigint = common_bootstrap_source_selected(native_bootstrap_family::NUMERIC_BIGINT);
+        assert!(!bigint.contains("installMathNumericBuiltins"));
+        assert!(bigint.contains("installBigIntNumericBuiltins"));
         for name in [
             "__kilnTypedArrayCopy",
             "__kilnArrayBufferDetach",
@@ -1798,11 +1813,22 @@ mod web_tests {
     }
 
     #[test]
-    fn numeric_bootstrap_compiles_cleanly() {
-        let hir = kiln_frontend_oxc::parse("@kiln/numeric-bootstrap.ts", NUMERIC_BOOTSTRAP_SOURCE);
-        let program = kiln_ir::compile_module(&hir)
-            .expect("numeric bootstrap should compile to IR without error");
-        assert!(!program.program.code.is_empty());
+    fn numeric_bootstraps_compile_cleanly() {
+        for (path, source) in [
+            (
+                "@kiln/numeric-math-bootstrap.ts",
+                NUMERIC_MATH_BOOTSTRAP_SOURCE,
+            ),
+            (
+                "@kiln/numeric-bigint-bootstrap.ts",
+                NUMERIC_BIGINT_BOOTSTRAP_SOURCE,
+            ),
+        ] {
+            let hir = kiln_frontend_oxc::parse(path, source);
+            let program = kiln_ir::compile_module(&hir)
+                .expect("numeric bootstrap should compile to IR without error");
+            assert!(!program.program.code.is_empty());
+        }
     }
 
     #[test]

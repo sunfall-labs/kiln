@@ -365,6 +365,38 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
         family::WEB_BOOTSTRAP_DEPENDENCIES | family::TYPED_ARRAY | family::ARRAY_BUFFER
     );
+    members.builtins.clear();
+    members.names.clear();
+    members.builtins.insert("Math".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+            | family::NUMERIC_MATH
+            | family::TYPED_ARRAY
+            | family::ARRAY_BUFFER
+    );
+    members.builtins.clear();
+    members.names.insert("f16round".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+            | family::NUMERIC_MATH
+            | family::TYPED_ARRAY
+            | family::ARRAY_BUFFER
+    );
+    members.names.clear();
+    members.builtins.insert("BigInt".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+    );
+    members.builtins.clear();
+    members.names.insert("asUintN".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+    );
+    members.names.clear();
     members.has_computed_access = true;
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),

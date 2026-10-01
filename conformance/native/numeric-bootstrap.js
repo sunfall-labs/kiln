@@ -30,4 +30,25 @@ try {
 
 const descriptor = Object.getOwnPropertyDescriptor(BigInt, "asUintN");
 console.log(descriptor.writable, descriptor.enumerable, descriptor.configurable,
-  BigInt.asIntN(Number.MAX_SAFE_INTEGER, 1n));
+  BigInt.asIntN(Number.MAX_SAFE_INTEGER, 1n),
+  BigInt.asUintN(Number.MAX_SAFE_INTEGER, 1n));
+
+const rejectedNumbers = [];
+for (const input of [1, new Number(1), { valueOf() { return 1; } }]) {
+  try {
+    BigInt.asIntN(8, input);
+    rejectedNumbers.push(false);
+  } catch (error) {
+    rejectedNumbers.push(error instanceof TypeError);
+  }
+}
+const zeroOrder = [];
+const zero = BigInt.asIntN(
+  { valueOf() { zeroOrder.push("bits"); return 0; } },
+  { [Symbol.toPrimitive](hint) { zeroOrder.push(`value:${hint}`); return 2n; } },
+);
+console.log(...rejectedNumbers, zero, zeroOrder.join(","));
+console.log(BigInt.asIntN(8, {
+  [Symbol.toPrimitive]: null,
+  valueOf() { return 12n; },
+}));

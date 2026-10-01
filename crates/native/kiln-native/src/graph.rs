@@ -1119,7 +1119,7 @@ pub(super) fn native_bootstrap_families(
     if builtin(&["Date", "Intl"]) || names(&["getTime", "setTime", "toISOString", "toUTCString"]) {
         selected |= family::DATE;
     }
-    let typed_array = builtin(&[
+    let mut typed_array = builtin(&[
         "Int8Array",
         "Uint8Array",
         "Uint8ClampedArray",
@@ -1143,6 +1143,17 @@ pub(super) fn native_bootstrap_families(
         "subarray",
         "copyWithin",
     ]);
+    // `Math.f16round` delegates conversion to the existing Float16Array element store, so its
+    // bootstrap dependency is the typed-array runtime. BigInt truncation is a separate chunk:
+    // keeping its BigInt literals out of unrelated bootstrap graphs preserves demand-driven
+    // native artifacts.
+    if builtin(&["Math"]) || names(&["f16round"]) {
+        selected |= family::NUMERIC_MATH;
+        typed_array = true;
+    }
+    if builtin(&["BigInt"]) || names(&["asIntN", "asUintN"]) {
+        selected |= family::NUMERIC_BIGINT;
+    }
     if typed_array {
         selected |= family::TYPED_ARRAY;
     }
