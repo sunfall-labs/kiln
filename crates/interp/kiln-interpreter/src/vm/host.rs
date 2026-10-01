@@ -1612,11 +1612,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     [options] => (Some(options), Value::Undefined),
                     [] => (None, Value::Undefined),
                 };
-                if options
-                    .is_some_and(|options| {
-                        !matches!(options, Value::Undefined | Value::Null | Value::Object(_))
-                    })
-                {
+                if options.is_some_and(|options| {
+                    !matches!(options, Value::Undefined | Value::Null | Value::Object(_))
+                }) {
                     return self.throw_node_invalid_arg_type(
                         "The \"options\" argument must be of type object",
                     );
@@ -3630,11 +3628,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             self.dispatch_node_event(
                 Native::NodeEventEmit,
                 &server_object,
-                &[
-                    Value::String("request".into()),
-                    incoming.clone(),
-                    response,
-                ],
+                &[Value::String("request".into()), incoming.clone(), response],
                 instruction,
             )?;
         } else if is_callable(&handler) {
