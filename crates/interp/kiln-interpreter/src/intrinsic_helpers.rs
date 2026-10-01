@@ -1270,6 +1270,21 @@ pub(super) fn delete_property_key(
             closure.properties.borrow_mut().remove_key(key);
             true
         }
+        // Bound functions carry ordinary user-defined own properties in their own store too.
+        // In particular, deleting a configurable override must expose the current prototype
+        // chain (or no property after [[Prototype]] is set to null).
+        Value::Bound(bound) => {
+            let removable = bound
+                .properties
+                .borrow()
+                .get_own_attributes_key(key)
+                .is_none_or(|attributes| attributes.configurable);
+            if !removable {
+                return false;
+            }
+            bound.properties.borrow_mut().remove_key(key);
+            true
+        }
         // Removing an element leaves a *hole* rather than shortening the array: the slot reads
         // as undefined and `length` is unchanged, but `1 in a` is false and a console shows
         // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the

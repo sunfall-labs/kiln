@@ -482,6 +482,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::AbortControllerConstructor, _) => {
                 self.stack.push(abort_controller());
             }
+            // `Buffer` is both callable and constructible in Node. Keep construction on the
+            // same public facade path as `Buffer(...)`; its dispatcher owns the legacy numeric,
+            // string, and view conversion rules.
+            Value::Native(Native::NodeBufferGlobal, _) => {
+                let built = self.dispatch_native(
+                    Native::NodeBufferGlobal,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(built);
+            }
             Value::Native(Native::TextEncoderConstructor, _) => {
                 self.stack.push(text_encoder());
             }
