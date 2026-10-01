@@ -424,9 +424,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         socket: &Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let Some(process) = self.process_object.clone() else {
-            return Ok(());
-        };
+        // The facade may have been initialized by another machine in this module realm.
+        // Resolve the realm's shared process even when this machine has not read it yet.
+        let process = self.process_object();
         let decorator = self.read_property(&process, "__kilnSocketDecorator", instruction)?;
         if is_callable(&decorator) {
             self.call_value(
