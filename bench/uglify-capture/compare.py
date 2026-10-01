@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Matched native timing for production vs captured-record hydration control.
+"""Compare prebuilt native-release Uglify workloads with matched source/output.
 
-Build each binary from the same source revision, changing only the dynamic
-captured-record hydration implementation in the control. Run with npm deps
-installed in conformance/npm-compat; warmups prime each binary's artifact
-cache before alternating measured invocations. Stdout is checked every time.
+The arguments are standalone workload executables, not the kiln CLI. Build both
+from the same source revision, changing only captured-record hydration in the
+control, with `kiln build --node --profile native-release`. The workload times
+module initialization separately, one first minify call, and a warmed 24-call
+batch using the realm's host-backed performance clock.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
+import platform
+import signal
 import statistics
 import subprocess
 import sys
@@ -20,95 +26,202 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "conformance" / "npm-compat"
 WORKLOAD = CORPUS / "benchmarks" / "uglify-capture.js"
+TIME_FIELDS = ("moduleInitMs", "firstCallMs", "warmed24Ms")
 
 
-def invoke(binary: Path, timeout: float) -> tuple[float, bytes]:
+def digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_bounded(argv: list[str], timeout: float, cwd: Path) -> tuple[bytes, bytes, float, int]:
     started = time.perf_counter()
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            [str(binary), "--one-shot", "run", "--native", str(WORKLOAD)],
-            cwd=CORPUS,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        raise RuntimeError(f"{binary} exceeded {timeout:g}s") from error
-    elapsed = time.perf_counter() - started
-    if result.returncode:
-        detail = result.stderr.decode("utf-8", "replace")[-4000:]
-        raise RuntimeError(f"{binary} exited {result.returncode}:\n{detail}")
-    return elapsed, result.stdout
-
-
-def node_baseline(timeout: float) -> bytes:
-    try:
-        result = subprocess.run(
-            ["node", str(WORKLOAD)],
-            cwd=CORPUS,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
+        partial_out = error.output or b""
+        partial_err = error.stderr or b""
+        # Each executable gets its own process group. Signal only that group;
+        # always issue KILL after the grace interval because the leader may
+        # exit on TERM while a child keeps the inherited pipes open.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired as grace:
+            partial_out = grace.output or partial_out
+            partial_err = grace.stderr or partial_err
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired as final:
+            partial_out = final.output or partial_out
+            partial_err = final.stderr or partial_err
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=1.0)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            stdout, stderr = partial_out, partial_err
+        raise RuntimeError(
+            f"timeout after {timeout:g}s: {' '.join(argv)}\n"
+            f"partial stdout: {stdout.decode('utf-8', 'replace')[-2000:]}\n"
+            f"partial stderr: {stderr.decode('utf-8', 'replace')[-2000:]}"
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(f"Node baseline failed: {error}") from error
+    return stdout, stderr, time.perf_counter() - started, process.returncode
+
+
+def parse_result(label: str, output: bytes, stderr: bytes, code: int) -> dict[str, object]:
+    if code:
+        raise RuntimeError(
+            f"{label} exited {code}: {stderr.decode('utf-8', 'replace')[-4000:]}"
+        )
+    try:
+        result = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{label} did not emit benchmark JSON: {output!r}") from error
+    if not isinstance(result, dict) or not isinstance(result.get("checksum"), int):
+        raise RuntimeError(f"{label} emitted an invalid benchmark result: {result!r}")
+    if result.get("calls") != 25:
+        raise RuntimeError(f"{label} did not run the first call plus 24-call batch: {result!r}")
+    for field in TIME_FIELDS:
+        value = result.get(field)
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise RuntimeError(f"{label} has no advancing host-clock measurement in {field}: {result!r}")
+    return result
+
+
+def git_head(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
     if result.returncode:
-        detail = result.stderr.decode("utf-8", "replace")[-4000:]
-        raise RuntimeError(f"Node baseline exited {result.returncode}:\n{detail}")
-    return result.stdout
+        raise RuntimeError(f"cannot read source revision for {path}")
+    return result.stdout.decode().strip()
+
+
+def source_metadata(path: Path | None) -> dict[str, str | None] | None:
+    if path is None:
+        return None
+    dynamic = path / "crates/native/kiln-backend-c/src/runtime/dynamic.c"
+    if not dynamic.is_file():
+        raise RuntimeError(f"no dynamic.c found under source checkout {path}")
+    return {"head": git_head(path), "dynamic_c_sha256": digest_file(dynamic)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("production", type=Path, help="release kiln binary with borrowed views")
-    parser.add_argument("control", type=Path, help="release kiln binary with per-call hydration")
+    parser.add_argument("production", type=Path, help="prebuilt standalone production workload")
+    parser.add_argument("control", type=Path, help="prebuilt standalone hydration-control workload")
+    parser.add_argument("--production-source", type=Path)
+    parser.add_argument("--control-source", type=Path)
     parser.add_argument("--warmups", type=int, default=2)
-    parser.add_argument("--rounds", type=int, default=9)
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--rounds", type=int, default=8, help="even count of alternating timed runs")
+    parser.add_argument("--timeout", type=float, default=120.0, help="per-process timeout in seconds")
+    parser.add_argument("--results", type=Path, required=True, help="JSON evidence output path")
     args = parser.parse_args()
-    if args.warmups < 1 or args.rounds < 3 or args.timeout <= 0:
-        parser.error("use at least one warmup, three rounds, and a positive timeout")
-    production, control = args.production.resolve(), args.control.resolve()
-    for binary in (production, control):
-        if not binary.is_file() or not binary.stat().st_mode & 0o111:
-            parser.error(f"not an executable binary: {binary}")
+    if args.warmups < 1 or args.rounds < 4 or args.rounds % 2 or args.timeout <= 0:
+        parser.error("warmups must be positive, rounds even and >= 4, and timeout positive")
+    binaries = {"production": args.production.resolve(), "control": args.control.resolve()}
+    for path in binaries.values():
+        if not path.is_file() or not path.stat().st_mode & 0o111:
+            parser.error(f"not an executable workload binary: {path}")
     if not WORKLOAD.is_file() or not (CORPUS / "node_modules" / "uglify-js").exists():
-        parser.error("install conformance/npm-compat dependencies with npm ci first")
+        parser.error("install conformance/npm-compat dependencies with npm ci before building workloads")
 
-    reference = node_baseline(args.timeout)
-    samples: dict[str, list[float]] = {"production": [], "control": []}
-    binaries = {"production": production, "control": control}
+    node_version, node_error, node_elapsed, node_code = run_bounded(["node", "--version"], 10, CORPUS)
+    if node_code:
+        raise RuntimeError(f"cannot obtain Node version: {node_error.decode('utf-8', 'replace')}")
+    node_output, node_error, node_wall, node_code = run_bounded(
+        ["node", str(WORKLOAD)], args.timeout, CORPUS
+    )
+    reference = parse_result("Node", node_output, node_error, node_code)
+    evidence: dict[str, object] = {
+        "source": {
+            "production": source_metadata(args.production_source.resolve()) if args.production_source else None,
+            "control": source_metadata(args.control_source.resolve()) if args.control_source else None,
+            "workload_sha256": digest_file(WORKLOAD),
+        },
+        "binaries": {label: {"path": str(path), "sha256": digest_file(path)}
+                     for label, path in binaries.items()},
+        "environment": {
+            "host": platform.platform(),
+            "python": platform.python_version(),
+            "node": node_version.decode().strip(),
+            "native_build_profile": "native-release with --node (host clock enabled)",
+            "kiln_environment": {key: os.environ[key] for key in sorted(os.environ)
+                                 if key.startswith("KILN_") and key in {
+                                     "KILN_JOBS", "KILN_REALMS", "KILN_GC_STRESS", "KILN_IO"
+                                 }},
+        },
+        "node_baseline": {"wall_seconds": node_wall, **reference},
+        "runs": {"production": [], "control": []},
+    }
 
-    def run(label: str, phase: str, index: int) -> bool:
-        elapsed, output = invoke(binaries[label], args.timeout)
-        if output != reference:
-            sys.stderr.write(
-                f"stdout mismatch: {label} {phase} {index}; expected={reference!r}, got={output!r}\n"
+    for warmup in range(args.warmups):
+        warm_order = ("production", "control") if warmup % 2 == 0 else ("control", "production")
+        for warm_label in warm_order:
+            output, stderr, _wall, code = run_bounded(
+                [str(binaries[warm_label])], args.timeout, CORPUS
             )
-            return False
-        if phase == "measure":
-            samples[label].append(elapsed)
-        print(f"{phase} {index:02d} {label} {elapsed:.6f}s", flush=True)
-        return True
+            result = parse_result(f"{warm_label} warmup", output, stderr, code)
+            if {k: result[k] for k in ("checksum", "calls")} != {
+                k: reference[k] for k in ("checksum", "calls")
+            }:
+                raise RuntimeError(f"{warm_label} disagrees with the Node checksum during warmup")
 
-    # Prime both artifact caches and establish the exact output before timing.
-    for index in range(args.warmups):
-        for label in ("production", "control"):
-            if not run(label, "warm", index):
-                return 2
-
-    # AB / BA pairs counterbalance thermal and background drift.
-    for index in range(args.rounds):
-        order = ("production", "control") if index % 2 == 0 else ("control", "production")
+    for pair in range(args.rounds // 2):
+        order = ("production", "control") if pair % 2 == 0 else ("control", "production")
         for label in order:
-            if not run(label, "measure", index):
-                return 2
+            output, stderr, wall, code = run_bounded([str(binaries[label])], args.timeout, CORPUS)
+            result = parse_result(label, output, stderr, code)
+            if {k: result[k] for k in ("checksum", "calls")} != {
+                k: reference[k] for k in ("checksum", "calls")
+            }:
+                raise RuntimeError(f"{label} output diverged from Node")
+            result["wallSeconds"] = wall
+            evidence["runs"][label].append(result)  # type: ignore[index,union-attr]
 
-    p50 = statistics.median(samples["production"])
-    c50 = statistics.median(samples["control"])
-    print(f"median production={p50:.6f}s control={c50:.6f}s speedup={c50 / p50:.3f}x")
+    runs = evidence["runs"]
+    p_runs = runs["production"]  # type: ignore[index]
+    c_runs = runs["control"]  # type: ignore[index]
+    summary = {}
+    for field in (*TIME_FIELDS, "wallSeconds"):
+        p_median = statistics.median(float(row[field]) for row in p_runs)
+        c_median = statistics.median(float(row[field]) for row in c_runs)
+        summary[field] = {"production_median": p_median, "control_median": c_median}
+    summary["warmed24_speedup"] = (
+        summary["warmed24Ms"]["control_median"]
+        / summary["warmed24Ms"]["production_median"]
+    )
+    evidence["summary"] = summary
+    evidence["node_version_query_wall_seconds"] = node_elapsed
+    result_path = args.results.resolve()
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(f"evidence: {result_path}")
     return 0
 
 
