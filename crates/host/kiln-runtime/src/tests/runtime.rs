@@ -3580,3 +3580,52 @@ fn tokio_host_intercepts_vfs_overlay_operations_fast_path() {
         }]))
     );
 }
+
+#[test]
+fn pending_only_cancel_preserves_ready_results_and_cancels_unfinished_accept() {
+    let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+    runtime.start_host_op(
+        AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        },
+        true,
+    );
+    let listener = match next_host_completion(&mut runtime)
+        .expect("listen completes")
+        .result
+        .expect("listen succeeds")
+    {
+        AsyncHostValue::Resource(resource) => resource.id,
+        other => panic!("expected listener, got {other:?}"),
+    };
+    let query = runtime.start_host_op(AsyncHostOp::ResourceState { resource: listener }, false);
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(query),
+        PendingCancellation::CompletionReady
+    );
+    let result = next_host_completion(&mut runtime).expect("ready result remains deliverable");
+    assert_eq!(result.request, query);
+    assert!(
+        matches!(result.result, Ok(AsyncHostValue::ResourceState(state)) if state.info.id == listener)
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(query),
+        PendingCancellation::Unknown
+    );
+
+    // There is no peer: this accept cannot have a ready success hidden behind delivery.
+    let accept = runtime.start_host_op(AsyncHostOp::TcpAccept { listener }, true);
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(accept),
+        PendingCancellation::Cancelled
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(accept),
+        PendingCancellation::Unknown
+    );
+    runtime.start_host_op(AsyncHostOp::CloseResource { resource: listener }, false);
+    let closed = next_host_completion(&mut runtime).expect("listener close completes");
+    assert_eq!(closed.result, Ok(AsyncHostValue::Undefined));
+    assert!(!runtime.state.has_pending_host_work());
+}

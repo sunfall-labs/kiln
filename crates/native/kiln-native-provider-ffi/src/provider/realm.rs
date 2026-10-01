@@ -4242,7 +4242,13 @@ pub unsafe extern "C" fn kiln_realm_cancel_active_request_if_pending(request: u6
                 realm.continuations.borrow_mut().remove(&request);
                 1
             }
-            kiln_host_abi::PendingCancellation::Unknown => 0,
+            kiln_host_abi::PendingCancellation::Unknown => {
+                if realm.continuations.borrow().contains_key(&request) {
+                    RUNTIME_ERROR
+                } else {
+                    0
+                }
+            }
         }
     })
 }
