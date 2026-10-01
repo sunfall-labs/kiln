@@ -1524,6 +1524,18 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                 if (status != KILN_C99_OK) {
                     return status;
                 }
+            } else if (object->module_namespace) {
+                /* Namespace properties store live-binding cells. CopyDataProperties reads the
+                 * property through [[Get]], which dereferences the cell (and checks TDZ), rather
+                 * than copying the cell handle into the ordinary target object. */
+                kiln_value key_value = kiln_c99_stable_key_value(property.key);
+                if (key_value.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                status = kiln_c99_get_computed(host, source, key_value, &copied, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             } else {
                 copied = property.value;
             }
