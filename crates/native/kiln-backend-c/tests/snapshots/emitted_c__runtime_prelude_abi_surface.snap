@@ -1,6 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 806
+assertion_line: 813
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -3798,6 +3798,7 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
 static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
 static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,
 static int kiln_c99_worker_post_plain(uint64_t port, kiln_value value, kiln_value *out) {
+static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_par_key_plain(const kiln_string *ikey) {
 static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
