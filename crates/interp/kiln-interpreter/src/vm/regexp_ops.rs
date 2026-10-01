@@ -50,12 +50,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let exec = self.read_property(target, "exec", instruction)?;
         if is_callable(&exec) {
-            let result = self.call_value(
-                &exec,
-                target.clone(),
-                vec![subject.clone()],
-                instruction,
-            )?;
+            let result =
+                self.call_value(&exec, target.clone(), vec![subject.clone()], instruction)?;
             // Null or an object and nothing else: a program whose `exec` answers a number has
             // broken the protocol, and reading `"0"` off it would silently produce undefined.
             if !matches!(result, Value::Null) && !is_reflect_target(&result) {
@@ -73,12 +69,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "Method called on an incompatible receiver".to_owned(),
             });
         }
-        self.dispatch_native(
-            Native::RegExpExec,
-            target,
-            &[subject],
-            instruction,
-        )
+        self.dispatch_native(Native::RegExpExec, target, &[subject], instruction)
     }
 
     /// Read one property and coerce it to text, which several of the steps below need in a row.
