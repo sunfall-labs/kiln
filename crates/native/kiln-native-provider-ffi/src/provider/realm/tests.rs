@@ -2913,6 +2913,20 @@ fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
             .copied()
             .flatten();
         unsafe { *work.accepted_resource = resource.map_or(0, ResourceId::get) };
+        // Pending-only cancellation must preserve both queued completions and ownership. The
+        // ordinary cancellation below still retires the accepted resource exactly once.
+        if unsafe { kiln_realm_cancel_active_request_if_pending(*work.borrowed_request) } != 2
+            || unsafe { kiln_realm_cancel_active_request_if_pending(accept_request) } != 2
+            || realm
+                .queued
+                .borrow()
+                .get(&RequestId::new(accept_request))
+                .copied()
+                .flatten()
+                != resource
+        {
+            return RUNTIME_ERROR;
+        }
         unsafe {
             *work.cancel_query = kiln_realm_cancel_request(work.handle, *work.borrowed_request);
             *work.cancel_accept = kiln_realm_cancel_request(work.handle, accept_request);
