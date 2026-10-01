@@ -2207,7 +2207,87 @@ pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{HostResource, Reactor, RealmHostProvider, ResourceInfo, ResourceKind, TokioHost};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct CountWrites(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tokio::io::AsyncRead for CountWrites {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for CountWrites {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn pre_cancelled_upgrade_completion_does_not_poll_prefix_writer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reactor = Reactor::shared_wall().expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        let writes = std::sync::Arc::new(AtomicUsize::new(0));
+        let writer_polls = std::sync::Arc::clone(&writes);
+        local.block_on(&reactor.runtime, async move {
+            let resource = ResourceId::new(73);
+            let info = ResourceInfo {
+                id: resource,
+                kind: ResourceKind::TcpStream,
+                address: Some("127.0.0.1".into()),
+                port: Some(80),
+            };
+            let mut host = TokioHost::new();
+            host.resources.insert(
+                resource,
+                HostResource::TcpTaken {
+                    info,
+                    referenced: true,
+                    restore_referenced: true,
+                },
+            );
+            let completion = UpgradeWriteCompletion::pending();
+            completion.register_fence(1);
+            completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "aborted before prefix writer started",
+            )));
+            assert!(RealmHostProvider::adopt_upgrade_transport(
+                &mut host,
+                resource,
+                HostTransport(Box::new(CountWrites(std::sync::Arc::clone(&writer_polls)))),
+                b"prefix".to_vec(),
+                vec![UpgradeWriteFenceBoundary {
+                    fence: 1,
+                    offset: 6,
+                }],
+                completion,
+            ));
+
+            tokio::task::yield_now().await;
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+        });
+    }
 
     #[test]
     fn upgrade_write_fences_preserve_order_and_fail_pending_waiters_once() {
