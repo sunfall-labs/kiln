@@ -1051,15 +1051,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .unwrap_or_else(|| Value::String(key.owned()));
             return self.proxy_get(target, &trap_key, instruction);
         }
-        // A namespace names the exporting module's bindings, so it is caught up before it is
-        // read: the module may have assigned to an export since the link ran. The shared borrow
-        // decides first, so an ordinary object -- which is every object but these -- never takes
-        // the exclusive one, and a read that re-enters through a getter cannot collide with it.
-        if let Value::Object(object) = target
-            && object.borrow().tracks_namespace_cells()
-        {
-            object.borrow_mut().refresh_namespace();
-        }
+        self.refresh_namespace_for_read(target);
         // A `DataView` a shrink has left outside its buffer answers neither of its two
         // measurements: the specification checks the view is still in bounds before it reports
         // either, and a zero here would read as a view that is legitimately empty.
@@ -1537,6 +1529,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
+        // Computed reads are still ordinary [[Get]] operations. In particular, Object.assign
+        // reads namespace exports through this path, so refresh live export cells after
+        // ToPropertyKey has run and before looking up the property's stored snapshot.
+        self.refresh_namespace_for_read(target);
         // A numeric key on an integer-indexed exotic already identifies the canonical
         // numeric string. Avoid formatting and reparsing it for every byte of a view copy.
         // ToPropertyKey maps numeric -0 to "0"; the distinct string "-0" still takes the
@@ -1572,6 +1568,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             Some(Property::Value(value)) => Ok(value),
             _ => Ok(self.computed_key_ref(target, property_key)),
+        }
+    }
+
+    fn refresh_namespace_for_read(&mut self, target: &Value) {
+        // A namespace names the exporting module's bindings, so it is caught up before it is
+        // read: the module may have assigned to an export since the link ran. The shared borrow
+        // decides first, so an ordinary object never takes the exclusive one.
+        if let Value::Object(object) = target
+            && object.borrow().tracks_namespace_cells()
+        {
+            object.borrow_mut().refresh_namespace();
         }
     }
 
