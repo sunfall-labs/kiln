@@ -6,6 +6,11 @@ async function* asyncGenerator() {}
 const AsyncFunction = asynchronous.constructor;
 const GeneratorFunction = generator.constructor;
 const AsyncGeneratorFunction = asyncGenerator.constructor;
+for (const constructor of [AsyncFunction, GeneratorFunction, AsyncGeneratorFunction]) {
+  if (Reflect.ownKeys(constructor).join(",") !== "length,name,prototype") {
+    throw new Error("function-kind constructors must expose the ordinary callable own keys");
+  }
+}
 AsyncFunction.prototype.kindMarker = 11;
 
 for (const prototype of [AsyncFunction.prototype, GeneratorFunction.prototype, AsyncGeneratorFunction.prototype]) {

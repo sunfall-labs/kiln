@@ -36,3 +36,28 @@ Object.defineProperty(Math, ownSymbol, { value: 8, configurable: true });
 console.log(Object.hasOwn(Math, "customOwn"), Object.prototype.hasOwnProperty.call(Math, ownSymbol));
 delete Math.customOwn;
 delete Math[ownSymbol];
+Object.defineProperty(Buffer, "compatOwnEnumerable", {
+  value: 9,
+  enumerable: true,
+  configurable: true,
+});
+const bufferOwnDescriptor = Object.getOwnPropertyDescriptor(Buffer, "compatOwnEnumerable");
+const originalBufferFrom = Object.getOwnPropertyDescriptor(Buffer, "from");
+const replacementBufferFrom = function replacementBufferFrom() {};
+Object.defineProperty(Buffer, "from", {
+  value: replacementBufferFrom,
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
+const bufferFromDescriptor = Object.getOwnPropertyDescriptor(Buffer, "from");
+console.log(
+  Object.keys(Buffer).includes("compatOwnEnumerable"),
+  bufferOwnDescriptor.value,
+  bufferOwnDescriptor.enumerable,
+  bufferFromDescriptor.value === replacementBufferFrom,
+  bufferFromDescriptor.writable,
+  Object.keys(Buffer).includes("from"),
+);
+Object.defineProperty(Buffer, "from", originalBufferFrom);
+delete Buffer.compatOwnEnumerable;

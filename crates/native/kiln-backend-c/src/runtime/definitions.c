@@ -853,6 +853,16 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        /* Reads on a builtin consult its ordinary own-property store before the intrinsic
+         * member table. Reflection must use the same authority: otherwise a user-defined own
+         * property can be readable and present in ownKeys, yet its descriptor refuses because
+         * the table does not know the name (or reports the table row after an override). */
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, view, canonical)) {
+            return kiln_c99_describe_property_key(host, store, view, canonical, out, found,
+                                                  depth, thrown);
+        }
         kiln_typed_kind typed_kind;
         if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind) &&
             kiln_c99_same_name_key(view, "BYTES_PER_ELEMENT")) {
