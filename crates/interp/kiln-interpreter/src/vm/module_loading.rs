@@ -373,6 +373,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             arguments_object: self.arguments_object.take(),
             mapped_arguments: std::mem::replace(&mut self.mapped_arguments, false),
             constructing: None,
+            super_call: false,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
             instruction: self.instruction,

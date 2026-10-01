@@ -8,6 +8,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// says and what makes `Array.from({ length: 2 })` two undefineds rather than an error.
     pub(crate) fn array_from(
         &mut self,
+        receiver: &Value,
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
@@ -60,19 +61,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if length > u32::MAX as usize {
                 return Err(ExecutionError::InvalidArrayLength);
             }
-            let mut collected = Vec::with_capacity(length.min(1024));
+            let result = self.array_from_result(receiver, Some(length), instruction)?;
             for index in 0..length {
                 let value =
                     self.read_computed(&source, &Value::Number(index as f64), instruction)?;
-                collected.push(self.array_from_mapped(
+                let mapped = self.array_from_mapped(
                     mapper.as_ref(),
                     &this_argument,
                     value,
                     index,
                     instruction,
-                )?);
+                )?;
+                self.create_element(&result, index as u64, mapped, instruction)?;
             }
-            return Ok(Value::Array(ArrayData::new(collected)));
+            self.set_or_throw(
+                &result,
+                &Value::String("length".into()),
+                Value::Number(length as f64),
+                instruction,
+            )?;
+            return Ok(result);
         }
 
         // Already the right shape, and copying beats walking an iterator to the same elements --
@@ -80,8 +88,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `Symbol.iterator` is a different sequence, and a mapper is user code that runs between
         // the steps: one that shortens the array as it goes must see the shorter array, because
         // the specification re-reads `length` on every step of the array iterator.
-        if let (Value::Array(items), None, Value::Native(Native::ArrayValues, _)) =
-            (&source, &mapper, &method)
+        if (!is_constructor(receiver)
+            || matches!(receiver, Value::Native(Native::ArrayConstructor, _)))
+            && let (Value::Array(items), None, Value::Native(Native::ArrayValues, _)) =
+                (&source, &mapper, &method)
         {
             return Ok(Value::Array(ArrayData::new(dense_items(&items.borrow()))));
         }
@@ -91,13 +101,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: format!("{} is not iterable", source.to_display_string()),
             });
         }
+        let result = self.array_from_result(receiver, None, instruction)?;
         let iterator = self.call_value(&method, source.clone(), Vec::new(), instruction)?;
         // `GetIteratorFromMethod` reads `next` once and the record keeps it. Reading it again per
         // step is not merely extra work: it is a `Get` the language does not perform, so a proxy
         // counts four traps for a three-element walk and an accessor that answers differently the
         // second time is followed where the specification pins the first answer.
         let next = self.read_property(&iterator, "next", instruction)?;
-        let mut collected = Vec::new();
+        let mut index = 0usize;
         loop {
             let step = self.call_value(&next, iterator.clone(), Vec::new(), instruction)?;
             // A step that is not an object has no `done` to read, and treating its absence as
@@ -106,33 +117,62 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Err(ExecutionError::IteratorResultNotAnObject);
             }
             if self.read_property(&step, "done", instruction)?.is_truthy() {
-                return Ok(Value::Array(ArrayData::new(collected)));
+                self.set_or_throw(
+                    &result,
+                    &Value::String("length".into()),
+                    Value::Number(index as f64),
+                    instruction,
+                )?;
+                return Ok(result);
             }
             let value = self.read_property(&step, "value", instruction)?;
             // The mapper runs *inside* the walk rather than over the finished list. It sees each
             // element as the iterator produces it, and a throw from it closes an iterator that is
             // still open. Draining first got both wrong, and left an endless iterable running
             // where the language stops at the first mapper that throws.
-            let mapped = self.array_from_mapped(
-                mapper.as_ref(),
-                &this_argument,
-                value,
-                collected.len(),
-                instruction,
-            );
+            let mapped =
+                self.array_from_mapped(mapper.as_ref(), &this_argument, value, index, instruction);
             match mapped {
-                Ok(value) => collected.push(value),
+                Ok(value) => {
+                    if let Err(error) =
+                        self.create_element(&result, index as u64, value, instruction)
+                    {
+                        self.close_discarding(&iterator, instruction);
+                        return Err(error);
+                    }
+                    index += 1;
+                }
                 Err(error) => {
                     self.close_discarding(&iterator, instruction);
                     return Err(error);
                 }
             }
-            if collected.len() > self.limits.max_steps as usize {
+            if index > self.limits.max_steps as usize {
                 return Err(ExecutionError::StepLimitExceeded {
-                    steps: collected.len() as u64,
+                    steps: index as u64,
                     limit: self.limits.max_steps,
                 });
             }
+        }
+    }
+
+    /// Construct before reading elements, with no arguments for an iterable and a length
+    /// argument for an array-like source. Array.from uses its receiver, not @@species.
+    fn array_from_result(
+        &mut self,
+        receiver: &Value,
+        length: Option<usize>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if is_constructor(receiver)
+            && !matches!(receiver, Value::Native(Native::ArrayConstructor, _))
+        {
+            let arguments = length
+                .map(|n| vec![Value::Number(n as f64)])
+                .unwrap_or_default();
+            self.construct_value(receiver.clone(), arguments, receiver.clone(), instruction)
+        } else {
+            Self::create_array_of_length(length.unwrap_or(0) as u64)
         }
     }
 

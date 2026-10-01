@@ -1967,3 +1967,13 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
     if (KILN_UNLIKELY(floor == 0)) floor = kiln_c99_stack_floor_find();
     return KILN_UNLIKELY(here < floor);
 }
+
+/* Array.from drives the captured iterator record while creating its result. */
+static int kiln_c99_iterator_direct(kiln_host *host, kiln_value source, kiln_value *next, int depth, kiln_value *thrown);
+static int kiln_c99_iterator_advance(kiln_host *host, kiln_value iterator, kiln_value next, kiln_value *value, int *finished, int depth, kiln_value *thrown);
+static void kiln_c99_iterator_close_discarding(kiln_host *host, kiln_value iterator, int depth, kiln_value *thrown);
+
+static int kiln_c99_heritage_constructs(kiln_value value);
+
+static int kiln_c99_intrinsic_has_instance(kiln_value callable);
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);

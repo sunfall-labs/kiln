@@ -207,8 +207,8 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell, ki
 extern int kiln_c99_global_object_val(kiln_val *out);
 extern int kiln_c99_make_cell(kiln_value *slot);
 extern void kiln_c99_mark_uninitialized(kiln_value *slot);
-extern int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, kiln_val new_target, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, const kiln_val *captured, uint32_t count);
-extern int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, int publishes_frame);
+extern int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int function_kind, int arrow, int strict, kiln_val receiver, kiln_val new_target, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, const kiln_val *captured, uint32_t count);
+extern int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int function_kind, int arrow, int strict, kiln_val receiver, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, int publishes_frame);
 extern int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise, uint32_t module_index, kiln_value *out_promise, int depth, kiln_value *thrown);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown);
 extern int kiln_c99_buffer_prototype(kiln_host *host, kiln_value *out, int depth, kiln_value *thrown);
@@ -302,7 +302,7 @@ extern int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
 extern int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced);
 extern int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 extern int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype, kiln_value *thrown);
-extern int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer);
+extern int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_typeof(kiln_value value);
 extern kiln_value kiln_c99_unary(uint16_t operation, kiln_value value);
 extern kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right);

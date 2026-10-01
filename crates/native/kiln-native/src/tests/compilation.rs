@@ -858,13 +858,20 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     // The ordinary shared-library object and its final link share one toolchain identity by
     // design; identity digests intentionally omit artifact kind and link inputs. Every other
     // catalogued family/profile contributes a distinct identity.
-    assert_eq!(identities.len(), 73);
-
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);
     let compiler = compiler_identity(tool);
     let provider_identities = number_provider::producer_identities(tool)
         .expect("provider identities without archive builds");
+    // Installed providers and capability additions change this count independently of the
+    // C families. Count their enumerated variants instead of pinning the old eleven-variant
+    // total. One object/link pair aliases in each of the five native profile families.
+    let non_provider_count =
+        NativeArtifactFamily::SOURCES.len() - 1 + (NativeArtifactFamily::OBJECTS.len() - 1) * 5;
+    assert_eq!(
+        identities.len(),
+        non_provider_count + provider_identities.len()
+    );
     let full_provider_identity = provider_identities
         .iter()
         .find(|(variant, _)| matches!(variant, ProviderVariant::Full))

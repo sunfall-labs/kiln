@@ -91,6 +91,10 @@ run = "./scripts/facts-baseline.sh --check"
 description = "Regenerate the whole-program facts baseline (deliberate: the diff is the record)"
 run = "./scripts/facts-baseline.sh --update"
 
+[tasks.npm-compat]
+description = "npm package compatibility corpus vs porffor's dashboard methodology (informational, not a gate)"
+run = "./scripts/npm-compat.sh"
+
 [tools]
 rust = "latest"
 

@@ -370,6 +370,8 @@ pub(super) struct Frame {
     /// Held here rather than in a parallel stack so that `Return` can decide locally: a
     /// constructor yields its instance unless the body returned an object, which wins.
     pub(super) constructing: Option<Value>,
+    /// Restore the caller with the object produced by super(), without a nested Rust call.
+    pub(super) super_call: bool,
     pub(super) locals: Vec<Value>,
     /// The realm the caller was running in, restored with the frame.
     ///

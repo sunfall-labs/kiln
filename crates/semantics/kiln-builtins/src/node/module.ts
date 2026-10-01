@@ -59,6 +59,28 @@ export function isBuiltin(moduleName: string): boolean {
   return builtinModules.indexOf(name) !== -1;
 }
 
+export const constants = {
+  compileCacheStatus: {
+    FAILED: 0,
+    ENABLED: 1,
+    ALREADY_ENABLED: 2,
+    DISABLED: 3,
+  },
+};
+
+// In a kiln native binary every module is ahead-of-time compiled, so the
+// compile cache is permanently "already enabled" — there is nothing to warm
+// up and no cache directory. This is a semantic no-op, not a stub.
+export function enableCompileCache(_cacheDir?: string): { status: number } {
+  return { status: constants.compileCacheStatus.ALREADY_ENABLED };
+}
+
+export function getCompileCacheDir(): undefined {
+  return undefined;
+}
+
+export function flushCompileCache(): void {}
+
 export function createRequire(filename: string | any): (specifier: string) => any {
   const isUrlObject =
     filename instanceof NodeURL ||
@@ -89,6 +111,10 @@ export class Module {
   static createRequire: typeof createRequire = createRequire;
   static builtinModules: string[] = builtinModules;
   static isBuiltin: typeof isBuiltin = isBuiltin;
+  static constants: typeof constants = constants;
+  static enableCompileCache: typeof enableCompileCache = enableCompileCache;
+  static getCompileCacheDir: typeof getCompileCacheDir = getCompileCacheDir;
+  static flushCompileCache: typeof flushCompileCache = flushCompileCache;
   static _cache: any = Object.create(null);
   static _extensions: any = Object.create(null);
 

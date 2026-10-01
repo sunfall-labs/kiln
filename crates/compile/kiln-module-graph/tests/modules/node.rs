@@ -220,6 +220,45 @@ fn create_require_literal_is_retained_as_lazy_runtime_dependency() {
 }
 
 #[test]
+fn get_builtin_module_literal_is_retained_as_lazy_runtime_dependency() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "const os = process.getBuiltinModule(\"node:os\");\n\
+         function aliased(e) { return e.getBuiltinModule(`node:path`); }\n\
+         console.log(typeof os, typeof aliased(process));",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        kiln_frontend_oxc::parse,
+    )
+    .expect("build getBuiltinModule graph");
+    let node = graph.module(&entry).expect("entry node");
+    let specifiers = node
+        .runtime_dependencies
+        .iter()
+        .map(|dependency| dependency.specifier.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        specifiers.contains(&"node:os".to_string()),
+        "node:os via global process, got {specifiers:?}"
+    );
+    assert!(
+        specifiers.contains(&"node:path".to_string()),
+        "node:path via aliased receiver, got {specifiers:?}"
+    );
+    for dependency in &node.runtime_dependencies {
+        assert!(
+            graph.module(&dependency.target).is_some(),
+            "lazy builtin {} is in closure",
+            dependency.specifier
+        );
+    }
+}
+
+#[test]
 fn create_require_uses_its_captured_file_as_the_resolution_base_dynamic_compat() {
     let project = TempProject::new();
     fs::create_dir_all(project.root.join("nested")).unwrap();

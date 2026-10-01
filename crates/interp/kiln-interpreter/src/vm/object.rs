@@ -2004,7 +2004,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
                 if property_key.matches_ascii("prototype") {
-                    if closure.properties.borrow().is_frozen() {
+                    if closure.program.functions[closure.function as usize].is_class
+                        || closure.properties.borrow().is_frozen()
+                    {
                         return Ok(());
                     }
                     *closure.prototype.borrow_mut() = Some(value);

@@ -249,9 +249,9 @@ static int kiln_c99_process_object(kiln_value *out) {
                                   kiln_c99_boolean(features[index].value), 0, NULL);
         if (status == KILN_C99_OK) status = kiln_c99_put(NULL, *process, "features", 8, built, 0, NULL);
     }
-    /* `process.getBuiltinModule` is a require over the linked builtins, which only the launcher
-     * holds; until it installs one the name refuses rather than reading `undefined`. */
-    if (status == KILN_C99_OK) status = kiln_c99_put_refused(*process, "getBuiltinModule", 16);
+    /* `process.getBuiltinModule` is a require over the linked builtins. The native bootstrap
+     * installs the TypeScript implementation (built over `__kilnHostModuleCreateRequire`), so
+     * the name is left absent here to let that installation take effect. */
     /* `process.argv` follows node's single-executable-application convention, because a compiled
      * kiln program is one: there is no separate interpreter to name in slot 0 and no script file
      * to name in slot 1, so both name the executable and the program's own arguments still start

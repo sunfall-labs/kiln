@@ -147,6 +147,31 @@ pub fn parse_dce(path: &str, source: &str, demanded_exports: &BTreeSet<String>) 
         source_type,
         None,
         Some(demanded_exports),
+        None,
+    )
+}
+
+/// Parse an ESM module for a native binary, where `import.meta` resolves at
+/// runtime from `process.execPath` (Node SEA semantics) instead of baking in
+/// build-time source paths. `is_entry` controls `import.meta.main`.
+pub fn parse_dce_native(
+    path: &str,
+    source: &str,
+    demanded_exports: &BTreeSet<String>,
+    is_entry: bool,
+) -> Module {
+    let mut source_type = SourceType::from_path(Path::new(path))
+        .unwrap_or_else(|_| SourceType::default().with_module(true));
+    if !path.ends_with(".cjs") {
+        source_type = source_type.with_module(true);
+    }
+    parse_source_in_context(
+        Some(path),
+        source,
+        source_type,
+        None,
+        Some(demanded_exports),
+        Some(is_entry),
     )
 }
 
@@ -219,6 +244,7 @@ pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
         source,
         inferred.with_script(true),
         Some(allow),
+        None,
         None,
     )
 }
@@ -328,10 +354,16 @@ fn discover_node_runtime_requests_from_semantic(
     }
 
     fn literal_argument(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
-        let Some(Argument::StringLiteral(literal)) = call.arguments.first() else {
-            return None;
-        };
-        Some(literal.value.to_string())
+        match call.arguments.first()? {
+            Argument::StringLiteral(literal) => Some(literal.value.to_string()),
+            // `` `node:os` `` with no interpolations is as static as `"node:os"`.
+            Argument::TemplateLiteral(template)
+                if template.expressions.is_empty() && template.quasis.len() == 1 =>
+            {
+                Some(template.quasis[0].value.cooked.as_ref()?.to_string())
+            }
+            _ => None,
+        }
     }
 
     fn imported_factory_base(
@@ -460,13 +492,12 @@ fn discover_node_runtime_requests_from_semantic(
             });
             continue;
         } else if let Expression::StaticMemberExpression(member) = &call.callee {
-            let Expression::Identifier(process) = &member.object else {
-                continue;
-            };
-            if process.name != "process"
-                || member.property.name != "getBuiltinModule"
-                || !process.is_global_reference(scoping)
-            {
+            // `x.getBuiltinModule(id)`: the receiver is usually the global `process`, but
+            // bundlers routinely alias it (`e.getBuiltinModule(...)` with `e` a parameter),
+            // so any receiver is accepted. A literal id is a statically-provable builtin
+            // request (ADR 0067 §2); a user-defined `getBuiltinModule` merely links one
+            // extra builtin, which is harmless.
+            if member.property.name != "getBuiltinModule" {
                 continue;
             }
             let Some(specifier) = literal_argument(call) else {
@@ -1054,7 +1085,7 @@ fn has_unexported_top_level_class_heritage(program: &oxc_ast::ast::Program<'_>) 
 }
 
 fn parse_source(path: Option<&str>, source: &str, source_type: SourceType) -> Module {
-    parse_source_in_context(path, source, source_type, None, None)
+    parse_source_in_context(path, source, source_type, None, None, None)
 }
 
 fn parse_source_in_context(
@@ -1063,6 +1094,7 @@ fn parse_source_in_context(
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
     demanded_exports: Option<&BTreeSet<String>>,
+    native_import_meta: Option<bool>,
 ) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
@@ -1117,8 +1149,15 @@ fn parse_source_in_context(
             &semantic,
         )
     };
-    let mut module =
-        lower_parsed_in_context(path, &parsed, source, source_type, allow, demanded_exports);
+    let mut module = lower_parsed_in_context(
+        path,
+        &parsed,
+        source,
+        source_type,
+        allow,
+        demanded_exports,
+        native_import_meta,
+    );
     module.node_runtime_requests = node_runtime_requests;
     module
 }
@@ -1129,7 +1168,7 @@ fn lower_parsed(
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(path, parsed, source, source_type, None, None)
+    lower_parsed_in_context(path, parsed, source, source_type, None, None, None)
 }
 
 fn lower_parsed_in_context(
@@ -1139,6 +1178,7 @@ fn lower_parsed_in_context(
     source_type: SourceType,
     allow: Option<&EvalSyntax>,
     demanded_exports: Option<&BTreeSet<String>>,
+    native_import_meta: Option<bool>,
 ) -> Module {
     let filter_module_record = demanded_exports.is_some();
     let module_statement_spans = parsed
@@ -1368,7 +1408,11 @@ fn lower_parsed_in_context(
         }
         diagnostics.extend(early);
     }
-    let mut lowerer = Lowerer { text: source, path };
+    let mut lowerer = Lowerer {
+        text: source,
+        path,
+        native_import_meta,
+    };
     let body = lowerer.statements(&parsed.program.body);
 
     let module = Module {
@@ -1554,6 +1598,10 @@ struct Lowerer<'a> {
     /// keyword ends means looking at the text.
     text: &'a str,
     path: Option<&'a str>,
+    /// Native-binary `import.meta` mode: `None` lowers to the standard static object with
+    /// build-time paths; `Some(is_entry)` lowers to a `__kilnNativeImportMeta(isEntry)` call
+    /// whose values resolve at runtime from `process.execPath` (Node SEA semantics).
+    native_import_meta: Option<bool>,
 }
 
 impl Lowerer<'_> {
@@ -2554,64 +2602,84 @@ impl Lowerer<'_> {
                 return self.unsupported_expression("private-in expression", expression_span);
             }
             Expression::ImportMeta(_) => {
-                let (url, dirname, filename) = if let Some(p) = self.path {
-                    let path_buf = Path::new(p);
-                    let abs_path = if path_buf.is_absolute() {
-                        path_buf.to_path_buf()
-                    } else if let Ok(cwd) = std::env::current_dir() {
-                        cwd.join(path_buf)
-                    } else {
-                        path_buf.to_path_buf()
-                    };
-                    let filename_str = abs_path.to_string_lossy().into_owned();
-                    let dirname_str = abs_path
-                        .parent()
-                        .map(|parent| parent.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let url_str = format!("file://{filename_str}");
-                    (url_str, dirname_str, filename_str)
+                // Native binary: `import.meta` resolves at runtime from `process.execPath`
+                // (Node SEA semantics). The bootstrap defines `__kilnNativeImportMeta`.
+                if let Some(is_entry) = self.native_import_meta {
+                    HirExpressionKind::Call {
+                        callee: Box::new(HirExpression {
+                            kind: HirExpressionKind::Identifier(
+                                "__kilnNativeImportMeta".to_string(),
+                            ),
+                            span: expression_span,
+                        }),
+                        arguments: vec![kiln_hir::ListElement::Item(HirExpression {
+                            kind: HirExpressionKind::Literal(HirLiteral::Boolean(is_entry)),
+                            span: expression_span,
+                        })],
+                        optional: false,
+                    }
                 } else {
-                    (
-                        "file:///unknown".to_string(),
-                        String::new(),
-                        "unknown".to_string(),
-                    )
-                };
+                    let (url, dirname, filename) = if let Some(p) = self.path {
+                        let path_buf = Path::new(p);
+                        let abs_path = if path_buf.is_absolute() {
+                            path_buf.to_path_buf()
+                        } else if let Ok(cwd) = std::env::current_dir() {
+                            cwd.join(path_buf)
+                        } else {
+                            path_buf.to_path_buf()
+                        };
+                        let filename_str = abs_path.to_string_lossy().into_owned();
+                        let dirname_str = abs_path
+                            .parent()
+                            .map(|parent| parent.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let url_str = format!("file://{filename_str}");
+                        (url_str, dirname_str, filename_str)
+                    } else {
+                        (
+                            "file:///unknown".to_string(),
+                            String::new(),
+                            "unknown".to_string(),
+                        )
+                    };
 
-                HirExpressionKind::Object {
-                    members: vec![
-                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("url".to_string().into()),
-                            value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(url.into())),
+                    HirExpressionKind::Object {
+                        members: vec![
+                            kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                                key: kiln_hir::ObjectKey::Static("url".to_string().into()),
+                                value: HirExpression {
+                                    kind: HirExpressionKind::Literal(HirLiteral::String(
+                                        url.into(),
+                                    )),
+                                    span: expression_span,
+                                },
+                                form: kiln_hir::PropertyForm::KeyValue,
                                 span: expression_span,
-                            },
-                            form: kiln_hir::PropertyForm::KeyValue,
-                            span: expression_span,
-                        }),
-                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("dirname".to_string().into()),
-                            value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(
-                                    dirname.into(),
-                                )),
+                            }),
+                            kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                                key: kiln_hir::ObjectKey::Static("dirname".to_string().into()),
+                                value: HirExpression {
+                                    kind: HirExpressionKind::Literal(HirLiteral::String(
+                                        dirname.into(),
+                                    )),
+                                    span: expression_span,
+                                },
+                                form: kiln_hir::PropertyForm::KeyValue,
                                 span: expression_span,
-                            },
-                            form: kiln_hir::PropertyForm::KeyValue,
-                            span: expression_span,
-                        }),
-                        kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
-                            key: kiln_hir::ObjectKey::Static("filename".to_string().into()),
-                            value: HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::String(
-                                    filename.into(),
-                                )),
+                            }),
+                            kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                                key: kiln_hir::ObjectKey::Static("filename".to_string().into()),
+                                value: HirExpression {
+                                    kind: HirExpressionKind::Literal(HirLiteral::String(
+                                        filename.into(),
+                                    )),
+                                    span: expression_span,
+                                },
+                                form: kiln_hir::PropertyForm::KeyValue,
                                 span: expression_span,
-                            },
-                            form: kiln_hir::PropertyForm::KeyValue,
-                            span: expression_span,
-                        }),
-                    ],
+                            }),
+                        ],
+                    }
                 }
             }
             Expression::NewTarget(_) => HirExpressionKind::NewTarget,
@@ -3985,6 +4053,28 @@ mod tests {
                 .map(|request| request.specifier)
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn node_runtime_discovery_accepts_aliased_get_builtin_module_receiver() {
+        // Bundlers alias `process` (e.g. a parameter named `e`); the builtin id is still
+        // statically provable, so it is still a link-time request.
+        let source = r#"
+            function bundle(e) {
+                e.getBuiltinModule("node:os");
+                e.getBuiltinModule(`node:path`);
+            }
+            process.getBuiltinModule("node:util");
+        "#;
+        let mut requests = discover_node_runtime_requests("fixture.mjs", source);
+        requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        assert_eq!(
+            requests
+                .into_iter()
+                .map(|request| request.specifier)
+                .collect::<Vec<_>>(),
+            ["node:os", "node:path", "node:util"]
         );
     }
 

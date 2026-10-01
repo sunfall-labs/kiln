@@ -2160,6 +2160,11 @@ pub struct AbsentAnswer {
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     AbsentAnswer {
+        function: "kiln_c99_function_species",
+        sites: 2,
+        proved_by: "the checked prototype chain ended at null, or an own accessor has no getter",
+    },
+    AbsentAnswer {
         function: "kiln_c99_callable_store_lookup",
         sites: 4,
         proved_by: "a callable with no property store has no own member at all, so there is no \

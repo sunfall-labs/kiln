@@ -983,6 +983,7 @@ struct kiln_closure;
 struct kiln_generator;
 typedef struct kiln_call_context {
 typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues,
+enum kiln_c99_function_kind {
 typedef struct kiln_closure {
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
@@ -1950,6 +1951,12 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
 #else
 #endif
+static int kiln_c99_iterator_direct(kiln_host *host, kiln_value source, kiln_value *next, int depth, kiln_value *thrown);
+static int kiln_c99_iterator_advance(kiln_host *host, kiln_value iterator, kiln_value next, kiln_value *value, int *finished, int depth, kiln_value *thrown);
+static void kiln_c99_iterator_close_discarding(kiln_host *host, kiln_value iterator, int depth, kiln_value *thrown);
+static int kiln_c99_heritage_constructs(kiln_value value);
+static int kiln_c99_intrinsic_has_instance(kiln_value callable);
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
@@ -2285,6 +2292,7 @@ static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, 
 KILN_ALWAYS_INLINE static inline void *kiln_c99_gc_alloc_hot(uint32_t kind, size_t size,
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
+static void *kiln_c99_gc_alloc_tenured_ex(uint32_t kind, size_t size, int capture_candidate) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
@@ -2330,6 +2338,8 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
 typedef struct kiln_c99_graph_root_alias_visitor {
 static int kiln_c99_graph_realm_value_alias(void *opaque, const kiln_value *slot) {
 static int kiln_c99_graph_realm_val_alias(void *opaque, kiln_val value) {
+static int kiln_c99_graph_ledger_enabled(void);
+static int kiln_c99_graph_ledger_audit_enabled(void);
 static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
@@ -2356,6 +2366,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 typedef struct kiln_c99_candidate_owner_observer {
 static void kiln_c99_candidate_observe_pointer(void *context, const void *pointer) {
 static void kiln_c99_candidate_record_owner_layout(kiln_gc_heap *heap,
+static int kiln_c99_candidate_context_publish(kiln_gc_heap *heap,
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_context_owners(
 static void kiln_c99_candidate_record_chunk_layout(kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
@@ -2363,6 +2375,7 @@ static void kiln_c99_candidate_prune_owners(kiln_gc_heap *heap) {
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_candidate_owners(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_incoming_heap_checked(
+static int kiln_c99_graph_ledger_enabled(void) {
 static int kiln_c99_graph_ledger_audit_enabled(void) {
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
@@ -3184,6 +3197,7 @@ static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string 
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
+static int kiln_c99_function_species(kiln_host *host, kiln_value target,
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
@@ -3825,7 +3839,9 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
 static int kiln_c99_heritage_constructs(kiln_value value) {
 static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
-static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
+static int kiln_c99_intrinsic_has_instance(kiln_value callable) {
+static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
+static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {
 static kiln_value kiln_c99_typeof(kiln_value value) {
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {

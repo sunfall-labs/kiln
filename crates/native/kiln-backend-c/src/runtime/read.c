@@ -59,6 +59,58 @@ static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
            kiln_c99_property_read_own_value(store, key, ikey, &property);
 }
 
+/* Resolve a constructor's species through its actual prototype chain. Accessors receive
+ * the constructor that started the read, including an inherited intrinsic accessor. */
+static int kiln_c99_function_species(kiln_host *host, kiln_value target,
+                                      const kiln_string *key, const kiln_string *ikey,
+                                      kiln_value *out, int depth, kiln_value *thrown) {
+    kiln_value current = target;
+    size_t steps;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_value store = current;
+        kiln_property property;
+        int status;
+        if (current.tag == KILN_VALUE_NULL) {
+            KILN_C99_ABSENT("species is absent after every own descriptor in the prototype chain was checked", out);
+        }
+        if (current.tag == KILN_VALUE_PROXY) {
+            return kiln_c99_get_with_receiver(host, current, kiln_c99_key_value(key, NULL),
+                                              target, out, depth, thrown);
+        }
+        if (current.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_callable_store(current, &store, 0);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_property_read_own_value(store, key, ikey, &property)) {
+            if (property.refused) KILN_C99_REFUSE("a species descriptor declared but not implemented");
+            if (!property.accessor) { *out = property.value; return KILN_C99_OK; }
+            if (property.getter.tag == KILN_VALUE_UNDEFINED) {
+                KILN_C99_ABSENT("a species accessor without a getter", out);
+            }
+            return kiln_c99_call(host, out, property.getter, target, NULL, 0, depth, thrown);
+        }
+        if (current.tag == KILN_VALUE_BUILTIN) {
+            kiln_typed_kind kind;
+            if (current.bits == KILN_C99_BUILTIN_ARRAY ||
+                current.bits == KILN_C99_BUILTIN_MAP ||
+                current.bits == KILN_C99_BUILTIN_SET ||
+                current.bits == KILN_C99_BUILTIN_PROMISE ||
+                current.bits == KILN_C99_BUILTIN_REGEXP ||
+                current.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+                current.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER ||
+                kiln_c99_builtin_typed_kind(current.bits, &kind)) {
+                *out = target;
+                return KILN_C99_OK;
+            }
+        }
+        status = kiln_c99_invoke_method(host, &current, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                        kiln_c99_undefined(), &current, 1, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    KILN_C99_REFUSE("a species prototype chain exceeding the traversal limit");
+}
+
 /* A read the instance path could not answer, tried against the prototype built-in's own store.
  * That store is where the runtime bootstrap defines the members it writes in TypeScript
  * (design.md §5): `RegExp.prototype[@@replace]`, `Date.prototype[@@toPrimitive]`,
@@ -588,15 +640,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number((double)closure->arity);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name_key(key, "@@species")) {
+            return kiln_c99_function_species(host, target, key, ikey, out, depth, thrown);
+        }
         if (kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
             /* An assigned property wins, exactly as an own property shadows an
              * inherited one -- which is what `Function.prototype.call` is. */
             return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
                                     depth, thrown);
-        }
-        if (kiln_c99_same_name_key(key, "@@species")) {
-            *out = target;
-            return KILN_C99_OK;
         }
         KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
         {
@@ -1029,6 +1080,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     case KILN_VALUE_ARRAY: {
         uint64_t code;
         if (kiln_c99_same_name_key(key, "constructor")) {
+            if (kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED) {
+                int found;
+                int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
         }
@@ -1482,7 +1538,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 int found = 0;
                 int status = kiln_c99_invoke_method(host, &parent,
                                                     KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
-                                                    kiln_c99_undefined(), &bound->target, 1,
+                                                    kiln_c99_undefined(), &target, 1,
                                                     depth, thrown);
                 if (status != KILN_C99_OK) return status;
                 if (parent.tag == KILN_VALUE_BUILTIN &&
@@ -1502,6 +1558,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
             }
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
             KILN_C99_REFUSE("a member of a bound function other than name and length");
         }
         if (target.tag == KILN_VALUE_METHOD &&

@@ -370,6 +370,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
             generator: false,
             async_generator: false,
             is_method: false,
+            is_class: false,
             parameter_count: 0,
             declared_length: 0,
             mapped_arguments: false,
@@ -670,6 +671,7 @@ fn program_hash_covers_function_table_and_proto_contents() {
             inferred_name: None,
             prologue_end: 0,
             is_method: true,
+            is_class: false,
             ..function(vec![Instruction::Return])
         },
         FunctionProto {
@@ -1386,6 +1388,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
         asynchronous: false,
         async_generator: false,
         is_method: false,
+        is_class: false,
         mapped_arguments: false,
         upvalues: Vec::new(),
         type_annotations: None,

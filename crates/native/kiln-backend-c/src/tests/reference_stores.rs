@@ -85,7 +85,8 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
         let field = words[index + 1].0;
         let protected = matches!(
             field,
-            "captured_this"
+            "hash_next"
+                | "captured_this"
                 | "captured_new_target"
                 | "captured_arguments"
                 | "own_prototype"
@@ -120,7 +121,18 @@ fn direct_reference_writes(source: &str) -> Vec<usize> {
         let require_reference = index > 0
             && words[index - 1].0 == "require"
             && matches!(field, "context" | "root_context");
-        if !protected && !collection_entry && !bound_reference && !require_reference {
+        let facade_reference = matches!(field, "owner" | "previous" | "next" | "hash_next")
+            && words[..index]
+                .iter()
+                .rev()
+                .take(5)
+                .any(|word| word.0 == "facade");
+        if !protected
+            && !collection_entry
+            && !bound_reference
+            && !require_reference
+            && !facade_reference
+        {
             continue;
         }
         let mut next = index + 2;
@@ -498,13 +510,54 @@ fn callable_slot_alias_writes(source: &str) -> Vec<usize> {
                         aliases.push(window[0].0);
                     }
                 }
-                for (at, window) in body.windows(3).enumerate() {
-                    if window[0].0 == "*"
-                        && (at == 0 || body[at - 1].0 != "kiln_value")
-                        && aliases.contains(&window[1].0)
-                        && window[2].0 == "="
+                // Copies preserve the storage authority. Iterate to include aliases declared
+                // earlier than their source's assignment in a branch or loop.
+                loop {
+                    let before = aliases.len();
+                    for window in body.windows(3) {
+                        if window[1].0 == "="
+                            && aliases.contains(&window[2].0)
+                            && !aliases.contains(&window[0].0)
+                            && window[0]
+                                .0
+                                .as_bytes()
+                                .first()
+                                .is_some_and(u8::is_ascii_alphabetic)
+                        {
+                            aliases.push(window[0].0);
+                        }
+                    }
+                    if aliases.len() == before {
+                        break;
+                    }
+                }
+                for (at, word) in body.iter().enumerate() {
+                    if !aliases.contains(&word.0) {
+                        continue;
+                    }
+                    let dereference = at > 0
+                        && body[at - 1].0 == "*"
+                        && (at < 2 || !matches!(body[at - 2].0, "kiln_value" | "kiln_val"));
+                    let mut next = at + 1;
+                    let indexed = body.get(next).is_some_and(|word| word.0 == "[");
+                    if indexed {
+                        let mut depth = 1;
+                        next += 1;
+                        while next < body.len() && depth != 0 {
+                            match body[next].0 {
+                                "[" => depth += 1,
+                                "]" => depth -= 1,
+                                _ => {}
+                            }
+                            next += 1;
+                        }
+                    }
+                    if (dereference || indexed)
+                        && body.get(next).is_some_and(|word| {
+                            matches!(word.0, "=" | "+=" | "-=" | "|=" | "&=" | "^=" | "++" | "--")
+                        })
                     {
-                        found.push(window[0].1);
+                        found.push(word.1);
                     }
                 }
             }
@@ -540,6 +593,9 @@ fn callable_slot_guard_checks_aliases_within_their_function() {
         int write_function(void) {
             kiln_value *held = kiln_c99_closure_prototype_slot(closure);
             *held = candidate;
+            kiln_value *copied = held;
+            *copied = candidate;
+            copied[0] = candidate;
         }
         int write_exotic(void) {
             slot = kiln_c99_exotic_store(value);
@@ -552,7 +608,7 @@ fn callable_slot_guard_checks_aliases_within_their_function() {
         }
         int unrelated(void) { *slot = number; }
     "#;
-    assert_eq!(callable_slot_alias_writes(source).len(), 2);
+    assert_eq!(callable_slot_alias_writes(source).len(), 4);
 }
 
 #[test]

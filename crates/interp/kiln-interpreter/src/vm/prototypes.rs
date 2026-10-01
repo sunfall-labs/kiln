@@ -159,16 +159,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return Ok(true);
         }
+        if let Value::Bound(bound) = constructor {
+            return self.instance_of_value(value, &bound.target, error_prototype, instruction);
+        }
+        if !is_an_object(value) {
+            return Ok(false);
+        }
         let prototype = match constructor {
-            Value::Proxy(_) => self.read_computed(
+            Value::Proxy(_) | Value::Function(_) => self.read_computed(
                 constructor,
                 &Value::String("prototype".to_owned().into()),
                 instruction,
             )?,
-            Value::Function(closure) => match closure.prototype.borrow().clone() {
-                Some(prototype) => prototype,
-                None => return Ok(false),
-            },
             // Derived from the constructor rather than handed in. It used to be a parameter, and
             // the caller that could not supply one -- `Function.prototype[@@hasInstance]`, which
             // is reached with no operator context at all -- answered false for every error in the
@@ -179,17 +181,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let kind = *kind;
                 let _ = error_prototype;
                 self.error_prototype(kind)
-            }
-            Value::Bound(bound) => {
-                // `OrdinaryHasInstance` unwraps a bound function and asks about its target, and
-                // it asks *this* operation rather than the operator: the specification does not
-                // re-read `@@hasInstance` off the target.
-                return self.ordinary_has_instance(
-                    value,
-                    &bound.target,
-                    error_prototype,
-                    instruction,
-                );
             }
             // A Buffer's chain reaches `Buffer.prototype` once the bootstrap has assigned it;
             // before that the brand is the answer.
@@ -206,7 +197,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => return Ok(false),
         };
         if !is_an_object(&prototype) {
-            return Ok(false);
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Function has non-object prototype in instanceof check".to_owned(),
+            });
         }
         let mut current = self.prototype_for(value, instruction)?;
         for _ in 0..MAX_PROTOTYPE_DEPTH {
@@ -330,10 +323,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// prototype transfer below are both invisible until a subclass depends on them.
     pub(crate) fn super_call_with(
         &mut self,
-        arguments: Vec<Value>,
+        mut arguments: Vec<Value>,
         current: usize,
     ) -> Result<(), ExecutionError> {
-        let parent = self.pop(current)?;
+        let mut parent = self.pop(current)?;
+        while let Value::Bound(bound) = &parent {
+            let mut forwarded = bound.arguments.clone();
+            forwarded.extend(arguments);
+            arguments = forwarded;
+            parent = bound.target.clone();
+        }
         let this_value = self.this_value.clone();
         match parent {
             Value::Function(closure) => {
@@ -351,6 +350,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let inherited = self.new_target.clone();
                 self.call_with_this(closure, argc as u16, current, this_value, None)?;
                 self.new_target = inherited;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.super_call = true;
+                }
             }
             // A native parent builds its own object, and `this` *becomes* that object rather
             // than being handed its properties. That is the whole of `class A extends Array`:

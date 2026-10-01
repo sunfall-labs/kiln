@@ -656,6 +656,8 @@ pub struct FunctionProto {
     /// method, or accessor). It has no `prototype` property unless it is a generator, and can
     /// never be constructed with `new`.
     pub is_method: bool,
+    /// A class constructor has a non-writable own prototype property.
+    pub is_class: bool,
     pub parameter_count: u32,
     /// Whether this function's `arguments` is the *mapped* kind: the code is sloppy and
     /// `IsSimpleParameterList` is true.
