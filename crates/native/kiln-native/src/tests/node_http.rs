@@ -144,9 +144,9 @@ server.listen(0, "127.0.0.1", () => {
     socketEvents++;
     if (request.socket !== socket || request.connection !== socket) throw new Error("client socket event identity");
     console.log("client socket event", request.socket === socket);
-  console.log("client write after end", request.write("late", (error) => {
-    console.log("client write callback", error.code);
-  }));
+    console.log("client write after end", request.write("late", (error) => {
+      console.log("client write callback", error.code);
+    }));
   });
   if (request.socket !== null || request.connection !== null) throw new Error("client socket before connect");
   request.end();
@@ -405,10 +405,12 @@ const socket = connect({port}, "127.0.0.1", () => {{
   if (socket.readyState !== "open") throw new Error("socket was not open");
   socket.end("final bytes");
   if (socket.readyState !== "readOnly") throw new Error("socket was not read-only");
+  console.log("write after end", socket.write("late", (error) => console.log("write callback", error.code)));
 }});
 let reply = "";
 socket.setEncoding("utf8");
 socket.on("data", chunk => reply += chunk);
+socket.on("error", error => console.log("write error event", error.code));
 socket.on("end", () => {{}});
 socket.on("close", () => {{
   if (socket.readyState !== "closed") throw new Error("socket was not closed");
@@ -446,7 +448,10 @@ socket.on("close", () => {{
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"reply\n");
+    assert_eq!(
+        output.stdout,
+        b"write after end false\nwrite callback ERR_STREAM_WRITE_AFTER_END\nwrite error event ERR_STREAM_WRITE_AFTER_END\nreply\n"
+    );
 }
 
 #[test]

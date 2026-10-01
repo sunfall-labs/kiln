@@ -5145,6 +5145,7 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
             KILN_VISIT_REALM_VALUE(&realm->symbols[index]);
     }
     KILN_VISIT_REALM_VALUE(&realm->isolated_graphs);
+    KILN_VISIT_REALM_VALUE(&realm->http_client_requests);
     KILN_VISIT_REALM_VALUE(&realm->isolated_request_handle);
     KILN_VISIT_REALM_VALUE(&realm->isolated_escrow_key);
     KILN_VISIT_REALM_VALUE(&realm->isolated_escrow_value);

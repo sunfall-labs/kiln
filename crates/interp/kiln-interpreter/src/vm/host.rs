@@ -1,6 +1,60 @@
 use super::*;
 
+fn node_stream_write_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
+    match value {
+        Some(Value::String(_)) => node_body_bytes(value),
+        Some(Value::TypedArray(view)) if view.kind == TypedKind::Uint8 => node_body_bytes(value),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "The \"chunk\" argument must be of type string or an instance of Buffer or Uint8Array".into(),
+        }),
+    }
+}
+
 impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
+    fn schedule_node_write_after_end(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let error = self.construct_error(
+            ErrorKind::Error,
+            &[Value::String("write after end".into())],
+        );
+        if let Value::Object(error_object) = &error {
+            error_object
+                .borrow_mut()
+                .set_non_enumerable(
+                    "code",
+                    Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
+                );
+        }
+        let callback = arguments
+            .get(2)
+            .filter(|value| is_callable(value))
+            .or_else(|| arguments.get(1).filter(|value| is_callable(value)));
+        if let Some(callback) = callback {
+            let callback = Value::Bound(Rc::new(BoundFunction {
+                target: callback.clone(),
+                this_value: Value::Undefined,
+                arguments: vec![error.clone()],
+                properties: RefCell::new(ObjectData::default()),
+            }));
+            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        }
+        let emit = self.read_property(receiver, "emit", instruction)?;
+        let emit = Value::Bound(Rc::new(BoundFunction {
+            target: emit,
+            this_value: receiver.clone(),
+            arguments: vec![Value::String("error".into()), error],
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let scheduled = self.scheduled(Job::NextTick(emit, Vec::new()));
+        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        Ok(())
+    }
+
     fn node_connect_arguments(
         &mut self,
         arguments: &[Value],
@@ -306,6 +360,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             return Ok(receiver.clone());
         }
         if native == Native::NodeSocketWrite
+            && server
+                .borrow()
+                .streams
+                .iter()
+                .find(|stream| stream.resource() == resource)
+                .is_some_and(|stream| stream.driver.end_requested() || stream.driver.write_closed())
+        {
+            // Keep Node's chunk validation before the asynchronous write-after-end report.
+            let _ = node_stream_write_bytes(arguments.first())?;
+            self.schedule_node_write_after_end(receiver, arguments, instruction)?;
+            return Ok(Value::Boolean(false));
+        }
+        if native == Native::NodeSocketWrite
             && let Some(id) = server
                 .borrow()
                 .streams
@@ -313,7 +380,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 .find(|stream| stream.resource() == resource)
                 .and_then(|stream| stream.upgrade_request_id)
         {
-            let bytes = node_body_bytes(arguments.first())?;
+            let bytes = node_stream_write_bytes(arguments.first())?;
             let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "node:http requires the realm HTTP runtime".into(),
@@ -2951,42 +3018,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let state = node_http_client_request(receiver)?;
         match native {
             Native::NodeClientRequestWrite => {
-                let bytes = node_body_bytes(arguments.first())?;
+                let bytes = node_stream_write_bytes(arguments.first())?;
+                if state.borrow().ended {
+                    self.schedule_node_write_after_end(receiver, arguments, instruction)?;
+                    return Ok(Value::Boolean(false));
+                }
                 let (resource, started) = {
                     let mut state = state.borrow_mut();
-                    if state.ended {
-                        let error = self.construct_error(
-                            ErrorKind::Error,
-                            &[Value::String("write after end".into())],
-                        );
-                        if let Value::Object(error_object) = &error {
-                            error_object.borrow_mut().set_non_enumerable(
-                                "code",
-                                Value::String("ERR_STREAM_WRITE_AFTER_END".into()),
-                            );
-                        }
-                        let callback = arguments.iter().rev().find(|value| is_callable(value));
-                        if let Some(callback) = callback {
-                            let callback = Value::Bound(Rc::new(BoundFunction {
-                                target: callback.clone(),
-                                this_value: Value::Undefined,
-                                arguments: vec![error.clone()],
-                                properties: RefCell::new(ObjectData::default()),
-                            }));
-                            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
-                            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
-                        }
-                        let emit = self.read_property(receiver, "emit", instruction)?;
-                        let emit = Value::Bound(Rc::new(BoundFunction {
-                            target: emit,
-                            this_value: receiver.clone(),
-                            arguments: vec![Value::String("error".into()), error],
-                            properties: RefCell::new(ObjectData::default()),
-                        }));
-                        let scheduled = self.scheduled(Job::NextTick(emit, Vec::new()));
-                        self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
-                        return Ok(Value::Boolean(false));
-                    }
                     let resource = state
                         .socket
                         .as_ref()

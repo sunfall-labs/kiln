@@ -1033,6 +1033,9 @@ typedef struct kiln_c99_realm_state {
     /* Private actor handles: a weak-key collection rooted by the realm, never exposed to JS.
      * Its values are the isolated graphs; the handle itself does not keep one alive. */
     kiln_value isolated_graphs;
+    /* Active node:http ClientRequests are rooted until their response or terminal error. This
+     * realm-local array also lets a queued Agent request be found before it owns a socket. */
+    kiln_value http_client_requests;
     /* A future sender-turn request carries only this realm-local ID across the scheduler
      * boundary. Retain its handle, never its graph, until that boundary resolves the ID. */
     uint64_t isolated_request_next_id;
