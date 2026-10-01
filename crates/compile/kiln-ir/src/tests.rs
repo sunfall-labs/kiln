@@ -1781,16 +1781,15 @@ fn linkage_compilation_maps_named_imports_and_local_exports_to_slots() {
     assert_eq!(linked.imports[0].local_slot, 0);
     assert_eq!(linked.exports[0].exported, "answer");
     assert_eq!(linked.exports[0].local_slot, 1);
-    // The import reads through a cell, because an import is a live view of the exporter's
-    // binding rather than a copy of it. The export here is a `const` and so is *not* boxed:
-    // a snapshot of something that cannot change is the same thing as a live view of it, and
-    // leaving it unboxed is what keeps such a module compilable by the native backend.
+    // Imports and exports both use cells: even an immutable export must retain its TDZ
+    // identity while cyclic modules evaluate, before its initializer has produced a value.
     assert!(linked.program.code.contains(&Instruction::LoadCell(0)));
-    assert!(linked.program.code.contains(&Instruction::StoreLocal(1)));
+    assert!(linked.program.code.contains(&Instruction::NewCell(1)));
+    assert!(linked.program.code.contains(&Instruction::StoreCell(1)));
 }
 
 #[test]
-fn linkage_compilation_rejects_assignment_to_import() {
+fn linkage_compilation_defers_import_assignment_failure_until_execution() {
     let mut module = module(vec![Statement {
         kind: StatementKind::Expression(Expression {
             kind: ExpressionKind::Assignment {
@@ -1811,12 +1810,25 @@ fn linkage_compilation_rejects_assignment_to_import() {
         statement_span: Span::default(),
     });
 
-    let diagnostics = compile_module(&module).expect_err("imports are immutable bindings");
+    let linked = compile_module(&module).expect("immutable writes are runtime errors");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("imported binding"))
+        linked
+            .program
+            .code
+            .contains(&Instruction::LoadBuiltin(Builtin::TypeError))
     );
+    assert!(linked.program.code.contains(&Instruction::Throw));
+    assert!(!linked.program.code.contains(&Instruction::StoreCell(0)));
+    let rhs = linked.program.code.iter().position(|instruction| matches!(instruction,
+        Instruction::Const(index) if linked.program.constants[*index as usize] == Constant::Number(1.0f64.to_bits())))
+        .expect("assignment RHS remains in the program");
+    let thrown = linked
+        .program
+        .code
+        .iter()
+        .position(|instruction| *instruction == Instruction::Throw)
+        .expect("PutValue throws");
+    assert!(rhs < thrown);
 }
 
 #[test]
