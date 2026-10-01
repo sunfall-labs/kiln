@@ -142,7 +142,7 @@ static const char kiln_c99_http_version_10[] = "1.0";
  *
  * There is no registered `IncomingMessage` constructor to hang this on, so it is a realm value
  * slot. The response has one -- see `kiln_c99_callable_prototype` -- and uses it. */
-static int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
+int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
     kiln_value *slot = NULL;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_INCOMING_MESSAGE, &slot);
     if (status != KILN_C99_OK) return status;

@@ -665,6 +665,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
                     destroyed: false,
+                    close_emitted: false,
                     connect_request: None,
                     http_agent_request: None,
                 }));
@@ -2332,6 +2333,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             shutdown_after_upgrade_fence: None,
             end_requested: false,
             destroyed: false,
+            close_emitted: false,
             connect_request: None,
             http_agent_request: None,
         }));
@@ -2483,6 +2485,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
                     destroyed: false,
+                    close_emitted: false,
                     connect_request: None,
                     http_agent_request: None,
                 }));
@@ -2967,7 +2970,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     stream.closed = true;
                 }
                 if let Some(socket) = socket {
-                    if let Ok(socket_state) = node_net_socket_state(&socket) {
+                    let emit_close = if let Ok(socket_state) = node_net_socket_state(&socket) {
+                        let emit = {
+                            let mut state = socket_state.borrow_mut();
+                            let emit = !state.close_emitted;
+                            state.close_emitted = true;
+                            emit
+                        };
                         let (write_callbacks, end_callbacks) =
                             Self::take_node_socket_queued_state(&socket_state);
                         self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
@@ -2979,11 +2988,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 instruction,
                             )?;
                         }
-                    }
+                        emit
+                    } else {
+                        false
+                    };
                     // Node exposes the terminal stream state from inside the `close` listener.
                     // Project it before queueing the event so user code sees the terminal state.
                     sync_node_socket_ready_state(server, resource);
-                    self.schedule_node_event_emit(socket, "close");
+                    if emit_close {
+                        self.schedule_node_event_emit(socket, "close");
+                    }
                 }
                 let emit_close = {
                     let mut state = server.borrow_mut();
@@ -3386,14 +3400,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // The engine's last word: the transport is gone and the connection has
                     // left its table. Nothing remains to close; the realm's record goes
                     // unless a request or response object is still reachable from JavaScript.
-                    let socket = server
+                    let (socket, socket_object) = server
                         .borrow()
                         .streams
                         .iter()
                         .find(|stream| stream.resource() == resource)
-                        .and_then(|stream| stream.socket.clone());
-                    if let Some(socket) = socket {
-                        let (write_callbacks, end_callbacks) = {
+                        .map(|stream| (stream.socket.clone(), stream.socket_object.clone()))
+                        .unwrap_or((None, None));
+                    let emit_socket_close = if let Some(socket) = &socket {
+                        let (write_callbacks, end_callbacks, emit_close) = {
                             let mut state = socket.borrow_mut();
                             let mut callbacks = Vec::new();
                             for batch in std::mem::take(&mut state.queued_write_callbacks) {
@@ -3405,7 +3420,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             state.corked_write.clear();
                             state.cork_depth = 0;
                             state.shutdown_after_upgrade_fence = None;
-                            (callbacks, end_callbacks)
+                            state.destroyed = true;
+                            let emit_close = !state.close_emitted;
+                            state.close_emitted = true;
+                            (callbacks, end_callbacks, emit_close)
                         };
                         self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
                         for callback in end_callbacks {
@@ -3416,6 +3434,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 instruction,
                             )?;
                         }
+                        emit_close
+                    } else {
+                        false
+                    };
+                    if let Some(Value::Object(socket)) = &socket_object {
+                        let mut socket = socket.borrow_mut();
+                        socket.set("destroyed", Value::Boolean(true));
+                        socket.set("readable", Value::Boolean(false));
+                        socket.set("writable", Value::Boolean(false));
+                        socket.set("readyState", Value::String("closed".into()));
+                    }
+                    if emit_socket_close && let Some(socket) = socket_object {
+                        self.schedule_node_event_emit(socket, "close");
                     }
                     let mut server_state = server.borrow_mut();
                     if let Some(stream) = server_state
@@ -6151,7 +6182,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     .borrow()
                     .streams
                     .iter()
-                    .filter(|stream| stream.runtime_http)
+                    .filter(|stream| {
+                        stream.runtime_http
+                            || stream.socket.as_ref().is_some_and(|socket| {
+                                let socket = socket.borrow();
+                                !socket.upgrade_write_callbacks.is_empty()
+                                    || socket.shutdown_after_upgrade_fence.is_some()
+                            })
+                    })
                     .map(|stream| (Rc::clone(server), stream.resource()))
                     .collect::<Vec<_>>()
             })

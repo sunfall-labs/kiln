@@ -3403,6 +3403,7 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
  * ends the checkpoint without turning the failure into another rejected promise. */
 #define KILN_GRAPH_FATAL_REJECTION (-1000)
 extern int kiln_c99_process_object(kiln_value *result);
+extern int kiln_c99_node_incoming_message_prototype(kiln_value *result);
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 #define KILN_C99_HINT_STRING 1
@@ -4164,6 +4165,13 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, http_obj, "createFetchServer", 17, http_create_fetch_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, http_obj, "fetchRespond", 12, http_fetch_respond, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    kiln_value incoming_message_prototype = kiln_c99_undefined();
+    status = kiln_c99_node_incoming_message_prototype(&incoming_message_prototype);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "__incomingMessagePrototype",
+                          sizeof("__incomingMessagePrototype") - 1,
+                          incoming_message_prototype, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;

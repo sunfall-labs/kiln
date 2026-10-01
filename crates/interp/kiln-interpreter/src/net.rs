@@ -43,6 +43,7 @@ pub(crate) struct NetSocketState {
     pub(crate) shutdown_after_upgrade_fence: Option<u64>,
     pub(crate) end_requested: bool,
     pub(crate) destroyed: bool,
+    pub(crate) close_emitted: bool,
     pub(crate) connect_request: Option<kiln_host_abi::RequestId>,
     pub(crate) http_agent_request: Option<(String, u16, u64)>,
 }

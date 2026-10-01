@@ -1,7 +1,7 @@
 // kiln-builtins: node:http implementation (Phase 5.2, ADR 0005)
 import "node:net";
 
-import { Writable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 
 const nativeModule =
   typeof process !== "undefined"
@@ -50,6 +50,42 @@ export const IncomingMessage: any =
   nativeModule && typeof nativeModule.IncomingMessage === "function"
     ? nativeModule.IncomingMessage
     : function IncomingMessage() {};
+const incomingMessagePrototype = nativeModule?.__incomingMessagePrototype || IncomingMessage.prototype;
+if (incomingMessagePrototype && typeof Readable === "function") {
+  if (Object.getPrototypeOf(incomingMessagePrototype) !== Readable.prototype) {
+    Object.setPrototypeOf(incomingMessagePrototype, Readable.prototype);
+  }
+  if (IncomingMessage.prototype !== incomingMessagePrototype) {
+    IncomingMessage.prototype = incomingMessagePrototype;
+  }
+  // Native IncomingMessage objects are allocated by the HTTP host rather than by the
+  // TypeScript Readable constructor. Give the shared Readable methods their normal per-instance
+  // state without installing a second set of stream methods on each response/request object.
+  const incomingReadableStates = new WeakMap<object, any>();
+  Object.defineProperty(incomingMessagePrototype, "_readableState", {
+    configurable: true,
+    get: function (this: object): any {
+      let state = incomingReadableStates.get(this);
+      if (!state) {
+        state = {
+          buffer: [],
+          length: 0,
+          pipes: [],
+          flowing: null,
+          ended: false,
+          endEmitted: false,
+          reading: false,
+          destroyed: false,
+          highWaterMark: 16 * 1024,
+          encoding: null,
+          objectMode: false,
+        };
+        incomingReadableStates.set(this, state);
+      }
+      return state;
+    },
+  });
+}
 if (IncomingMessage.prototype && typeof IncomingMessage.prototype.unpipe !== "function") {
   IncomingMessage.prototype.unpipe = function unpipe() {
     return this;
