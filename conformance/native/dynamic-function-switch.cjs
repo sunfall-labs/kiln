@@ -109,6 +109,18 @@ const annexBBreakBeforeDeclaration = Function(
 if (annexBBreakBeforeDeclaration() !== "undefined") {
   throw new Error("a switch break before a function declaration leaves its Annex B alias undefined");
 }
+const annexBBlockBreakBeforeDeclaration = Function(
+  "done: { break done; function blockAlias() {} } return typeof blockAlias;",
+);
+if (annexBBlockBreakBeforeDeclaration() !== "undefined") {
+  throw new Error("a block break before a function declaration leaves its Annex B alias undefined");
+}
+const blockFunctionBeforeDeclaration = Function(
+  "{ return typeof blockAlias; function blockAlias() {} }",
+);
+if (blockFunctionBeforeDeclaration() !== "function") {
+  throw new Error("ordinary block function values initialize before statements execute");
+}
 globalThis.__switchGlobalAlias = function existingGlobalAlias() {};
 const annexBUnreachableSwitch = Function(
   "return typeof __switchGlobalAlias; switch (0) { case 0: function __switchGlobalAlias() {} }",

@@ -759,11 +759,7 @@ impl super::Compiler {
     ///
     pub(super) fn emit_function_declaration(&mut self, function: &Function, span: Span) {
         self.initialize_function_declaration(function, span);
-        if let Some(name) = &function.name
-            && let Resolution::Local(local) = self.resolve(name)
-        {
-            self.emit_annexb_var_write(name, local);
-        }
+        self.emit_annexb_function_write(function);
     }
 
     /// Compile a function declaration and store it in its already-created binding.

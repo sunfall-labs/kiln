@@ -956,16 +956,17 @@ impl super::Compiler {
         }
         for statement in list {
             if let StatementKind::Function(function) = &statement.kind {
-                self.emit_function_declaration(function, statement.span);
+                self.initialize_function_declaration(function, statement.span);
             }
         }
         for statement in list {
-            // Emitted above; running it again would rebuild the closure and overwrite the
-            // binding with an identical one.
-            if matches!(statement.kind, StatementKind::Function(_)) {
-                continue;
+            // The lexical closure already exists. Only the Annex B copy belongs at the
+            // declaration's execution point, so an earlier break or return skips that copy.
+            if let StatementKind::Function(function) = &statement.kind {
+                self.emit_annexb_function_write(function);
+            } else {
+                self.statement(statement);
             }
-            self.statement(statement);
         }
     }
 
@@ -2695,11 +2696,7 @@ impl super::Compiler {
             starts.push(self.code.len() as u32);
             for statement in &case.body {
                 if let StatementKind::Function(function) = &statement.kind {
-                    if let Some(name) = &function.name
-                        && let Resolution::Local(local) = self.resolve(name)
-                    {
-                        self.emit_annexb_var_write(name, local);
-                    }
+                    self.emit_annexb_function_write(function);
                 } else {
                     self.statement(statement);
                 }

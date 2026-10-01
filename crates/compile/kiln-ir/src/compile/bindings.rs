@@ -94,6 +94,15 @@ impl super::Compiler {
         }
     }
 
+    /// Evaluate a function declaration whose lexical value was initialized on scope entry.
+    pub(super) fn emit_annexb_function_write(&mut self, function: &Function) {
+        if let Some(name) = &function.name
+            && let Resolution::Local(local) = self.resolve(name)
+        {
+            self.emit_annexb_var_write(name, local);
+        }
+    }
+
     /// The var-scoped write Annex B adds to a block-level function declaration's evaluation.
     ///
     /// Emitted after the block-scoped binding has been given its value, and reading that binding
