@@ -1349,6 +1349,7 @@ fn scripted_runtime_cancellation_retires_stream_read_before_close() {
     };
     assert_eq!(close_operation, &close);
     assert!(runtime.cancel_host_op(request));
+    assert!(driver.cancelled(request));
     let close_request = runtime.start_host_op(close_operation.clone(), false);
     assert!(driver.started(close_operation, close_request));
     assert_eq!(
