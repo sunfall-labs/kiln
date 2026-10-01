@@ -2800,6 +2800,7 @@ pub(crate) fn call_native(
         | Native::NodeCryptoKeyPublic
         | Native::NodeCryptoKeyInfo
         | Native::NodeCryptoKeyExport
+        | Native::NodeCryptoKeyFree
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder

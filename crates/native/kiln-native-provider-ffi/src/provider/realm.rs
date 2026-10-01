@@ -1643,6 +1643,16 @@ pub(crate) fn with_active_crypto_key<R>(
     keys.get(&handle).map(use_key)
 }
 
+pub(crate) fn active_crypto_key_remove(handle: u64) {
+    if let Some(realm) = active_realm()
+        && let Ok(mut keys) = realm.crypto_keys.try_borrow_mut()
+    {
+        // Finalization is idempotent: a pending callback can outlive disposal of the realm that
+        // owned its handle, and repeated delivery must never release a later key.
+        keys.remove(&handle);
+    }
+}
+
 pub(crate) fn active_clock_is_virtual() -> bool {
     active_realm().is_some_and(|realm| matches!(realm.clock.get(), NativeClock::Virtual))
 }

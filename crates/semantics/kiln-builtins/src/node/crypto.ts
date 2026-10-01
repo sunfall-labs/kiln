@@ -351,12 +351,18 @@ const cryptoKeyImportBridge = (globalThis as any).__kilnCryptoKeyImport;
 const cryptoKeyPublicBridge = (globalThis as any).__kilnCryptoKeyPublic;
 const cryptoKeyInfoBridge = (globalThis as any).__kilnCryptoKeyInfo;
 const cryptoKeyExportBridge = (globalThis as any).__kilnCryptoKeyExport;
+const cryptoKeyFreeBridge = (globalThis as any).__kilnCryptoKeyFree;
 delete (globalThis as any).__kilnCryptoKeyImport;
 delete (globalThis as any).__kilnCryptoKeyPublic;
 delete (globalThis as any).__kilnCryptoKeyInfo;
 delete (globalThis as any).__kilnCryptoKeyExport;
+delete (globalThis as any).__kilnCryptoKeyFree;
 
 const asymmetricKeyHandles = new WeakMap<KeyObject, any>();
+const asymmetricKeyFinalizer: FinalizationRegistry<any> | undefined =
+  typeof FinalizationRegistry === 'function' && typeof cryptoKeyFreeBridge === 'function'
+    ? new FinalizationRegistry((handle: any) => { cryptoKeyFreeBridge(handle); })
+    : undefined;
 
 /** Node's opaque key handle. Asymmetric values carry a parsed key-core handle in a WeakMap;
  * private material is never stored as an ordinary JavaScript byte property. */
@@ -380,16 +386,27 @@ export class KeyObject {
   export(options?: any): any {
     const handle = asymmetricKeyHandles.get(this);
     if (handle !== undefined) {
-      if (options === undefined || options === null || typeof options !== 'object' || options.format === undefined) {
+      if (options === undefined || options === null || typeof options !== 'object') {
         throw new TypeError('The "options.format" property is required');
       }
-      const format = String(options.format);
+      const requestedFormat = options.format;
+      if (requestedFormat === undefined) throw new TypeError('The "options.format" property is required');
+      const format = String(requestedFormat);
+      if (format === 'jwk') {
+        const bytes = cryptoKeyExportBridge(handle, 'jwk', 'json');
+        return JSON.parse(Buffer.from(bytes).toString('utf8'));
+      }
       if (format !== 'der' && format !== 'pem') {
         throw new TypeError(`The key export format "${format}" is not supported`);
       }
-      const type = options.type === undefined
-        ? (this.type === 'private' ? 'pkcs8' : 'spki')
-        : String(options.type);
+      if (options.type === undefined) {
+        throw new TypeError('The "options.type" property is required for PEM and DER export');
+      }
+      const type = String(options.type);
+      const validTypes = this.type === 'private' ? ['pkcs1', 'pkcs8'] : ['pkcs1', 'spki'];
+      if (!validTypes.includes(type)) {
+        throw new TypeError(`The key export type "${type}" is invalid for a ${this.type} key`);
+      }
       const bytes = cryptoKeyExportBridge(handle, type, format);
       return format === 'pem' ? Buffer.from(bytes).toString('utf8') : Buffer.from(bytes);
     }
@@ -401,9 +418,20 @@ export class KeyObject {
 }
 
 function makeAsymmetricKey(handle: any): KeyObject {
+  if (asymmetricKeyFinalizer === undefined) {
+    if (typeof cryptoKeyFreeBridge === 'function') cryptoKeyFreeBridge(handle);
+    throw new TypeError('The runtime cannot release asymmetric key handles after collection');
+  }
   const info = cryptoKeyInfoBridge(handle);
   const key = new KeyObject(undefined, info.type, info.asymmetricKeyType, info.asymmetricKeyDetails);
-  asymmetricKeyHandles.set(key, handle);
+  try {
+    asymmetricKeyHandles.set(key, handle);
+    asymmetricKeyFinalizer.register(key, handle);
+  } catch (error) {
+    asymmetricKeyHandles.delete(key);
+    cryptoKeyFreeBridge(handle);
+    throw error;
+  }
   return key;
 }
 
@@ -417,13 +445,15 @@ export function createSecretKey(key: any, encoding?: string): KeyObject {
   return new KeyObject(key, 'secret');
 }
 
-function importKeyInput(input: any): { bytes: Uint8Array; format: string } {
+function importKeyInput(input: any): { bytes: Uint8Array; format: string; type?: string } {
   let key = input;
   let format = 'pem';
   let encoding: string | undefined;
+  let type: string | undefined;
   if (key && typeof key === 'object' && !(key instanceof Uint8Array) && !(key instanceof KeyObject) && 'key' in key) {
     format = key.format === undefined ? 'pem' : String(key.format);
     encoding = key.encoding === undefined ? undefined : String(key.encoding);
+    type = key.type === undefined ? undefined : String(key.type);
     key = key.key;
   }
   if (key instanceof KeyObject) {
@@ -431,7 +461,7 @@ function importKeyInput(input: any): { bytes: Uint8Array; format: string } {
   }
   if (format === 'jwk') {
     if (!key || typeof key !== 'object') throw new TypeError('The key argument must be an RSA JWK object');
-    return { bytes: new TextEncoder().encode(JSON.stringify(key)), format };
+    return { bytes: new TextEncoder().encode(JSON.stringify(key)), format, type };
   }
   if (format !== 'pem' && format !== 'der') {
     throw new TypeError(`The key format "${format}" is not supported`);
@@ -444,12 +474,15 @@ function importKeyInput(input: any): { bytes: Uint8Array; format: string } {
         ? new Uint8Array(key.buffer, key.byteOffset || 0, key.byteLength)
         : undefined;
   if (!bytes) throw new TypeError('The key argument must be a string, Buffer, TypedArray, or key options object');
-  return { bytes, format };
+  return { bytes, format, type };
 }
 
 export function createPrivateKey(input: any): KeyObject {
-  const { bytes, format } = importKeyInput(input);
-  return makeAsymmetricKey(cryptoKeyImportBridge(bytes, format, 'private'));
+  const { bytes, format, type } = importKeyInput(input);
+  if (format === 'der' && type !== 'pkcs1' && type !== 'pkcs8') {
+    throw new TypeError('The "key.type" property must be "pkcs1" or "pkcs8" for a private DER key');
+  }
+  return makeAsymmetricKey(cryptoKeyImportBridge(bytes, format, 'private', type || ''));
 }
 
 export function createPublicKey(input: any): KeyObject {
@@ -461,9 +494,16 @@ export function createPublicKey(input: any): KeyObject {
     }
     return makeAsymmetricKey(cryptoKeyPublicBridge(handle));
   }
-  const { bytes, format } = importKeyInput(input);
-  const imported = cryptoKeyImportBridge(bytes, format, 'auto');
-  return makeAsymmetricKey(cryptoKeyPublicBridge(imported));
+  const { bytes, format, type } = importKeyInput(input);
+  if (format === 'der' && type !== 'pkcs1' && type !== 'spki') {
+    throw new TypeError('The "key.type" property must be "pkcs1" or "spki" for a public DER key');
+  }
+  const imported = cryptoKeyImportBridge(bytes, format, format === 'pem' ? 'auto' : 'public', type || '');
+  try {
+    return makeAsymmetricKey(cryptoKeyPublicBridge(imported));
+  } finally {
+    cryptoKeyFreeBridge(imported);
+  }
 }
 
 export class Hmac {

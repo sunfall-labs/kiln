@@ -3,19 +3,22 @@
 use core::slice;
 
 use kiln_key_core::{
-    ImportedKey, KeyEncoding, KeyFormat, KeyType, import_rsa, import_rsa_any, import_rsa_jwk_json,
+    ImportedKey, KeyEncoding, KeyFormat, KeyType, import_rsa, import_rsa_any, import_rsa_der,
+    import_rsa_jwk_json,
 };
 
-use super::realm::{active_crypto_key_insert, with_active_crypto_key};
+use super::realm::{active_crypto_key_insert, active_crypto_key_remove, with_active_crypto_key};
 
 const INVALID_ARGUMENT: i32 = -1;
 const INVALID_KEY: i32 = -2;
 const UNSUPPORTED: i32 = -3;
 const BUFFER_TOO_SMALL: i32 = -4;
+const WRONG_KEY_TYPE: i32 = -5;
 
 /// Import PEM, DER, or a JSON RSA JWK and return a realm-scoped opaque handle.
-/// `kind` is 1=private PEM, 2=public PEM, 3=private DER, 4=public DER, 5=RSA JWK JSON,
-/// 6=automatic PEM kind, 7=automatic DER kind.
+/// `kind` is 1=private PEM, 2=public PEM, 3=private PKCS#1 DER, 4=private PKCS#8 DER,
+/// 5=public PKCS#1 DER, 6=public SPKI DER, 7=public/automatic RSA JWK JSON, 8=private JWK JSON,
+/// 9=automatic PEM kind.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_crypto_key_import(
     data: *const u8,
@@ -36,16 +39,17 @@ pub unsafe extern "C" fn kiln_crypto_key_import(
     let parsed = match kind {
         1 => import_rsa(bytes, KeyEncoding::Pem, KeyType::Private),
         2 => import_rsa(bytes, KeyEncoding::Pem, KeyType::Public),
-        3 => import_rsa(bytes, KeyEncoding::Der, KeyType::Private),
-        4 => import_rsa(bytes, KeyEncoding::Der, KeyType::Public),
-        5 => import_rsa_jwk_json(bytes),
-        6 => import_rsa_any(bytes, KeyEncoding::Pem),
-        7 => import_rsa_any(bytes, KeyEncoding::Der),
+        3 => import_rsa_der(bytes, KeyType::Private, KeyFormat::Pkcs1),
+        4 => import_rsa_der(bytes, KeyType::Private, KeyFormat::Pkcs8),
+        5 => import_rsa_der(bytes, KeyType::Public, KeyFormat::Pkcs1),
+        6 => import_rsa_der(bytes, KeyType::Public, KeyFormat::Spki),
+        7 => import_rsa_jwk_json(bytes),
         8 => match import_rsa_jwk_json(bytes) {
             Ok(key @ ImportedKey::RsaPrivate(_)) => Ok(key),
-            Ok(ImportedKey::RsaPublic(_)) => Err(kiln_key_core::KeyError::UnsupportedKeyType),
+            Ok(ImportedKey::RsaPublic(_)) => Err(kiln_key_core::KeyError::WrongKeyType),
             Err(error) => Err(error),
         },
+        9 => import_rsa_any(bytes, KeyEncoding::Pem),
         _ => return UNSUPPORTED,
     };
     let key = match parsed {
@@ -56,7 +60,10 @@ pub unsafe extern "C" fn kiln_crypto_key_import(
         ) => {
             return UNSUPPORTED;
         }
-        Err(kiln_key_core::KeyError::InvalidKey) => return INVALID_KEY,
+        Err(kiln_key_core::KeyError::WrongKeyType) => return WRONG_KEY_TYPE,
+        Err(kiln_key_core::KeyError::InvalidKey) => {
+            return INVALID_KEY;
+        }
     };
     let Some(handle) = active_crypto_key_insert(key) else {
         return INVALID_ARGUMENT;
@@ -80,6 +87,14 @@ pub unsafe extern "C" fn kiln_crypto_key_public(handle: u64, out_handle: *mut u6
     };
     // SAFETY: the ABI contract requires a writable output pointer; it was checked above.
     unsafe { out_handle.write(public_handle) };
+    0
+}
+
+/// Release a realm-owned key handle after its JS `KeyObject` is finalized. Repeated release and
+/// delivery after realm disposal are harmless.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_crypto_key_free(handle: u64) -> i32 {
+    active_crypto_key_remove(handle);
     0
 }
 
@@ -132,11 +147,13 @@ pub unsafe extern "C" fn kiln_crypto_key_export(
         1 => KeyFormat::Pkcs1,
         2 => KeyFormat::Pkcs8,
         3 => KeyFormat::Spki,
+        4 => KeyFormat::Jwk,
         _ => return UNSUPPORTED,
     };
     let encoding = match encoding {
         0 => KeyEncoding::Der,
         1 => KeyEncoding::Pem,
+        2 => KeyEncoding::Json,
         _ => return UNSUPPORTED,
     };
     let Some(bytes) = with_active_crypto_key(handle, |key| key.export(format, encoding)) else {

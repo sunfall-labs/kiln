@@ -193,6 +193,11 @@ pub enum ExecutionError {
     TypeErrorMessage {
         message: String,
     },
+    /// Invalid external key material is an ordinary catchable `Error`, as Node's crypto API
+    /// reports parser failures; argument-shape errors remain `TypeErrorMessage`.
+    ErrorMessage {
+        message: String,
+    },
     /// A `RangeError` with wording of its own, for the same reason as the pair around it: an
     /// index outside a view is refused for several different reasons and the message is what
     /// tells them apart.
@@ -344,6 +349,13 @@ pub enum ExecutionError {
     /// program told `SyntaxError` would believe its own source was rejected, and take the branch
     /// it wrote for that instead of failing.
     EvalUnsupported {
+        message: String,
+    },
+    /// A valid Node crypto input requires an algorithm or encoding this runtime has not built.
+    ///
+    /// This is an uncatchable capability refusal rather than a JavaScript `TypeError`: reporting
+    /// a malformed key would let the program take the branch it wrote for bad caller input.
+    CryptoUnsupported {
         message: String,
     },
     /// A property assignment on something that is not an object.
@@ -522,6 +534,7 @@ impl fmt::Display for ExecutionError {
             }
             Self::SyntaxErrorMessage { message } => write!(formatter, "{message}"),
             Self::EvalUnsupported { message } => write!(formatter, "{message}"),
+            Self::CryptoUnsupported { message } => write!(formatter, "{message}"),
             Self::ProxyNotSerialisable => {
                 write!(formatter, "cannot serialise a proxy nested inside a value")
             }
@@ -583,6 +596,7 @@ impl fmt::Display for ExecutionError {
                 Ok(())
             }
             Self::TypeErrorMessage { message }
+            | Self::ErrorMessage { message }
             | Self::RangeErrorMessage { message }
             | Self::ReferenceErrorMessage { message } => {
                 write!(formatter, "{message}")
@@ -633,6 +647,7 @@ impl ExecutionError {
             Self::TemporalFailure { kind, message } => (*kind, message.clone()),
             Self::IntlFailure { kind, message } => (*kind, message.clone()),
             Self::TypeErrorMessage { message } => (ErrorKind::Type, message.clone()),
+            Self::ErrorMessage { message } => (ErrorKind::Error, message.clone()),
             Self::RangeErrorMessage { message } => (ErrorKind::Range, message.clone()),
             Self::ReferenceErrorMessage { message } => (ErrorKind::Reference, message.clone()),
             Self::BufferNotResizable => (

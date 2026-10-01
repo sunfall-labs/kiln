@@ -16,6 +16,11 @@ pub unsafe extern "C" fn kiln_crypto_key_public(_handle: u64, _out_handle: *mut 
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn kiln_crypto_key_free(_handle: u64) -> i32 {
+    -1
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_crypto_key_info(
     _handle: u64,
     _out_type: *mut u32,

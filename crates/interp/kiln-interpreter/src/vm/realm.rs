@@ -881,6 +881,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "__kilnCryptoKeyExport",
                 Value::Native(Native::NodeCryptoKeyExport, realm),
             );
+            globals.set_non_enumerable(
+                "__kilnCryptoKeyFree",
+                Value::Native(Native::NodeCryptoKeyFree, realm),
+            );
         }
         // Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
         // `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by

@@ -297,6 +297,9 @@ macro_rules! assert_root_provider_export {
     (crypto, kiln_crypto_key_export, crypto_key_export) => {
         const _: unsafe extern "C" fn(u64, u32, u32, *mut u8, usize, *mut usize) -> i32 = kiln_crypto_key_export;
     };
+    (crypto, kiln_crypto_key_free, crypto_key_free) => {
+        const _: extern "C" fn(u64) -> i32 = kiln_crypto_key_free;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -316,7 +319,8 @@ mod keys;
 #[path = "provider/key_stubs.rs"]
 mod keys;
 use keys::{
-    kiln_crypto_key_export, kiln_crypto_key_import, kiln_crypto_key_info, kiln_crypto_key_public,
+    kiln_crypto_key_export, kiln_crypto_key_free, kiln_crypto_key_import, kiln_crypto_key_info,
+    kiln_crypto_key_public,
 };
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is

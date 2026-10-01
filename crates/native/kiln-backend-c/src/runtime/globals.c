@@ -499,6 +499,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnCryptoKeyPublic", KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW},
                      {"__kilnCryptoKeyInfo", KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW},
                      {"__kilnCryptoKeyExport", KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW},
+                     {"__kilnCryptoKeyFree", KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW},
                      {"__kilnUint8ToHex", KILN_C99_METHOD_UINT8_TO_HEX_RAW},
                      {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW},
                      {"__kilnUrlParse", KILN_C99_METHOD_URL_PARSE_RAW},

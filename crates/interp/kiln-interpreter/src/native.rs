@@ -238,6 +238,7 @@ pub enum Native {
     NodeCryptoKeyPublic,
     NodeCryptoKeyInfo,
     NodeCryptoKeyExport,
+    NodeCryptoKeyFree,
     NodeHashUpdate,
     NodeHashDigest,
     NodeStringDecoder,

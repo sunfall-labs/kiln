@@ -47,3 +47,16 @@ try { privateKey.export(); } catch (error) { missingExportFormatRejected = error
 let publicKeyObjectRejected = false;
 try { createPublicKey(publicFromPrivate); } catch (error) { publicKeyObjectRejected = error instanceof TypeError; }
 console.log(missingExportFormatRejected, publicKeyObjectRejected);
+let pemMissingTypeRejected = false;
+let derMissingTypeRejected = false;
+try { privateKey.export({ format: 'pem' }); } catch (error) { pemMissingTypeRejected = error instanceof TypeError; }
+try { privateKey.export({ format: 'der' }); } catch (error) { derMissingTypeRejected = error instanceof TypeError; }
+const pkcs1Der = privateKey.export({ format: 'der', type: 'pkcs1' });
+let derDeclaredTypeMismatchRejected = false;
+try { createPrivateKey({ key: pkcs1Der, format: 'der', type: 'pkcs8' }); } catch { derDeclaredTypeMismatchRejected = true; }
+let invalidMaterialIsGenericError = false;
+try { createPrivateKey('test-secret'); } catch (error) {
+  invalidMaterialIsGenericError = error instanceof Error && !(error instanceof TypeError);
+}
+console.log(pemMissingTypeRejected, derMissingTypeRejected,
+  derDeclaredTypeMismatchRejected, invalidMaterialIsGenericError);

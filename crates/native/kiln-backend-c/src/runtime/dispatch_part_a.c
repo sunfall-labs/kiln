@@ -1498,8 +1498,9 @@ static int kiln_c99_crypto_key_import_raw(kiln_value *result, const kiln_value *
     uint32_t kind = 0;
     uint64_t handle = 0;
     int status;
-    if (argc < 3 || args == NULL || args[0].tag != KILN_VALUE_TYPED_ARRAY ||
-        args[1].tag != KILN_VALUE_STRING || args[2].tag != KILN_VALUE_STRING)
+    if (argc < 4 || args == NULL || args[0].tag != KILN_VALUE_TYPED_ARRAY ||
+        args[1].tag != KILN_VALUE_STRING || args[2].tag != KILN_VALUE_STRING ||
+        args[3].tag != KILN_VALUE_STRING)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Invalid internal crypto key import arguments");
     input = kiln_c99_typed_array_of(args[0]);
@@ -1507,15 +1508,26 @@ static int kiln_c99_crypto_key_import_raw(kiln_value *result, const kiln_value *
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Key material must be a byte-oriented typed array");
     if (kiln_c99_string_equals_ascii(args[1], "jwk", 3))
-        kind = kiln_c99_string_equals_ascii(args[2], "private", 7) ? 8 : 5;
+        kind = kiln_c99_string_equals_ascii(args[2], "private", 7) ? 8 : 7;
     else if (kiln_c99_string_equals_ascii(args[1], "pem", 3)) {
         if (kiln_c99_string_equals_ascii(args[2], "private", 7)) kind = 1;
         else if (kiln_c99_string_equals_ascii(args[2], "public", 6)) kind = 2;
-        else kind = 6;
+        else kind = 9;
     } else if (kiln_c99_string_equals_ascii(args[1], "der", 3)) {
-        if (kiln_c99_string_equals_ascii(args[2], "private", 7)) kind = 3;
-        else if (kiln_c99_string_equals_ascii(args[2], "public", 6)) kind = 4;
-        else kind = 7;
+        if (kiln_c99_string_equals_ascii(args[2], "private", 7)) {
+            if (kiln_c99_string_equals_ascii(args[3], "pkcs1", 5)) kind = 3;
+            else if (kiln_c99_string_equals_ascii(args[3], "pkcs8", 5)) kind = 4;
+            else return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                             "The key type is invalid for a private DER key");
+        } else if (kiln_c99_string_equals_ascii(args[2], "public", 6)) {
+            if (kiln_c99_string_equals_ascii(args[3], "pkcs1", 5)) kind = 5;
+            else if (kiln_c99_string_equals_ascii(args[3], "spki", 4)) kind = 6;
+            else return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                             "The key type is invalid for a public DER key");
+        } else {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Invalid internal crypto key import arguments");
+        }
     } else {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Unsupported asymmetric key encoding");
@@ -1525,8 +1537,13 @@ static int kiln_c99_crypto_key_import_raw(kiln_value *result, const kiln_value *
                                         : input->buffer->bytes + input->byte_offset,
                                     input->length, kind, &handle);
     if (status == -3)
+        KILN_C99_REFUSE("a valid asymmetric algorithm or key encoding this runtime has not implemented");
+    if (status == -5)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Unsupported asymmetric key type or format");
+                                    "Invalid RSA key type");
+    if (status == -2)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "Invalid RSA key material");
     if (status != 0)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Invalid RSA key material");
@@ -1553,6 +1570,24 @@ static int kiln_c99_crypto_key_public_raw(kiln_value *result, const kiln_value *
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "The key handle is invalid for this realm");
     *result = kiln_c99_number((double)public_handle);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_crypto_key_free_raw(kiln_value *result, const kiln_value *args,
+                                         size_t argc, kiln_value *thrown) {
+    union { uint64_t bits; double number; } boxed;
+    if (argc < 1 || args == NULL || args[0].tag != KILN_VALUE_NUMBER)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "The key handle is invalid");
+    boxed.bits = args[0].bits;
+    if (boxed.number < 1.0 || boxed.number > 9007199254740991.0 ||
+        floor(boxed.number) != boxed.number)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "The key handle is invalid");
+    /* Finalizer delivery can race realm teardown; the provider makes this release idempotent and
+     * a missing active realm simply means its handle table was already dropped. */
+    (void)kiln_crypto_key_free((uint64_t)boxed.number);
+    *result = kiln_c99_undefined();
     return KILN_C99_OK;
 }
 
@@ -1620,13 +1655,17 @@ static int kiln_c99_crypto_key_export_raw(kiln_value *result, const kiln_value *
     if (kiln_c99_string_equals_ascii(args[1], "pkcs1", 5)) format = 1;
     else if (kiln_c99_string_equals_ascii(args[1], "pkcs8", 5)) format = 2;
     else if (kiln_c99_string_equals_ascii(args[1], "spki", 4)) format = 3;
+    else if (kiln_c99_string_equals_ascii(args[1], "jwk", 3)) format = 4;
     else return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                      "Unsupported asymmetric key format");
-    if (kiln_c99_string_equals_ascii(args[2], "pem", 3)) encoding = 1;
+    if (format == 4) encoding = 2;
+    else if (kiln_c99_string_equals_ascii(args[2], "pem", 3)) encoding = 1;
     else if (kiln_c99_string_equals_ascii(args[2], "der", 3)) encoding = 0;
     else return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                      "Unsupported asymmetric key encoding");
     status = kiln_crypto_key_export(handle, format, encoding, NULL, 0, &required);
+    if (status == -3)
+        KILN_C99_REFUSE("a valid asymmetric key export encoding this runtime has not implemented");
     if (status != 0 || required > SIZE_MAX)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "The requested key format is unavailable for this key");
@@ -1676,6 +1715,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_crypto_key_info_raw(host, result, args, argc, thrown);
     if (code == KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW)
         return kiln_c99_crypto_key_export_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW)
+        return kiln_c99_crypto_key_free_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_NUMBER_VALUE_OF || code == KILN_C99_METHOD_NUMBER_TO_STRING ||
         code == KILN_C99_METHOD_NUMBER_TO_FIXED ||
         code == KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL ||

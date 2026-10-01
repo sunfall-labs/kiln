@@ -243,6 +243,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeCryptoKeyPublic => Some("__kilnCryptoKeyPublic"),
         Native::NodeCryptoKeyInfo => Some("__kilnCryptoKeyInfo"),
         Native::NodeCryptoKeyExport => Some("__kilnCryptoKeyExport"),
+        Native::NodeCryptoKeyFree => Some("__kilnCryptoKeyFree"),
         Native::NodeHashUpdate => Some("update"),
         Native::NodeHashDigest => Some("digest"),
         _ => None,
@@ -491,6 +492,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeCryptoKeyPublic => node_crypto_key_public(arguments),
             Native::NodeCryptoKeyInfo => node_crypto_key_info(arguments),
             Native::NodeCryptoKeyExport => node_crypto_key_export(arguments),
+            Native::NodeCryptoKeyFree => node_crypto_key_free(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();
@@ -567,9 +569,32 @@ fn node_crypto_key_import(arguments: &[Value]) -> Result<Value, ExecutionError> 
         Some("public") => Some(kiln_key_core::KeyType::Public),
         _ => None,
     };
-    let key = match expected {
-        Some(kind) => kiln_key_core::import_rsa(&bytes, encoding, kind),
-        None => kiln_key_core::import_rsa_any(&bytes, encoding),
+    let key = match encoding {
+        kiln_key_core::KeyEncoding::Der => {
+            let kind = expected.ok_or_else(|| {
+                crypto_key_type_error("A DER key import requires an explicit key type")
+            })?;
+            let format = match arguments.get(3).map(Value::to_display_string).as_deref() {
+                Some("pkcs1") => kiln_key_core::KeyFormat::Pkcs1,
+                Some("pkcs8") => kiln_key_core::KeyFormat::Pkcs8,
+                Some("spki") => kiln_key_core::KeyFormat::Spki,
+                _ => {
+                    return Err(crypto_key_type_error(
+                        "A DER key import requires a supported key type",
+                    ));
+                }
+            };
+            kiln_key_core::import_rsa_der(&bytes, kind, format)
+        }
+        kiln_key_core::KeyEncoding::Pem => match expected {
+            Some(kind) => kiln_key_core::import_rsa(&bytes, encoding, kind),
+            None => kiln_key_core::import_rsa_any(&bytes, encoding),
+        },
+        kiln_key_core::KeyEncoding::Json => {
+            return Err(ExecutionError::CryptoUnsupported {
+                message: "JSON key material import is not supported through this bridge".into(),
+            });
+        }
     }
     .map_err(key_import_error)?;
     Ok(crypto_key_value(key))
@@ -602,6 +627,14 @@ fn node_crypto_key_info(arguments: &[Value]) -> Result<Value, ExecutionError> {
 
 fn node_crypto_key_export(arguments: &[Value]) -> Result<Value, ExecutionError> {
     let key = crypto_key_argument(arguments.first())?;
+    if arguments
+        .get(1)
+        .is_some_and(|format| format.to_display_string() == "jwk")
+    {
+        return Err(ExecutionError::CryptoUnsupported {
+            message: "RSA JWK export is not implemented by this runtime".into(),
+        });
+    }
     let format = match arguments.get(1).map(Value::to_display_string).as_deref() {
         Some("pkcs1") => kiln_key_core::KeyFormat::Pkcs1,
         Some("pkcs8") => kiln_key_core::KeyFormat::Pkcs8,
@@ -611,8 +644,16 @@ fn node_crypto_key_export(arguments: &[Value]) -> Result<Value, ExecutionError> 
         Some("pem") => kiln_key_core::KeyEncoding::Pem,
         _ => kiln_key_core::KeyEncoding::Der,
     };
-    let bytes = key.export(format, encoding).map_err(key_import_error)?;
+    let bytes = key.export(format, encoding).map_err(key_export_error)?;
     Ok(node_bytes_value(bytes))
+}
+
+fn node_crypto_key_free(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    // The interpreter stores the validated key directly in the KeyObject's Rc-backed payload.
+    // FinalizationRegistry holdings keep that opaque payload alive until cleanup, then releasing
+    // the callback argument drops it without a process- or realm-global handle table.
+    let _key = crypto_key_argument(arguments.first())?;
+    Ok(Value::Undefined)
 }
 
 fn crypto_key_value(key: kiln_key_core::ImportedKey) -> Value {
@@ -640,10 +681,27 @@ fn crypto_key_argument(
 }
 
 fn key_import_error(error: kiln_key_core::KeyError) -> ExecutionError {
+    match error {
+        kiln_key_core::KeyError::InvalidKey => ExecutionError::ErrorMessage {
+            message: "Invalid RSA key material".into(),
+        },
+        kiln_key_core::KeyError::WrongKeyType => crypto_key_type_error("Invalid RSA key type"),
+        kiln_key_core::KeyError::UnsupportedKeyType => ExecutionError::CryptoUnsupported {
+            message: "Unsupported asymmetric key type".into(),
+        },
+        kiln_key_core::KeyError::UnsupportedEncoding => ExecutionError::CryptoUnsupported {
+            message: "Unsupported asymmetric key encoding".into(),
+        },
+    }
+}
+
+fn key_export_error(error: kiln_key_core::KeyError) -> ExecutionError {
     let message = match error {
-        kiln_key_core::KeyError::InvalidKey => "Invalid RSA key material",
+        kiln_key_core::KeyError::InvalidKey | kiln_key_core::KeyError::WrongKeyType => {
+            "Invalid RSA key material"
+        }
         kiln_key_core::KeyError::UnsupportedKeyType => "Unsupported asymmetric key type",
-        kiln_key_core::KeyError::UnsupportedEncoding => "Unsupported asymmetric key encoding",
+        kiln_key_core::KeyError::UnsupportedEncoding => "Unsupported asymmetric key format",
     };
     crypto_key_type_error(message)
 }

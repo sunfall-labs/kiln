@@ -3545,6 +3545,7 @@ int kiln_crypto_key_public(uint64_t handle, uint64_t *out_handle);
 int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits);
 int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
                            uint8_t *output, size_t capacity, size_t *out_length);
+int kiln_crypto_key_free(uint64_t handle);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions
