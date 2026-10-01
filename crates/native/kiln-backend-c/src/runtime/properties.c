@@ -238,6 +238,13 @@ static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string 
     return kiln_c99_property_read_own(kiln_c99_object_of(owner), key, ikey, out);
 }
 
+static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
+                              const kiln_string *ikey) {
+    kiln_property property;
+    return store.tag == KILN_VALUE_OBJECT &&
+           kiln_c99_property_read_own_value(store, key, ikey, &property);
+}
+
 static int kiln_c99_function_owns_prototype(const kiln_closure *closure) {
     return !closure->arrow && (!closure->asynchronous || closure->async_generator) &&
            (!closure->is_method || closure->generator);

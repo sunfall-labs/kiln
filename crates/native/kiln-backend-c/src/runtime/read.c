@@ -52,12 +52,6 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
 }
 
-static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
-                              const kiln_string *ikey) {
-    kiln_property property;
-    return store.tag == KILN_VALUE_OBJECT &&
-           kiln_c99_property_read_own_value(store, key, ikey, &property);
-}
 
 /* Resolve a constructor's species through its actual prototype chain. Accessors receive
  * the constructor that started the read, including an inherited intrinsic accessor. */
