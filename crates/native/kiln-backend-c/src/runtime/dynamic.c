@@ -2573,6 +2573,66 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                                  arrow_source, receiver, 0, depth,
                                                  out, thrown);
         }
+        /* Parentheses preserve an identifier Reference. Recognize nested grouping around one
+         * identifier before value-only expression evaluation so a following call keeps the
+         * WithBaseObject, without evaluating a getter or identifier twice. Comma and other
+         * operators deliberately fall through and produce ordinary values. */
+        kiln_dyn_lexer look;
+        memset(&look, 0, sizeof look);
+        look.src = lex->src;
+        look.len = lex->len;
+        look.pos = lex->pos;
+        look.strict = lex->strict;
+        look.dynamic_function_body = lex->dynamic_function_body;
+        look.prev_kind = lex->prev_kind;
+        size_t group_count = 1;
+        kiln_dyn_lexer_next(&look);
+        while (look.curr.kind == KILN_DYN_LPAREN) {
+            group_count++;
+            kiln_dyn_lexer_next(&look);
+        }
+        int grouped_identifier = look.curr.kind == KILN_DYN_IDENT;
+        if (grouped_identifier) {
+            kiln_dyn_lexer_next(&look);
+            for (size_t index = 0; index < group_count; ++index) {
+                if (look.curr.kind != KILN_DYN_RPAREN) {
+                    grouped_identifier = 0;
+                    break;
+                }
+                kiln_dyn_lexer_next(&look);
+            }
+        }
+        kiln_dyn_token_free(&look.curr);
+        if (grouped_identifier) {
+            for (size_t index = 0; index < group_count; ++index)
+                kiln_dyn_lexer_next(lex);
+            const char *name = lex->curr.start;
+            size_t name_len = lex->curr.len;
+            int found = 0;
+            int status = kiln_dyn_scope_get(host, scope, name, name_len, depth, out, &found,
+                                            reference_base, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!found) {
+                kiln_value globals = kiln_c99_undefined();
+                status = kiln_c99_global_object(&globals);
+                if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&globals);
+                int present = 0;
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_has_property(host, globals, name, name_len, &present,
+                                                   depth, thrown);
+                    if (status == KILN_C99_OK && present)
+                        status = kiln_c99_get(host, globals, name, name_len, out, depth,
+                                              thrown);
+                }
+                if (status != KILN_C99_OK) return status;
+                if (!present) return kiln_dyn_throw_unresolvable_reference(thrown, name,
+                                                                            name_len);
+            }
+            kiln_c99_gc_keep_alive(out);
+            for (size_t index = 0; index < group_count + 1; ++index)
+                kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
+        }
         kiln_dyn_lexer_next(lex);
         int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, out, thrown);
         if (status != KILN_C99_OK) return status;
@@ -3027,6 +3087,7 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                               thrown)
                          : kiln_c99_call(host, &res, *out, current_receiver, call_args,
                                          call_argc, depth, thrown);
+            kiln_c99_gc_keep_alive(&current_receiver);
             if (status != KILN_C99_OK) return status;
             constructing = 0;
             current_receiver = kiln_c99_undefined();
