@@ -1130,22 +1130,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // an Event used to turn its four enumerable symbol slots into strings.
                     // This operation path also runs proxy traps and later getters after any
                     // changes an earlier getter made to the source.
-                    for key in self.own_keys_reflected(&source, current)? {
-                        let Some(descriptor) = self.own_descriptor_value(&source, &key, current)?
-                        else {
-                            continue;
-                        };
-                        if !self
-                            .read_property(&descriptor, "enumerable", current)?
-                            .is_truthy()
-                        {
-                            continue;
+                    // Proxy traps and source accessors are user code. Run the whole abstract
+                    // operation under the instruction loop's catchable boundary: letting a
+                    // getter's `ThrownAcrossNative` escape this arm turns an ordinary JS throw
+                    // into a host failure instead of allowing an enclosing `try` to catch it.
+                    let copied = (|| {
+                        for key in self.own_keys_reflected(&source, current)? {
+                            let Some(descriptor) =
+                                self.own_descriptor_value(&source, &key, current)?
+                            else {
+                                continue;
+                            };
+                            if !self
+                                .read_property(&descriptor, "enumerable", current)?
+                                .is_truthy()
+                            {
+                                continue;
+                            }
+                            let value = self.read_computed(&source, &key, current)?;
+                            let units = key.property_key_units_checked()?;
+                            object
+                                .borrow_mut()
+                                .set_key(PropertyKeyRef::from_value(&key, &units), value);
                         }
-                        let value = self.read_computed(&source, &key, current)?;
-                        let units = key.property_key_units_checked()?;
-                        object
-                            .borrow_mut()
-                            .set_key(PropertyKeyRef::from_value(&key, &units), value);
+                        Ok::<(), ExecutionError>(())
+                    })();
+                    if self.catchable(copied, current)?.is_none() {
+                        continue;
                     }
                     self.stack.push(target);
                 }
