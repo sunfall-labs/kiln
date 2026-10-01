@@ -4911,8 +4911,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                         let socket_value = match &target {
                             PendingConnect::Net(state) => {
-                                state.borrow_mut().connecting = false;
-                                state.borrow_mut().connect_request = None;
+                                {
+                                    let mut state = state.borrow_mut();
+                                    state.connecting = false;
+                                    state.destroyed = true;
+                                    state.connect_request = None;
+                                }
                                 state
                                     .borrow()
                                     .object
