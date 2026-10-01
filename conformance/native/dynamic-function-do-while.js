@@ -51,6 +51,11 @@ if (stackedLabels() !== 3) {
   throw new Error("stacked labels on do-while remain iteration targets");
 }
 
+const postfixCondition = Function("var index = 2; do { } while (index-- > 0); return index;");
+if (postfixCondition() !== -1) {
+  throw new Error("postfix decrement remains part of a do-while relational condition");
+}
+
 const nestedContinue = Function(`
   var count = 0, innerTests = 0, outerTests = 0;
   outer: do {

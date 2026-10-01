@@ -439,6 +439,7 @@ typedef enum {
     KILN_DYN_KW_THIS,
     KILN_DYN_KW_ARGUMENTS,
     KILN_DYN_KW_TYPEOF,
+    KILN_DYN_KW_DELETE,
     KILN_DYN_KW_FUNCTION,
     KILN_DYN_KW_NEW,
     KILN_DYN_KW_FOR,
@@ -1239,6 +1240,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                             lex->prev_kind == KILN_DYN_KW_CASE ||
                             lex->prev_kind == KILN_DYN_KW_IN ||
                             lex->prev_kind == KILN_DYN_KW_INSTANCEOF ||
+                            lex->prev_kind == KILN_DYN_KW_DELETE ||
                             lex->prev_kind == KILN_DYN_KW_TYPEOF);
         if (can_be_regex) {
             size_t reg_start = lex->pos;
@@ -1357,6 +1359,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         KILN_CHECK_KW("this", KILN_DYN_KW_THIS);
         KILN_CHECK_KW("arguments", KILN_DYN_KW_ARGUMENTS);
         KILN_CHECK_KW("typeof", KILN_DYN_KW_TYPEOF);
+        KILN_CHECK_KW("delete", KILN_DYN_KW_DELETE);
         KILN_CHECK_KW("function", KILN_DYN_KW_FUNCTION);
         KILN_CHECK_KW("new", KILN_DYN_KW_NEW);
         KILN_CHECK_KW("for", KILN_DYN_KW_FOR);
@@ -2377,6 +2380,9 @@ static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int pre
 static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_dyn_scope *scope, kiln_value receiver, const kiln_value *args, size_t argc,
     int depth, kiln_value *out, kiln_value *thrown, kiln_dyn_token_kind prefix_update);
+static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
+    kiln_dyn_scope *scope, kiln_value receiver, const kiln_value *args, size_t argc,
+    int depth, kiln_value *out, kiln_value *thrown);
 
 typedef enum {
     KILN_DYN_UPDATE_BINDING,
@@ -2542,6 +2548,31 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected member reference after update operator");
     }
+    if (kiln_dyn_member_assignment_ahead(lex, 2))
+        return kiln_dyn_eval_member_assignment(host, lex, scope, receiver, args, argc,
+                                               depth, out, thrown, KILN_DYN_EOF);
+    if (lex->curr.kind == KILN_DYN_IDENT) {
+        const char *name = lex->curr.start;
+        size_t name_len = lex->curr.len;
+        kiln_dyn_lexer look;
+        memset(&look, 0, sizeof look);
+        look.src = lex->src;
+        look.len = lex->len;
+        look.pos = (size_t)(lex->curr.start - lex->src) + lex->curr.len;
+        look.dynamic_function_body = lex->dynamic_function_body;
+        look.strict = lex->strict;
+        look.prev_kind = lex->curr.kind;
+        kiln_dyn_lexer_next(&look);
+        int decrement = look.curr.kind == KILN_DYN_MINUS_MINUS;
+        int update = decrement || look.curr.kind == KILN_DYN_PLUS_PLUS;
+        kiln_dyn_token_free(&look.curr);
+        if (update) {
+            kiln_dyn_lexer_next(lex);
+            kiln_dyn_lexer_next(lex);
+            return kiln_dyn_update_identifier(host, scope, name, name_len, !decrement, 0,
+                                              depth, out, thrown);
+        }
+    }
     if (lex->curr.kind == KILN_DYN_NOT) {
         kiln_dyn_lexer_next(lex);
         int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
@@ -2569,6 +2600,92 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
         if (status != KILN_C99_OK) return status;
         *out = kiln_c99_unary(5, *out);
         return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_DELETE) {
+        kiln_dyn_lexer_next(lex);
+        if (kiln_dyn_member_assignment_ahead(lex, 4)) {
+            if (kiln_dyn_member_assignment_ahead(lex, 3))
+                return kiln_dyn_eval_delete_member(host, lex, scope, receiver, args, argc,
+                                                   depth, out, thrown);
+            int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc,
+                                             depth, out, thrown);
+            if (status == KILN_C99_OK) *out = kiln_c99_boolean(1);
+            return status;
+        }
+        if (lex->curr.kind == KILN_DYN_IDENT) {
+            kiln_dyn_lexer look;
+            memset(&look, 0, sizeof look);
+            look.src = lex->src;
+            look.len = lex->len;
+            look.pos = (size_t)(lex->curr.start - lex->src) + lex->curr.len;
+            look.dynamic_function_body = lex->dynamic_function_body;
+            look.strict = lex->strict;
+            look.prev_kind = lex->curr.kind;
+            kiln_dyn_lexer_next(&look);
+            int call_expression = look.curr.kind == KILN_DYN_LPAREN;
+            kiln_dyn_token_free(&look.curr);
+            if (call_expression) {
+                int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc,
+                                                 depth, out, thrown);
+                if (status == KILN_C99_OK) *out = kiln_c99_boolean(1);
+                return status;
+            }
+            if (scope->strict)
+                return kiln_dyn_throw_parse_error(lex, thrown,
+                                                  "Delete of an unqualified identifier");
+            const char *name = lex->curr.start;
+            size_t name_len = lex->curr.len;
+            for (kiln_dyn_scope *environment = scope; environment != NULL;
+                 environment = environment->parent) {
+                for (size_t i = 0; i < environment->count; ++i) {
+                    if (environment->bindings[i].name_len == name_len &&
+                        memcmp(environment->bindings[i].name, name, name_len) == 0) {
+                        *out = kiln_c99_boolean(0);
+                        kiln_dyn_lexer_next(lex);
+                        return KILN_C99_OK;
+                    }
+                }
+                if (environment->has_with_object) {
+                    int present = 0;
+                    int status = kiln_c99_has_property(host, environment->with_object,
+                        name, name_len, &present, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (present) {
+                        kiln_c99_gc_keep_alive(
+                            kiln_c99_gc_value_pointer(environment->with_object));
+                        kiln_value key = kiln_c99_copy_text(name, name_len);
+                        if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                        int deleted = 0;
+                        status = kiln_c99_delete_computed_or_throw(host,
+                            environment->with_object, key, 0, &deleted, depth, thrown);
+                        kiln_c99_gc_keep_alive(
+                            kiln_c99_gc_value_pointer(environment->with_object));
+                        kiln_c99_gc_keep_alive(&key);
+                        if (status != KILN_C99_OK) return status;
+                        *out = kiln_c99_boolean(deleted);
+                        kiln_dyn_lexer_next(lex);
+                        return KILN_C99_OK;
+                    }
+                }
+            }
+            kiln_value global = kiln_c99_undefined();
+            int status = kiln_c99_global_object(&global);
+            if (status == KILN_C99_OK) {
+                int deleted = 0;
+                status = kiln_c99_delete(host, global, name, name_len, &deleted, depth, thrown);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(global));
+                if (status != KILN_C99_OK) return status;
+                *out = kiln_c99_boolean(deleted);
+            } else {
+                *out = kiln_c99_boolean(1);
+            }
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
+        }
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth,
+                                         out, thrown);
+        if (status == KILN_C99_OK) *out = kiln_c99_boolean(1);
+        return status;
     }
     if (lex->curr.kind == KILN_DYN_KW_TYPEOF) {
         kiln_dyn_lexer_next(lex);
@@ -2861,7 +2978,7 @@ static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
 /* Recognize a member reference without evaluating it. A speculative read would run getters or
  * computed-key effects twice when the expression is not an assignment. The real reference walk
  * below runs only after this token-only lookahead proves that an assignment/update follows. */
-static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int prefix) {
+static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int mode) {
     kiln_dyn_lexer scan = *input;
     int member = 0;
     if (scan.curr.kind != KILN_DYN_IDENT && scan.curr.kind != KILN_DYN_KW_THIS &&
@@ -2893,13 +3010,16 @@ static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int pre
     }
     kiln_dyn_token_kind kind = scan.curr.kind;
     kiln_dyn_token_free(&scan.curr);
-    return member && ((prefix && kind != KILN_DYN_LPAREN) || kind == KILN_DYN_ASSIGN || kind == KILN_DYN_PLUS_ASSIGN ||
+    if (mode == 2) return member &&
+        (kind == KILN_DYN_PLUS_PLUS || kind == KILN_DYN_MINUS_MINUS);
+    if (mode == 3) return member && kind != KILN_DYN_LPAREN;
+    if (mode == 4) return member;
+    return member && ((mode == 1 && kind != KILN_DYN_LPAREN) || kind == KILN_DYN_ASSIGN || kind == KILN_DYN_PLUS_ASSIGN ||
         kind == KILN_DYN_MINUS_ASSIGN || kind == KILN_DYN_STAR_ASSIGN ||
         kind == KILN_DYN_SLASH_ASSIGN || kind == KILN_DYN_PERCENT_ASSIGN ||
         kind == KILN_DYN_LSHIFT_ASSIGN || kind == KILN_DYN_RSHIFT_ASSIGN ||
         kind == KILN_DYN_URSHIFT_ASSIGN || kind == KILN_DYN_BIT_AND_ASSIGN ||
-        kind == KILN_DYN_BIT_OR_ASSIGN || kind == KILN_DYN_BIT_XOR_ASSIGN ||
-        kind == KILN_DYN_PLUS_PLUS || kind == KILN_DYN_MINUS_MINUS);
+        kind == KILN_DYN_BIT_OR_ASSIGN || kind == KILN_DYN_BIT_XOR_ASSIGN);
 }
 
 static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
@@ -2991,6 +3111,57 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
     return status;
 }
 
+static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
+                                       kiln_dyn_scope *scope, kiln_value receiver,
+                                       const kiln_value *args, size_t argc, int depth,
+                                       kiln_value *out, kiln_value *thrown) {
+    kiln_value target = kiln_c99_undefined(), key = kiln_c99_undefined();
+    int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth,
+                                       &target, thrown);
+    if (status != KILN_C99_OK) return status;
+    while (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
+        int computed = lex->curr.kind == KILN_DYN_LBRACKET;
+        kiln_dyn_lexer_next(lex);
+        if (computed) {
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                        &key, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            if (status != KILN_C99_OK) return status;
+            if (lex->curr.kind != KILN_DYN_RBRACKET)
+                return kiln_dyn_throw_parse_error(lex, thrown,
+                                                  "Expected ']' in delete reference");
+            kiln_dyn_lexer_next(lex);
+            kiln_value property_key;
+            status = kiln_c99_reduce_key(host, target, key, &property_key, depth, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            if (status != KILN_C99_OK) return status;
+            key = property_key;
+        } else {
+            key = kiln_c99_copy_text(lex->curr.start, lex->curr.len);
+            kiln_c99_gc_keep_alive(&target);
+            if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            kiln_dyn_lexer_next(lex);
+        }
+        if (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
+            kiln_value next;
+            status = kiln_c99_get_computed(host, target, key, &next, depth, thrown);
+            kiln_c99_gc_keep_alive(&target);
+            kiln_c99_gc_keep_alive(&key);
+            if (status != KILN_C99_OK) return status;
+            target = next;
+            continue;
+        }
+        int deleted = 0;
+        status = kiln_c99_delete_computed_or_throw(host, target, key, scope->strict,
+                                                   &deleted, depth, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        if (status == KILN_C99_OK) *out = kiln_c99_boolean(deleted);
+        return status;
+    }
+    return kiln_dyn_throw_parse_error(lex, thrown, "Expected property reference after delete");
+}
+
 static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                     kiln_value receiver, const kiln_value *args, size_t argc,
                                     int depth, kiln_value *out, kiln_value *thrown) {
@@ -3004,15 +3175,7 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
         kiln_dyn_token saved_tok = lex->curr;
 
         kiln_dyn_lexer_next(lex);
-        if (lex->curr.kind == KILN_DYN_PLUS_PLUS) {
-            kiln_dyn_lexer_next(lex);
-            return kiln_dyn_update_identifier(host, scope, name, name_len, 1, 0,
-                                              depth, out, thrown);
-        } else if (lex->curr.kind == KILN_DYN_MINUS_MINUS) {
-            kiln_dyn_lexer_next(lex);
-            return kiln_dyn_update_identifier(host, scope, name, name_len, 0, 0,
-                                              depth, out, thrown);
-        } else if (lex->curr.kind == KILN_DYN_ASSIGN ||
+        if (lex->curr.kind == KILN_DYN_ASSIGN ||
                    lex->curr.kind == KILN_DYN_PLUS_ASSIGN ||
                    lex->curr.kind == KILN_DYN_MINUS_ASSIGN ||
                    lex->curr.kind == KILN_DYN_STAR_ASSIGN ||
@@ -4437,10 +4600,11 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         kiln_dyn_token_free(&block.curr);
         int did_throw = status == KILN_C99_THROWN;
         kiln_value exception = did_throw && thrown != NULL ? *thrown : kiln_c99_undefined();
-        if (did_throw) {
-            status = KILN_C99_OK;
-            if (thrown != NULL) *thrown = kiln_c99_undefined();
-        }
+        int completion_status = status;
+        int completion_return = *returned;
+        kiln_value completion_exception = exception;
+        kiln_c99_gc_keep_alive(&completion_exception);
+        if (did_throw && thrown != NULL) *thrown = kiln_c99_undefined();
         int has_catch = lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 5 &&
                         memcmp(lex->curr.start, "catch", 5) == 0;
         if (has_catch) {
@@ -4476,6 +4640,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                     kiln_dyn_scope_destroy(&catch_scope);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
+                int catch_returned = 0;
                 memset(&block, 0, sizeof(block));
                 block.src = catch_body;
                 block.len = catch_len;
@@ -4483,17 +4648,57 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 kiln_dyn_lexer_next(&block);
                 while (block.curr.kind != KILN_DYN_EOF) {
                     status = kiln_dyn_eval_stmt(host, &block, &catch_scope, receiver, args,
-                                                argc, depth, result, returned, thrown);
-                    if (status != KILN_C99_OK || *returned) break;
+                                                argc, depth, result, &catch_returned, thrown);
+                    if (status != KILN_C99_OK || catch_returned) break;
                 }
                 kiln_dyn_token_free(&block.curr);
                 kiln_dyn_scope_destroy(&catch_scope);
+                completion_status = status;
+                completion_return = catch_returned;
+                completion_exception = status == KILN_C99_THROWN && thrown != NULL
+                                           ? *thrown : kiln_c99_undefined();
+                kiln_c99_gc_keep_alive(&completion_exception);
             }
-        } else if (did_throw) {
-            if (thrown != NULL) *thrown = exception;
-            return KILN_C99_THROWN;
         }
-        return status;
+        int has_finally = lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 7 &&
+                          memcmp(lex->curr.start, "finally", 7) == 0;
+        if (has_finally) {
+            const char *finally_body;
+            size_t finally_len;
+            kiln_dyn_lexer_next(lex);
+            if (!kiln_dyn_capture_block(lex, &finally_body, &finally_len))
+                return kiln_dyn_throw_parse_error(lex, thrown,
+                                                  "Expected finally block");
+            kiln_dyn_scope finally_scope;
+            kiln_dyn_scope_init(&finally_scope, scope);
+            int finally_returned = 0;
+            memset(&block, 0, sizeof(block));
+            block.src = finally_body;
+            block.len = finally_len;
+            block.strict = finally_scope.strict;
+            kiln_dyn_lexer_next(&block);
+            int finally_status = KILN_C99_OK;
+            while (block.curr.kind != KILN_DYN_EOF) {
+                finally_status = kiln_dyn_eval_stmt(host, &block, &finally_scope, receiver,
+                    args, argc, depth, result, &finally_returned, thrown);
+                if (finally_status != KILN_C99_OK || finally_returned) break;
+            }
+            kiln_dyn_token_free(&block.curr);
+            kiln_dyn_scope_destroy(&finally_scope);
+            if (finally_status != KILN_C99_OK || finally_returned) {
+                completion_status = finally_status;
+                completion_return = finally_returned;
+                completion_exception = finally_status == KILN_C99_THROWN && thrown != NULL
+                                           ? *thrown : kiln_c99_undefined();
+                kiln_c99_gc_keep_alive(&completion_exception);
+            }
+        } else if (completion_status == KILN_C99_THROWN && thrown != NULL) {
+            *thrown = completion_exception;
+        }
+        *returned = completion_return;
+        if (completion_status == KILN_C99_THROWN && thrown != NULL)
+            *thrown = completion_exception;
+        return completion_status;
     }
     if (lex->curr.kind == KILN_DYN_KW_THROW) {
         kiln_value exception;
