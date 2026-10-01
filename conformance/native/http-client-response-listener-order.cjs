@@ -20,10 +20,10 @@ server.listen(0, "127.0.0.1", () => {
   request.on("response", (response) => {
     assert(response === callbackResponse, "callback and event share IncomingMessage");
     order.push("event");
+    assert(response.socket === request.socket, "response exposes the assigned socket");
     response.resume();
     response.on("end", () => {
       assert(order.join(",") === "callback,event", "callback precedes later response listeners");
-      assert(response.socket === request.socket, "response exposes the assigned socket");
       let removedCallbackRan = false;
       function removedCallback() { removedCallbackRan = true; }
       const second = http.get(
