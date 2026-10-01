@@ -1697,6 +1697,109 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_dyn_scope *scope, kiln_value receiver, const kiln_value *args, size_t argc,
     int depth, kiln_value *out, kiln_value *thrown, kiln_dyn_token_kind prefix_update);
 
+typedef enum {
+    KILN_DYN_UPDATE_BINDING,
+    KILN_DYN_UPDATE_WITH,
+    KILN_DYN_UPDATE_GLOBAL,
+} kiln_dyn_update_reference;
+
+/* Identifier updates share one reference path for prefix and postfix forms. In particular,
+ * resolve the reference before ToNumeric so missing names throw and `with`/global writes target
+ * the same binding whose value was read. */
+static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
+                                      const char *name, size_t name_len, int increment,
+                                      int prefix, int depth, kiln_value *out,
+                                      kiln_value *thrown) {
+    kiln_value current = kiln_c99_undefined();
+    kiln_value global_target = kiln_c99_undefined();
+    kiln_dyn_update_reference reference = KILN_DYN_UPDATE_BINDING;
+    int found = 0;
+    int status = kiln_dyn_scope_get(scope, name, name_len, &current, &found, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (!found) {
+        status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth, &current,
+                                         &found, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (found) reference = KILN_DYN_UPDATE_WITH;
+    }
+    if (!found) {
+        status = kiln_c99_global_object(&global_target);
+        if (status != KILN_C99_OK) return status;
+        int present = 0;
+        status = kiln_c99_has_property(host, global_target, name, name_len, &present, depth,
+                                       thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!present)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                                        "Variable is not defined");
+        kiln_c99_gc_keep_alive(&global_target);
+        status = kiln_c99_get(host, global_target, name, name_len, &current, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        reference = KILN_DYN_UPDATE_GLOBAL;
+    }
+    kiln_c99_gc_keep_alive(&current);
+    kiln_c99_gc_keep_alive(&global_target);
+
+    kiln_value numeric = kiln_c99_undefined();
+    status = kiln_c99_unary_checked(7, host, current, &numeric, depth, thrown);
+    kiln_c99_gc_keep_alive(&current);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&numeric);
+    kiln_value next = kiln_c99_undefined();
+    status = kiln_c99_unary_checked(increment ? 8 : 9, host, numeric, &next, depth, thrown);
+    kiln_c99_gc_keep_alive(&numeric);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&next);
+
+    int ignore_write = 0;
+    if (reference == KILN_DYN_UPDATE_BINDING) {
+        status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+        if (status != KILN_C99_OK) return status;
+    } else if (reference == KILN_DYN_UPDATE_WITH) {
+        /* A with-environment reference is resolved again when its mutable binding is written.
+         * The value's ToPrimitive may have deleted the matching property, allowing an outer
+         * with/global/lexical environment to supply SetMutableBinding. */
+        int written = 0;
+        status = kiln_dyn_scope_set_with(host, scope, name, name_len, next, depth,
+                                         &written, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (written) {
+            *out = prefix ? next : numeric;
+            kiln_c99_gc_keep_alive(out);
+            return KILN_C99_OK;
+        }
+        int binding_found = 0;
+        status = kiln_dyn_scope_get(scope, name, name_len, &current, &binding_found, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (binding_found) {
+            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!ignore_write && !kiln_dyn_scope_update(scope, name, name_len, next))
+                return KILN_C99_OUT_OF_MEMORY;
+            *out = prefix ? next : numeric;
+            kiln_c99_gc_keep_alive(out);
+            return KILN_C99_OK;
+        }
+        reference = KILN_DYN_UPDATE_GLOBAL;
+    }
+    if (!ignore_write) {
+        if (reference == KILN_DYN_UPDATE_BINDING) {
+            if (!kiln_dyn_scope_update(scope, name, name_len, next))
+                return KILN_C99_OUT_OF_MEMORY;
+        } else {
+            if (global_target.tag != KILN_VALUE_OBJECT) {
+                status = kiln_c99_global_object(&global_target);
+                if (status != KILN_C99_OK) return status;
+            }
+            status = kiln_c99_put(host, global_target, name, name_len, next, 0, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    *out = prefix ? next : numeric;
+    kiln_c99_gc_keep_alive(out);
+    return KILN_C99_OK;
+}
+
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *out, kiln_value *thrown) {
@@ -1706,6 +1809,14 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
         if (kiln_dyn_member_assignment_ahead(lex, 1))
             return kiln_dyn_eval_member_assignment(host, lex, scope, receiver, args, argc,
                                                    depth, out, thrown, update);
+        if (lex->curr.kind == KILN_DYN_IDENT) {
+            const char *name = lex->curr.start;
+            size_t name_len = lex->curr.len;
+            kiln_dyn_lexer_next(lex);
+            return kiln_dyn_update_identifier(host, scope, name, name_len,
+                                              update == KILN_DYN_PLUS_PLUS, 1, depth,
+                                              out, thrown);
+        }
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected member reference after update operator");
     }
@@ -2118,9 +2229,16 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
     }
     if (prefix_update == KILN_DYN_EOF) kiln_dyn_lexer_next(lex);
     if (update) {
-        double number = kiln_c99_as_number(current);
-        *out = kiln_c99_number(number);
-        rhs = kiln_c99_number(number + (assignment == KILN_DYN_PLUS_PLUS ? 1.0 : -1.0));
+        status = kiln_c99_unary_checked(7, host, current, out, depth, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&current);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_unary_checked(assignment == KILN_DYN_PLUS_PLUS ? 8 : 9,
+                                        host, *out, &rhs, depth, thrown);
+        kiln_c99_gc_keep_alive(out);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&rhs);
         if (prefix_update != KILN_DYN_EOF) *out = rhs;
     } else {
         status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
@@ -2166,54 +2284,12 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
         kiln_dyn_lexer_next(lex);
         if (lex->curr.kind == KILN_DYN_PLUS_PLUS) {
             kiln_dyn_lexer_next(lex);
-            kiln_value cur_val = kiln_c99_number(0);
-            int found = 0;
-            int status = kiln_dyn_scope_get(scope, name, name_len, &cur_val, &found, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (!found) {
-                status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                 &cur_val, &found, thrown);
-                if (status != KILN_C99_OK) return status;
-            }
-            int ignore_write = 0;
-            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
-            if (status != KILN_C99_OK) return status;
-            double n = kiln_c99_as_number(cur_val);
-            if (!ignore_write &&
-                !kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n + 1.0))) {
-                int status = kiln_dyn_scope_set_with(host, scope, name, name_len,
-                                                     kiln_c99_number(n + 1.0), depth, &found,
-                                                     thrown);
-                if (status != KILN_C99_OK) return status;
-                if (!found) kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n + 1.0));
-            }
-            *out = kiln_c99_number(n);
-            return KILN_C99_OK;
+            return kiln_dyn_update_identifier(host, scope, name, name_len, 1, 0,
+                                              depth, out, thrown);
         } else if (lex->curr.kind == KILN_DYN_MINUS_MINUS) {
             kiln_dyn_lexer_next(lex);
-            kiln_value cur_val = kiln_c99_number(0);
-            int found = 0;
-            int status = kiln_dyn_scope_get(scope, name, name_len, &cur_val, &found, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (!found) {
-                status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                 &cur_val, &found, thrown);
-                if (status != KILN_C99_OK) return status;
-            }
-            int ignore_write = 0;
-            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
-            if (status != KILN_C99_OK) return status;
-            double n = kiln_c99_as_number(cur_val);
-            if (!ignore_write &&
-                !kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n - 1.0))) {
-                int status = kiln_dyn_scope_set_with(host, scope, name, name_len,
-                                                     kiln_c99_number(n - 1.0), depth, &found,
-                                                     thrown);
-                if (status != KILN_C99_OK) return status;
-                if (!found) kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n - 1.0));
-            }
-            *out = kiln_c99_number(n);
-            return KILN_C99_OK;
+            return kiln_dyn_update_identifier(host, scope, name, name_len, 0, 0,
+                                              depth, out, thrown);
         } else if (lex->curr.kind == KILN_DYN_ASSIGN ||
                    lex->curr.kind == KILN_DYN_PLUS_ASSIGN ||
                    lex->curr.kind == KILN_DYN_MINUS_ASSIGN ||
