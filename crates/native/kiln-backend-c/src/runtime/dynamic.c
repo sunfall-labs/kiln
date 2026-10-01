@@ -1009,7 +1009,11 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                         lex->pos += 2;
                         continue;
                     }
-                    cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &lex->pos);
+                    {
+                        size_t back = lex->pos - 1;
+                        cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &back);
+                        lex->pos = back;
+                    }
                     break;
                 case 'b': cp = '\b'; break;
                 case 'f': cp = '\f'; break;
