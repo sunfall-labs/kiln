@@ -56,6 +56,10 @@ const customResult = "subject".matchAll(customMatchAll);
 if (customResult.subject !== "subject" || matchReads !== 1 || flagReads !== 1) {
   throw new Error("String.matchAll must preserve custom hooks and observable IsRegExp checks");
 }
+const unconvertedSubject = { toString() { throw new Error("premature matchAll coercion"); } };
+if (String.prototype.matchAll.call(unconvertedSubject, customMatchAll).subject !== unconvertedSubject) {
+  throw new Error("String.matchAll must pass its original receiver to the custom hook");
+}
 const optedOut = /x/;
 optedOut[Symbol.match] = false;
 if ("x".matchAll(optedOut).next().value[0] !== "x") {
