@@ -4191,7 +4191,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         kiln_value copied;
                         if (!kiln_c99_property_read_own(source, name, name, &property) ||
                             !kiln_c99_property_is_enumerable(&property)) continue;
-                        if (property.accessor) {
+                        /* Module namespace slots hold live-binding cells internally. Object.assign
+                         * performs [[Get]] even for data descriptors; copying descriptor.value
+                         * here would publish that implementation cell into an ordinary object.
+                         * Route namespaces through the ordinary read path, which resolves the
+                         * current export value and preserves the namespace's live-binding rules. */
+                        if (property.accessor || source->module_namespace) {
                             status = kiln_c99_get_key(host, src_val, name, name, &copied,
                                                       depth, thrown);
                             if (status != KILN_C99_OK) return status;
@@ -4224,9 +4229,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                 continue;
                             }
                         }
-                        sval = (source->slots != NULL && index < source->slot_capacity)
-                                   ? kiln_val_to_boundary(source->slots[index])
-                                   : kiln_c99_undefined();
+                        if (source->module_namespace) {
+                            status = kiln_c99_get_key(host, src_val, skey, skey, &sval,
+                                                      depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                        } else {
+                            sval = (source->slots != NULL && index < source->slot_capacity)
+                                       ? kiln_val_to_boundary(source->slots[index])
+                                       : kiln_c99_undefined();
+                        }
                         status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 1, depth,
                                                        thrown);
                         if (status != KILN_C99_OK) {
@@ -4246,7 +4257,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         if (!kiln_c99_property_is_enumerable(&source->properties[index])) {
                             continue;
                         }
-                        if (source->properties[index].accessor) {
+                        if (source->properties[index].accessor || source->module_namespace) {
                             status = kiln_c99_get_key(host, src_val, source->properties[index].key,
                                                       source->properties[index].key, &copied,
                                                       depth, thrown);
