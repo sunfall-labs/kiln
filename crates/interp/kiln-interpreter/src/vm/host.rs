@@ -229,7 +229,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             })?;
             (server, resource)
         };
-        if native == Native::NodeSocketDestroy && server.borrow().protocol != ServerProtocol::Net {
+        if native == Native::NodeSocketDestroy
+            && server.borrow().protocol != ServerProtocol::Net
+            && server
+                .borrow()
+                .streams
+                .iter()
+                .find(|stream| stream.resource() == resource)
+                .is_some_and(|stream| stream.runtime_http)
+        {
             let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                 instruction,
                 message: "node:http requires the realm HTTP runtime".into(),
@@ -240,6 +248,27 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Abort)
             };
             return Ok(receiver.clone());
+        }
+        if native == Native::NodeSocketWrite
+            && let Some(id) = server
+                .borrow()
+                .streams
+                .iter()
+                .find(|stream| stream.resource() == resource)
+                .and_then(|stream| stream.upgrade_request_id)
+        {
+            let bytes = node_body_bytes(arguments.first())?;
+            let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node:http requires the realm HTTP runtime".into(),
+            })?;
+            let disposition =
+                unsafe { ActiveHttpRuntime::write_upgrade(&mut *runtime, resource, id, &bytes) }
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP upgrade write is no longer available".into(),
+                    })?;
+            return Ok(Value::Boolean(disposition.ready));
         }
         let (result, actions) = {
             let mut server_state = server.borrow_mut();
@@ -1192,7 +1221,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 {
                     let mut server = state.borrow_mut();
                     if server.protocol == ServerProtocol::Http
-                        && server.streams.iter().any(|stream| !stream.closed)
+                        && server.streams.iter().any(|stream| {
+                            !stream.closed && stream.runtime_http && !stream.upgrading
+                        })
                     {
                         server.close_deferred = true;
                         return Ok(());
@@ -1217,6 +1248,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
+                    upgrade_request_id: None,
+                    upgrading: false,
                     socket: socket_state,
                     socket_object: Some(socket.clone()),
                     request: None,
@@ -1598,6 +1631,47 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                     )?;
                 }
+                RuntimeHttpEvent::UpgradeRequest { id, request, head } => {
+                    self.dispatch_http_upgrade_request(
+                        server,
+                        resource,
+                        id,
+                        request,
+                        head,
+                        instruction,
+                    )?;
+                }
+                RuntimeHttpEvent::UpgradeReady { head } => {
+                    let (socket, actions) = {
+                        let mut server_state = server.borrow_mut();
+                        let connection = server_state
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction,
+                                message: "upgraded HTTP stream disappeared".into(),
+                            })?;
+                        connection.runtime_http = false;
+                        connection.upgrade_request_id = None;
+                        connection.upgrading = false;
+                        (
+                            connection.socket_object.clone().unwrap_or(Value::Undefined),
+                            connection.driver.resume_reading(),
+                        )
+                    };
+                    if !head.is_empty() {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &socket,
+                            &[Value::String("data".into()), node_bytes_value(head)],
+                            instruction,
+                        )?;
+                    }
+                    for action in actions {
+                        self.start_http_stream_action(server, resource, action, instruction)?;
+                    }
+                }
                 RuntimeHttpEvent::RequestData { id: _, data } => {
                     let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
                     let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
@@ -1686,7 +1760,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             || stream.response.is_some()
                     });
                     let emit_close = server_state.close_deferred
-                        && server_state.streams.iter().all(|stream| stream.closed);
+                        && server_state.streams.iter().all(|stream| {
+                            stream.closed || !stream.runtime_http || stream.upgrading
+                        });
                     if emit_close {
                         server_state.close_deferred = false;
                     }
@@ -1752,6 +1828,89 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }),
                         instruction,
                     )?;
+                }
+                RuntimeHttpClientEvent::Upgrade {
+                    id,
+                    status,
+                    reason,
+                    headers,
+                    head,
+                } => {
+                    let (request, socket, actions) = {
+                        let mut state = owner.borrow_mut();
+                        let connection = state
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction,
+                                message: "upgraded HTTP client stream disappeared".into(),
+                            })?;
+                        let request =
+                            connection
+                                .client_requests
+                                .get(&id)
+                                .cloned()
+                                .ok_or_else(|| ExecutionError::Host {
+                                    instruction,
+                                    message: "HTTP upgrade lost its ClientRequest".into(),
+                                })?;
+                        connection.runtime_http = false;
+                        connection.upgrade_request_id = None;
+                        connection.upgrading = false;
+                        (
+                            request,
+                            connection.socket_object.clone().unwrap_or(Value::Undefined),
+                            connection.driver.resume_reading(),
+                        )
+                    };
+                    let mut response = ObjectData {
+                        node_events: Some(Vec::new()),
+                        node_object: Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+                            HttpIncomingState {
+                                stream: resource,
+                                readable: new_readable_state(16 * 1024, None),
+                            },
+                        )))),
+                        ..Default::default()
+                    };
+                    response.set_prototype(Value::Native(
+                        Native::PrototypeOf(PrototypeTable::Readable),
+                        RealmId::PRIMARY,
+                    ));
+                    response.set("statusCode", Value::Number(status as f64));
+                    response.set("statusMessage", Value::String(reason.into()));
+                    let mut header_object = ObjectData::default();
+                    for (name, value) in headers {
+                        header_object.set(&name, Value::String(value.into()));
+                    }
+                    response.set(
+                        "headers",
+                        Value::Object(Rc::new(RefCell::new(header_object))),
+                    );
+                    let response = Value::Object(Rc::new(RefCell::new(response)));
+                    if let Some(connection) = owner
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.resource() == resource)
+                    {
+                        connection.client_responses.insert(id, response.clone());
+                    }
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &request,
+                        &[
+                            Value::String("upgrade".into()),
+                            response,
+                            socket.clone(),
+                            node_bytes_value(head),
+                        ],
+                        instruction,
+                    )?;
+                    for action in actions {
+                        self.start_http_stream_action(owner, resource, action, instruction)?;
+                    }
                 }
                 RuntimeHttpClientEvent::ResponseData { id, data: body } => {
                     self.dispatch_http_response_event(
@@ -2151,6 +2310,97 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             )
         };
         Ok(Value::Boolean(sent))
+    }
+
+    pub(crate) fn dispatch_http_upgrade_request(
+        &mut self,
+        server: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        request: u64,
+        message: kiln_runtime::node_http::HttpRequest,
+        head: Vec<u8>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let socket = server
+            .borrow()
+            .streams
+            .iter()
+            .find(|stream| stream.resource() == resource)
+            .and_then(|stream| stream.socket_object.clone())
+            .unwrap_or(Value::Undefined);
+        let mut incoming = ObjectData {
+            node_events: Some(Vec::new()),
+            node_object: Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+                HttpIncomingState {
+                    stream: resource,
+                    readable: new_readable_state(16 * 1024, None),
+                },
+            )))),
+            ..Default::default()
+        };
+        incoming.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Readable),
+            RealmId::PRIMARY,
+        ));
+        incoming.set("method", Value::String(message.method.into()));
+        incoming.set("url", Value::String(message.target.into()));
+        incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+        incoming.set(
+            "once",
+            Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "removeListener",
+            Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "off",
+            Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "removeAllListeners",
+            Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "emit",
+            Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "pause",
+            Value::Native(Native::NodeReadablePause, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "resume",
+            Value::Native(Native::NodeReadableResume, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "setEncoding",
+            Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
+        );
+        incoming.set("socket", socket.clone());
+        incoming.set("connection", socket.clone());
+        let mut headers = ObjectData::default();
+        for (name, value) in message.headers_object() {
+            headers.set(&name, Value::String(value.into()));
+        }
+        incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
+        let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+        if let Some(connection) = server
+            .borrow_mut()
+            .streams
+            .iter_mut()
+            .find(|stream| stream.resource() == resource)
+        {
+            connection.request = Some(incoming.clone());
+            connection.upgrade_request_id = Some(request);
+            connection.upgrading = true;
+        }
+        self.emit_http_server(
+            server,
+            "upgrade",
+            vec![incoming, socket, node_bytes_value(head)],
+            instruction,
+        )
     }
 
     pub(crate) fn dispatch_http_request_head(
@@ -3473,6 +3723,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         let mut connection = NodeConnection {
                             driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                             runtime_http: protocol == ServerProtocol::HttpClient,
+                            upgrade_request_id: None,
+                            upgrading: false,
                             socket: Some(Rc::clone(&socket_state)),
                             socket_object: Some(socket.clone()),
                             request: Some(request.clone()),

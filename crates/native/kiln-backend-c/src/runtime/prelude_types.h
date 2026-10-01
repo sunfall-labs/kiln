@@ -3254,6 +3254,9 @@ struct kiln_node_socket {
     uint64_t write_request;
     uint64_t shutdown_request;
     uint64_t close_request;
+    uint64_t upgrade_request_id;
+    int http_upgrade_pending;
+    int http_upgraded;
     kiln_node_server *server;
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;

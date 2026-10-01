@@ -1245,7 +1245,7 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
-    if (socket->server != NULL && socket->server->protocol_http) {
+    if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded) {
         // The C adapter registers a response before invoking the JavaScript listener, while the
         // realm only registers its Hyper body when response.start/end reaches the runtime. A
         // same-turn server.close() must therefore wait on C's response list before asking the
@@ -1511,6 +1511,77 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     (void)host;
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
     client = kiln_c99_node_client_for_id(socket, event->id);
+    if (event->kind == 11 && socket->server != NULL) {
+        const kiln_c99_node_http_layout *layout;
+        kiln_value prototype, request, headers, arguments[4], ignored;
+        kiln_node_response *header_owner;
+        int emitted;
+        status = kiln_c99_node_http_layout_ready(&layout);
+        if (status == KILN_C99_OK) status = kiln_c99_node_incoming_message_prototype(&prototype);
+        if (status != KILN_C99_OK) return status;
+        header_owner = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE, sizeof *header_owner);
+        if (header_owner == NULL) return KILN_C99_OUT_OF_MEMORY;
+        header_owner->target_ptr = (const char *)event->target;
+        header_owner->target_len = (size_t)event->target_len;
+        header_owner->request_headers = event->headers_len == 0 ? NULL : (char *)event->headers;
+        header_owner->request_headers_len = (size_t)event->headers_len;
+        status = kiln_c99_node_http_instance(&request, prototype, layout->request_shape, header_owner);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_heap_store_value(header_owner, &header_owner->request, request);
+        status = kiln_c99_put(NULL, request, "method", 6,
+                              kiln_c99_node_http_method_text((const char *)event->method, (size_t)event->method_len), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, request, "url", 3,
+                                  kiln_c99_node_http_target_text((const char *)event->target, (size_t)event->target_len), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_request_headers_object(header_owner, &headers);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, request, "headers", 7, headers, 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, request, "socket", 6, socket->object, 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, request, "connection", 10, socket->object, 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_node_request_headers_keep(header_owner);
+        if (status != KILN_C99_OK) return status;
+        socket->upgrade_request_id = event->id;
+        socket->http_upgrade_pending = 1;
+        kiln_c99_node_unlink_socket(socket);
+        arguments[0] = kiln_c99_copy_text("upgrade", 7);
+        arguments[1] = request;
+        arguments[2] = socket->object;
+        status = kiln_c99_buffer_from_bytes(&arguments[3], event->data, (size_t)event->data_len);
+        if (status != KILN_C99_OK) return status;
+        emitted = kiln_c99_node_event(socket->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                      socket->server->object, arguments, 4, 0, exception);
+        if (emitted != KILN_C99_OK) return emitted;
+        if (ignored.tag == KILN_VALUE_BOOLEAN && ignored.bits == 0) {
+            kiln_realm_http_response empty = {0};
+            empty.status = 400;
+            socket->upgrade_request_id = 0;
+            socket->http_upgrade_pending = 0;
+            status = kiln_realm_http_response_start_active(socket->resource, event->id, &empty, 16384);
+            if (status == KILN_C99_OK)
+                status = kiln_realm_http_response_end_active(socket->resource, event->id, NULL, 0);
+            return status;
+        }
+        return KILN_C99_OK;
+    }
+    if (event->kind == 12) {
+        kiln_node_completion *read;
+        socket->http_upgraded = 1;
+        socket->http_upgrade_pending = 0;
+        socket->upgrade_request_id = 0;
+        if (event->data_len != 0) {
+            kiln_value head;
+            status = kiln_c99_buffer_from_bytes(&head, event->data, (size_t)event->data_len);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_node_emit(socket->host, socket->object, "data", head, 1, 0, exception);
+            if (status != KILN_C99_OK || socket->closing) return status;
+        }
+        read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
+        if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+        read->kind = KILN_REALM_OP_TCP_READ;
+        kiln_c99_heap_store_pointer(read, &read->socket, socket);
+        return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                                   NULL, 0, NULL, 0, read, &socket->read_request);
+    }
     if (event->kind == 1 && socket->server != NULL && socket->server->fetch_mode)
         return kiln_c99_node_fetch_request(socket, event, exception);
     if (event->kind == 1) {
@@ -1628,7 +1699,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             }
         }
     }
-    if (client != NULL && event->kind == 6) {
+    if (client != NULL && (event->kind == 6 || event->kind == 13)) {
         status = kiln_c99_new_object_for_owner(&client->response, client);
             if (status == KILN_C99_OK) {
                 kiln_value prototype;
@@ -1692,7 +1763,26 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                                           client);
             if (status == KILN_C99_OK) {
                 client->response_started = 1;
-                if (kiln_c99_is_callable(client->callback)) {
+                if (event->kind == 13) {
+                    kiln_value arguments[4];
+                    kiln_node_completion *read;
+                    if (client->socket == NULL) return KILN_C99_INVALID_ARGUMENT;
+                    client->socket->http_upgraded = 1;
+                    arguments[0] = kiln_c99_copy_text("upgrade", 7);
+                    arguments[1] = client->response;
+                    arguments[2] = client->socket->object;
+                    status = kiln_c99_buffer_from_bytes(&arguments[3], event->data, event->data_len);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_node_event(client->host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                                     client->object, arguments, 4, 0, exception);
+                    if (status != KILN_C99_OK) return status;
+                    read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
+                    if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    read->kind = KILN_REALM_OP_TCP_READ;
+                    kiln_c99_heap_store_pointer(read, &read->socket, client->socket);
+                    return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, client->socket->resource, 16384,
+                                               NULL, 0, NULL, 0, read, &client->socket->read_request);
+                } else if (kiln_c99_is_callable(client->callback)) {
                     status = kiln_c99_call(client->host, &ignored, client->callback,
                                            kiln_c99_undefined(), &client->response, 1, 0,
                                            exception);
@@ -3960,6 +4050,15 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             kiln_c99_node_byte_span span;
             status = kiln_c99_node_http_byte_span(argc > 0 ? args[0] : kiln_c99_undefined(), &span);
             if (status != KILN_C99_OK) return status;
+            if (socket->upgrade_request_id != 0) {
+                status = kiln_realm_http_upgrade_write_active(socket->resource,
+                                                              socket->upgrade_request_id,
+                                                              span.bytes, span.len);
+                kiln_c99_node_http_byte_span_release(&span);
+                if (status < 0) return status;
+                *result = kiln_c99_boolean(status == 0);
+                return KILN_C99_OK;
+            }
             work->kind = KILN_REALM_OP_TCP_WRITE;
             status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
                                          span.bytes, span.len, work,

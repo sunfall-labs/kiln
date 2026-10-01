@@ -47,6 +47,8 @@ pub(crate) enum ServerProtocol {
 pub(crate) struct NodeConnection {
     pub(crate) driver: StreamDriver,
     pub(crate) runtime_http: bool,
+    pub(crate) upgrade_request_id: Option<u64>,
+    pub(crate) upgrading: bool,
     pub(crate) socket: Option<Rc<RefCell<NetSocketState>>>,
     pub(crate) socket_object: Option<Value>,
     pub(crate) request: Option<Value>,

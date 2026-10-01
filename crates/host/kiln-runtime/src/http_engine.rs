@@ -21,11 +21,12 @@ use http_body_util::BodyExt;
 use hyper::body::{Body as _, Frame, Incoming};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
+use hyper::upgrade::OnUpgrade;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use kiln_host_abi::ResourceId;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Notify;
 
 use crate::HttpCloseMode;
@@ -78,9 +79,17 @@ pub(crate) use trace;
 pub struct HostTransport(pub Box<dyn HostIo>);
 
 /// What a transport must be for Hyper: nothing more than Tokio's I/O traits.
-pub trait HostIo: AsyncRead + AsyncWrite + Unpin {}
+pub trait HostIo: AsyncRead + AsyncWrite + Unpin + Send {}
 
-impl<T: AsyncRead + AsyncWrite + Unpin> HostIo for T {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> HostIo for T {}
+
+/// A byte stream Hyper released after an HTTP/1 protocol upgrade. `head` contains bytes Hyper
+/// had already read beyond the HTTP request/response header; callers deliver it exactly once
+/// before starting ordinary socket reads.
+pub struct UpgradeTransport {
+    pub transport: HostTransport,
+    pub head: Vec<u8>,
+}
 
 impl std::fmt::Debug for HostTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,6 +125,17 @@ pub struct HttpEvent<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpEventKind {
     RequestHead,
+    /// An HTTP/1 request with an Upgrade header. The language receives it before sending the
+    /// 101 response so it can write the protocol handshake through `write_upgrade`. `data` is
+    /// empty: Hyper exposes bytes it read beyond the request head only after the response
+    /// transfers the connection, and those bytes are then delivered once as the socket's first
+    /// `data` event on `UpgradeReady`.
+    UpgradeRequest,
+    /// The HTTP parser has transferred an accepted upgrade transport back to the host. `data`
+    /// contains bytes Hyper had already read beyond the request head.
+    UpgradeReady,
+    /// An HTTP client received a 101 and owns the raw upgraded stream after this event.
+    UpgradeResponse,
     RequestData,
     RequestEnd,
     /// The body the language is writing (a response, or a client request) took a queued chunk.
@@ -308,6 +328,7 @@ pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefau
 /// `Rc` so a finished connection can retire itself.
 pub struct HttpServerEngine {
     connections: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
     http3: bool,
 }
 
@@ -321,8 +342,49 @@ impl HttpServerEngine {
     pub fn with_http3(http3: bool) -> Self {
         Self {
             connections: Rc::new(RefCell::new(HashMap::default())),
+            upgraded: Rc::new(RefCell::new(HashMap::default())),
             http3,
         }
+    }
+
+    /// Queue bytes written by a Node `upgrade` listener while Hyper still owns the connection.
+    /// The first complete HTTP response head commits the 101; following bytes are sent over the
+    /// transport after Hyper hands it back.
+    pub fn write_upgrade(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: &[u8],
+    ) -> Option<WriteDisposition> {
+        let shared = self.connections.borrow().get(&resource)?.shared.clone();
+        let writes = shared.upgrade_writes.borrow().get(&id)?.clone();
+        let Some(completed) = writes.append(data) else {
+            return None;
+        };
+        if let Some((status, headers, trailing)) = completed {
+            let mut flattened = Vec::new();
+            flatten_header_map(&headers, &mut flattened);
+            if !self.start_response(resource, id, status, &flattened, 16 * 1024)
+                || !self.end_response_bytes(resource, id, &[])
+            {
+                return None;
+            }
+            writes.add_trailing(&trailing);
+        }
+        let ready = writes.pending_bytes() < 16 * 1024;
+        if !ready {
+            writes.drain_needed.set(true);
+        }
+        Some(WriteDisposition {
+            ready,
+            submit_now: true,
+        })
+    }
+
+    /// Take the raw stream after an upgrade was accepted. This removes the protocol task's
+    /// ownership; the host must adopt it under the same resource before publishing `UpgradeReady`.
+    pub fn take_upgrade(&mut self, resource: ResourceId) -> Option<UpgradeTransport> {
+        self.upgraded.borrow_mut().remove(&resource)
     }
 }
 
@@ -345,6 +407,61 @@ pub(crate) struct ConnectionShared {
     /// work in flight so a drive does not return before the language hears it.
     abort_pending: Cell<bool>,
     http3: bool,
+    pending_upgrade: RefCell<Option<OnUpgrade>>,
+    upgrade_accepted: Cell<bool>,
+    upgrade_request_id: Cell<u64>,
+    upgrade_writes: RefCell<HashMap<u64, Rc<UpgradeWrite>>>,
+}
+
+struct UpgradeWrite {
+    raw_head: RefCell<Vec<u8>>,
+    trailing: RefCell<Vec<u8>>,
+    parsed: Cell<bool>,
+    drain_needed: Cell<bool>,
+}
+
+impl UpgradeWrite {
+    fn new() -> Self {
+        Self {
+            raw_head: RefCell::new(Vec::with_capacity(1024)),
+            trailing: RefCell::new(Vec::new()),
+            parsed: Cell::new(false),
+            drain_needed: Cell::new(false),
+        }
+    }
+
+    fn append(&self, data: &[u8]) -> Option<Option<(u16, HeaderMap, Vec<u8>)>> {
+        if self.parsed.get() {
+            self.trailing.borrow_mut().extend_from_slice(data);
+            return Some(None);
+        }
+        let mut raw = self.raw_head.borrow_mut();
+        raw.extend_from_slice(data);
+        if raw.len() > 64 * 1024 {
+            return None;
+        }
+        let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return Some(None);
+        };
+        let end = end + 4;
+        let (status, headers) = parse_upgrade_response_head(&raw[..end])?;
+        let trailing = raw[end..].to_vec();
+        raw.clear();
+        self.parsed.set(true);
+        Some(Some((status, headers, trailing)))
+    }
+
+    fn add_trailing(&self, data: &[u8]) {
+        self.trailing.borrow_mut().extend_from_slice(data);
+    }
+
+    fn take_trailing(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.trailing.borrow_mut())
+    }
+
+    fn pending_bytes(&self) -> usize {
+        self.raw_head.borrow().len() + self.trailing.borrow().len()
+    }
 }
 
 impl ConnectionShared {
@@ -807,14 +924,20 @@ impl HttpServerEngine {
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
             http3: self.http3,
+            pending_upgrade: RefCell::new(None),
+            upgrade_accepted: Cell::new(false),
+            upgrade_request_id: Cell::new(0),
+            upgrade_writes: RefCell::new(HashMap::default()),
         });
         trace!("{resource:?} attach half_close={allow_half_close}");
         let table = Rc::clone(&self.connections);
+        let upgraded = Rc::clone(&self.upgraded);
         let task = tokio::task::spawn_local(serve(
             transport,
             allow_half_close,
             Rc::clone(&shared),
             table,
+            upgraded,
         ));
         self.connections
             .borrow_mut()
@@ -1091,14 +1214,19 @@ async fn serve(
     allow_half_close: bool,
     shared: Rc<ConnectionShared>,
     table: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
 ) {
     shared.dispatcher.started();
     let next_id = Cell::new(1_u64);
     let service_shared = Rc::clone(&shared);
-    let service = service_fn(move |request: Request<Incoming>| {
+    let service = service_fn(move |mut request: Request<Incoming>| {
         let id = next_id.get();
         next_id.set(id.wrapping_add(1).max(1));
         let shared = Rc::clone(&service_shared);
+        let is_upgrade = request_is_upgrade(&request);
+        if is_upgrade {
+            *shared.pending_upgrade.borrow_mut() = Some(hyper::upgrade::on(&mut request));
+        }
         async move { Ok::<_, std::convert::Infallible>(handle(shared, id, request).await) }
     });
     let mut builder = auto::Builder::new(LocalExecutor);
@@ -1111,7 +1239,8 @@ async fn serve(
     // program passes still selects raw-socket behaviour elsewhere; HTTP keeps Node's rule.
     let _ = allow_half_close;
     builder.http1().half_close(true);
-    let mut connection = Box::pin(builder.serve_connection(TokioIo::new(transport.0), service));
+    let mut connection =
+        Box::pin(builder.serve_connection_with_upgrades(TokioIo::new(transport.0), service));
     let result = tokio::select! {
         biased;
         result = &mut connection => result,
@@ -1126,6 +1255,76 @@ async fn serve(
         shared.resource,
         result.as_ref().err()
     );
+    let mut transferred = false;
+    if result.is_ok() && shared.upgrade_accepted.get() {
+        if let Some(on_upgrade) = shared.pending_upgrade.borrow_mut().take() {
+            match on_upgrade.await {
+                Ok(upgraded_stream) => {
+                    match upgraded_stream.downcast::<TokioIo<Box<dyn HostIo>>>() {
+                        Ok(parts) => {
+                            let mut parts = parts;
+                            // Hyper owns request framing and exposes exactly the bytes it read
+                            // beyond the upgrade headers here. They become the raw socket's
+                            // first data event after the language has attached its listener.
+                            let head = parts.read_buf.to_vec();
+                            let request_id = shared.upgrade_request_id.get();
+                            let writes = shared.upgrade_writes.borrow_mut().remove(&request_id);
+                            let mut raw = parts.io.into_inner();
+                            let trailing = writes
+                                .as_ref()
+                                .map_or_else(Vec::new, |writes| writes.take_trailing());
+                            let flush = if trailing.is_empty() {
+                                Ok(())
+                            } else {
+                                raw.write_all(&trailing).await
+                            };
+                            if let Err(error) = flush {
+                                let message = error.to_string();
+                                let _ = shared.dispatch(&HttpEvent {
+                                    message: message.as_bytes(),
+                                    ..HttpEvent::bare(HttpEventKind::Error, request_id)
+                                });
+                            } else {
+                                upgraded.borrow_mut().insert(
+                                    shared.resource,
+                                    UpgradeTransport {
+                                        transport: HostTransport(Box::new(raw)),
+                                        head: head.clone(),
+                                    },
+                                );
+                                let _ = shared.dispatch(&HttpEvent {
+                                    id: request_id,
+                                    data: &head,
+                                    ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
+                                });
+                                if writes.is_some_and(|writes| writes.drain_needed.get()) {
+                                    let _ = shared.dispatch(&HttpEvent::bare(
+                                        HttpEventKind::Drain,
+                                        request_id,
+                                    ));
+                                }
+                                transferred = true;
+                            }
+                        }
+                        Err(_) => {
+                            let message = b"HTTP upgrade returned an unexpected transport";
+                            let _ = shared.dispatch(&HttpEvent {
+                                message,
+                                ..HttpEvent::bare(HttpEventKind::Error, 0)
+                            });
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = shared.dispatch(&HttpEvent {
+                        message: message.as_bytes(),
+                        ..HttpEvent::bare(HttpEventKind::Error, 0)
+                    });
+                }
+            }
+        }
+    }
     if let Err(error) = result {
         let message = error.to_string();
         let event = HttpEvent {
@@ -1135,7 +1334,9 @@ async fn serve(
         let _ = shared.dispatch(&event);
     }
     let _ = shared.flush_deferred();
-    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    if !transferred {
+        let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    }
     table.borrow_mut().remove(&shared.resource);
 }
 
@@ -1160,6 +1361,45 @@ fn keep_alive_requested(parts: &hyper::http::request::Parts) -> bool {
     }
 }
 
+fn request_is_upgrade(request: &Request<Incoming>) -> bool {
+    let connection = request
+        .headers()
+        .get(hyper::header::CONNECTION)
+        .and_then(|value| value.to_str().ok());
+    let requests_upgrade = connection.is_some_and(|value| {
+        value
+            .split(',')
+            .any(|candidate| candidate.trim().eq_ignore_ascii_case("upgrade"))
+    });
+    requests_upgrade && request.headers().contains_key(hyper::header::UPGRADE)
+}
+
+fn parse_upgrade_response_head(bytes: &[u8]) -> Option<(u16, HeaderMap)> {
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let status_line = lines.next()?.strip_suffix(b"\r")?;
+    let mut status_parts = status_line.splitn(3, |byte| *byte == b' ');
+    let version = status_parts.next()?;
+    if version != b"HTTP/1.0" && version != b"HTTP/1.1" {
+        return None;
+    }
+    let status = std::str::from_utf8(status_parts.next()?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let line = line.strip_suffix(b"\r")?;
+        if line.is_empty() {
+            break;
+        }
+        let colon = line.iter().position(|byte| *byte == b':')?;
+        let name = HeaderName::from_bytes(&line[..colon]).ok()?;
+        let value = HeaderValue::from_bytes(line[colon + 1..].trim_ascii()).ok()?;
+        headers.append(name, value);
+    }
+    Some((status, headers))
+}
+
 async fn handle(
     shared: Rc<ConnectionShared>,
     id: u64,
@@ -1169,9 +1409,29 @@ async fn handle(
     let (parts, mut body) = request.into_parts();
     let http_10 = parts.version == hyper::Version::HTTP_10;
     let head_request = parts.method == hyper::Method::HEAD;
+    let is_upgrade = parts.headers.contains_key(hyper::header::UPGRADE)
+        && parts
+            .headers
+            .get(hyper::header::CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case("upgrade"))
+            });
+    // Hyper provides the authoritative post-header bytes when it completes the 101 transfer.
+    // Until then the listener receives an empty `head`; those preserved bytes are emitted as
+    // the socket's first data event immediately after the listener returns.
+    let upgrade_head = [0u8; 0];
     let keep_alive = keep_alive_requested(&parts);
     let slot = Rc::new(ResponseSlot::new(head_request));
     shared.requests.borrow_mut().insert(id, Rc::clone(&slot));
+    if is_upgrade {
+        shared
+            .upgrade_writes
+            .borrow_mut()
+            .insert(id, Rc::new(UpgradeWrite::new()));
+    }
 
     // An origin-form target is the path and query Hyper already holds; anything else (an
     // absolute-form target from a proxy client) is rendered once.
@@ -1185,7 +1445,7 @@ async fn handle(
     };
     // A language that takes requests whole gets the body with the head, so the body is read
     // before anything is dispatched. A request that declares no body (every GET) costs nothing.
-    let whole = shared.dispatcher.whole_requests();
+    let whole = shared.dispatcher.whole_requests() && !is_upgrade;
     let whole_body = if whole && !body.is_end_stream() {
         match (&mut body).collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -1228,8 +1488,19 @@ async fn handle(
             method: parts.method.as_str().as_bytes(),
             target,
             headers: &scratch,
-            data: &whole_body,
-            ..HttpEvent::bare(HttpEventKind::RequestHead, id)
+            data: if is_upgrade {
+                &upgrade_head[..]
+            } else {
+                &whole_body
+            },
+            ..HttpEvent::bare(
+                if is_upgrade {
+                    HttpEventKind::UpgradeRequest
+                } else {
+                    HttpEventKind::RequestHead
+                },
+                id,
+            )
         };
         shared.dispatch(&head)
     };
@@ -1282,7 +1553,7 @@ async fn handle(
         };
         (response, Some(pump))
     } else {
-        if dispatched && !whole {
+        if dispatched && !whole && !is_upgrade {
             let mut failed = false;
             while let Some(frame) = body.frame().await {
                 match frame {
@@ -1336,6 +1607,10 @@ async fn handle(
         mut headers,
         body,
     } = response;
+    if is_upgrade && status == hyper::StatusCode::SWITCHING_PROTOCOLS.as_u16() {
+        shared.upgrade_accepted.set(true);
+        shared.upgrade_request_id.set(id);
+    }
     let is_http2 = parts.version == hyper::Version::HTTP_2;
     let close_delimited = http_10
         && !head_request

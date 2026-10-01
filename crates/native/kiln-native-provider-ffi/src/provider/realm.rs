@@ -81,6 +81,18 @@ const HTTP_EVENT_ERROR: u32 = 9;
 #[cfg(feature = "realm-http")]
 const HTTP_EVENT_CLOSED: u32 = 10;
 #[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_REQUEST: u32 = 11;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_READY: u32 = 12;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_REQUEST: u32 = 11;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_READY: u32 = 12;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
+#[cfg(feature = "realm-http")]
 const HTTP_AGENT_CONNECT: i32 = 1;
 #[cfg(feature = "realm-http")]
 const HTTP_AGENT_REUSE: i32 = 2;
@@ -4194,8 +4206,36 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let _online = reclaim::online();
         tick_clock(&realm);
         let (host, thrown) = realm.drive_context.get();
+        if event.kind == HttpEventKind::UpgradeReady {
+            let adopted = realm
+                .runtime
+                .state
+                .borrow_mut()
+                .adopt_server_upgrade(self.resource);
+            if !adopted {
+                return INVALID_ARGUMENT;
+            }
+            realm.http_connections.borrow_mut().remove(&self.resource);
+        }
+        if event.kind == HttpEventKind::UpgradeResponse {
+            let adopted = realm
+                .runtime
+                .state
+                .borrow_mut()
+                .adopt_client_upgrade(self.resource);
+            if !adopted {
+                return INVALID_ARGUMENT;
+            }
+            realm.http_connections.borrow_mut().remove(&self.resource);
+        }
         let kind = match event.kind {
             HttpEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
+            HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
+            HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
+            HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,
+            HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
+            HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
+            HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,
             HttpEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
             HttpEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
             HttpEventKind::Drain => HTTP_EVENT_DRAIN,
@@ -4726,6 +4766,35 @@ pub unsafe extern "C" fn kiln_realm_http_response_end_active(
     write_http_response(resource, id, data, data_len, true)
 }
 
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active(
+    resource: u64,
+    id: u64,
+    data: *const u8,
+    data_len: u64,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(disposition) =
+            runtime
+                .http_server()
+                .write_upgrade(kiln_host_abi::ResourceId::new(resource), id, data)
+        else {
+            return RUNTIME_ERROR;
+        };
+        i32::from(!disposition.ready)
+    })
+}
+
 /// Linkable HTTP stubs for archives built without `realm-http`.
 ///
 /// Every symbol the provider ABI registry names must still link (PROVIDER_EXPORTS keeps
@@ -4765,6 +4834,7 @@ mod http_stubs {
     http_stub!(kiln_realm_http_response_start_active(resource: u64, id: u64, response: *const HttpResponseView, high_water_mark: u64) -> i32);
     http_stub!(kiln_realm_http_response_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
     http_stub!(kiln_realm_http_response_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
 }
 
 #[cfg(not(feature = "realm-http"))]
