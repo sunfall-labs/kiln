@@ -466,18 +466,33 @@ fn discover_node_runtime_requests_from_semantic(
             continue;
         };
         for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                continue;
-            };
-            let imported = match &specifier.imported {
-                oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::IdentifierReference(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
-            };
-            if imported == "createRequire"
-                && let Some(symbol) = specifier.local.symbol_id.get()
-            {
-                create_symbols.insert(symbol);
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = match &specifier.imported {
+                        oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
+                        oxc_ast::ast::ModuleExportName::IdentifierReference(name) => {
+                            name.name.as_str()
+                        }
+                        oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
+                    };
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        if imported == "createRequire" {
+                            create_symbols.insert(symbol);
+                        } else if matches!(imported, "Module" | "default") {
+                            module_symbols.insert(symbol, path.to_owned());
+                        }
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
             }
         }
     }
@@ -587,6 +602,7 @@ fn discover_node_runtime_requests_from_semantic(
     }
 
     create_symbols.retain(|symbol| !scoping.symbol_is_mutated(*symbol));
+    module_symbols.retain(|symbol, _| !scoping.symbol_is_mutated(*symbol));
     let mut require_symbols = HashMap::new();
     // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
     // pass because semantic node order is an AST walk detail, not a source-order contract.
@@ -5330,6 +5346,51 @@ mod tests {
                 NodeRuntimeRequest {
                     specifier: "./from-url.cjs".to_owned(),
                     importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn create_require_tracks_module_namespace_and_default_imports() {
+        let requests = discover_node_runtime_requests(
+            "fixture.mjs",
+            r#"
+                import * as moduleNamespace from "node:module";
+                import Module, { Module as NamedModule } from "node:module";
+                const fromNamespace = moduleNamespace.createRequire(import.meta.url);
+                const fromDefault = Module.createRequire(import.meta.filename);
+                const fromNamed = NamedModule.createRequire(new URL(import.meta.url));
+                fromNamespace("./namespace.cjs");
+                fromDefault("./default.cjs");
+                fromNamed("./named.cjs");
+                function shadow(moduleNamespace) {
+                    const fake = moduleNamespace.createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                let changed = moduleNamespace;
+                changed = {};
+                const notLoader = changed.createRequire("/virtual/changed.cjs");
+                notLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./default.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./named.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./namespace.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
                     resolve_only: false,
                 },
             ]
