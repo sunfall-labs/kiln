@@ -1023,7 +1023,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                     if (escape < 0x80) cp = escape;
                     else {
                         size_t back = lex->pos - 1;
-                        cp = kiln_c99_utf8_next(lex->src, lex->len, &back);
+                        cp = kiln_dyn_read_source_codepoint(lex->src, lex->len, &back);
                         lex->pos = back;
                     }
                     break;
