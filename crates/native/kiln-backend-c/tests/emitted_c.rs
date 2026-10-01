@@ -1129,7 +1129,8 @@ fn runtime_prelude_size() {
     // The compiled runtime fixtures verify that sections are not emitted twice.
     // Shared exotic spread snapshots, named array deletion and live namespace enumeration
     // bring the inspected prelude to 79,082 lines; runtime sections are still emitted once.
-    const CEILING_LINES: usize = 79_100;
+    // Typed-array indexed descriptor projection and array deletion invariants add 43 lines.
+    const CEILING_LINES: usize = 79_140;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
