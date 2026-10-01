@@ -1197,36 +1197,93 @@ exports.annotations = function (ast, values) { return values; };
         let (reduced, reduced_demand) = graph
             .reduce_to_live(&demand)
             .expect("reduce graph with reexports");
-        for (path, local) in [("entry.mjs", "publicName"), ("barrel.mjs", "localName")] {
-            let path = fs::canonicalize(root.join(path)).expect("canonical module path");
-            let original = graph.module(&path).expect("original module node");
-            let original_index = original
-                .program
-                .imports
-                .iter()
-                .position(|import| import.local == local)
-                .expect("original named import");
-            assert!(
-                demand
-                    .live_imports
-                    .contains(&(path.clone(), original_index)),
-                "import {local} in {} should be selected live",
-                path.display()
-            );
-            let node = reduced.module(&path).expect("reduced module node");
-            let index = node
-                .program
-                .imports
-                .iter()
-                .position(|import| import.local == local)
-                .expect("named import");
-            assert!(
-                reduced_demand.live_imports.contains(&(path.clone(), index)),
-                "reduced import {local} in {} should remain live",
-                path.display()
-            );
-        }
+        let entry = fs::canonicalize(root.join("entry.mjs")).expect("entry path");
+        let entry_node = graph.module(&entry).expect("entry module");
+        let entry_import = entry_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local == "publicName")
+            .expect("entry named import");
+        assert!(demand.live_imports.contains(&(entry.clone(), entry_import)));
+        let reduced_entry = reduced.module(&entry).expect("reduced entry");
+        let reduced_entry_import = reduced_entry
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local == "publicName")
+            .expect("reduced entry named import");
+        assert!(
+            reduced_demand
+                .live_imports
+                .contains(&(entry.clone(), reduced_entry_import))
+        );
+
+        let barrel = fs::canonicalize(root.join("barrel.mjs")).expect("barrel path");
         let provider = fs::canonicalize(root.join("provider.mjs")).expect("provider path");
+        let resolved = graph
+            .resolved_export(&barrel, "publicName")
+            .expect("resolve barrel export");
+        let ResolvedExport::Local {
+            module: resolved_provider,
+            local_slot,
+        } = resolved
+        else {
+            panic!("named barrel export should resolve to a local provider slot");
+        };
+        assert_eq!(resolved_provider, &provider);
+        assert!(
+            demand
+                .slots
+                .get(&provider)
+                .is_some_and(|slots| slots.contains(local_slot))
+        );
+
+        // Imported-local exports are lowered to a dedicated synthetic import slot. That is the
+        // row liveness must retain for graph linkage; the original source import can remain dead.
+        let barrel_node = graph.module(&barrel).expect("barrel module");
+        let export = barrel_node
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == "publicName")
+            .expect("barrel export");
+        let synthetic_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export.local_slot)
+            .expect("synthetic reexport import");
+        assert!(
+            demand
+                .live_imports
+                .contains(&(barrel.clone(), synthetic_import))
+        );
+        let reduced_barrel = reduced.module(&barrel).expect("reduced barrel");
+        let reduced_export = reduced_barrel
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == "publicName")
+            .expect("reduced barrel export");
+        let reduced_synthetic_import = reduced_barrel
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == reduced_export.local_slot)
+            .expect("reduced synthetic reexport import");
+        assert!(
+            reduced_demand
+                .live_imports
+                .contains(&(barrel.clone(), reduced_synthetic_import))
+        );
+        assert!(
+            !reduced_barrel
+                .program
+                .imports
+                .iter()
+                .any(|import| import.local == "localName")
+        );
         assert!(reduced.module(&provider).is_some());
     }
 }
