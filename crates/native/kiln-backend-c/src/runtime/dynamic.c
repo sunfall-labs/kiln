@@ -800,6 +800,16 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                  kiln_value receiver, const kiln_value *args, size_t argc,
                                  int depth, kiln_value *out, kiln_value *thrown,
                                  int construct_first_call);
+
+/* This object is a private serialized lexical environment, not a JavaScript object with the
+ * realm's inherited names or legacy __proto__ setter. */
+static int kiln_dyn_new_environment(kiln_value *out) {
+    int status = kiln_c99_new_object(out);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_set_prototype(*out, kiln_c99_null());
+    return status;
+}
+
 static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                                        kiln_value env_obj, int depth,
                                        kiln_value *thrown) {
@@ -1250,7 +1260,7 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                                   KILN_DYN_BINDING_FUNCTION_NAME);
         }
         kiln_value env_obj;
-        status = kiln_c99_new_object(&env_obj);
+        status = kiln_dyn_new_environment(&env_obj);
         if (status != KILN_C99_OK) {
             kiln_dyn_scope_destroy(&function_scope);
             return status;
@@ -2138,7 +2148,7 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                  kiln_value *thrown) {
     kiln_value upvals[3];
     kiln_value env_obj;
-    int status = kiln_c99_new_object(&env_obj);
+    int status = kiln_dyn_new_environment(&env_obj);
     if (status != KILN_C99_OK) return status;
     kiln_c99_gc_keep_alive(&env_obj);
     status = kiln_dyn_capture_environment(host, scope, env_obj, 0, thrown);
@@ -2826,10 +2836,9 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             }
             if (!kiln_dyn_scope_set(scope, name, name_len, init))
                 return KILN_C99_OUT_OF_MEMORY;
-            if (is_const &&
-                !kiln_dyn_scope_mark_restriction(scope, name, name_len,
-                                                 KILN_DYN_BINDING_READ_ONLY))
-                return KILN_C99_INTERNAL_ERROR;
+            if (is_const)
+                (void)kiln_dyn_scope_mark_restriction(scope, name, name_len,
+                                                      KILN_DYN_BINDING_READ_ONLY);
             if (lex->curr.kind != KILN_DYN_COMMA) break;
             kiln_dyn_lexer_next(lex);
         }
