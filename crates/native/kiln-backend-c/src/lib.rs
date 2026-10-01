@@ -260,6 +260,9 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_cancel_active_request) => {
         concat!("int ", stringify!($name), "(uint64_t request);\n")
     };
+    ($group:ident, $name:ident, realm_cancel_active_request_if_pending) => {
+        concat!("int ", stringify!($name), "(uint64_t request);\n")
+    };
     ($group:ident, $name:ident, realm_cancel_request) => {
         concat!("int ", stringify!($name), "(uint64_t realm, uint64_t request);\n")
     };

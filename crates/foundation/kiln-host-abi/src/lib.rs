@@ -353,6 +353,17 @@ pub struct Completion {
     pub result: Result<AsyncHostValue, AsyncHostError>,
 }
 
+/// Result of cancelling unfinished work while preserving a completed operation's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingCancellation {
+    /// No operation or undelivered completion is owned by this host.
+    Unknown,
+    /// The unfinished operation was cancelled; no completion will be delivered.
+    Cancelled,
+    /// A terminal completion remains owned by the ordinary completion pump.
+    CompletionReady,
+}
+
 /// Starts and controls asynchronous operations without exposing an executor implementation.
 pub trait AsyncHostOps {
     /// Start a non-resource operation and return its opaque request identity immediately.
@@ -364,6 +375,10 @@ pub trait AsyncHostOps {
 
     /// Cancel a pending operation, returning whether it was still owned by this host.
     fn cancel(&mut self, request: RequestId) -> bool;
+
+    /// Cancel only unfinished work. Completed results must remain available to the completion
+    /// pump so language callbacks retain the operation's actual success or failure.
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation;
 
     /// Return whether referenced work currently keeps the realm alive.
     fn has_referenced_work(&self) -> bool;
@@ -384,6 +399,10 @@ pub trait ActiveAsyncHostOps {
 
     /// Cancel a pending operation, returning whether it was still owned by this host.
     fn cancel(&mut self, request: RequestId) -> bool;
+
+    /// Cancel only unfinished work. Completed results must remain available to the completion
+    /// pump so language callbacks retain the operation's actual success or failure.
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation;
 }
 
 /// A number as `String(value)` renders it.

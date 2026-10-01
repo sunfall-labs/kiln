@@ -1453,6 +1453,7 @@ int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation
 int kiln_realm_start_active_host_op(const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int kiln_realm_cancel_active_request(uint64_t request);
+int kiln_realm_cancel_active_request_if_pending(uint64_t request);
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_server_attach_with_options_active(uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_server_close_active(uint64_t resource, int mode);

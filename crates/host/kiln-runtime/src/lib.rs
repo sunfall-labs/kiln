@@ -96,8 +96,9 @@ use timer_queue::{SequenceBuild, TimerEntry, TimerQueue};
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AcceptedTcpStream, ActiveAsyncHostOps, AsyncHostError, AsyncHostOp, AsyncHostOps,
-    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, ProcessOutput,
-    RequestId, ResourceId, ResourceInfo, ResourceKind, ResourceState,
+    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue,
+    PendingCancellation, ProcessOutput, RequestId, ResourceId, ResourceInfo, ResourceKind,
+    ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
@@ -698,6 +699,15 @@ impl AsyncHostOps for ScriptedHost {
 
     fn cancel(&mut self, request: RequestId) -> bool {
         self.pending.remove(&request).is_some()
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        // Scripted operations already own their terminal result at submission.
+        if self.pending.contains_key(&request) {
+            PendingCancellation::CompletionReady
+        } else {
+            PendingCancellation::Unknown
+        }
     }
 
     fn has_referenced_work(&self) -> bool {
@@ -1851,6 +1861,11 @@ impl<H: RealmHostProvider> RealmState<H> {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
     }
 
+    /// Cancel unfinished host work without discarding a result awaiting language delivery.
+    pub fn cancel_host_op_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        AsyncHostOps::cancel_if_pending(&mut self.host, request)
+    }
+
     /// Whether an HTTP engine owns the transport of `resource`.
     #[cfg(feature = "http")]
     pub fn http_owns(&self, resource: ResourceId) -> bool {
@@ -2674,6 +2689,10 @@ impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     fn cancel(&mut self, request: RequestId) -> bool {
         RealmHostProvider::cancel_on_realm(&mut self.state.host, request)
     }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        self.state.cancel_host_op_if_pending(request)
+    }
 }
 
 impl ActiveAsyncHostOps for TokioHost {
@@ -2683,6 +2702,10 @@ impl ActiveAsyncHostOps for TokioHost {
 
     fn cancel(&mut self, request: RequestId) -> bool {
         AsyncHostOps::cancel(self, request)
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        AsyncHostOps::cancel_if_pending(self, request)
     }
 }
 
@@ -4148,6 +4171,21 @@ impl AsyncHostOps for TokioHost {
             }
         }
         true
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        self.collect_ready_nonblocking();
+        let Some(pending) = self.pending.get(&request) else {
+            return PendingCancellation::Unknown;
+        };
+        if self.ready.contains_key(&pending.sequence) {
+            return PendingCancellation::CompletionReady;
+        }
+        if AsyncHostOps::cancel(self, request) {
+            PendingCancellation::Cancelled
+        } else {
+            PendingCancellation::Unknown
+        }
     }
 
     fn has_referenced_work(&self) -> bool {

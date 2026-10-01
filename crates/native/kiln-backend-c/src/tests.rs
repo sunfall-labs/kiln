@@ -885,6 +885,10 @@ int kiln_realm_cancel_active_request(uint64_t request) {
     (void)request;
     return KILN_REALM_ASYNC_NOT_FOUND;
 }
+int kiln_realm_cancel_active_request_if_pending(uint64_t request) {
+    (void)request;
+    return 0;
+}
 
 /* Scalar backend fixtures never exercise Node HTTP; production artifacts link these symbols
  * from the Rust realm provider. */

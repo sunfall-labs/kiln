@@ -4210,6 +4210,43 @@ pub unsafe extern "C" fn kiln_realm_cancel_active_request(request: u64) -> i32 {
     unsafe { kiln_realm_cancel_request(handle, request) }
 }
 
+/// Cancel unfinished work without suppressing an already-completed language callback.
+/// Returns 1 for cancelled work, 2 for an intact ready completion, and 0 for an unknown request.
+/// Unlike ordinary cancellation, this primitive never retires a completion-owned resource.
+///
+/// # Safety
+/// `request` must be an identity previously returned to this active realm.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_cancel_active_request_if_pending(request: u64) -> i32 {
+    ffi(|| {
+        let handle = ACTIVE_REALM.with(Cell::get);
+        let Some(realm) = active_handle(handle) else {
+            return INVALID_ARGUMENT;
+        };
+        let request = RequestId::new(request);
+        if realm.queued.borrow().contains_key(&request)
+            && !realm.cancelled.borrow().contains(&request)
+        {
+            return 2;
+        }
+        let Some(outcome) = realm
+            .runtime
+            .state_mut()
+            .map(|mut state| state.cancel_host_op_if_pending(request))
+        else {
+            return RUNTIME_ERROR;
+        };
+        match outcome {
+            kiln_host_abi::PendingCancellation::CompletionReady => 2,
+            kiln_host_abi::PendingCancellation::Cancelled => {
+                realm.continuations.borrow_mut().remove(&request);
+                1
+            }
+            kiln_host_abi::PendingCancellation::Unknown => 0,
+        }
+    })
+}
+
 /// Runs every queued next-tick job, promise job and host completion. This is the checkpoint
 /// the drive performs between turns and the one the HTTP engine performs after every direct
 /// callback (ADR 0042); both are in context.
@@ -6818,6 +6855,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_cancel_active_request, realm_cancel_active_request) => {
             const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_cancel_active_request;
+        };
+        (realm, kiln_realm_cancel_active_request_if_pending, realm_cancel_active_request_if_pending) => {
+            const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_cancel_active_request_if_pending;
         };
         (realm, $name:ident, realm_http_attach) => {
             const _: unsafe extern "C" fn(u64, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = $name;
