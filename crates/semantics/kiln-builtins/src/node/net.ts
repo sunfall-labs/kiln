@@ -5,6 +5,43 @@ const nativeModule =
     ? (process as any).__kilnNativeModules?.net || null
     : null;
 
+// Public Socket methods are TypeScript facades. The native capability only provides the
+// per-socket cork buffer operations; registering here lets HTTP-created sockets share the same
+// methods even though their constructors live in the host adapter.
+function socketCork(this: any): any {
+  if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
+  return nativeModule.__corkSocket(this);
+}
+
+function socketUncork(this: any): any {
+  if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
+  return nativeModule.__uncorkSocket(this);
+}
+
+const socketPrototypes = new WeakMap<object, object>();
+
+function decorateSocket(socket: any): any {
+  const base = Object.getPrototypeOf(socket);
+  let prototype = socketPrototypes.get(base);
+  if (!prototype) {
+    prototype = Object.create(base);
+    Object.defineProperties(prototype, {
+      cork: { configurable: true, writable: true, value: socketCork },
+      uncork: { configurable: true, writable: true, value: socketUncork },
+    });
+    socketPrototypes.set(base, prototype);
+  }
+  Object.setPrototypeOf(socket, prototype);
+  return socket;
+}
+
+if (typeof process !== "undefined") {
+  Object.defineProperty(process, "__kilnSocketDecorator", {
+    configurable: false,
+    value: decorateSocket,
+  });
+}
+
 export function createServer(...args: any[]): any {
   if (nativeModule && typeof nativeModule.createServer === "function") {
     return nativeModule.createServer(...args);

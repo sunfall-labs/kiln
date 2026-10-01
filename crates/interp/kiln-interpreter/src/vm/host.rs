@@ -312,6 +312,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     http_agent_request: None,
                 }));
                 let socket = node_socket_object(&state);
+                self.decorate_node_socket(&socket, instruction)?;
                 if let Some(callback) = callback {
                     self.dispatch_node_event(
                         Native::NodeEventOnce,
@@ -338,12 +339,37 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 });
                 Ok(socket)
             }
-            Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy
-            | Native::NodeSocketCork | Native::NodeSocketUncork => {
+            Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
                 self.dispatch_node_socket(native, receiver, arguments, instruction)
+            }
+            Native::NodeSocketCork | Native::NodeSocketUncork => {
+                let socket = arguments.first().ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Socket cork operation requires a socket receiver".into(),
+                })?;
+                self.dispatch_node_socket(native, socket, &[], instruction)
             }
             _ => unreachable!("only node:net natives dispatch here"),
         }
+    }
+
+    fn decorate_node_socket(
+        &mut self,
+        socket: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let Some(process) = self.process_object.clone() else {
+            return Ok(());
+        };
+        let decorator = self.read_property(&process, "__kilnSocketDecorator", instruction)?;
+        if is_callable(&decorator) {
+            self.call_value(
+                &decorator,
+                Value::Undefined,
+                vec![socket.clone()],
+                instruction,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn dispatch_node_socket(
@@ -354,6 +380,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_net_socket_state(receiver)?;
+        if native == Native::NodeSocketEnd
+            && let Some(callback) = arguments.iter().rev().find(|value| is_callable(value))
+        {
+            self.dispatch_node_event(
+                Native::NodeEventOnce,
+                receiver,
+                &[Value::String("finish".into()), callback.clone()],
+                instruction,
+            )?;
+        }
         if native == Native::NodeSocketCork {
             let mut state = state.borrow_mut();
             state.cork_depth = state.cork_depth.saturating_add(1);
@@ -421,7 +457,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Native::NodeSocketEnd => {
                     let data = arguments
                         .first()
-                        .filter(|value| !matches!(value, Value::Undefined))
+                        .filter(|value| {
+                            !matches!(value, Value::Undefined) && !is_callable(value)
+                        })
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
                     let mut state = state.borrow_mut();
@@ -602,6 +640,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         instruction,
                         message: "HTTP upgrade write is no longer available".into(),
                     })?;
+            state.borrow_mut().corked_callbacks.extend(write_callbacks);
             return Ok(Value::Boolean(disposition.ready));
         }
         let (result, actions) = {
@@ -623,7 +662,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Native::NodeSocketEnd => {
                     let mut data = arguments
                         .first()
-                        .filter(|value| !matches!(value, Value::Undefined))
+                        .filter(|value| {
+                            !matches!(value, Value::Undefined) && !is_callable(value)
+                        })
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
                     let corked = {
@@ -1569,6 +1610,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_agent_request: None,
         }));
         let socket = node_socket_object(&socket_state);
+        self.decorate_node_socket(&socket, instruction)?;
         let request = state
             .borrow()
             .object
@@ -1706,6 +1748,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     http_agent_request: None,
                 }));
                 let socket = node_socket_object(&socket_state);
+                self.decorate_node_socket(&socket, self.instruction)?;
                 if protocol == ServerProtocol::Http {
                     if let Value::Object(object) = &socket {
                         object.borrow_mut().set("encrypted", Value::Boolean(false));
@@ -4147,8 +4190,29 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 PendingNodeRequest::Stream {
                     server, resource, write_callbacks, ..
                 } => {
+                    let callback_result = completion.result.clone();
+                    // Only raw `node:net` sockets read and write through host operations;
+                    // an HTTP connection's bytes belong to the engine (ADR 0046).
+                    let mut server_state = server.borrow_mut();
+                    let stream = server_state
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.resource() == resource)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "completion lost its node:net stream".into(),
+                        })?;
+                    stream.applying_read_completion = true;
+                    let socket = stream.socket.clone();
+                    let actions = stream.driver.completed(completion).ok_or_else(|| {
+                        ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "completion lost its node:net stream".into(),
+                        }
+                    })?;
+                    drop(server_state);
                     if !write_callbacks.is_empty() {
-                        let callback_args = match &completion.result {
+                        let callback_args = match &callback_result {
                             Ok(_) => Vec::new(),
                             Err(error) => {
                                 let value = self.construct_error(
@@ -4178,25 +4242,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             )?;
                         }
                     }
-                    // Only raw `node:net` sockets read and write through host operations;
-                    // an HTTP connection's bytes belong to the engine (ADR 0046).
-                    let mut server_state = server.borrow_mut();
-                    let stream = server_state
-                        .streams
-                        .iter_mut()
-                        .find(|stream| stream.resource() == resource)
-                        .ok_or_else(|| ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "completion lost its node:net stream".into(),
-                        })?;
-                    stream.applying_read_completion = true;
-                    let actions = stream.driver.completed(completion).ok_or_else(|| {
-                        ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "completion lost its node:net stream".into(),
+                    if socket.is_some_and(|socket| socket.borrow().destroyed) {
+                        if let Some(stream) = server
+                            .borrow_mut()
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.resource() == resource)
+                        {
+                            stream.applying_read_completion = false;
                         }
-                    })?;
-                    drop(server_state);
+                        sync_node_socket_ready_state(&server, resource);
+                        return Ok(());
+                    }
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }

@@ -304,6 +304,8 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "connect" | "createConnection" => {
             Some(Value::Native(Native::NodeNetConnect, RealmId::PRIMARY))
         }
+        "__corkSocket" => Some(Value::Native(Native::NodeSocketCork, RealmId::PRIMARY)),
+        "__uncorkSocket" => Some(Value::Native(Native::NodeSocketUncork, RealmId::PRIMARY)),
         "default" => Some(Value::Native(Native::NodeNet, RealmId::PRIMARY)),
         _ => None,
     }
