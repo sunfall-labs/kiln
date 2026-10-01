@@ -928,17 +928,14 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
                 && !matches!(inherited, Value::Undefined))
         }
-        // Mirrors the read: a function answers from its own store, then from `name`, `length`
-        // and `prototype`, then from the methods every callable inherits. `in` has to agree with
-        // what a read would produce, or a feature-detect and the call after it disagree.
+        // Callable methods belong to the actual prototype chain. In particular, setting a
+        // function's prototype to null removes inherited methods without removing its own
+        // identity properties. Membership must not invoke an inherited accessor.
         Value::Function(closure) => {
             closure.properties.borrow().lookup(&name).is_some()
                 || matches!(name, "name" | "length")
                 || (name == "prototype" && has_prototype_property(closure))
-                || !matches!(
-                    function_property(intrinsics, &name, value_realm(target)),
-                    Value::Undefined
-                )
+                || has_property_ascii(intrinsics, &prototype_of(target), name)
         }
         _ => false,
     }
