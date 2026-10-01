@@ -2702,22 +2702,18 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 }
                 kiln_dyn_lexer_next(lex);
 
-                size_t body_start = lex->pos - lex->curr.len;
-                if (lex->curr.kind == KILN_DYN_LBRACE) {
-                    int bdepth = 1;
-                    kiln_dyn_lexer_next(lex);
-                    while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
-                        if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
-                        else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
-                        kiln_dyn_lexer_next(lex);
-                    }
-                } else {
-                    while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
-                        kiln_dyn_lexer_next(lex);
-                    }
-                    if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
-                }
-                size_t body_end = lex->pos - lex->curr.len;
+                /* A loop body is a statement, not necessarily a block or expression ending at
+                 * the next semicolon. In particular, `for (x in xs) if (p(x)) { ... }` is a
+                 * single statement whose nested braces and optional `else` must stay together.
+                 * Use the same token-aware statement walker as conditional branches; this also
+                 * keeps strings, comments, regexps and nested control statements opaque. */
+                size_t body_start = lex->curr.start != NULL
+                                        ? (size_t)(lex->curr.start - lex->src)
+                                        : lex->pos;
+                kiln_dyn_skip_statement(lex);
+                size_t body_end = lex->curr.start != NULL
+                                      ? (size_t)(lex->curr.start - lex->src)
+                                      : lex->len;
                 const char *body_src = &lex->src[body_start];
                 size_t body_len = (body_end > body_start) ? (body_end - body_start) : 0;
 
@@ -2863,22 +2859,13 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         size_t step_end = lex->pos - lex->curr.len;
         if (lex->curr.kind == KILN_DYN_RPAREN) kiln_dyn_lexer_next(lex);
 
-        size_t body_start = lex->pos - lex->curr.len;
-        if (lex->curr.kind == KILN_DYN_LBRACE) {
-            int bdepth = 1;
-            kiln_dyn_lexer_next(lex);
-            while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
-                if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
-                else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
-                kiln_dyn_lexer_next(lex);
-            }
-        } else {
-            while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
-                kiln_dyn_lexer_next(lex);
-            }
-            if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
-        }
-        size_t body_end = lex->pos - lex->curr.len;
+        size_t body_start = lex->curr.start != NULL
+                                ? (size_t)(lex->curr.start - lex->src)
+                                : lex->pos;
+        kiln_dyn_skip_statement(lex);
+        size_t body_end = lex->curr.start != NULL
+                              ? (size_t)(lex->curr.start - lex->src)
+                              : lex->len;
 
         const char *cond_src = &lex->src[cond_start];
         size_t cond_len = (cond_end > cond_start) ? (cond_end - cond_start) : 0;
