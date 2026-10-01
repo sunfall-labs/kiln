@@ -1261,8 +1261,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             kiln_value value;
             status = kiln_c99_get_computed(host, source, key, &value, depth, thrown);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)key.ptr, NULL,
-                                           value, 0, depth, thrown);
+            status = kiln_c99_create_data_property(host, target, key, value, depth, thrown);
             if (status != KILN_C99_OK) return status;
         }
         return KILN_C99_OK;
@@ -1320,10 +1319,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            /* The headed form, as in the computed write above: the byte adapter would read
-             * the header's words as key bytes. */
-            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr, NULL,
-                                           element, 0, depth, thrown);
+            /* CreateDataProperty keeps object spread from invoking an inherited setter on the
+             * fresh target for a numeric index key. */
+            status = kiln_c99_create_data_property(host, target, name, element, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -1476,9 +1474,11 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         if (object->elements != NULL) {
             for (index = 0; index < object->element_count; ++index) {
                 if (object->elements[index] == KILN_VAL_HOLE) continue;
-                char num_buf[32];
-                size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
-                int status = kiln_c99_put(host, target, num_buf, nlen, kiln_val_to_boundary(object->elements[index]), depth, thrown);
+                kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                int status = kiln_c99_create_data_property(
+                    host, target, key, kiln_val_to_boundary(object->elements[index]), depth,
+                    thrown);
                 if (status != KILN_C99_OK) return status;
             }
         }
@@ -1497,7 +1497,14 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             sval = (object->slots != NULL && index < object->slot_capacity)
                        ? kiln_val_to_boundary(object->slots[index])
                        : kiln_c99_undefined();
-            status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 0, depth, thrown);
+            kiln_value key_value;
+            if (!kiln_c99_symbol_of_key_view(skey, &key_value)) {
+                key_value = kiln_c99_stable_key_value(skey);
+            }
+            if (key_value.tag != KILN_VALUE_STRING && key_value.tag != KILN_VALUE_SYMBOL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            status = kiln_c99_create_data_property(host, target, key_value, sval, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -1518,6 +1525,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             const kiln_string *key = (const kiln_string *)
                 kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
             kiln_property property;
+            kiln_value key_value;
             kiln_value copied;
             if (!kiln_c99_property_read_own(object, key, key, &property)) continue;
             /* The backing record stores every `@@` key as non-enumerable so ordinary string-key
@@ -1531,9 +1539,12 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                      * `"gone" in { ...source }` said false where node says true, because
                      * `CopyDataProperties` creates a property for every enumerable own key it
                      * was given, whatever the read produced. */
-                    status = kiln_c99_put_mode_key(host, target, property.key,
-                                                   property.key,
-                                                   kiln_c99_undefined(), 0, depth, thrown);
+                    kiln_value key_value;
+                    if (!kiln_c99_symbol_of_key_view(property.key, &key_value)) {
+                        key_value = kiln_c99_stable_key_value(property.key);
+                    }
+                    status = kiln_c99_create_data_property(host, target, key_value,
+                                                          kiln_c99_undefined(), depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -1561,9 +1572,10 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             } else {
                 copied = property.value;
             }
-            status = kiln_c99_put_mode_key(host, target, property.key,
-                                           property.key, copied, 0, depth,
-                                           thrown);
+            if (!kiln_c99_symbol_of_key_view(property.key, &key_value)) {
+                key_value = kiln_c99_stable_key_value(property.key);
+            }
+            status = kiln_c99_create_data_property(host, target, key_value, copied, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }

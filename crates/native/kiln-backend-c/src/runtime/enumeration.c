@@ -1173,7 +1173,6 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         kiln_value descriptor;
         kiln_value enumerable;
         kiln_value copied;
-        kiln_value name;
         int found;
         status = kiln_c99_proxy_describe(host, source, key, &descriptor, &found, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -1193,14 +1192,10 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* A symbol is stored under the reserved name it carries, the same spelling every other
-         * write of one uses -- and that name lives on the symbol, so it outlives this frame. */
-        name = kiln_c99_property_key(key);
-        if (name.tag != KILN_VALUE_STRING) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr,
-                                       (const kiln_string *)name.ptr, copied, 0, depth, thrown);
+        /* CopyDataProperties uses CreateDataProperty on its fresh target. Preserve the original
+         * string or symbol key instead of assigning through [[Set]], which could invoke an
+         * inherited setter on Object.prototype. */
+        status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
