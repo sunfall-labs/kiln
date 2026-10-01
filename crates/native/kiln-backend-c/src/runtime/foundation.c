@@ -2041,3 +2041,4 @@ static int kiln_c99_heritage_constructs(kiln_value value);
 
 static int kiln_c99_intrinsic_has_instance(kiln_value callable);
 static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
+static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);

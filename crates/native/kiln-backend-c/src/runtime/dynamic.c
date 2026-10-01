@@ -2919,7 +2919,7 @@ static int kiln_dyn_callable_scan_advance(kiln_dyn_lexer *scan,
     *previous_is_control_head = kind == KILN_DYN_IDENT &&
         ((scan->curr.len == 5 && memcmp(scan->curr.start, "while", 5) == 0) ||
          (scan->curr.len == 6 && memcmp(scan->curr.start, "switch", 6) == 0) ||
-         (scan->curr.len == 5 && memcmp(scan->curr.start, "catch", 5) == 0);
+         (scan->curr.len == 5 && memcmp(scan->curr.start, "catch", 5) == 0));
     return 1;
 }
 
