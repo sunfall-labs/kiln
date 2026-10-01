@@ -94,7 +94,8 @@ for (const body of ["return 00.5;", "return 01e2;", "return 09_0;", "return 00.0
   }
   if (!rejected) throw new Error("legacy-octal spellings must be rejected in this context");
 }
-for (const body of ["return 0.1n;", "return .1n;", "return 1e2n;", "return 01n;", "return 08n;"]) {
+for (const body of ["return 0.1n;", "return .1n;", "return 1e2n;", "return 01n;", "return 08n;",
+  "return 1n2;"]) {
   let rejected = false;
   try {
     Function(body);

@@ -764,7 +764,8 @@ static int kiln_dyn_validate_source(const char *source, size_t length, int stric
 }
 
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
-    if ((tok->kind == KILN_DYN_STR || tok->kind == KILN_DYN_REGEX) && tok->str_val != NULL) {
+    if ((tok->kind == KILN_DYN_STR || tok->kind == KILN_DYN_REGEX ||
+         tok->kind == KILN_DYN_BIGINT) && tok->str_val != NULL) {
         free(tok->str_val);
         tok->str_val = NULL;
     }
@@ -1172,7 +1173,8 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         }
         if (valid && lex->pos < lex->len) {
             unsigned char next = (unsigned char)lex->src[lex->pos];
-            if (kiln_dyn_number_suffix(next) || (radix != 10 && next >= '0' && next <= '9'))
+            if (kiln_dyn_number_suffix(next) ||
+                ((radix != 10 || bigint_literal) && next >= '0' && next <= '9'))
                 valid = 0;
         }
         if (valid && !bigint_literal) {
