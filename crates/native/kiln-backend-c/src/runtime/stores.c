@@ -57,13 +57,9 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* Defined rather than assigned: `constructor` is a real property and is never
-         * enumerated, so `for (const k in new C())` visits what the constructor assigned and not
-         * the link back to the class. */
-        status = kiln_c99_define_method(*slot, "constructor", 11, function);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
+        /* Ordinary constructor prototypes have a non-enumerable link back to the function.
+         * Generator prototypes inherit that link from the shared TypeScript-owned intrinsic
+         * prototype installed below. */
         prototype = *slot;
         if (closure->async_generator || (closure->generator && !closure->asynchronous)) {
             size_t kind = closure->async_generator ? 1 : 0;
@@ -71,6 +67,11 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
             if (shared.tag == KILN_VALUE_OBJECT) {
                 status = kiln_c99_set_prototype(prototype, shared);
                 if (status != KILN_C99_OK) return status;
+            }
+        } else {
+            status = kiln_c99_define_method(*slot, "constructor", 11, function);
+            if (status != KILN_C99_OK) {
+                return status;
             }
         }
     }

@@ -56,7 +56,7 @@
     const generator = (function* () {})();
     const generatorPrototype = Object.create(Iterator.prototype);
     Object.defineProperties(generatorPrototype, {
-      constructor: { value: GeneratorFunction, writable: false, configurable: true },
+      constructor: { value: prototypes[1], writable: false, configurable: true },
       next: { value: generator.next, writable: true, configurable: true },
       return: { value: generator.return, writable: true, configurable: true },
       throw: { value: generator.throw, writable: true, configurable: true },
@@ -81,7 +81,7 @@
     }
     const asyncGeneratorPrototype = Object.create(asyncIteratorPrototype);
     Object.defineProperties(asyncGeneratorPrototype, {
-      constructor: { value: AsyncGeneratorFunction, writable: false, configurable: true },
+      constructor: { value: prototypes[2], writable: false, configurable: true },
       next: { value: asyncGenerator.next, writable: true, configurable: true },
       return: { value: asyncGenerator.return, writable: true, configurable: true },
       throw: { value: asyncGenerator.throw, writable: true, configurable: true },

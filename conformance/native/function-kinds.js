@@ -21,7 +21,7 @@ if (
   typeof generatorObjectPrototype.next !== "function" ||
   typeof generatorObjectPrototype.return !== "function" ||
   typeof generatorObjectPrototype.throw !== "function" ||
-  generatorObjectPrototype.constructor !== GeneratorFunction ||
+  generatorObjectPrototype.constructor !== GeneratorFunction.prototype ||
   Object.getOwnPropertyDescriptor(generatorObjectPrototype, "constructor").writable ||
   Object.prototype.toString.call(generatorObjectPrototype) !== "[object Generator]" ||
   Object.getPrototypeOf(asyncGeneratorObjectPrototype) === Object.prototype ||
@@ -29,7 +29,7 @@ if (
   typeof asyncGeneratorObjectPrototype.next !== "function" ||
   typeof asyncGeneratorObjectPrototype.return !== "function" ||
   typeof asyncGeneratorObjectPrototype.throw !== "function" ||
-  asyncGeneratorObjectPrototype.constructor !== AsyncGeneratorFunction ||
+  asyncGeneratorObjectPrototype.constructor !== AsyncGeneratorFunction.prototype ||
   Object.getOwnPropertyDescriptor(asyncGeneratorObjectPrototype, "constructor").writable ||
   Object.prototype.toString.call(asyncGeneratorObjectPrototype) !== "[object AsyncGenerator]" ||
   Object.getOwnPropertyDescriptor(GeneratorFunction.prototype, "prototype").writable ||

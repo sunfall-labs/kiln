@@ -1503,6 +1503,23 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_c99_object_of(frame->properties)->prototype.tag != KILN_VALUE_UNDEFINED) {
             function_prototype = kiln_c99_object_of(frame->properties)->prototype;
         }
+        size_t generator_kind = frame->async_generator ? 1 : 0;
+        kiln_value shared_prototype = kiln_c99_realm()->generator_object_prototypes[generator_kind];
+        if (shared_prototype.tag == KILN_VALUE_OBJECT &&
+            function_prototype.tag == KILN_VALUE_OBJECT) {
+            /* Once the TypeScript-owned iterator prototype exists, its ordinary [[Get]] is
+             * authoritative. Do not probe membership first: a proxy can observe that extra
+             * operation, and accessors must receive the generator as `this`. */
+            return kiln_c99_get_with_receiver(host, function_prototype,
+                                              kiln_c99_key_value(key, ikey), target, out,
+                                              depth, thrown);
+        }
+        if (shared_prototype.tag == KILN_VALUE_OBJECT &&
+            function_prototype.tag == KILN_VALUE_NULL) {
+            KILN_C99_ABSENT("a generator instance with an explicit null prototype has no \
+                             inherited properties",
+                            out);
+        }
         if (function_prototype.tag == KILN_VALUE_OBJECT) {
             status = kiln_c99_has_property_key(host, function_prototype, key, ikey, &found,
                                                depth, thrown);

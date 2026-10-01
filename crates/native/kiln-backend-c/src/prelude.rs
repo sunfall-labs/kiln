@@ -2384,7 +2384,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 36,
+        sites: 37,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2407,7 +2407,8 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     lacks it. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them. An explicit \
-                    null [[Prototype]] ends lookup, so every inherited property is absent",
+                    null [[Prototype]] ends lookup, so every inherited property is absent; and a \
+                    generator instance explicitly linked to null has no inherited iterator members",
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",
