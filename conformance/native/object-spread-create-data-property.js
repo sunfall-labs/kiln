@@ -53,6 +53,16 @@ for (const [label, source] of [["object", ordinary], ["array", array], ["proxy",
     throw new Error(`${label} spread did not define own string and symbol properties`);
   }
 }
+Object.defineProperty(Object.prototype, "0", {
+  configurable: true,
+  set() { inheritedSetterCalls += 1; },
+});
+const indexedCopy = { ...["array-index"] };
+delete Object.prototype["0"];
+if (indexedCopy[0] !== "array-index" ||
+    !Object.prototype.hasOwnProperty.call(indexedCopy, "0")) {
+  throw new Error("array spread did not define its indexed property");
+}
 if (inheritedSetterCalls !== 0) {
   throw new Error(`spread invoked ${inheritedSetterCalls} inherited setter(s)`);
 }
