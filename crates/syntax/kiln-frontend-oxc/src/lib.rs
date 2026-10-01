@@ -2369,11 +2369,11 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
 #[derive(Default)]
 struct AnnexBFunctionScope {
     sloppy: bool,
-    lexical_names: HashMap<String, oxc_span::Span>,
 }
 
 struct AnnexBBlockedAliasVisitor {
     scopes: Vec<AnnexBFunctionScope>,
+    lexical_scopes: Vec<HashMap<String, oxc_span::Span>>,
     suppressed_pairs: HashSet<(u32, u32, u32, u32)>,
 }
 
@@ -2381,6 +2381,7 @@ impl AnnexBBlockedAliasVisitor {
     fn new() -> Self {
         Self {
             scopes: Vec::new(),
+            lexical_scopes: Vec::new(),
             suppressed_pairs: HashSet::new(),
         }
     }
@@ -2422,9 +2423,11 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             program.source_type.is_script() && !Self::strict_directives(&program.directives);
         self.scopes.push(AnnexBFunctionScope {
             sloppy,
-            lexical_names: Self::lexical_names(&program.body),
         });
+        self.lexical_scopes
+            .push(Self::lexical_names(&program.body));
         walk::walk_program(self, program);
+        self.lexical_scopes.pop();
         self.scopes.pop();
     }
 
@@ -2435,24 +2438,120 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
             return;
         };
         self.scopes.push(AnnexBFunctionScope {
-            sloppy: inherited_sloppy && !Self::strict_directives(&body.directives),
-            lexical_names: Self::lexical_names(&body.statements),
+            sloppy: inherited_sloppy
+                && !flags.is_strict_mode()
+                && !Self::strict_directives(&body.directives),
         });
+        self.lexical_scopes
+            .push(Self::lexical_names(&body.statements));
         walk::walk_function(self, function, flags);
+        self.lexical_scopes.pop();
         self.scopes.pop();
+    }
+
+    fn visit_arrow_function_expression(
+        &mut self,
+        function: &ArrowFunctionExpression<'ast>,
+    ) {
+        let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
+        let body = match &function.body {
+            oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => Some(body.as_ref()),
+            oxc_ast::ast::ArrowFunctionBody::Expression(_) => None,
+        };
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: inherited_sloppy && !function.has_use_strict_directive(),
+        });
+        self.lexical_scopes.push(body.map_or_else(HashMap::new, |body| {
+            Self::lexical_names(&body.statements)
+        }));
+        walk::walk_arrow_function_expression(self, function);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_class_body(&mut self, body: &oxc_ast::ast::ClassBody<'ast>) {
+        // Class bodies are strict, including methods and field initializers. The heritage
+        // expression is visited before ClassBody and retains the surrounding function's mode.
+        self.scopes.push(AnnexBFunctionScope { sloppy: false });
+        walk::walk_class_body(self, body);
+        self.scopes.pop();
+    }
+
+    fn visit_static_block(&mut self, block: &oxc_ast::ast::StaticBlock<'ast>) {
+        self.scopes.push(AnnexBFunctionScope { sloppy: false });
+        self.lexical_scopes.push(Self::lexical_names(&block.body));
+        walk::walk_static_block(self, block);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_block_statement(&mut self, statement: &oxc_ast::ast::BlockStatement<'ast>) {
+        self.lexical_scopes
+            .push(Self::lexical_names(&statement.body));
+        walk::walk_block_statement(self, statement);
+        self.lexical_scopes.pop();
+    }
+
+    fn visit_catch_clause(&mut self, clause: &oxc_ast::ast::CatchClause<'ast>) {
+        let mut names = HashMap::new();
+        if let Some(parameter) = &clause.param {
+            parameter.pattern.bound_names(&mut |identifier| {
+                names.insert(identifier.name.to_string(), identifier.span);
+            });
+        }
+        self.lexical_scopes.push(names);
+        walk::walk_catch_clause(self, clause);
+        self.lexical_scopes.pop();
     }
 
     fn visit_switch_statement(&mut self, statement: &oxc_ast::ast::SwitchStatement<'ast>) {
         if let Some(scope) = self.scopes.last().filter(|scope| scope.sloppy) {
+            let mut case_lexicals = HashSet::new();
+            for case in &statement.cases {
+                for consequent in &case.consequent {
+                    match consequent {
+                        Statement::VariableDeclaration(declaration)
+                            if !matches!(
+                                declaration.kind,
+                                oxc_ast::ast::VariableDeclarationKind::Var
+                            ) =>
+                        {
+                            for declarator in &declaration.declarations {
+                                declarator.id.bound_names(&mut |identifier| {
+                                    case_lexicals.insert(identifier.name.to_string());
+                                });
+                            }
+                        }
+                        Statement::ClassDeclaration(declaration) => {
+                            if let Some(identifier) = &declaration.id {
+                                case_lexicals.insert(identifier.name.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             for case in &statement.cases {
                 for consequent in &case.consequent {
                     let Statement::FunctionDeclaration(function) = consequent else {
                         continue;
                     };
+                    // B.3.3 only adds aliases for plain function declarations. A generator or
+                    // async declaration can still be diagnosed as a real lexical collision.
+                    if function.generator || function.r#async {
+                        continue;
+                    }
                     let Some(identifier) = &function.id else {
                         continue;
                     };
-                    let Some(lexical_span) = scope.lexical_names.get(identifier.name.as_str())
+                    if case_lexicals.contains(identifier.name.as_str()) {
+                        continue;
+                    }
+                    let Some(lexical_span) = self
+                        .lexical_scopes
+                        .iter()
+                        .rev()
+                        .find_map(|names| names.get(identifier.name.as_str()))
                     else {
                         continue;
                     };
@@ -5896,6 +5995,56 @@ mod tests {
                 module.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn annex_b_switch_alias_diagnostics_respect_the_blocked_binding_scope() {
+        let blocked_alias = parse_with_goal(
+            "case.js",
+            "function f() { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; return lexicalName; }",
+            SourceGoal::Script,
+        );
+        assert!(
+            blocked_alias.diagnostics.is_empty(),
+            "a suppressed Annex B alias is not a redeclaration: {:?}",
+            blocked_alias.diagnostics
+        );
+
+        let duplicate_in_case_block = parse_with_goal(
+            "case.js",
+            "function f() { switch (0) { case 0: function lexicalName() {} \
+             let lexicalName; } }",
+            SourceGoal::Script,
+        );
+        assert!(
+            !duplicate_in_case_block.diagnostics.is_empty(),
+            "the filter must preserve a real CaseBlock duplicate"
+        );
+
+        let strict_class_method = parse_with_goal(
+            "case.js",
+            "class C { method() { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; } }",
+            SourceGoal::Script,
+        );
+        assert!(
+            strict_class_method.diagnostics.is_empty(),
+            "class methods are strict and do not create Annex B aliases: {:?}",
+            strict_class_method.diagnostics
+        );
+
+        let arrow_body = parse_with_goal(
+            "case.js",
+            "const f = () => { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; return lexicalName; };",
+            SourceGoal::Script,
+        );
+        assert!(
+            arrow_body.diagnostics.is_empty(),
+            "an arrow's lexical scope must participate in Annex B suppression: {:?}",
+            arrow_body.diagnostics
+        );
     }
 
     #[test]
