@@ -2385,7 +2385,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_with_receiver",
-        sites: 1,
+        sites: 2,
         proved_by: "an accessor with no getter: the language defines that read as undefined",
     },
     AbsentAnswer {
