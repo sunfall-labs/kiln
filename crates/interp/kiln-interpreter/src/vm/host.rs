@@ -3079,7 +3079,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP client request lost its JavaScript object".into(),
             })?;
         state.borrow_mut().socket = Some(Rc::clone(&socket));
-        let socket_value = Value::Object(socket_object);
+        let socket_value = socket_object;
         request_object
             .borrow_mut()
             .set("socket", socket_value.clone());
