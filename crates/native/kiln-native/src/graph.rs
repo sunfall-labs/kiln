@@ -1069,8 +1069,7 @@ fn compile_native_builtin_bootstrap(
 /// and typed-array implementations. Preserve that dispatch group even when the user graph does
 /// not directly demand those globals; family pruning and method-group pruning have separate
 /// liveness inputs.
-pub(super) const NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS: u32 =
-    kiln_graph::method_groups::MATH_NUMBER;
+pub(super) const NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS: u32 = kiln_graph::method_groups::MATH_NUMBER;
 
 /// A native executable with no open-world access constructs only the intrinsic families it can
 /// reach. Unknown computed/global access keeps the full surface. The remaining conditions are
