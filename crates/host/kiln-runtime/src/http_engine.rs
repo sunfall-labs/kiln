@@ -1360,8 +1360,12 @@ impl crate::node_stream::PipeTarget for ResponseSlotPipeTarget {
 
 fn server_service(
     shared: Rc<ConnectionShared>,
-) -> impl Service<Request<Incoming>, Response = Response<EngineBody>, Error = std::convert::Infallible>
-{
+) -> impl Service<
+    Request<Incoming>,
+    Response = Response<EngineBody>,
+    Error = std::convert::Infallible,
+    Future = Pin<Box<dyn Future<Output = Result<Response<EngineBody>, std::convert::Infallible>>>>,
+> + Unpin {
     let next_id = Cell::new(1_u64);
     service_fn(move |request: Request<Incoming>| {
         let id = next_id.get();
@@ -1394,11 +1398,13 @@ async fn serve(
                     ..HttpEvent::bare(HttpEventKind::Error, 0)
                 });
                 let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                table.borrow_mut().remove(&shared.resource);
                 return;
             }
         },
         _ = shared.shutdown.notified() => {
             let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+            table.borrow_mut().remove(&shared.resource);
             return;
         }
     };
