@@ -1983,7 +1983,7 @@ pub(super) fn collect_annexb_function_names(
     body: &[Statement],
     nested: bool,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     let depth = blocked.len();
     for statement in body {
@@ -1998,9 +1998,8 @@ pub(super) fn collect_annexb_function_names(
             && !function.generator
             && !function.asynchronous
             && !blocked.contains(name)
-            && !out.contains(name)
         {
-            out.push(name.clone());
+            out.push((name.clone(), function.span));
         }
         collect_annexb_in_statement(statement, blocked, out);
     }
@@ -2012,7 +2011,7 @@ pub(super) fn collect_annexb_function_names(
 pub(super) fn collect_annexb_in_statement(
     statement: &Statement,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     match &statement.kind {
         StatementKind::Block(body) => collect_annexb_function_names(body, true, blocked, out),
@@ -2080,9 +2079,8 @@ pub(super) fn collect_annexb_in_statement(
                         && !function.generator
                         && !function.asynchronous
                         && !blocked.contains(name)
-                        && !out.contains(name)
                     {
-                        out.push(name.clone());
+                        out.push((name.clone(), function.span));
                     }
                     collect_annexb_in_statement(statement, blocked, out);
                 }
@@ -2112,16 +2110,15 @@ pub(super) fn collect_annexb_in_statement(
 pub(super) fn collect_annexb_branch(
     statement: &Statement,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     if let StatementKind::Function(function) = &statement.kind
         && let Some(name) = &function.name
         && !function.generator
         && !function.asynchronous
         && !blocked.contains(name)
-        && !out.contains(name)
     {
-        out.push(name.clone());
+        out.push((name.clone(), function.span));
     }
     collect_annexb_in_statement(statement, blocked, out);
 }

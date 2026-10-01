@@ -1244,14 +1244,11 @@ impl super::Compiler {
         let mut blocked: Vec<String> = parameters.iter().cloned().collect();
         let mut names = Vec::new();
         collect_annexb_function_names(body, false, &mut blocked, &mut names);
-        for name in names {
-            if self.annexb_var_functions.contains(&name) {
-                continue;
-            }
+        for (name, span) in names {
             // A `var` or a top-level function declaration of the same name already owns the
             // binding; Annex B only adds the write, never a second slot.
             self.predeclare(VariableKind::Var, &name, true);
-            self.annexb_var_functions.insert(name);
+            self.annexb_var_functions.insert(span);
         }
     }
 

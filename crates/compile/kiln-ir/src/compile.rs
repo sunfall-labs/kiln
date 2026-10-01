@@ -810,7 +810,7 @@ struct Compiler {
     /// tell a borrowed binding from one of its own: a sloppy `var` takes the caller's over, and
     /// everything else shadows it.
     outer_names: HashSet<String>,
-    /// Names of the block-level function declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
+    /// Source spans of the block-level declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
     /// binding in the body being compiled.
     ///
     /// `{ function f() {} }` is two bindings, not one: a block-scoped one, which is all the main
@@ -818,8 +818,9 @@ struct Compiler {
     /// script, which the declaration writes to as it is evaluated. Legacy, and load-bearing:
     /// bundled JavaScript still relies on it. Names that are blocked -- by a lexical declaration
     /// between here and the block, by a formal parameter, or by being `arguments` -- are never in
-    /// this set, so the write is emitted only where the specification asks for it.
-    annexb_var_functions: HashSet<String>,
+    /// this set. Declaration identity matters: an eligible sibling with the same name must not
+    /// authorize writes from a blocked declaration.
+    annexb_var_functions: HashSet<Span>,
     /// Names this program declared on the global object rather than in a slot.
     ///
     /// Non-empty only for *global* code: a script and an `eval` whose variable environment is the

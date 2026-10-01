@@ -121,6 +121,21 @@ const blockFunctionBeforeDeclaration = Function(
 if (blockFunctionBeforeDeclaration() !== "function") {
   throw new Error("ordinary block function values initialize before statements execute");
 }
+const annexBMixedSiblingEligibility = Function(
+  "{ function mixedAlias() { return 1; } } " +
+    "{ let mixedAlias = 10; { function mixedAlias() { return 2; } } } return mixedAlias();",
+);
+if (annexBMixedSiblingEligibility() !== 1) {
+  throw new Error("an eligible sibling alias does not authorize a lexically blocked declaration");
+}
+function annexBGeneratorSibling() {
+  { function mixedAlias() { return 1; } }
+  { function* mixedAlias() { return 2; } }
+  return mixedAlias();
+}
+if (annexBGeneratorSibling() !== 1) {
+  throw new Error("an eligible sibling alias does not authorize a generator declaration");
+}
 globalThis.__switchGlobalAlias = function existingGlobalAlias() {};
 const annexBUnreachableSwitch = Function(
   "return typeof __switchGlobalAlias; switch (0) { case 0: function __switchGlobalAlias() {} }",

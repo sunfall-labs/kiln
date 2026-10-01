@@ -96,7 +96,10 @@ impl super::Compiler {
 
     /// Evaluate a function declaration whose lexical value was initialized on scope entry.
     pub(super) fn emit_annexb_function_write(&mut self, function: &Function) {
-        if let Some(name) = &function.name
+        if !function.generator
+            && !function.asynchronous
+            && self.annexb_var_functions.contains(&function.span)
+            && let Some(name) = &function.name
             && let Resolution::Local(local) = self.resolve(name)
         {
             self.emit_annexb_var_write(name, local);
@@ -110,9 +113,6 @@ impl super::Compiler {
     /// two bindings start as the same function object and diverge from there --
     /// `{ function f() {} f = 123; }` leaves the outer `f` a function.
     pub(super) fn emit_annexb_var_write(&mut self, name: &str, block: Local) {
-        if !self.annexb_var_functions.contains(name) {
-            return;
-        }
         let Some(target) = self.scopes[0].get(name).copied() else {
             // The var-scoped binding is a property of the global object, so the copy is a write
             // to it rather than to a slot.
