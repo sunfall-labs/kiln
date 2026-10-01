@@ -701,67 +701,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
                                     depth, thrown);
         }
-        if (kiln_c99_same_name_key(key, "constructor")) {
-            kiln_value store = kiln_c99_closure_store(closure);
-            kiln_value parent = store.tag == KILN_VALUE_OBJECT
-                                    ? kiln_c99_object_prototype_read(store)
-                                    : kiln_c99_undefined();
-            if (parent.tag == KILN_VALUE_UNDEFINED)
-                parent = kiln_c99_function_kind_prototype(closure);
-            if (parent.tag == KILN_VALUE_NULL) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
-            }
-            return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
+        kiln_value store = kiln_c99_closure_store(closure);
+        kiln_value parent = store.tag == KILN_VALUE_OBJECT
+                                ? kiln_c99_object_prototype_read(store)
+                                : kiln_c99_undefined();
+        if (parent.tag == KILN_VALUE_UNDEFINED)
+            parent = kiln_c99_function_kind_prototype(closure);
+        if (parent.tag == KILN_VALUE_NULL) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
-        {
-            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
-                                                &intrinsic_len);
-            uint64_t callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
-            if (callable != 0) {
-                *out = kiln_c99_method(callable);
-                return KILN_C99_OK;
-            }
-        }
-        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
-         * already answers and this one never did.
-         *
-         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
-         * written as "toString and valueOf would shadow what a constructor answers". Only
-         * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
-         * than refusing, and a callable answers that name for itself through
-         * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
-         * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
-         * `toString` exactly as it does for a plain object. */
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
-        {
-            uint64_t borrowed =
-                kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
-                : kiln_c99_same_name_key(key, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
-                    ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
-                    : 0;
-            if (borrowed != 0) {
-                *out = kiln_c99_method(borrowed);
-                return KILN_C99_OK;
-            }
-        }
-        /* Own members were answered above; what `Function.prototype` carries in its store comes
-         * next, before the name is called absent. */
-        {
-            int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
-                                                       key, ikey, out, depth, thrown, &found);
-            if (status != KILN_C99_OK || found) return status;
-        }
-        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) {
-            KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
-                            "answer",
-                            out);
-        }
-        return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out, depth, thrown);
+        kiln_value property_key = kiln_c99_key_value(key, &ikey);
+        if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_get_with_receiver(host, parent, property_key, target, out, depth,
+                                          thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {

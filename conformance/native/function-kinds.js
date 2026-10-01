@@ -6,6 +6,7 @@ async function* asyncGenerator() {}
 const AsyncFunction = asynchronous.constructor;
 const GeneratorFunction = generator.constructor;
 const AsyncGeneratorFunction = asyncGenerator.constructor;
+AsyncFunction.prototype.kindMarker = 11;
 
 console.log(
   AsyncFunction !== Function,
@@ -29,14 +30,18 @@ console.log(
   asyncGenerator instanceof AsyncGeneratorFunction,
   ordinary instanceof AsyncFunction,
 );
+Object.setPrototypeOf(asynchronous, { customMarker: 12 });
+console.log(asynchronous.kindMarker === undefined, asynchronous.customMarker === 12);
 console.log(
   Object.getPrototypeOf(asynchronous) === AsyncFunction.prototype,
   Object.getPrototypeOf(generator) === GeneratorFunction.prototype,
   Object.getPrototypeOf(asyncGenerator) === AsyncGeneratorFunction.prototype,
   Object.getPrototypeOf(ordinary) === Function.prototype,
+  asynchronous.kindMarker === 11,
 );
 
 asynchronous.constructor = ordinary;
 console.log(asynchronous.constructor === ordinary);
+delete asynchronous.constructor;
 Object.setPrototypeOf(asynchronous, Function.prototype);
 console.log(asynchronous.constructor === Function, asynchronous instanceof AsyncFunction);
