@@ -58,6 +58,9 @@ struct ClientShared {
     abort_pending: Cell<bool>,
     /// Hyper's connection future runs as its own task; an abort has to reach it too.
     connection: RefCell<Option<tokio::task::AbortHandle>>,
+    upgrade_wake: Notify,
+    upgrade_parts: RefCell<Option<(HostTransport, Vec<u8>)>>,
+    upgrade_error: RefCell<Option<String>>,
     header_scratch: RefCell<Vec<u8>>,
 }
 
@@ -207,6 +210,19 @@ impl ClientShared {
         self.in_flight.set(self.in_flight.get().saturating_sub(1));
     }
 
+    async fn take_upgrade_parts(&self) -> Result<(HostTransport, Vec<u8>), String> {
+        loop {
+            let notified = self.upgrade_wake.notified();
+            if let Some(parts) = self.upgrade_parts.borrow_mut().take() {
+                return Ok(parts);
+            }
+            if let Some(error) = self.upgrade_error.borrow_mut().take() {
+                return Err(error);
+            }
+            notified.await;
+        }
+    }
+
     /// Fail every request the language started that Hyper never answered, queued or in
     /// progress. Called once the connection is gone, before `Closed`.
     fn fail_outstanding(&self, message: &str) {
@@ -248,6 +264,9 @@ impl HttpClientEngine {
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
             connection: RefCell::new(None),
+            upgrade_wake: Notify::new(),
+            upgrade_parts: RefCell::new(None),
+            upgrade_error: RefCell::new(None),
             header_scratch: RefCell::new(Vec::with_capacity(512)),
         });
         trace!("{resource:?} client attach");
@@ -445,7 +464,23 @@ async fn run(
             return;
         }
     };
-    let connection = tokio::task::spawn_local(connection.with_upgrades());
+    let connection_shared = Rc::clone(&shared);
+    let connection = tokio::task::spawn_local(async move {
+        match connection.without_shutdown().await {
+            Ok(parts) => {
+                let raw = parts.io.into_inner();
+                *connection_shared.upgrade_parts.borrow_mut() =
+                    Some((HostTransport(raw), parts.read_buf.to_vec()));
+                connection_shared.upgrade_wake.notify_one();
+                Ok(())
+            }
+            Err(error) => {
+                *connection_shared.upgrade_error.borrow_mut() = Some(error.to_string());
+                connection_shared.upgrade_wake.notify_one();
+                Err(error)
+            }
+        }
+    });
     *shared.connection.borrow_mut() = Some(connection.abort_handle());
     let mut connection = Some(connection);
     let mut transferred = false;
@@ -547,28 +582,20 @@ async fn exchange(
     if let Err(error) = sender.ready().await {
         return Err(Failure::Error(error.to_string()));
     }
-    let mut response = sender
+    let response = sender
         .send_request(request)
         .await
         .map_err(|error| Failure::Error(error.to_string()))?;
     if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
-        let on_upgrade = hyper::upgrade::on(&mut response);
         let (response_parts, _body) = response.into_parts();
         let reason = response_parts.status.canonical_reason().unwrap_or_default();
-        let upgraded_stream = on_upgrade
-            .await
-            .map_err(|error| Failure::Error(error.to_string()))?;
-        let upgraded_parts = upgraded_stream
-            .downcast::<TokioIo<Box<dyn crate::HostIo>>>()
-            .map_err(|_| Failure::Error("HTTP upgrade returned an unexpected transport".into()))?;
-        let stream = upgraded_parts.io.into_inner();
-        let head = upgraded_parts.read_buf.to_vec();
+        let (stream, head) = shared.take_upgrade_parts().await.map_err(Failure::Error)?;
         let mut scratch = shared.header_scratch.borrow_mut();
         flatten_header_map(&response_parts.headers, &mut scratch);
         upgraded.borrow_mut().insert(
             shared.dispatcher.resource,
             UpgradeTransport {
-                transport: HostTransport(stream),
+                transport: stream,
                 head: head.clone(),
                 pending_write: Vec::new(),
                 write_completion: crate::http_engine::UpgradeWriteCompletion::completed(),
@@ -660,6 +687,9 @@ fn finish(
 ) {
     let _ = shared.dispatcher.flush_deferred();
     if !transferred {
+        // `without_shutdown` also returns the IO when an ordinary connection closes. Keep its
+        // parts only while a 101 exchange can claim them; otherwise dropping them retires IO.
+        shared.upgrade_parts.borrow_mut().take();
         let _ = shared
             .dispatcher
             .dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
