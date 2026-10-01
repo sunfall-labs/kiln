@@ -238,6 +238,26 @@ static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string 
     return kiln_c99_property_read_own(kiln_c99_object_of(owner), key, ikey, out);
 }
 
+static int kiln_c99_function_owns_prototype(const kiln_closure *closure) {
+    return !closure->arrow && (!closure->asynchronous || closure->async_generator) &&
+           (!closure->is_method || closure->generator);
+}
+
+/* The intrinsic value lives on the closure; reconfigured attributes live in its realm-owned
+ * property store, just like name/length overrides. Region closures share no mutable metadata. */
+static int kiln_c99_function_prototype_writable(const kiln_closure *closure) {
+    kiln_value store = kiln_c99_closure_store(closure);
+    kiln_property own;
+    kiln_string key;
+    if (closure->is_class) return 0;
+    if (store.tag != KILN_VALUE_OBJECT) return 1;
+    if (kiln_c99_object_of(store)->frozen) return 0;
+    key.unit_len = 9;
+    key.flags = kiln_c99_fixed_key_flags("prototype", 9);
+    key.data = "prototype";
+    return !kiln_c99_property_read_own_value(store, &key, NULL, &own) || own.writable;
+}
+
 /* The GC side of the same storage boundary. A projected read returns a temporary record, but
  * tracing must visit the underlying realm slots directly and must never allocate or convert a
  * shaped object. A future descriptor/value overlay adds its realm-owned values here. */
@@ -622,11 +642,19 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
-        if (kiln_c99_same_name_key(key, "prototype")) {
+        if (kiln_c99_same_name_key(key, "prototype") &&
+            kiln_c99_function_owns_prototype(closure)) {
             kiln_value store = kiln_c99_closure_store(closure);
             kiln_value *slot;
-            if (closure->is_class || (store.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(store)->frozen)) {
+            if (!kiln_c99_function_prototype_writable(closure)) {
                 return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+            }
+            if (store.tag == KILN_VALUE_OBJECT) {
+                int found = 0;
+                status = kiln_c99_property_storage_assign_existing(
+                    host, store, kiln_c99_object_of(store), key, ikey, value,
+                    strict, depth, thrown, &found);
+                if (status != KILN_C99_OK) return status;
             }
             slot = kiln_c99_closure_prototype_slot(closure);
             if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;

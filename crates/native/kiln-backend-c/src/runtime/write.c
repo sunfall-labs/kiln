@@ -431,10 +431,9 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name_key(key, "prototype")) {
-            if (closure->is_class) return 0;
-            return kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT ||
-                   !kiln_c99_object_of(kiln_c99_closure_store(closure))->frozen;
+        if (kiln_c99_same_name_key(key, "prototype") &&
+            kiln_c99_function_owns_prototype(closure)) {
+            return kiln_c99_function_prototype_writable(closure);
         }
         current = kiln_c99_closure_store(closure);
     } else if (target.tag == KILN_VALUE_ARRAY) {

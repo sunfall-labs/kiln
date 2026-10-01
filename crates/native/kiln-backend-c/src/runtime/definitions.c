@@ -357,6 +357,52 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (target.tag == KILN_VALUE_FUNCTION && kiln_c99_same_name_key(view, "prototype") &&
+        kiln_c99_function_owns_prototype(kiln_c99_closure_of(target))) {
+        kiln_closure *closure = kiln_c99_closure_of(target);
+        kiln_value prototype;
+        int can_write = kiln_c99_function_prototype_writable(closure);
+        if (has_getter || has_setter ||
+            (has_enumerable && kiln_c99_truthy(enumerable)) ||
+            (has_configurable && kiln_c99_truthy(configurable)) ||
+            (!can_write && has_writable && kiln_c99_truthy(writable)))
+            return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+        if (!has_value || !can_write) {
+            status = kiln_c99_prototype_object(target, &prototype);
+            if (status != KILN_C99_OK) return status;
+        } else prototype = value;
+        if (!can_write) {
+            int same = !has_value || kiln_c99_strict_equal(value, prototype);
+            if (has_value && value.tag == KILN_VALUE_NUMBER && prototype.tag == KILN_VALUE_NUMBER) {
+                double left = kiln_c99_as_number(value), right = kiln_c99_as_number(prototype);
+                same = (isnan(left) && isnan(right)) ||
+                       (left == right && (left != 0.0 || signbit(left) == signbit(right)));
+            }
+            return same ? KILN_C99_OK : kiln_c99_throw_named_key_text(
+                thrown, "Cannot redefine property: ", view, "");
+        }
+        /* This is an existing intrinsic property even when its attribute overlay has not been
+         * allocated yet. A non-extensible callable still permits redefining its writable value. */
+        status = kiln_c99_function_store(target, &store);
+        if (status != KILN_C99_OK) return status;
+        memset(&next, 0, sizeof next);
+        next.key = view;
+        next.value = has_value ? value : prototype;
+        next.writable = has_writable ? kiln_c99_truthy(writable) : can_write;
+        status = kiln_c99_property_storage_commit(store, view, stable, &next);
+        if (status == KILN_C99_OK) {
+            kiln_value *slot = kiln_c99_closure_prototype_slot(closure);
+            if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+            kiln_c99_heap_store_value(closure->region ? NULL : closure, slot,
+                next.value.tag == KILN_VALUE_UNDEFINED
+                    ? kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0) : next.value);
+        }
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&store);
+        kiln_c99_gc_keep_alive(&prototype);
+        kiln_c99_gc_keep_alive(&value);
+        return status;
+    }
     if (target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(view, "lastIndex")) {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         if (has_getter || has_setter ||
@@ -1081,7 +1127,7 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             status = kiln_c99_prototype_object(target, &prototype);
             if (status == KILN_C99_OK) status = kiln_c99_new_object(&built);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "value", 5, prototype, 0, NULL);
-            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(!closure->is_class), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(kiln_c99_function_prototype_writable(closure)), 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
             *found = 1;
