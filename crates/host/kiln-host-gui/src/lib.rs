@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+pub mod appkit;
 pub mod ffi;
 
 // OS Dialog Options

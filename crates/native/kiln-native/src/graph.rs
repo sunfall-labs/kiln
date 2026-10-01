@@ -1033,14 +1033,17 @@ fn compile_native_builtin_bootstrap(
     let common_ts_builtins = kiln_builtins::common_bootstrap_source_selected(families);
     let get_builtin_module = native_get_builtin_module_bootstrap();
     let import_meta = native_import_meta_bootstrap();
+    // WHATWG web standards (fetch, Headers, Request, Response, etc.) are global,
+    // not gated behind the node adapter: the HTTP host capability
+    // (process.__kilnNativeModules.http.request) exists in both modes.
+    let web = kiln_builtins::WEB_BOOTSTRAP_SOURCE;
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}\n{get_builtin_module}\n{import_meta}",
-            kiln_builtins::WEB_BOOTSTRAP_SOURCE
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{web}\n{get_builtin_module}\n{import_meta}"
         )
     } else {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}\n{import_meta}"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{web}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}\n{import_meta}"
         )
     };
     let source_digest = Digest::hash(source.as_bytes());

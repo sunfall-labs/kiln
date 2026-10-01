@@ -301,6 +301,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) async_host: Option<*mut dyn ActiveAsyncHostOps>,
     /// Runtime-owned HTTP policy installed beside the capability-only HostOps surface.
     pub(super) http_runtime: Option<*mut dyn ActiveHttpRuntime>,
+    /// Async host for the HTTP client (global fetch), available without the Node Adapter.
+    /// Set alongside http_runtime; the underlying RealmRuntime implements ActiveAsyncHostOps.
+    pub(super) http_client_host: Option<*mut dyn ActiveAsyncHostOps>,
     /// Graph-owned lazy CommonJS loader, installed only while evaluating a module graph.
     pub(super) commonjs_loader: Option<*mut (dyn CommonJsModuleLoader + 'host)>,
     /// Which `AsyncLocalStorage`s hold a store right here.

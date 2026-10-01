@@ -88,6 +88,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             module_realm: None,
             async_host: None,
             http_runtime: None,
+            http_client_host: None,
             commonjs_loader: None,
             caught: None,
             fd_table: fs::VirtualFdTable::new(),

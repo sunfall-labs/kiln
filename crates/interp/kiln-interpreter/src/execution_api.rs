@@ -116,6 +116,13 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         runtime.capabilities(),
         capabilities,
     )?;
+    // The HTTP runtime is available for global fetch (a WHATWG web standard, not a Node API).
+    // The realm's HTTP transport (Hyper via Tokio) exists in both modes; only the Node.js
+    // API surface (require, process, etc.) remains gated behind the node adapter.
+    // The http_client_host allows the HTTP client to establish TCP connections without
+    // the full async_host (which would also enable node:fs, node:net, etc.).
+    vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
+    vm.http_client_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
@@ -876,8 +883,14 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     vm.self_namespaces = self_namespaces;
     if session.as_ref().is_some_and(|(session, _)| session.adapter) {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
-        vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     }
+    // The HTTP runtime is available for global fetch (a WHATWG web standard, not a Node API).
+    // The realm's HTTP transport (Hyper via Tokio) exists in both modes; only the Node.js
+    // API surface (require, process, etc.) remains gated behind the adapter.
+    // The http_client_host allows the HTTP client to establish TCP connections without
+    // the full async_host (which would also enable node:fs, node:net, etc.).
+    vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
+    vm.http_client_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     if let Some(loader) = commonjs_loader.as_deref_mut() {
         vm.commonjs_loader = Some(loader as *mut dyn CommonJsModuleLoader);
     }
