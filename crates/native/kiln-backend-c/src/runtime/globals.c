@@ -106,8 +106,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     kiln_value versions;
     kiln_value stream;
 #if KILN_RETAIN_GROUP_NODE_NET
-    kiln_value native_modules;
-    kiln_value net_module;
+    kiln_value native_modules = kiln_c99_undefined();
+    kiln_value net_module = kiln_c99_undefined();
 #endif
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
     if (status != KILN_C99_OK) return status;
@@ -431,6 +431,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "__kilnNativeModules", 19,
                               native_modules, 0, NULL);
+    kiln_c99_gc_keep_alive(&native_modules);
+    kiln_c99_gc_keep_alive(&net_module);
 #endif
     if (status != KILN_C99_OK) return status;
     *out = *process;
