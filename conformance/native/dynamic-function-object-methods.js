@@ -20,3 +20,9 @@ console.log("method rejects construction:", (() => {
 })());
 const reservedMethod = new Function("return { 'while'() { return 53; } };")();
 console.log("quoted control-word method:", reservedMethod.while());
+
+const quotedOptions = Function('return {"fn": function(value) { return value + 1; }, "inverse": function() { return "empty"; }, "é": "unicode", "": 7};')();
+if (quotedOptions.fn(8) !== 9 || quotedOptions.inverse() !== 'empty' || quotedOptions['é'] !== 'unicode' || quotedOptions[''] !== 7) {
+  throw new Error('dynamic quoted property names must survive value parsing');
+}
+console.log('quoted callback options:', quotedOptions.fn(8), quotedOptions.inverse(), quotedOptions['é'], quotedOptions['']);
