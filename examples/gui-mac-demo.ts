@@ -46,7 +46,7 @@ console.log(`Active Platform Driver: ${getActiveDriver().name}`);
 const win = new Window({
   title: '⚡ Kiln Developer Studio • macOS AppKit',
   width: 660,
-  height: 780,
+  height: 790,
 });
 
 // Fine-grained reactive state
@@ -118,7 +118,7 @@ const metricsGrid = new Grid({
   gap: 12,
   style: {
     width: '100%',
-    height: 76,
+    height: 82,
   },
   children: [heapMetricCard, archMetricCard, engineMetricCard],
 });
