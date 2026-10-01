@@ -13,7 +13,7 @@ const iterator = "r-5,s-62".matchAll(/([a-z]+)-(\d+)/g);
 console.log("match-all-before-next", RegExp.$1, RegExp.$2);
 const firstMatch = iterator.next().value;
 console.log("match-all-first", firstMatch[0], RegExp.$1, RegExp.$2);
-/other-(\d+)/.test("other-99");
+/(other)-(\d+)/.test("other-99");
 const retainedValues = [...[firstMatch].values()];
 if (retainedValues[0][0] !== "r-5" || RegExp.$1 !== "other" || RegExp.$2 !== "99") {
   throw new Error("ordinary array iterator republished stale matchAll captures");
