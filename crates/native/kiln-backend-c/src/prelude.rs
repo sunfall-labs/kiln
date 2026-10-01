@@ -2399,12 +2399,9 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     prototype chain after an explicit prototype replacement, Set constructor string statics (name, \
                     length and prototype), BigInt constructor string statics (asIntN and asUintN are \
                     handled above), then BUILTIN_SURFACE plus \
-                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
-                    a synchronous generator has no `@@asyncIterator` member (only async \
-                    generators define it); and a bound function's `prototype` is decided by \
-                    BoundFunctionCreate, which defines none, so it is \
-                    absent when its [[Prototype]] is null or a `Function.prototype` whose store \
-                    lacks it. These are the lists \
+                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A synchronous generator has no `@@asyncIterator` member (only async \
+                    generators define it); a bound callable with no matching own property \
+                    and an explicit null [[Prototype]] has no inherited member. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them. An explicit \
                     null [[Prototype]] ends lookup, so every inherited property is absent; and a \
