@@ -2335,6 +2335,13 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
     let semantic = SemanticBuilder::new_compiler().build(&parsed.program);
     let mut diagnostics = semantic.diagnostics.errors().collect::<Vec<_>>();
 
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| is_redeclaration_diagnostic(diagnostic))
+    {
+        return diagnostics.into_iter().map(lower_diagnostic).collect();
+    }
+
     // Oxc models Annex B's switch-function var alias before checking a lexical declaration in
     // the enclosing function body. Annex B suppresses that alias when it would collide with the
     // function body's lexical names; our IR lowering applies that rule when it creates aliases.
@@ -2343,11 +2350,7 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
     let mut annex_b = AnnexBBlockedAliasVisitor::new();
     annex_b.visit_program(&parsed.program);
     diagnostics.retain(|diagnostic| {
-        let redeclaration = diagnostic
-            .message
-            .to_string()
-            .contains("has already been declared");
-        if !redeclaration || diagnostic.labels.len() < 2 {
+        if !is_redeclaration_diagnostic(diagnostic) {
             return true;
         }
         let first = diagnostic.labels[0].span();
@@ -2363,6 +2366,10 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
             ))
     });
     diagnostics.into_iter().map(lower_diagnostic).collect()
+}
+
+fn is_redeclaration_diagnostic(diagnostic: &OxcDiagnostic) -> bool {
+    diagnostic.message.contains("has already been declared") && diagnostic.labels.len() >= 2
 }
 
 #[derive(Default)]
