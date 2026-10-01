@@ -2265,6 +2265,10 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
         async_ctor,
         Value::Native(Native::AsyncFunctionConstructor, RealmId::PRIMARY)
     );
+    assert!(!is_callable(&Value::Native(
+        Native::AsyncFunctionPrototype,
+        RealmId::PRIMARY
+    )));
     assert_eq!(
         vm.read_property(&async_proto, "constructor", 0).unwrap(),
         async_ctor
@@ -2301,6 +2305,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
         gen_proto,
         Value::Native(Native::GeneratorFunctionPrototype, RealmId::PRIMARY)
     );
+    assert!(!is_callable(&gen_proto));
 
     let gen_ctor = vm.read_property(&gen_fn, "constructor", 0).unwrap();
     assert_eq!(
@@ -2335,6 +2340,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
         async_gen_proto,
         Value::Native(Native::AsyncGeneratorFunctionPrototype, RealmId::PRIMARY)
     );
+    assert!(!is_callable(&async_gen_proto));
 
     let async_gen_ctor = vm.read_property(&async_gen_fn, "constructor", 0).unwrap();
     assert_eq!(

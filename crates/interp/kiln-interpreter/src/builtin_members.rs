@@ -113,6 +113,12 @@ pub(crate) fn is_callable(value: &Value) -> bool {
         // a function at all -- and `typeof` said so too. The target survives revocation, which
         // is what keeps a revoked function proxy a function.
         Value::Proxy(proxy) => is_callable(&proxy.target),
+        Value::Native(
+            Native::AsyncFunctionPrototype
+            | Native::GeneratorFunctionPrototype
+            | Native::AsyncGeneratorFunctionPrototype,
+            _,
+        ) => false,
         other => {
             matches!(
                 other,
