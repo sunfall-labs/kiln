@@ -3269,6 +3269,10 @@ struct kiln_node_socket {
     size_t corked_write_len;
     size_t corked_write_capacity;
     unsigned int cork_depth;
+    /* FIFO of [byte length, callback batch] entries for writes not yet submitted. */
+    kiln_value write_queue;
+    /* The currently submitted batch remains rooted here until its host result arrives. */
+    kiln_value active_write_callbacks;
     kiln_value write_callbacks;
     kiln_value end_callbacks;
     /* Upgrade callback batches are keyed by HTTP engine append-completion fences. */
@@ -3289,6 +3293,7 @@ struct kiln_node_socket {
     struct kiln_node_response *responses;
     int close_after_write;
     int close_after_responses;
+    int destroy_after_write;
     int shutdown_after_write;
     int utf8;
     int read_closed;
