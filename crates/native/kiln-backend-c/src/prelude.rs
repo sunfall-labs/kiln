@@ -2855,7 +2855,8 @@ const _: () = assert_refusals_name_themselves(
 /// Dynamic function captures now use the parser's stored identifier lengths; the two former
 /// identifier-buffer scans were removed with lexical capture serialization.
 /// Site 84 measures a constructor own-key name from a fixed NUL-terminated literal table.
-pub const C_STRING_LENGTH_SITES: usize = 82;
+/// The shared callable descriptor authority removed one duplicate fixed method-name scan.
+pub const C_STRING_LENGTH_SITES: usize = 81;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
