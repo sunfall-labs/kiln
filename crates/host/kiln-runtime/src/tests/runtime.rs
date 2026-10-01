@@ -3629,3 +3629,51 @@ fn pending_only_cancel_preserves_ready_results_and_cancels_unfinished_accept() {
     assert_eq!(closed.result, Ok(AsyncHostValue::Undefined));
     assert!(!runtime.state.has_pending_host_work());
 }
+
+#[test]
+fn pending_only_cancel_preserves_synchronous_tcp_write_success() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener binds");
+    let mut runtime = RealmRuntime::new().expect("runtime builds");
+    runtime.start_host_op(
+        AsyncHostOp::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: u32::from(listener.local_addr().expect("listener address").port()),
+        },
+        true,
+    );
+    let stream = match next_host_completion(&mut runtime)
+        .expect("connect completes")
+        .result
+        .expect("connect succeeds")
+    {
+        AsyncHostValue::Resource(resource) => resource.id,
+        other => panic!("expected stream, got {other:?}"),
+    };
+    let (mut peer, _) = listener.accept().expect("peer accepts");
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("bounded read");
+    let write = runtime.start_host_op(
+        AsyncHostOp::TcpWrite {
+            stream,
+            data: b"x".to_vec(),
+        },
+        true,
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(write),
+        PendingCancellation::CompletionReady
+    );
+    let completion = next_host_completion(&mut runtime).expect("write result retained");
+    assert_eq!(completion.request, write);
+    assert_eq!(completion.result, Ok(AsyncHostValue::Undefined));
+    let mut received = [0];
+    peer.read_exact(&mut received)
+        .expect("actual byte delivered");
+    assert_eq!(&received, b"x");
+    runtime.start_host_op(AsyncHostOp::CloseResource { resource: stream }, false);
+    assert_eq!(
+        next_host_completion(&mut runtime).expect("close").result,
+        Ok(AsyncHostValue::Undefined)
+    );
+}

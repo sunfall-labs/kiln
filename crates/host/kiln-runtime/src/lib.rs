@@ -2866,7 +2866,17 @@ enum TcpWriter {
 impl TcpWriter {
     async fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
-            Self::Native(writer) => writer.lock().await.write_all(bytes).await,
+            Self::Native(writer) => {
+                let mut writer = writer.lock().await;
+                // Attempt the real nonblocking write before yielding. Retain the lock across
+                // any remaining asynchronous write so later submissions cannot overtake it.
+                let written = match writer.try_write(bytes) {
+                    Ok(written) => written,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 0,
+                    Err(error) => return Err(error),
+                };
+                writer.write_all(&bytes[written..]).await
+            }
             #[cfg(feature = "http")]
             Self::Upgraded {
                 writer,
@@ -3574,7 +3584,8 @@ impl TokioHost {
                     );
                     return request;
                 }
-                self.spawn_task(request, sequence, referenced, async move {
+                let immediate_write = matches!(&writer, TcpWriter::Native(_));
+                let mut write = Box::pin(async move {
                     let result = async {
                         writer.write_all(&data).await?;
                         Ok(AsyncHostValue::Undefined)
@@ -3588,6 +3599,21 @@ impl TokioHost {
                         result: result.map(HostCompletionValue::Public),
                     }
                 });
+                if immediate_write {
+                    // A successful OS write is already complete even when its language callback
+                    // has not run. Poll once and preserve the same future on Pending; dropping it
+                    // would lose partial progress and release write-order authority.
+                    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                    if let std::task::Poll::Ready(completion) = write.as_mut().poll(&mut context) {
+                        let result = completion.result.map(|value| match value {
+                            HostCompletionValue::Public(value) => value,
+                            _ => unreachable!("TCP writes only publish public results"),
+                        });
+                        self.insert_immediate(request, sequence, referenced, result);
+                        return request;
+                    }
+                }
+                self.spawn_task(request, sequence, referenced, write);
                 return request;
             }
             AsyncHostOp::TcpShutdown { stream } => {
