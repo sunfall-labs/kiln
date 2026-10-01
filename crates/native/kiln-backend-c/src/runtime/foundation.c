@@ -1047,9 +1047,10 @@ typedef struct kiln_c99_realm_state {
     kiln_value typed_array_iterator_prototype;
     kiln_value map_iterator_prototype;
     kiln_value set_iterator_prototype;
-    /* Async/generator functions have distinct internal [[Prototype]] objects, installed by the
-     * TypeScript-owned builtin bootstrap. These are per realm and strong roots. */
+    /* Function constructors and shared generator-instance prototypes are TypeScript-owned and
+     * realm-local. */
     kiln_value function_kind_prototypes[3];
+    kiln_value generator_object_prototypes[2];
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
     kiln_c99_unit_block **units;
     size_t unit_capacity;

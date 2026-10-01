@@ -1370,6 +1370,18 @@
                 }
                 return KILN_C99_OK;
             }
+            if (subject.tag == KILN_VALUE_GENERATOR) {
+                kiln_generator *frame = kiln_c99_generator_of(subject);
+                if (frame->properties.tag == KILN_VALUE_OBJECT) {
+                    kiln_value linked = kiln_c99_object_of(frame->properties)->prototype;
+                    if (linked.tag != KILN_VALUE_UNDEFINED) {
+                        *result = linked;
+                        return KILN_C99_OK;
+                    }
+                }
+                *result = frame->prototype;
+                return KILN_C99_OK;
+            }
             if (subject.tag == KILN_VALUE_STRING) {
                 *result = kiln_c99_builtin(KILN_C99_BUILTIN_STRING_PROTOTYPE);
                 return KILN_C99_OK;

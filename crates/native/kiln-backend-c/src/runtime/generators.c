@@ -13,6 +13,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
     size_t depth = closure->stack_size == 0 ? 1 : closure->stack_size;
     kiln_generator *frame;
+    kiln_value frame_root;
     size_t index;
     if (locals > (((size_t)-1) - sizeof *frame) / sizeof(kiln_val) - depth) {
         return KILN_C99_OUT_OF_MEMORY;
@@ -27,6 +28,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     if (frame == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    frame_root = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
+    kiln_c99_gc_keep_alive(&frame_root);
     kiln_c99_heap_store_pointer(frame, &frame->locals, (kiln_val *)(frame + 1));
     kiln_c99_heap_store_pointer(frame, &frame->stack, frame->locals + locals);
     kiln_c99_heap_store_pointer(frame, &frame->handlers, NULL);
@@ -39,6 +42,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
         kiln_c99_heap_store_val(frame, &frame->locals[index], kiln_val_from_boundary(args[index]));
     }
     kiln_c99_heap_store_value(frame, &frame->properties, kiln_c99_undefined());
+    kiln_c99_heap_store_value(frame, &frame->prototype, kiln_c99_undefined());
     kiln_c99_heap_store_value(frame, &frame->function, function);
     kiln_c99_heap_store_value(frame, &frame->receiver, receiver);
     frame->sp = 0;
@@ -60,6 +64,17 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->queue_executing = 0;
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
-    *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
+    if (closure->async_generator || (closure->generator && !closure->asynchronous)) {
+        kiln_value prototype;
+        int status = kiln_c99_prototype_object(function, &prototype);
+        if (status != KILN_C99_OK) return status;
+        if (prototype.tag != KILN_VALUE_OBJECT) {
+            size_t kind = closure->async_generator ? 1 : 0;
+            prototype = kiln_c99_realm()->generator_object_prototypes[kind];
+        }
+        kiln_c99_heap_store_value(frame, &frame->prototype, prototype);
+        kiln_c99_gc_keep_alive(&frame->prototype);
+    }
+    *out = frame_root;
     return KILN_C99_OK;
 }

@@ -2943,6 +2943,8 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_par_add(kiln_c99_par_arena *arena,
  * shape that makes resuming possible at all. */
 typedef struct kiln_generator {
     kiln_value properties;
+    /* The GetPrototypeFromConstructor result fixed when this iterator is created. */
+    kiln_value prototype;
     kiln_value function;
     kiln_value receiver;
     /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --

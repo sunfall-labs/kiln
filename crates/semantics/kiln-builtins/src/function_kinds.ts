@@ -31,7 +31,7 @@
       Object.setPrototypeOf(prototype, Function.prototype);
       Object.defineProperty(prototype, "constructor", {
         value: constructor,
-        writable: true,
+        writable: false,
         configurable: true,
       });
       Object.defineProperty(prototype, Symbol.toStringTag, {
@@ -48,7 +48,60 @@
         writable: false,
         configurable: true,
       });
-      installFunctionKindPrototype(kind, prototype);
     }
+
+    // Generator instances share one intrinsic iterator prototype per kind. Read their native
+    // methods from temporary instances so the TypeScript-owned objects reuse the runtime's
+    // existing generator callables rather than inventing a second dispatch path.
+    const generator = (function* () {})();
+    const generatorPrototype = Object.create(Iterator.prototype);
+    Object.defineProperties(generatorPrototype, {
+      constructor: { value: GeneratorFunction, writable: false, configurable: true },
+      next: { value: generator.next, writable: true, configurable: true },
+      return: { value: generator.return, writable: true, configurable: true },
+      throw: { value: generator.throw, writable: true, configurable: true },
+      [Symbol.toStringTag]: { value: "Generator", configurable: true },
+    });
+
+    const asyncGenerator = (async function* () {})();
+    const asyncIteratorPrototype = Object.create(Object.prototype);
+    Object.defineProperty(asyncIteratorPrototype, Symbol.asyncIterator, {
+      value: function () { return this; },
+      writable: true,
+      configurable: true,
+    });
+    if (Symbol.asyncDispose !== undefined) {
+      Object.defineProperty(asyncIteratorPrototype, Symbol.asyncDispose, {
+        value: async function () {
+          if (typeof this.return === "function") await this.return();
+        },
+        writable: true,
+        configurable: true,
+      });
+    }
+    const asyncGeneratorPrototype = Object.create(asyncIteratorPrototype);
+    Object.defineProperties(asyncGeneratorPrototype, {
+      constructor: { value: AsyncGeneratorFunction, writable: false, configurable: true },
+      next: { value: asyncGenerator.next, writable: true, configurable: true },
+      return: { value: asyncGenerator.return, writable: true, configurable: true },
+      throw: { value: asyncGenerator.throw, writable: true, configurable: true },
+      [Symbol.toStringTag]: { value: "AsyncGenerator", configurable: true },
+    });
+
+    Object.defineProperty(prototypes[1], "prototype", {
+      value: generatorPrototype,
+      writable: false,
+      configurable: true,
+    });
+    Object.defineProperty(prototypes[2], "prototype", {
+      value: asyncGeneratorPrototype,
+      writable: false,
+      configurable: true,
+    });
+    for (let kind = 0; kind < prototypes.length; kind += 1) {
+      installFunctionKindPrototype(kind, prototypes[kind]);
+    }
+    installFunctionKindPrototype(3, generatorPrototype);
+    installFunctionKindPrototype(4, asyncGeneratorPrototype);
   }
 })();

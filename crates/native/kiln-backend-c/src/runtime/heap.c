@@ -5161,6 +5161,9 @@ static int kiln_c99_gc_visit_realm_roots(const kiln_gc_heap *heap,
     for (index = 0; index < sizeof realm->function_kind_prototypes / sizeof *realm->function_kind_prototypes;
          ++index)
         KILN_VISIT_REALM_VALUE(&realm->function_kind_prototypes[index]);
+    for (index = 0; index < sizeof realm->generator_object_prototypes / sizeof *realm->generator_object_prototypes;
+         ++index)
+        KILN_VISIT_REALM_VALUE(&realm->generator_object_prototypes[index]);
     for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
          ++index)
         KILN_VISIT_REALM_VALUE(&realm->native_prototypes[index]);
@@ -5450,6 +5453,7 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
              (frame->queue_promises == NULL || frame->queue_sent == NULL)))
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->properties) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->prototype) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->function) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->receiver) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->promise) ||
@@ -7982,6 +7986,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_GENERATOR: {
         kiln_generator *frame = (kiln_generator *)payload;
         kiln_c99_gc_mark_value(heap, &frame->properties);
+        kiln_c99_gc_mark_value(heap, &frame->prototype);
         kiln_c99_gc_mark_value(heap, &frame->function);
         kiln_c99_gc_mark_value(heap, &frame->receiver);
         kiln_c99_gc_mark_value(heap, &frame->promise);

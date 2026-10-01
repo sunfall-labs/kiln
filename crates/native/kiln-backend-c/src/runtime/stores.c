@@ -65,6 +65,14 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
             return status;
         }
         prototype = *slot;
+        if (closure->async_generator || (closure->generator && !closure->asynchronous)) {
+            size_t kind = closure->async_generator ? 1 : 0;
+            kiln_value shared = kiln_c99_realm()->generator_object_prototypes[kind];
+            if (shared.tag == KILN_VALUE_OBJECT) {
+                status = kiln_c99_set_prototype(prototype, shared);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
     }
     *out = prototype;
     return KILN_C99_OK;

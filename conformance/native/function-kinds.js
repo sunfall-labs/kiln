@@ -8,6 +8,40 @@ const GeneratorFunction = generator.constructor;
 const AsyncGeneratorFunction = asyncGenerator.constructor;
 AsyncFunction.prototype.kindMarker = 11;
 
+const generatorObjectPrototype = GeneratorFunction.prototype.prototype;
+const asyncGeneratorObjectPrototype = AsyncGeneratorFunction.prototype.prototype;
+const generatorInstance = generator();
+const asyncGeneratorInstance = asyncGenerator();
+if (
+  generatorObjectPrototype === Object.prototype ||
+  asyncGeneratorObjectPrototype === Object.prototype ||
+  Reflect.ownKeys(generatorObjectPrototype).length !== 5 ||
+  Reflect.ownKeys(asyncGeneratorObjectPrototype).length !== 5 ||
+  Object.getPrototypeOf(generatorObjectPrototype) !== Iterator.prototype ||
+  typeof generatorObjectPrototype.next !== "function" ||
+  typeof generatorObjectPrototype.return !== "function" ||
+  typeof generatorObjectPrototype.throw !== "function" ||
+  generatorObjectPrototype.constructor !== GeneratorFunction ||
+  Object.getOwnPropertyDescriptor(generatorObjectPrototype, "constructor").writable ||
+  Object.prototype.toString.call(generatorObjectPrototype) !== "[object Generator]" ||
+  Object.getPrototypeOf(asyncGeneratorObjectPrototype) === Object.prototype ||
+  typeof Object.getPrototypeOf(asyncGeneratorObjectPrototype)[Symbol.asyncIterator] !== "function" ||
+  typeof asyncGeneratorObjectPrototype.next !== "function" ||
+  typeof asyncGeneratorObjectPrototype.return !== "function" ||
+  typeof asyncGeneratorObjectPrototype.throw !== "function" ||
+  asyncGeneratorObjectPrototype.constructor !== AsyncGeneratorFunction ||
+  Object.getOwnPropertyDescriptor(asyncGeneratorObjectPrototype, "constructor").writable ||
+  Object.prototype.toString.call(asyncGeneratorObjectPrototype) !== "[object AsyncGenerator]" ||
+  Object.getOwnPropertyDescriptor(GeneratorFunction.prototype, "prototype").writable ||
+  Object.getOwnPropertyDescriptor(AsyncGeneratorFunction.prototype, "prototype").writable ||
+  Object.getPrototypeOf(generator.prototype) !== generatorObjectPrototype ||
+  Object.getPrototypeOf(asyncGenerator.prototype) !== asyncGeneratorObjectPrototype ||
+  Object.getPrototypeOf(generatorInstance) !== generator.prototype ||
+  Object.getPrototypeOf(asyncGeneratorInstance) !== asyncGenerator.prototype
+) {
+  throw new Error("native generator function prototypes do not match their shared intrinsics");
+}
+
 console.log(
   AsyncFunction !== Function,
   GeneratorFunction !== Function,
