@@ -3276,6 +3276,27 @@ static void kiln_dyn_skip_statement(kiln_dyn_lexer *lex) {
         }
         return;
     }
+    if (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 2 &&
+        memcmp(lex->curr.start, "do", 2) == 0) {
+        kiln_dyn_lexer_next(lex);
+        kiln_dyn_skip_statement(lex);
+        if (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 5 &&
+            memcmp(lex->curr.start, "while", 5) == 0) {
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind == KILN_DYN_LPAREN) {
+                int parens = 1;
+                kiln_dyn_lexer_next(lex);
+                while (parens != 0 && lex->curr.kind != KILN_DYN_EOF) {
+                    if (lex->curr.kind == KILN_DYN_LPAREN) parens++;
+                    else if (lex->curr.kind == KILN_DYN_RPAREN) parens--;
+                    if (parens != 0) kiln_dyn_lexer_next(lex);
+                }
+                if (lex->curr.kind == KILN_DYN_RPAREN) kiln_dyn_lexer_next(lex);
+                if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+            }
+        }
+        return;
+    }
     int conditional = lex->curr.kind == KILN_DYN_KW_IF;
     int switch_stmt = lex->curr.kind == KILN_DYN_KW_SWITCH;
     int loop = lex->curr.kind == KILN_DYN_KW_FOR || lex->curr.kind == KILN_DYN_KW_WITH ||
@@ -4577,6 +4598,118 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
             }
             kiln_dyn_token_free(&blex.curr);
             if (*returned == 2 || *returned == 3) return KILN_C99_OK;
+        }
+        if (*returned == 2 && lex->break_label != NULL &&
+            kiln_dyn_label_matches(my_labels, lex->break_label, lex->break_label_len)) {
+            lex->break_label = NULL;
+            lex->break_label_len = 0;
+            *returned = 0;
+        }
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_IDENT && lex->curr.len == 2 &&
+        memcmp(lex->curr.start, "do", 2) == 0) {
+        kiln_dyn_active_label *my_labels = lex->active_labels;
+        lex->active_labels = NULL;
+        kiln_dyn_lexer_next(lex);
+        size_t body_start = lex->curr.start != NULL
+                                ? (size_t)(lex->curr.start - lex->src) : lex->pos;
+        kiln_dyn_skip_statement(lex);
+        size_t body_end = lex->curr.start != NULL
+                              ? (size_t)(lex->curr.start - lex->src) : lex->len;
+        if (lex->curr.kind != KILN_DYN_IDENT || lex->curr.len != 5 ||
+            memcmp(lex->curr.start, "while", 5) != 0)
+            return kiln_dyn_throw_parse_error(lex, thrown,
+                                              "Expected while after do body");
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_LPAREN)
+            return kiln_dyn_throw_parse_error(lex, thrown,
+                                              "Expected '(' after do-while");
+        kiln_dyn_lexer_next(lex);
+        size_t cond_start = lex->curr.start != NULL
+                                ? (size_t)(lex->curr.start - lex->src) : lex->pos;
+        int parens = 1;
+        while (lex->curr.kind != KILN_DYN_EOF && parens != 0) {
+            if (lex->curr.kind == KILN_DYN_LPAREN) parens++;
+            else if (lex->curr.kind == KILN_DYN_RPAREN) parens--;
+            if (parens != 0) kiln_dyn_lexer_next(lex);
+        }
+        if (parens != 0)
+            return kiln_dyn_throw_parse_error(lex, thrown,
+                                              "Expected ')' after do-while condition");
+        size_t cond_end = lex->curr.start != NULL
+                              ? (size_t)(lex->curr.start - lex->src) : lex->pos;
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+        const char *body_src = lex->src + body_start;
+        size_t body_len = body_end > body_start ? body_end - body_start : 0;
+        const char *cond_src = lex->src + cond_start;
+        size_t cond_len = cond_end > cond_start ? cond_end - cond_start : 0;
+        int break_loop = 0;
+        while (!break_loop) {
+            kiln_dyn_lexer blex;
+            memset(&blex, 0, sizeof blex);
+            blex.src = body_src;
+            blex.len = body_len;
+            blex.strict = scope->strict;
+            blex.break_label = lex->break_label;
+            blex.break_label_len = lex->break_label_len;
+            kiln_dyn_lexer_next(&blex);
+            while (blex.curr.kind != KILN_DYN_EOF) {
+                int flow = 0;
+                int status = kiln_dyn_eval_stmt(host, &blex, scope, receiver, args, argc,
+                                                depth, result, &flow, thrown);
+                lex->break_label = blex.break_label;
+                lex->break_label_len = blex.break_label_len;
+                if (status != KILN_C99_OK || flow == 1) {
+                    *returned = flow;
+                    kiln_dyn_token_free(&blex.curr);
+                    return status;
+                }
+                if (flow == 2) {
+                    if (lex->break_label != NULL) {
+                        if (kiln_dyn_label_matches(my_labels, lex->break_label,
+                                                   lex->break_label_len)) {
+                            lex->break_label = NULL;
+                            lex->break_label_len = 0;
+                        } else {
+                            *returned = 2;
+                        }
+                    }
+                    break_loop = 1;
+                    break;
+                }
+                if (flow == 3 && lex->break_label != NULL) {
+                    if (kiln_dyn_label_matches(my_labels, lex->break_label,
+                                               lex->break_label_len)) {
+                        lex->break_label = NULL;
+                        lex->break_label_len = 0;
+                    } else {
+                        *returned = 3;
+                        break_loop = 1;
+                    }
+                    break;
+                }
+            }
+            kiln_dyn_token_free(&blex.curr);
+            if (*returned == 2 || *returned == 3) return KILN_C99_OK;
+            if (break_loop) break;
+
+            kiln_dyn_lexer clex;
+            memset(&clex, 0, sizeof clex);
+            clex.src = cond_src;
+            clex.len = cond_len;
+            clex.strict = scope->strict;
+            kiln_dyn_lexer_next(&clex);
+            kiln_value condition;
+            int status = kiln_dyn_eval_expr(host, &clex, scope, receiver, args, argc,
+                                            depth, &condition, thrown);
+            if (status == KILN_C99_OK && clex.curr.kind != KILN_DYN_EOF)
+                status = kiln_dyn_throw_parse_error(&clex, thrown,
+                                                    "Unexpected token in do-while condition");
+            kiln_dyn_token_free(&clex.curr);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(condition)) break;
         }
         if (*returned == 2 && lex->break_label != NULL &&
             kiln_dyn_label_matches(my_labels, lex->break_label, lex->break_label_len)) {
