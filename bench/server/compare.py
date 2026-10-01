@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run paired HTTP measurements with auditable metadata and owned processes."""
 from __future__ import annotations
-import hashlib, json, os, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.request
+import hashlib, json, os, shutil, signal, socket, statistics, subprocess, sys, tempfile, time, urllib.request
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -191,6 +191,7 @@ def main() -> int:
             },
         }
         (result_root / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        paired_kiln_results: dict[tuple[int, str, str], dict] = {}
         for pass_number in range(1, passes + 1):
             for workload in workloads:
                 driver = HERE / (
@@ -218,13 +219,75 @@ def main() -> int:
                                 (run_dir / f"client-{index}.json").write_text(json.dumps(report, indent=2) + "\n")
                                 if stderr: (run_dir / f"client-{index}.stderr").write_text(stderr)
                                 if status != 0 or report.get("errors", 0) or report.get("wrong", 0): raise RuntimeError(f"client validation failed: {report}")
+                                if workload == "pipeline":
+                                    depth = report.get("pipeline_depth")
+                                    requests = report.get("requests", 0)
+                                    if depth != 8 or requests <= 0 or requests % depth != 0:
+                                        raise RuntimeError(f"pipeline client did not complete whole 8-request batches: {report}")
                             aggregate = {"pass": pass_number, "label": label, "runtime": runtime, "workload": workload,
                                          "reports": [row[0] for row in reports], "rps": sum(row[0]["rps"] for row in reports)}
                             (run_dir / "aggregate.json").write_text(json.dumps(aggregate, indent=2) + "\n")
+                            if runtime == "kiln" and len(variants) == 2:
+                                key = (pass_number, workload, label)
+                                if key in paired_kiln_results:
+                                    raise RuntimeError(f"duplicate paired kiln result: {key}")
+                                paired_kiln_results[key] = aggregate
                             print(json.dumps(aggregate, separators=(",", ":")))
                         finally:
                             stop_process(process); stdout_file.close(); stderr_file.close()
                             if not port_free(port): raise RuntimeError(f"owned server left port {port} occupied")
+        if len(variants) == 2 and "kiln" in runtimes:
+            labels = {label for label, _ in variants}
+            if labels != {"baseline", "candidate"}:
+                raise RuntimeError(f"paired kiln summary requires baseline/candidate labels, found {sorted(labels)}")
+            summary: dict[str, dict] = {}
+            for workload in workloads:
+                pass_rows = []
+                baseline_rps = []
+                candidate_rps = []
+                baseline_p50 = []
+                candidate_p50 = []
+                baseline_p99 = []
+                candidate_p99 = []
+                for pass_number in range(1, passes + 1):
+                    baseline = paired_kiln_results.get((pass_number, workload, "baseline"))
+                    candidate_row = paired_kiln_results.get((pass_number, workload, "candidate"))
+                    if baseline is None or candidate_row is None:
+                        raise RuntimeError(f"missing paired kiln result: pass={pass_number} workload={workload}")
+                    baseline_rate = baseline["rps"]
+                    candidate_rate = candidate_row["rps"]
+                    if baseline_rate <= 0 or candidate_rate <= 0:
+                        raise RuntimeError(f"paired kiln result has no throughput: pass={pass_number} workload={workload}")
+                    baseline_client_p50 = statistics.median(row["p50_ms"] for row in baseline["reports"])
+                    candidate_client_p50 = statistics.median(row["p50_ms"] for row in candidate_row["reports"])
+                    baseline_client_p99 = statistics.median(row["p99_ms"] for row in baseline["reports"])
+                    candidate_client_p99 = statistics.median(row["p99_ms"] for row in candidate_row["reports"])
+                    baseline_rps.append(baseline_rate)
+                    candidate_rps.append(candidate_rate)
+                    baseline_p50.append(baseline_client_p50)
+                    candidate_p50.append(candidate_client_p50)
+                    baseline_p99.append(baseline_client_p99)
+                    candidate_p99.append(candidate_client_p99)
+                    pass_rows.append({
+                        "pass": pass_number,
+                        "baseline_rps": baseline_rate,
+                        "candidate_rps": candidate_rate,
+                        "candidate_over_baseline_rps": candidate_rate / baseline_rate,
+                    })
+                summary[workload] = {
+                    "passes": pass_rows,
+                    "median_candidate_over_baseline_rps": statistics.median(
+                        row["candidate_over_baseline_rps"] for row in pass_rows),
+                    "baseline_median_rps": statistics.median(baseline_rps),
+                    "candidate_median_rps": statistics.median(candidate_rps),
+                    "baseline_median_client_p50_ms": statistics.median(baseline_p50),
+                    "candidate_median_client_p50_ms": statistics.median(candidate_p50),
+                    "baseline_median_client_p99_ms": statistics.median(baseline_p99),
+                    "candidate_median_client_p99_ms": statistics.median(candidate_p99),
+                }
+            paired_summary = {"runtime": "kiln", "workloads": summary}
+            (result_root / "paired-summary.json").write_text(json.dumps(paired_summary, indent=2) + "\n")
+            print(json.dumps({"paired_summary": paired_summary}, separators=(",", ":")))
     return 0
 
 if __name__ == "__main__":
