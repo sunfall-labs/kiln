@@ -1718,7 +1718,8 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
                     *out = KILN_VAL_UNDEFINED;
                     return KILN_C99_OK;
                 }
-            } else if (obj->properties != NULL && obj->accessor_count == 0 && obj->prototype.tag == KILN_VALUE_NULL) {
+            } else if (obj->properties != NULL && obj->accessor_count == 0 &&
+                       obj->prototype.tag == KILN_VALUE_NULL && !obj->module_namespace) {
                 const kiln_string *ikey = kiln_c99_intern_key(keystr);
                 size_t idx = kiln_c99_own_index_key(obj, ikey, keystr);
                 if (idx != obj->count) {
