@@ -662,12 +662,18 @@
             size_t position;
             int finished;
             int part = 0;
+            int regexp_match_all = 0;
             if (receiver.tag != KILN_VALUE_OBJECT) {
                 KILN_C99_REFUSE("an array iterator whose state is not the object it builds");
             }
             status = kiln_c99_get(host, receiver, "@@iterated", 10, &items, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
+            }
+            {
+                kiln_property *marker = kiln_c99_own_private(receiver, "@@regexpMatchAll", 16);
+                regexp_match_all = marker != NULL && KILN_VAL_IS_BOOLEAN(marker->value) &&
+                                   marker->value == KILN_VAL_TRUE;
             }
             status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
             if (status != KILN_C99_OK) {
@@ -719,7 +725,9 @@
                     } else {
                         produced = kiln_val_to_boundary(array->elements[position]);
                     }
-                    status = kiln_c99_regexp_publish_deferred(produced);
+                    if (regexp_match_all) {
+                        status = kiln_c99_regexp_publish_deferred(produced);
+                    }
                 }
                 status = status == KILN_C99_OK
                              ? kiln_c99_put(host, step, "value", 5, produced, depth, thrown)

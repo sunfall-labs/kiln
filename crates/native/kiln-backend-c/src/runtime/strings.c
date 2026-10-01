@@ -1757,6 +1757,10 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             break;
         case KILN_C99_METHOD_STRING_MATCH_ALL:
             status = kiln_c99_new_iterator(result, collected, 2);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, *result, "@@regexpMatchAll", 16,
+                                      kiln_c99_boolean(1), 0, NULL);
+            }
             break;
         case KILN_C99_METHOD_SPLIT:
             if (!split_stopped && kiln_c99_array_of(collected)->count < (size_t)split_limit) {

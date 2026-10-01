@@ -166,7 +166,10 @@ int kiln_c99_regexp_defer_legacy(kiln_value match, const int64_t *ranges, size_t
     int status;
     if (match.tag != KILN_VALUE_ARRAY || ranges == NULL || groups == 0) return KILN_C99_OK;
     if (groups > 10) groups = 10;
+    status = kiln_c99_gc_keep_during_job(match);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_new_array(&saved);
+    if (status == KILN_C99_OK) status = kiln_c99_gc_keep_during_job(saved);
     for (index = 0; index < groups * 2 && status == KILN_C99_OK; ++index) {
         status = kiln_c99_array_push(saved, kiln_c99_number((double)ranges[index]));
     }
