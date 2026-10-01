@@ -57,9 +57,10 @@ if (shortCircuit[0] !== 2 || shortCircuit[1] !== 3 || shortCircuit[2] !== 5 ||
   throw new Error("short-circuit skipping must preserve conditional precedence and side effects");
 }
 
-const parseNumbers = Function("return [0xdc00, 0xDFFF, 0b1010, 0o17, 077, 08, 1_000, 1.25e2];");
+const parseNumbers = Function("return [0xdc00, 0xDFFF, 0b1010, 0o17, 077, 08, " +
+  "1_000, 1.25e2, .5, .5e2, 08.5, 09e2];");
 const parsedNumbers = parseNumbers();
-if (parsedNumbers.join(",") !== "56320,57343,10,15,63,8,1000,125") {
+if (parsedNumbers.join(",") !== "56320,57343,10,15,63,8,1000,125,0.5,50,8.5,900") {
   throw new Error("dynamic source must parse radix, separated, and exponent number literals");
 }
 let invalidNumberRejected = false;
@@ -76,4 +77,13 @@ try {
   strictLegacyOctalRejected = error instanceof SyntaxError;
 }
 if (!strictLegacyOctalRejected) throw new Error("strict Function source must reject legacy octal syntax");
+for (const body of ["return 00.5;", "return 01e2;", '"use strict"; return 08.5;']) {
+  let rejected = false;
+  try {
+    Function(body);
+  } catch (error) {
+    rejected = error instanceof SyntaxError;
+  }
+  if (!rejected) throw new Error("legacy-octal spellings must be rejected in this context");
+}
 console.log(result.join(","), shortCircuit.join(","), parsedNumbers.join(","));
