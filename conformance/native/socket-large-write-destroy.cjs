@@ -2,26 +2,31 @@ const net = require('node:net');
 
 const server = net.createServer((socket) => socket.resume());
 server.listen(0, '127.0.0.1', () => {
-  const socket = net.connect(server.address().port, '127.0.0.1');
-  socket.on('connect', () => {
-    const accepted = socket.write(Buffer.alloc(16 * 1024 * 1024), function (error) {
-      if (arguments.length !== 1 || error?.code !== 'ECANCELED') {
-        throw new Error(`wrong canceled write callback: ${error?.code}`);
-      }
-      console.log('write callback', error.code);
+  const verifyCancelled = (label) => function (error) {
+    if (arguments.length !== 1 || error?.code !== 'ECANCELED') {
+      throw new Error(`wrong ${label} callback: ${error?.code}`);
+    }
+    console.log(label, error.code);
+  };
+
+  const run = (withActiveCallback, done) => {
+    const socket = net.connect(server.address().port, '127.0.0.1');
+    socket.on('connect', () => {
+      const activeCallback = withActiveCallback ? verifyCancelled('active') : undefined;
+      const accepted = socket.write(Buffer.alloc(16 * 1024 * 1024), activeCallback);
+      if (accepted !== false) throw new Error('large write unexpectedly avoided backpressure');
+      console.log('write ready', accepted);
+      socket.write('q', verifyCancelled('queued'));
+      socket.end(verifyCancelled('end'));
+      socket.destroy();
     });
-    if (accepted !== false) throw new Error('large write unexpectedly avoided backpressure');
-    console.log('write ready', accepted);
-    socket.end(function (error) {
-      if (arguments.length !== 1 || error?.code !== 'ECANCELED') {
-        throw new Error(`wrong canceled end callback: ${error?.code}`);
-      }
-      console.log('end callback', error.code);
+    socket.on('close', done);
+  };
+
+  run(true, () => {
+    run(false, () => {
+      console.log('closed');
+      server.close();
     });
-    socket.destroy();
-  });
-  socket.on('close', () => {
-    console.log('closed');
-    server.close();
   });
 });

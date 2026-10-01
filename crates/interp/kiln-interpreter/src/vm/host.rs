@@ -490,7 +490,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     end_callbacks: Vec::new(),
                     deferred_destroy_callbacks: None,
                     defer_destroy_callbacks: false,
-                    end_callbacks_use_cancel_error: false,
+                    cancelled_active_write_error: None,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -1063,9 +1063,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // schedule those before callbacks for writes still held in the driver's queue. Keep
         // `end` callbacks after both groups, matching Writable's destroy ordering.
         if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks {
-            let use_cancel_error = {
+            let cancellation_error = {
                 let mut socket = state.borrow_mut();
-                std::mem::take(&mut socket.end_callbacks_use_cancel_error)
+                socket.cancelled_active_write_error.take()
             };
             let immediate = {
                 let mut socket = state.borrow_mut();
@@ -1078,20 +1078,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 }
             };
             if let Some((write_callbacks, end_callbacks)) = immediate {
-                self.schedule_node_socket_queued_callbacks(write_callbacks, Vec::new());
-                if use_cancel_error && !end_callbacks.is_empty() {
-                    let error = self.construct_error(
-                        ErrorKind::Error,
-                        &[Value::String("operation canceled".into())],
-                    );
-                    if let Value::Object(object) = &error {
-                        object
-                            .borrow_mut()
-                            .set_non_enumerable("code", Value::String("ECANCELED".into()));
-                    }
-                    self.schedule_node_socket_callbacks_with_error(end_callbacks, error);
+                if let Some(error) = cancellation_error {
+                    let mut callbacks = write_callbacks;
+                    callbacks.extend(end_callbacks);
+                    self.schedule_node_socket_callbacks_with_error(callbacks, error);
                 } else {
-                    self.schedule_node_socket_queued_callbacks(Vec::new(), end_callbacks);
+                    self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
                 }
             }
         }
@@ -2070,7 +2062,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             end_callbacks: Vec::new(),
             deferred_destroy_callbacks: None,
             defer_destroy_callbacks: false,
-            end_callbacks_use_cancel_error: false,
+            cancelled_active_write_error: None,
             upgrade_write_callbacks: Default::default(),
             shutdown_after_upgrade_fence: None,
             end_requested: false,
@@ -2220,7 +2212,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     end_callbacks: Vec::new(),
                     deferred_destroy_callbacks: None,
                     defer_destroy_callbacks: false,
-                    end_callbacks_use_cancel_error: false,
+                    cancelled_active_write_error: None,
                     upgrade_write_callbacks: Default::default(),
                     shutdown_after_upgrade_fence: None,
                     end_requested: false,
@@ -2469,11 +2461,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 };
                 match unsafe { ActiveAsyncHostOps::cancel_if_pending(&mut *host, request) } {
                     kiln_host_abi::PendingCancellation::Cancelled => {
-                        if let Some(PendingNodeRequest::Stream {
-                            write_callbacks, ..
-                        }) = self.take_pending_node_request(request)
-                            && !write_callbacks.is_empty()
-                        {
+                        let mut cancellation_error = None;
+                        if pending_is_write {
                             let error = self.construct_error(
                                 ErrorKind::Error,
                                 &[Value::String("operation canceled".into())],
@@ -2483,22 +2472,31 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     .borrow_mut()
                                     .set_non_enumerable("code", Value::String("ECANCELED".into()));
                             }
-                            if pending_is_write
-                                && let Some(socket) = node_net_socket_value(&server, resource)
-                                    .and_then(|socket| node_net_socket_state(&socket).ok())
+                            if let Some(socket) = node_net_socket_value(&server, resource)
+                                .and_then(|socket| node_net_socket_state(&socket).ok())
                                 && socket.borrow().destroyed
                             {
-                                socket.borrow_mut().end_callbacks_use_cancel_error = true;
+                                socket.borrow_mut().cancelled_active_write_error =
+                                    Some(error.clone());
                             }
-                            for callback in write_callbacks {
-                                let callback = Value::Bound(Rc::new(BoundFunction {
-                                    target: callback,
-                                    this_value: Value::Undefined,
-                                    arguments: vec![error.clone()],
-                                    properties: RefCell::new(ObjectData::default()),
-                                }));
-                                let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
-                                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                            cancellation_error = Some(error);
+                        }
+                        if let Some(PendingNodeRequest::Stream {
+                            write_callbacks, ..
+                        }) = self.take_pending_node_request(request)
+                        {
+                            if let Some(error) = cancellation_error {
+                                for callback in write_callbacks {
+                                    let callback = Value::Bound(Rc::new(BoundFunction {
+                                        target: callback,
+                                        this_value: Value::Undefined,
+                                        arguments: vec![error.clone()],
+                                        properties: RefCell::new(ObjectData::default()),
+                                    }));
+                                    let scheduled =
+                                        self.scheduled(Job::NextTick(callback, Vec::new()));
+                                    self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                                }
                             }
                         }
                     }
@@ -5045,29 +5043,37 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         }
                     })?;
                     drop(server_state);
+                    let completion_error = if let Err(error) = &callback_result {
+                        let value = self.construct_error(
+                            ErrorKind::Error,
+                            &[Value::String(error.message.clone().into())],
+                        );
+                        if let Value::Object(object) = &value {
+                            let mut object = object.borrow_mut();
+                            object.set_non_enumerable(
+                                "code",
+                                Value::String(error.code.clone().into()),
+                            );
+                            object.set_non_enumerable(
+                                "syscall",
+                                Value::String(error.syscall.clone().into()),
+                            );
+                        }
+                        Some(value)
+                    } else {
+                        None
+                    };
                     if !write_callbacks.is_empty() {
                         let callback_args = match &callback_result {
                             // Writable callbacks receive the error slot even on success; Node
                             // supplies `null`, which code commonly tests with `err && err.code`.
                             Ok(_) => vec![Value::Null],
-                            Err(error) => {
-                                let value = self.construct_error(
-                                    ErrorKind::Error,
-                                    &[Value::String(error.message.clone().into())],
-                                );
-                                if let Value::Object(object) = &value {
-                                    let mut object = object.borrow_mut();
-                                    object.set_non_enumerable(
-                                        "code",
-                                        Value::String(error.code.clone().into()),
-                                    );
-                                    object.set_non_enumerable(
-                                        "syscall",
-                                        Value::String(error.syscall.clone().into()),
-                                    );
-                                }
-                                vec![value]
-                            }
+                            Err(_) => vec![
+                                completion_error
+                                    .as_ref()
+                                    .expect("write error value was constructed")
+                                    .clone(),
+                            ],
                         };
                         for callback in write_callbacks {
                             self.call_value(
@@ -5085,10 +5091,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         {
                             let deferred = socket.borrow_mut().deferred_destroy_callbacks.take();
                             if let Some((write_callbacks, end_callbacks)) = deferred {
-                                self.schedule_node_socket_queued_callbacks(
-                                    write_callbacks,
-                                    end_callbacks,
-                                );
+                                if let Some(error) = completion_error {
+                                    let mut callbacks = write_callbacks;
+                                    callbacks.extend(end_callbacks);
+                                    self.schedule_node_socket_callbacks_with_error(
+                                        callbacks, error,
+                                    );
+                                } else {
+                                    self.schedule_node_socket_queued_callbacks(
+                                        write_callbacks,
+                                        end_callbacks,
+                                    );
+                                }
                             }
                         }
                     }

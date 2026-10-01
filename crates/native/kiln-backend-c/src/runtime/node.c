@@ -1611,10 +1611,7 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
             if (status != KILN_C99_OK) return status;
             status = kiln_c99_node_socket_settle_cancelled_active_write(socket, cancel_error);
             if (status != KILN_C99_OK) return status;
-            kiln_value queued_error;
-            status = kiln_c99_node_socket_destroy_error(&queued_error);
-            if (status != KILN_C99_OK) return status;
-            status = kiln_c99_node_socket_cancel_queued_write_callbacks(socket, queued_error);
+            status = kiln_c99_node_socket_cancel_queued_write_callbacks(socket, cancel_error);
             if (status != KILN_C99_OK) return status;
             /* `end()` waits on the active write. Its callback receives that write's
              * cancellation error; only writes discarded from the queued tail get
