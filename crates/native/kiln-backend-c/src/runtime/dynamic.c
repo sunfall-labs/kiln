@@ -3133,16 +3133,20 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         }
         size_t default_clause = SIZE_MAX;
         size_t selected_clause = SIZE_MAX;
-        int duplicate_default = 0;
+        // Validate the complete clause inventory before evaluating any case expression.
+        for (size_t index = 0; index < clause_count; ++index) {
+            if (!clauses[index].is_default) continue;
+            if (default_clause != SIZE_MAX) {
+                free(clauses);
+                return kiln_dyn_throw_parse_error(lex, thrown, "Duplicate default clause");
+            }
+            default_clause = index;
+        }
         kiln_dyn_scope switch_scope;
         kiln_dyn_scope_init(&switch_scope, scope);
         switch_scope.var_target = scope->var_target != NULL ? scope->var_target : scope;
         for (size_t index = 0; index < clause_count; ++index) {
-            if (clauses[index].is_default) {
-                if (default_clause != SIZE_MAX) { duplicate_default = 1; break; }
-                default_clause = index;
-                continue;
-            }
+            if (clauses[index].is_default) continue;
             if (selected_clause != SIZE_MAX) continue;
             kiln_dyn_lexer test_lex;
             memset(&test_lex, 0, sizeof test_lex);
@@ -3162,11 +3166,6 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 return status;
             }
             if (kiln_c99_strict_equal(discriminant, test_value)) selected_clause = index;
-        }
-        if (duplicate_default) {
-            kiln_dyn_scope_destroy(&switch_scope);
-            free(clauses);
-            return kiln_dyn_throw_parse_error(lex, thrown, "Duplicate default clause");
         }
         if (selected_clause == SIZE_MAX) selected_clause = default_clause;
         for (size_t index = selected_clause; index < clause_count && selected_clause != SIZE_MAX;
