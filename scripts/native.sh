@@ -237,8 +237,8 @@ run_probe() {
 	fi
 
 	{
-		printf '%s\n' "  interpreter: $(printf '%s' "$interpreted" | head -5) [exit $interpreted_status]"
-		printf '%s\n' "  native:      $(printf '%s' "$native" | head -5) [exit $native_status]"
+		printf '%s\n' "  interpreter: $interpreted [exit $interpreted_status]"
+		printf '%s\n' "  native:      $native [exit $native_status]"
 		if [[ $native == "$interpreted" ]]; then
 			printf '%s\n' "  the bytes agree; only the exit status differs"
 		fi

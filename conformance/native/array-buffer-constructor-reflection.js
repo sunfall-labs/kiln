@@ -22,6 +22,6 @@ function checkConstructor(ctor, name, expectedKeys) {
   assert(ctor[Symbol.species] === ctor, `${name}[Symbol.species] receiver`);
 }
 
-checkConstructor(ArrayBuffer, "ArrayBuffer", ["length", "name", "prototype", "isView", "@@species"]);
-checkConstructor(SharedArrayBuffer, "SharedArrayBuffer", ["length", "name", "prototype", "@@species"]);
+checkConstructor(ArrayBuffer, "ArrayBuffer", ["length", "name", "prototype", "isView", "@@Symbol.species"]);
+checkConstructor(SharedArrayBuffer, "SharedArrayBuffer", ["length", "name", "prototype", "@@Symbol.species"]);
 console.log("array-buffer constructor reflection ok");
