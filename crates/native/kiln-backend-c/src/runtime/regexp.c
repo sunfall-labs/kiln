@@ -1,3 +1,5 @@
+/* Some generated C translation units place this consumer before the common declaration block. */
+kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size_t len);
 
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
     return (kiln_regexp *)(uintptr_t)value.bits;
