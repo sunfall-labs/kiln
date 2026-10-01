@@ -2271,7 +2271,8 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
     );
     let to_string_tag_key = Symbol::WellKnown(WellKnown::ToStringTag).property_key();
     assert_eq!(
-        vm.read_property(&async_proto, &to_string_tag_key, 0).unwrap(),
+        vm.read_property(&async_proto, &to_string_tag_key, 0)
+            .unwrap(),
         Value::String("AsyncFunction".into())
     );
     let Value::Function(async_closure) = &async_fn else {
