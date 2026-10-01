@@ -1067,6 +1067,10 @@ export class Node {
     }
   }
 
+  on(event: string, handler: Function): void {
+    this.addEventListener(event, handler);
+  }
+
   removeEventListener(event: string, handler: Function): void {
     const list = this.listeners[event];
     if (list) {
@@ -1075,6 +1079,10 @@ export class Node {
         list.splice(index, 1);
       }
     }
+  }
+
+  off(event: string, handler: Function): void {
+    this.removeEventListener(event, handler);
   }
 
   dispatchEvent(event: string, ...args: any[]): void {
@@ -1341,7 +1349,7 @@ export class Text extends Node {
 }
 
 export class Button extends Node {
-  constructor(labelOrOptions?: string | (ButtonOptions & { width?: number; height?: number })) {
+  constructor(labelOrOptions?: string | (ButtonOptions & { width?: number; height?: number; icon?: string })) {
     super("button");
     if (typeof labelOrOptions === "string") {
       this.label = labelOrOptions;
@@ -1351,6 +1359,7 @@ export class Button extends Node {
       if (labelOrOptions.size !== undefined) this.size = labelOrOptions.size;
       if (labelOrOptions.disabled !== undefined) this.disabled = labelOrOptions.disabled;
       if (labelOrOptions.platform !== undefined) this.platform = labelOrOptions.platform;
+      if ((labelOrOptions as any).icon !== undefined) this.setProperty("icon", (labelOrOptions as any).icon);
       if ((labelOrOptions as any).width !== undefined) this.setProperty("width", (labelOrOptions as any).width);
       if ((labelOrOptions as any).height !== undefined) this.setProperty("height", (labelOrOptions as any).height);
       if (labelOrOptions.onPress) this.onPress = labelOrOptions.onPress;
@@ -1489,6 +1498,167 @@ export class Toggle extends Node {
   }
 }
 
+export class Spacer extends Node {
+  constructor(options?: { minWidth?: number; minHeight?: number }) {
+    super("spacer");
+    if (options) {
+      if (options.minWidth !== undefined) this.setProperty("width", options.minWidth);
+      if (options.minHeight !== undefined) this.setProperty("height", options.minHeight);
+    }
+  }
+}
+
+export class ScrollView extends Node {
+  constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
+    super("scroll");
+    if (options) {
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+      if (options.child) {
+        this.appendChild(options.child);
+      } else if (options.children) {
+        const inner = new VStack({ spacing: 12, children: options.children });
+        this.appendChild(inner);
+      }
+    }
+  }
+}
+
+export class SegmentedControl extends Node {
+  constructor(options?: { items: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, label: string) => void }) {
+    super("segmented");
+    if (options) {
+      if (options.items) {
+        this.text = JSON.stringify(options.items);
+        this.setProperty("items", JSON.stringify(options.items));
+      }
+      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.onChange) {
+        this.on("change", (e: any) => {
+          const raw = typeof e === "string" ? e : (e?.value ?? "0");
+          const idx = parseInt(raw, 10);
+          const label = options.items[idx] ?? "";
+          options.onChange!(idx, label);
+        });
+      }
+    }
+  }
+
+  get selectedIndex(): number {
+    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
+  }
+  set selectedIndex(val: number) {
+    this.setProperty("selectedIndex", val);
+  }
+}
+
+export class ProgressBar extends Node {
+  constructor(options?: { value?: number; max?: number; min?: number; indeterminate?: boolean; width?: number; height?: number }) {
+    super("progressbar");
+    if (options) {
+      if (options.value !== undefined) this.setProperty("value", options.value);
+      if (options.max !== undefined) this.setProperty("max", options.max);
+      if (options.min !== undefined) this.setProperty("min", options.min);
+      if (options.indeterminate !== undefined) this.setProperty("indeterminate", options.indeterminate ? "true" : "false");
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.height !== undefined) this.setProperty("height", options.height);
+    }
+  }
+
+  get value(): number {
+    return this.properties.value !== undefined ? this.properties.value : 0;
+  }
+  set value(val: number) {
+    this.setProperty("value", val);
+  }
+
+  setValue(val: number): void {
+    this.value = val;
+  }
+
+  get max(): number {
+    return this.properties.max !== undefined ? this.properties.max : 100;
+  }
+  set max(val: number) {
+    this.setProperty("max", val);
+  }
+}
+
+export class Select extends Node {
+  constructor(options?: { options: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, value: string) => void }) {
+    super("select");
+    if (options) {
+      if (options.options) {
+        this.text = JSON.stringify(options.options);
+        this.setProperty("options", JSON.stringify(options.options));
+      }
+      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
+      if (options.width !== undefined) this.setProperty("width", options.width);
+      if (options.onChange) {
+        this.on("change", (e: any) => {
+          const raw = typeof e === "string" ? e : (e?.value ?? "0:");
+          const colon = raw.indexOf(":");
+          let idx = 0;
+          let val = raw;
+          if (colon !== -1) {
+            idx = parseInt(raw.slice(0, colon), 10);
+            val = raw.slice(colon + 1);
+          }
+          options.onChange!(idx, val);
+        });
+      }
+    }
+  }
+
+  get selectedIndex(): number {
+    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
+  }
+  set selectedIndex(val: number) {
+    this.setProperty("selectedIndex", val);
+  }
+}
+
+export class Checkbox extends Node {
+  constructor(labelOrOptions?: string | { label?: string; checked?: boolean; width?: number; onToggle?: (checked: boolean) => void }) {
+    super("checkbox");
+    if (typeof labelOrOptions === "string") {
+      this.text = labelOrOptions;
+    } else if (labelOrOptions) {
+      if (labelOrOptions.label !== undefined) this.text = labelOrOptions.label;
+      if (labelOrOptions.checked !== undefined) this.setProperty("checked", labelOrOptions.checked ? "true" : "false");
+      if (labelOrOptions.width !== undefined) this.setProperty("width", labelOrOptions.width);
+      if (labelOrOptions.onToggle) {
+        this.on("toggle", (e: any) => {
+          const checked = typeof e === "string" ? e === "true" : Boolean(e?.checked ?? e?.value === "true");
+          labelOrOptions.onToggle!(checked);
+        });
+      }
+    }
+  }
+
+  get checked(): boolean {
+    return !!this.properties.checked;
+  }
+  set checked(val: boolean) {
+    this.setProperty("checked", val ? "true" : "false");
+  }
+}
+
+export class Icon extends Node {
+  constructor(nameOrOptions?: string | { name?: string; symbol?: string; width?: number; height?: number }) {
+    super("icon");
+    if (typeof nameOrOptions === "string") {
+      this.text = nameOrOptions;
+    } else if (nameOrOptions) {
+      const name = nameOrOptions.name || nameOrOptions.symbol || "";
+      if (name) this.text = name;
+      if (nameOrOptions.width !== undefined) this.setProperty("width", nameOrOptions.width);
+      if (nameOrOptions.height !== undefined) this.setProperty("height", nameOrOptions.height);
+    }
+  }
+}
+
 // Universal Renderer implementation for SolidJS 2.0 (@solidjs/universal interface)
 export function createRenderer<T extends Node = Node>(config?: any): {
   render: (code: () => T, container: T) => () => void;
@@ -1516,6 +1686,17 @@ export function createRenderer<T extends Node = Node>(config?: any): {
     textinput: TextInput,
     slider: Slider,
     toggle: Toggle,
+    spacer: Spacer,
+    scroll: ScrollView,
+    scrollview: ScrollView,
+    segmented: SegmentedControl,
+    progressbar: ProgressBar,
+    progress: ProgressBar,
+    select: Select,
+    dropdown: Select,
+    checkbox: Checkbox,
+    icon: Icon,
+    image: Icon,
   };
 
   const renderer = {
@@ -2495,6 +2676,13 @@ export default {
   HStack,
   Card,
   Divider,
+  Spacer,
+  ScrollView,
+  SegmentedControl,
+  ProgressBar,
+  Select,
+  Checkbox,
+  Icon,
   Text,
   Button,
   TextInput,
