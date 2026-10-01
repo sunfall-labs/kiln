@@ -281,14 +281,35 @@ pub extern "C" fn kiln_gui_hotkey_poll() -> u32 {
     hotkey::poll_event().unwrap_or(0)
 }
 
+macro_rules! ffi_guard {
+    ($body:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(res) => res,
+            Err(e) => {
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                eprintln!("💥 [kiln-host-gui FFI panic]: {msg}");
+                -1
+            }
+        }
+    };
+}
+
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_init() -> i32 {
-    if crate::appkit::ensure_initialized() {
-        0
-    } else {
-        -1
-    }
+    ffi_guard!({
+        if crate::appkit::ensure_initialized() {
+            0
+        } else {
+            -1
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -299,54 +320,66 @@ pub unsafe extern "C" fn kiln_gui_appkit_window_create(
     width: f64,
     height: f64,
 ) -> i32 {
-    let title_str =
-        unsafe { c_str_to_opt_string(title) }.unwrap_or_else(|| "Kiln Window".to_string());
-    if crate::appkit::window_create(id, &title_str, width, height) {
-        0
-    } else {
-        -1
-    }
+    ffi_guard!({
+        let title_str =
+            unsafe { c_str_to_opt_string(title) }.unwrap_or_else(|| "Kiln Window".to_string());
+        if crate::appkit::window_create(id, &title_str, width, height) {
+            0
+        } else {
+            -1
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_window_show(id: u64) -> i32 {
-    crate::appkit::window_show(id);
-    0
+    ffi_guard!({
+        crate::appkit::window_show(id);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_window_close(id: u64) -> i32 {
-    crate::appkit::window_close(id);
-    0
+    ffi_guard!({
+        crate::appkit::window_close(id);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_window_set_title(id: u64, title: *const c_char) -> i32 {
-    if let Some(t) = unsafe { c_str_to_opt_string(title) } {
-        crate::appkit::window_set_title(id, &t);
-    }
-    0
+    ffi_guard!({
+        if let Some(t) = unsafe { c_str_to_opt_string(title) } {
+            crate::appkit::window_set_title(id, &t);
+        }
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_window_set_content(win_id: u64, child_id: u64) -> i32 {
-    crate::appkit::window_set_content(win_id, child_id);
-    0
+    ffi_guard!({
+        crate::appkit::window_set_content(win_id, child_id);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_window_snapshot(id: u64, path: *const c_char) -> i32 {
-    if let Some(p) = unsafe { c_str_to_opt_string(path) } {
-        if crate::appkit::window_snapshot(id, &p) {
-            return 0;
+    ffi_guard!({
+        if let Some(p) = unsafe { c_str_to_opt_string(path) } {
+            if crate::appkit::window_snapshot(id, &p) {
+                return 0;
+            }
         }
-    }
-    -1
+        -1
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -356,13 +389,15 @@ pub unsafe extern "C" fn kiln_gui_appkit_widget_create(
     tag: *const c_char,
     text: *const c_char,
 ) -> i32 {
-    let tag_str = unsafe { c_str_to_opt_string(tag) }.unwrap_or_default();
-    let text_str = unsafe { c_str_to_opt_string(text) }.unwrap_or_default();
-    if crate::appkit::widget_create(id, &tag_str, &text_str) {
-        0
-    } else {
-        -1
-    }
+    ffi_guard!({
+        let tag_str = unsafe { c_str_to_opt_string(tag) }.unwrap_or_default();
+        let text_str = unsafe { c_str_to_opt_string(text) }.unwrap_or_default();
+        if crate::appkit::widget_create(id, &tag_str, &text_str) {
+            0
+        } else {
+            -1
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -373,34 +408,42 @@ pub unsafe extern "C" fn kiln_gui_appkit_widget_set_property(
     val_str: *const c_char,
     val_num: f64,
 ) -> i32 {
-    let name_str = unsafe { c_str_to_opt_string(name) }.unwrap_or_default();
-    let str_val = unsafe { c_str_to_opt_string(val_str) }.unwrap_or_default();
-    crate::appkit::widget_set_property(id, &name_str, &str_val, val_num);
-    0
+    ffi_guard!({
+        let name_str = unsafe { c_str_to_opt_string(name) }.unwrap_or_default();
+        let str_val = unsafe { c_str_to_opt_string(val_str) }.unwrap_or_default();
+        crate::appkit::widget_set_property(id, &name_str, &str_val, val_num);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_widget_add_child(parent_id: u64, child_id: u64) -> i32 {
-    crate::appkit::widget_add_child(parent_id, child_id);
-    0
+    ffi_guard!({
+        crate::appkit::widget_add_child(parent_id, child_id);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_widget_remove_child(parent_id: u64, child_id: u64) -> i32 {
-    crate::appkit::widget_remove_child(parent_id, child_id);
-    0
+    ffi_guard!({
+        crate::appkit::widget_remove_child(parent_id, child_id);
+        0
+    })
 }
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_pump_events(wait_ms: f64) -> i32 {
-    if crate::appkit::pump_events(wait_ms) {
-        1
-    } else {
-        0
-    }
+    ffi_guard!({
+        if crate::appkit::pump_events(wait_ms) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -412,20 +455,22 @@ pub unsafe extern "C" fn kiln_gui_appkit_poll_event(
     out_val_buf: *mut c_char,
     out_val_len: usize,
 ) -> i32 {
-    if let Some((id, event_type, val)) = crate::appkit::poll_event() {
-        if !out_id.is_null() {
-            unsafe { *out_id = id };
-        }
-        unsafe {
-            copy_to_c_buf(&event_type, out_type_buf, out_type_len);
-            if !out_val_buf.is_null() && out_val_len > 0 {
-                copy_to_c_buf(&val, out_val_buf, out_val_len);
+    ffi_guard!({
+        if let Some((id, event_type, val)) = crate::appkit::poll_event() {
+            if !out_id.is_null() {
+                unsafe { *out_id = id };
             }
-        };
-        1
-    } else {
-        0
-    }
+            unsafe {
+                copy_to_c_buf(&event_type, out_type_buf, out_type_len);
+                if !out_val_buf.is_null() && out_val_len > 0 {
+                    copy_to_c_buf(&val, out_val_buf, out_val_len);
+                }
+            };
+            1
+        } else {
+            0
+        }
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
