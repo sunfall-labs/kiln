@@ -59,6 +59,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use kiln_host_abi::HostOps;
 use kiln_runtime::{CaptureHost, RealmRuntime};
+use kiln_string::StringUnits;
 
 use crate::{
     BufferData, EvalSource, ExecutionCapabilities, ExecutionError, ExecutionLimits, ObjectData,
