@@ -43,6 +43,32 @@ int kiln_realm_http_upgrade_write_active(uint64_t resource, uint64_t id,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown);
 static void kiln_c99_node_drop_http_connection(void *opaque);
+static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                         kiln_value *thrown);
+static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
+                              const kiln_value *arguments, size_t count);
+static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
+static kiln_value kiln_c99_copy_text(const char *text, size_t len);
+
+static int kiln_c99_node_client_emit_socket(kiln_node_client_request *request,
+                                            kiln_node_socket *socket, int deferred,
+                                            kiln_value *thrown) {
+    kiln_value emit, arguments[2], ignored, callback;
+    int status = kiln_c99_get(request->host, request->object, "emit", 4, &emit, 0, thrown);
+    if (status != KILN_C99_OK) return status;
+    arguments[0] = kiln_c99_copy_text("socket", 6);
+    arguments[1] = socket->object;
+    if (deferred) {
+        status = kiln_c99_bind_with(&callback, emit, request->object, arguments, 2);
+        if (status == KILN_C99_OK) status = kiln_c99_enqueue_next_tick(callback, NULL, 0);
+        return status;
+    }
+    return kiln_c99_call(request->host, &ignored, emit, request->object, arguments, 2, 0,
+                         thrown);
+}
 
 static int kiln_c99_node_client_attach(kiln_node_client_request *request,
                                        kiln_node_socket *socket,
@@ -70,6 +96,8 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
                                                       socket);
         if (status != KILN_C99_OK) return status;
     }
+    status = kiln_c99_node_client_emit_socket(request, socket, !attach_runtime, thrown);
+    if (status != KILN_C99_OK) return status;
     return kiln_c99_node_client_try_start(request);
 }
 /* Date parsing is shared with the interpreter through the semantic provider. */

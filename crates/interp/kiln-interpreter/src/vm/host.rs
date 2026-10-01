@@ -942,7 +942,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         self.start_http_client_connection(&state, instruction)?
                     }
                     AgentDecision::Reuse(resource) => {
-                        self.attach_http_client_request_to_resource(&state, resource, instruction)?;
+                        self.attach_http_client_request_to_resource(
+                            &state,
+                            resource,
+                            instruction,
+                            true,
+                        )?;
                     }
                     AgentDecision::Queued => {}
                 }
@@ -2072,6 +2077,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             &queued,
                             resource,
                             instruction,
+                            false,
                         )?;
                     } else if release == AgentRelease::Retire {
                         let _ = unsafe {
@@ -3014,6 +3020,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         state: &Rc<RefCell<HttpClientRequestState>>,
         resource: kiln_host_abi::ResourceId,
         instruction: usize,
+        defer_socket_event: bool,
     ) -> Result<(), ExecutionError> {
         let owner = self
             .http_server_for_stream(resource)
@@ -3032,7 +3039,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP Agent connection lost its JavaScript socket".into(),
             })?;
         let request_id = state.borrow().request_id;
-        let request = state
+        let (request, request_object) = state
             .borrow()
             .object
             .as_ref()
@@ -3043,20 +3050,38 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             })?;
         state.borrow_mut().socket = Some(Rc::clone(&socket));
         let socket_value = Value::Object(Rc::clone(&socket));
-        request.1.borrow_mut().set("socket", socket_value.clone());
-        request.1.borrow_mut().set("connection", socket_value);
+        request_object
+            .borrow_mut()
+            .set("socket", socket_value.clone());
+        request_object
+            .borrow_mut()
+            .set("connection", socket_value.clone());
         let inserted = owner
             .borrow_mut()
             .streams
             .iter_mut()
             .find(|stream| stream.resource() == resource)
-            .map(|stream| stream.client_requests.insert(request_id, request.0))
+            .map(|stream| stream.client_requests.insert(request_id, request.clone()))
             .is_some();
         if !inserted {
             return Err(ExecutionError::Host {
                 instruction,
                 message: "HTTP Agent connection disappeared during attachment".into(),
             });
+        }
+        let emit = self.read_property(&request, "emit", instruction)?;
+        let event_arguments = vec![Value::String("socket".into()), socket_value];
+        if defer_socket_event {
+            let callback = Value::Bound(Rc::new(BoundFunction {
+                target: emit,
+                this_value: request,
+                arguments: event_arguments,
+                properties: RefCell::new(ObjectData::default()),
+            }));
+            let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
+            self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+        } else {
+            self.call_value(&emit, request, event_arguments, instruction)?;
         }
         self.flush_http_client_request(state, &socket, instruction)
     }

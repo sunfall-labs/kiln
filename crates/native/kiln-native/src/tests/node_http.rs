@@ -134,8 +134,15 @@ server.listen(0, "127.0.0.1", () => {
   const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
     if (!request.socket || request.connection !== request.socket) throw new Error("client request socket");
     if (response.socket !== request.socket || response.connection !== request.socket) throw new Error("client response socket");
+    if (socketEvents !== 1) throw new Error("client socket event count");
     response.on("data", () => {});
     response.on("end", () => {});
+  });
+  let socketEvents = 0;
+  request.on("socket", (socket) => {
+    socketEvents++;
+    if (request.socket !== socket || request.connection !== socket) throw new Error("client socket event identity");
+    console.log("client socket event", request.socket === socket);
   });
   if (request.socket !== null || request.connection !== null) throw new Error("client socket before connect");
   request.end();
@@ -144,7 +151,7 @@ server.listen(0, "127.0.0.1", () => {
     ) else {
         return;
     };
-    assert_eq!(output, "200 false false false\n201 true false\ntrue true\n");
+    assert_eq!(output, "client socket event true\n200 false false false\n201 true false\ntrue true\n");
 }
 
 #[test]
