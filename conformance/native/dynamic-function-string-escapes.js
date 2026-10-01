@@ -32,6 +32,8 @@ const reflectedDynamicExpression = Function(
 const reflectedDynamicArrow = Function(
   'return (a)=>"' + rawLoneSurrogate + '";',
 )();
+const reflectedArrowTrailingComment = Function('return (a)=>a /* outside body */')();
+const reflectedArrowBodyComment = Function('return (a)=> /* inside body */ a')();
 const reflectedDynamicMethod = Function(
   'return ({m(a){return "' + rawLoneSurrogate + '";}}).m',
 )();
@@ -39,12 +41,16 @@ const dynamicReflection = [
   reflectedDynamicConstructor.toString(),
   reflectedDynamicExpression.toString(),
   reflectedDynamicArrow.toString(),
+  reflectedArrowTrailingComment.toString(),
+  reflectedArrowBodyComment.toString(),
   reflectedDynamicMethod.toString(),
 ];
 const expectedDynamicReflection = [
   'function anonymous(x\n) {\nreturn "' + rawLoneSurrogate + '";\n}',
   'function(a){return "' + rawLoneSurrogate + '";}',
   '(a)=>"' + rawLoneSurrogate + '"',
+  '(a)=>a',
+  '(a)=> /* inside body */ a',
   'm(a){return "' + rawLoneSurrogate + '";}',
 ];
 if (dynamicReflection.some((source, index) => source !== expectedDynamicReflection[index])) {

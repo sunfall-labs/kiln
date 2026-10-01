@@ -1671,7 +1671,7 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                                         kiln_value *thrown);
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len);
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
-                                       size_t *body_len);
+                                       size_t *body_len, const char **syntax_end);
 static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
                                          kiln_dyn_scope *scope, const char *params,
                                          size_t params_len, const char *source_start,
@@ -1852,10 +1852,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                              (size_t)(source_end - name), receiver, 0, 1, 0,
                                              out, thrown);
             }
-            if (!kiln_dyn_capture_expression(lex, &body, &body_len))
+            const char *syntax_end;
+            if (!kiln_dyn_capture_expression(lex, &body, &body_len, &syntax_end))
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                             "Expected arrow function body");
-            const char *source_end = body + body_len;
+            const char *source_end = syntax_end;
             size_t return_len = body_len + sizeof "return ;";
             char *return_body = (char *)malloc(return_len);
             if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -3303,8 +3304,26 @@ static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t
     return 1;
 }
 
+static const char *kiln_dyn_expression_syntax_end(const char *source, size_t start,
+                                                 size_t end) {
+    kiln_dyn_lexer scan;
+    const char *syntax_end = NULL;
+    memset(&scan, 0, sizeof(scan));
+    scan.src = source;
+    scan.len = end;
+    scan.pos = start;
+    scan.curr.kind = KILN_DYN_EOF;
+    while (scan.pos < scan.len) {
+        kiln_dyn_lexer_next(&scan);
+        if (scan.curr.kind == KILN_DYN_EOF) break;
+        syntax_end = scan.curr.start + scan.curr.len;
+    }
+    kiln_dyn_token_free(&scan.curr);
+    return syntax_end;
+}
+
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
-                                       size_t *body_len) {
+                                       size_t *body_len, const char **syntax_end) {
     size_t start = lex->curr.start == NULL
                        ? lex->pos
                        : (size_t)(lex->curr.start - lex->src);
@@ -3340,6 +3359,10 @@ static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
     if (start == end) return 0;
     *body = &lex->src[start];
     *body_len = end - start;
+    if (syntax_end != NULL) {
+        *syntax_end = kiln_dyn_expression_syntax_end(lex->src, start, end);
+        if (*syntax_end == NULL) return 0;
+    }
     lex->pos = pos;
     kiln_dyn_lexer_next(lex);
     return 1;
@@ -3418,10 +3441,11 @@ static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
                                      (size_t)(source_end - source_start), receiver,
                                      asynchronous, 1, 0, out, thrown);
     }
-    if (!kiln_dyn_capture_expression(lex, &body, &body_len))
+    const char *syntax_end;
+    if (!kiln_dyn_capture_expression(lex, &body, &body_len, &syntax_end))
         return kiln_dyn_throw_parse_error(lex, thrown,
                                     "Expected arrow function body");
-    const char *source_end = body + body_len;
+    const char *source_end = syntax_end;
     char *return_body = (char *)malloc(body_len + sizeof "return ;");
     if (return_body == NULL) return KILN_C99_OUT_OF_MEMORY;
     memcpy(return_body, "return ", 7);
