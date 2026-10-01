@@ -26,6 +26,7 @@ if (typeof installFunctionKindPrototype === "function") {
   for (let kind = 0; kind < constructors.length; kind += 1) {
     const constructor = constructors[kind];
     const prototype = prototypes[kind];
+    Object.setPrototypeOf(constructor, Function);
     Object.setPrototypeOf(prototype, Function.prototype);
     Object.defineProperty(prototype, "constructor", {
       value: constructor,

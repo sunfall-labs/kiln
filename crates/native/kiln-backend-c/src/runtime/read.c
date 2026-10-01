@@ -708,8 +708,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (parent.tag == KILN_VALUE_UNDEFINED)
             parent = kiln_c99_function_kind_prototype(closure);
         if (parent.tag == KILN_VALUE_NULL) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("an explicit null [[Prototype]] ends inherited lookup, so the \
+                            name is absent by the language's property lookup rule",
+                            out);
         }
         kiln_value property_key = kiln_c99_key_value(key, &ikey);
         if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;

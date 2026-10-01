@@ -2384,7 +2384,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 36,
+        sites: 37,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2406,7 +2406,8 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     absent when its [[Prototype]] is null or a `Function.prototype` whose store \
                     lacks it. These are the lists \
                     the two engines can disagree about, and \
-                    scripts/native-surface-inventory.py --gate is what measures them",
+                    scripts/native-surface-inventory.py --gate is what measures them. An explicit \
+                    null [[Prototype]] ends lookup, so every inherited property is absent",
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",

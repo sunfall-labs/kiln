@@ -19,7 +19,7 @@ console.log(
   typeof AsyncFunction.prototype,
   typeof GeneratorFunction.prototype,
   typeof AsyncGeneratorFunction.prototype,
-  Object.getPrototypeOf(AsyncFunction) === Function.prototype,
+  Object.getPrototypeOf(AsyncFunction) === Function,
   AsyncFunction.length,
   Object.prototype.toString.call(asynchronous),
   Object.prototype.toString.call(generator),
@@ -32,8 +32,6 @@ console.log(
   asyncGenerator instanceof AsyncGeneratorFunction,
   ordinary instanceof AsyncFunction,
 );
-Object.setPrototypeOf(asynchronous, { customMarker: 12 });
-console.log(asynchronous.kindMarker === undefined, asynchronous.customMarker === 12);
 console.log(
   Object.getPrototypeOf(asynchronous) === AsyncFunction.prototype,
   Object.getPrototypeOf(generator) === GeneratorFunction.prototype,
@@ -41,9 +39,13 @@ console.log(
   Object.getPrototypeOf(ordinary) === Function.prototype,
   asynchronous.kindMarker === 11,
 );
+Object.setPrototypeOf(asynchronous, { customMarker: 12 });
+console.log(asynchronous.kindMarker === undefined, asynchronous.customMarker === 12);
 
 asynchronous.constructor = ordinary;
 console.log(asynchronous.constructor === ordinary);
 delete asynchronous.constructor;
 Object.setPrototypeOf(asynchronous, Function.prototype);
 console.log(asynchronous.constructor === Function, asynchronous instanceof AsyncFunction);
+Object.setPrototypeOf(asynchronous, null);
+console.log(asynchronous.constructor === undefined, asynchronous.toString === undefined);
