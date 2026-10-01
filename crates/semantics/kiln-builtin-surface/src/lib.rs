@@ -238,6 +238,7 @@ pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
     ("Function.prototype", "call", 1),
     ("Function.prototype", "apply", 2),
     ("Function.prototype", "bind", 1),
+    ("Date.prototype", "getTime", 0),
     ("RegExp.prototype", "test", 1),
     ("RegExp.prototype", "exec", 1),
     ("RegExp.prototype", "toString", 0),
