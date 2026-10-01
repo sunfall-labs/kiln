@@ -1,3 +1,36 @@
+static int kiln_c99_node_client_emit_socket(kiln_node_client_request *request,
+                                            kiln_value *thrown) {
+    kiln_value argument = request->object;
+    int status;
+    (void)thrown;
+    status = kiln_c99_enqueue_next_tick(
+        kiln_c99_method(KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN), &argument, 1);
+    return status;
+}
+
+static int kiln_c99_node_client_attach(kiln_node_client_request *request,
+                                       kiln_node_socket *socket,
+                                       int attach_runtime,
+                                       kiln_value *thrown) {
+    int status;
+    if (request == NULL || socket == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_heap_store_pointer(request, &request->socket, socket);
+    kiln_c99_heap_store_pointer(request, &request->next, socket->client_requests);
+    kiln_c99_heap_store_pointer(socket, &socket->client_requests, request);
+    if (attach_runtime) {
+        status = kiln_c99_node_socket_object(socket, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (attach_runtime) {
+        status = kiln_realm_http_client_attach_active(socket->resource,
+                                                      kiln_c99_node_http_event,
+                                                      kiln_c99_node_drop_http_connection,
+                                                      socket);
+        if (status != KILN_C99_OK) return status;
+    }
+    status = kiln_c99_node_client_emit_socket(request, thrown);
+    return status;
+}
 
 /* A compact native EventEmitter core shared by node:events and the socket/server facades.
  *

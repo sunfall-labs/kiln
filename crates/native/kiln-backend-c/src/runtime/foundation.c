@@ -63,39 +63,6 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 
-static int kiln_c99_node_client_emit_socket(kiln_node_client_request *request,
-                                            kiln_value *thrown) {
-    kiln_value argument = request->object;
-    int status;
-    (void)thrown;
-    status = kiln_c99_enqueue_next_tick(
-        kiln_c99_method(KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN), &argument, 1);
-    return status;
-}
-
-static int kiln_c99_node_client_attach(kiln_node_client_request *request,
-                                       kiln_node_socket *socket,
-                                       int attach_runtime,
-                                       kiln_value *thrown) {
-    int status;
-    if (request == NULL || socket == NULL) return KILN_C99_INVALID_ARGUMENT;
-    kiln_c99_heap_store_pointer(request, &request->socket, socket);
-    kiln_c99_heap_store_pointer(request, &request->next, socket->client_requests);
-    kiln_c99_heap_store_pointer(socket, &socket->client_requests, request);
-    if (attach_runtime) {
-        status = kiln_c99_node_socket_object(socket, thrown);
-        if (status != KILN_C99_OK) return status;
-    }
-    if (attach_runtime) {
-        status = kiln_realm_http_client_attach_active(socket->resource,
-                                                      kiln_c99_node_http_event,
-                                                      kiln_c99_node_drop_http_connection,
-                                                      socket);
-        if (status != KILN_C99_OK) return status;
-    }
-    status = kiln_c99_node_client_emit_socket(request, thrown);
-    return status;
-}
 /* Date parsing is shared with the interpreter through the semantic provider. */
 double kiln_date_parse(const kiln_string *source);
 /* `JSON.parse`'s reader, linked from the provider archive as a tape (`crates/semantics/kiln-json`, ADR
