@@ -2107,3 +2107,40 @@ int main(void) {
     );
     assert!(!String::from_utf8_lossy(&run.stderr).contains("candidate ledger disagrees"));
 }
+
+#[test]
+fn executable_zero_argument_string_construction_uses_a_valid_header() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty wrapper fixture emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+    kiln_value dummy, empty, wrapped, length, thrown = kiln_c99_undefined();
+    if ({}(NULL, &dummy) != KILN_C99_OK) return 1;
+    kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
+    if (kiln_c99_call(NULL, &empty, constructor, kiln_c99_undefined(), NULL, 0, 0, &thrown) != KILN_C99_OK) return 2;
+    if (empty.tag != KILN_VALUE_STRING || empty.ptr == NULL ||
+        ((const kiln_string *)empty.ptr)->unit_len != 0) return 3;
+    if (kiln_c99_construct(NULL, &wrapped, constructor, NULL, 0, 0, &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_get(NULL, wrapped, "length", 6, &length, 0, &thrown) != KILN_C99_OK ||
+        length.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(length) != 0) return 5;
+    kiln_value primitive;
+    if (!kiln_c99_primitive_wrapper_value(wrapped, KILN_C99_WRAPPER_STRING, &primitive) ||
+        !kiln_c99_same_value(empty, primitive)) return 6;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "zero-argument-string-wrapper");
+    assert!(
+        run.status.success(),
+        "empty String wrapper failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
