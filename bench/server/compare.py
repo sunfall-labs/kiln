@@ -162,6 +162,8 @@ def main() -> int:
     runtimes = os.environ.get("RUNTIMES", "kiln node bun deno").split()
     workloads = os.environ.get("WORKLOADS", "hello mixed static-file json-echo-1k json-echo-64k chunked-stream large-upload connection-churn fs-small-reads fs-large-read fs-stat-storm").split()
     if not runtimes or not workloads: raise ValueError("RUNTIMES and WORKLOADS must each contain at least one value")
+    node_client = shutil.which("node")
+    if node_client is None: raise ValueError("node is required as the HTTP load client")
     result_root = Path(os.environ.get("RESULTS_DIR", ROOT / ".scratch" / f"server-compare-{int(time.time())}-{os.getpid()}"))
     result_root.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="kiln-server-sources-") as temporary:
@@ -174,6 +176,8 @@ def main() -> int:
             "transformed_serve_source_sha256": sha256(sources / "serve.mjs"), "transformed_app_source_sha256": sha256(sources / "app.mjs"),
             "driver_source_sha256": sha256(HERE / "drive.mjs"), "drive_mix_source_sha256": sha256(HERE / "drive-mix.mjs"),
             "drive_pipeline_source_sha256": sha256(HERE / "drive-pipeline.mjs"),
+            "load_client": {"runtime": "node", "executable": node_client,
+                            "version": runtime_version("node", candidate)},
             "variants": {label: {kind: sha256(path) for kind, path in paths.items()} for label, paths in variants},
             "runtime_versions": {runtime: runtime_version(runtime, candidate) for runtime in runtimes if runtime == "kiln" or shutil.which(runtime)},
             "passes": passes, "processes": processes, "connections": connections, "duration_ms": duration,
@@ -208,7 +212,8 @@ def main() -> int:
                         try:
                             wait_ready(port, process)
                             reports = run_clients(driver, duration, connections, port, workload, processes,
-                                                  max(10.0, duration / 1000 + 5.0), output_dir=run_dir)
+                                                  max(10.0, duration / 1000 + 5.0), node_bin=node_client,
+                                                  output_dir=run_dir)
                             for index, (report, stderr, status) in enumerate(reports, 1):
                                 (run_dir / f"client-{index}.json").write_text(json.dumps(report, indent=2) + "\n")
                                 if stderr: (run_dir / f"client-{index}.stderr").write_text(stderr)
