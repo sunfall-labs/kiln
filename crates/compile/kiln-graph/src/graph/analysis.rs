@@ -934,6 +934,9 @@ pub fn candidate_number_parameters_with_profile(
 pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
     Some(match instruction {
         Instruction::HostCall { argc, .. } => (usize::from(*argc), 1),
+        // A direct-eval call carries the same callee/argument stack shape as a normal call.
+        // Spread calls materialize their arguments as one array before this instruction.
+        Instruction::DirectEval(site) => (usize::from(site.argc.unwrap_or(1)) + 1, 1),
         Instruction::LoadArguments
         | Instruction::LoadTemplateObject(_)
         | Instruction::RestArguments(_)

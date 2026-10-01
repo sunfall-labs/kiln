@@ -275,11 +275,9 @@ pub fn stack_effect(
                 Ok((height - needed + 1, false))
             }
         }
-        // Refused by `validate_supported_instruction`, so nothing is ever emitted for it. The
-        // arithmetic is still written out rather than waved away: `stack_effect` is what proves
-        // the height claims of a program consistent, and a lie here would be a lie about a
-        // program the interpreter runs happily. `argc` is `None` when a spread put the arguments
-        // in one array, which leaves exactly one value to consume.
+        // The graph bridge and native tail emitter consume the same call shape. `argc` is `None`
+        // when a spread put the arguments in one array, which leaves one argument value below
+        // the callee.
         Instruction::DirectEval(site) => {
             // The source reference to `eval` is read before its arguments, so accessors and
             // mutations run in ordinary call-expression order. The callee remains below the
