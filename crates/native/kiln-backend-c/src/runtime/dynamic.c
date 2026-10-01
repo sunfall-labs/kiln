@@ -672,6 +672,20 @@ static int kiln_dyn_string_to_source(kiln_value value, uint8_t **out, size_t *by
     if (out == NULL || byte_len == NULL) return KILN_C99_INVALID_ARGUMENT;
     *out = NULL;
     *byte_len = 0;
+    /* Most generated source is already ASCII. Copy it directly rather than allocating an
+     * intermediate UTF-16 buffer and encoding every unit on each invocation. */
+    size_t ascii_len = 0;
+    const char *ascii = kiln_c99_string_ascii_bytes(value, &ascii_len);
+    if (ascii != NULL && kiln_c99_ascii_scan(ascii, ascii_len)) {
+        if (ascii_len == SIZE_MAX) return KILN_C99_OUT_OF_MEMORY;
+        uint8_t *copy = (uint8_t *)malloc(ascii_len + 1);
+        if (copy == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (ascii_len != 0) memcpy(copy, ascii, ascii_len);
+        copy[ascii_len] = 0;
+        *out = copy;
+        *byte_len = ascii_len;
+        return KILN_C99_OK;
+    }
     int status = kiln_c99_to_units(value, &units, &count);
     if (status != KILN_C99_OK) return status;
     if (count > (SIZE_MAX - 1) / 3) {
