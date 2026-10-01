@@ -4,10 +4,8 @@
 //! an `ImportedKey`, never bytes that are merely labelled as a key. RSA constructors validate
 //! the encoded components before a handle can be created.
 
-use rsa::pkcs1::{
-    DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
-};
-use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
+use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 
@@ -229,7 +227,7 @@ fn validate_public_parameters(
     modulus: rsa::BigUint,
     exponent: rsa::BigUint,
 ) -> Result<RsaPublicKey, KeyError> {
-    if modulus.bits() > MAX_PUBLIC_RSA_BITS as u64 {
+    if modulus.bits() > MAX_PUBLIC_RSA_BITS {
         return Err(KeyError::UnsupportedKeySize);
     }
     RsaPublicKey::new_with_max_size(modulus, exponent, MAX_PUBLIC_RSA_BITS)
