@@ -757,17 +757,22 @@ impl super::Compiler {
 
     /// Compile a function body into its own proto and bind the name to a callable.
     ///
-    /// Declarations are not hoisted yet: the binding exists from this point on, so calling a
-    /// function textually above its declaration is an unresolved identifier rather than a call
-    /// to `undefined`. That is a smaller lie than hoisting half-way would be, and it is a
-    /// diagnostic rather than a wrong answer.
+    pub(super) fn emit_function_declaration(&mut self, function: &Function, span: Span) {
+        self.initialize_function_declaration(function, span);
+        if let Some(name) = &function.name
+            && let Resolution::Local(local) = self.resolve(name)
+        {
+            self.emit_annexb_var_write(name, local);
+        }
+    }
+
     /// Compile a function declaration and store it in its already-created binding.
     ///
     /// The binding exists before the body is compiled, which is what makes a function able to
     /// call itself and to be called from above its own text: the body resolves its own name
     /// through the enclosing scope, and the slot it reads is filled by the `MakeFunction` here
     /// before any call can reach it.
-    pub(super) fn emit_function_declaration(&mut self, function: &Function, span: Span) {
+    pub(super) fn initialize_function_declaration(&mut self, function: &Function, span: Span) {
         let Some(name) = function.name.clone() else {
             self.error(Some(span), "a function declaration requires a name");
             return;
@@ -800,7 +805,6 @@ impl super::Compiler {
                 } else {
                     Instruction::StoreLocal(local.slot)
                 });
-                self.emit_annexb_var_write(&name, local);
             }
             // A function declaration at the top of global code: the binding is a property of the
             // global object, created by `DeclareGlobalBinding` when the scope was entered and

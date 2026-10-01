@@ -2654,6 +2654,16 @@ impl super::Compiler {
                 self.hoist_names(statement);
             }
         }
+        // CaseBlock declaration instantiation initializes every function before any case test
+        // runs, including declarations in unselected clauses. Annex B's outer var write is a
+        // separate operation that occurs only when execution reaches the declaration below.
+        for case in cases {
+            for statement in &case.body {
+                if let StatementKind::Function(function) = &statement.kind {
+                    self.initialize_function_declaration(function, statement.span);
+                }
+            }
+        }
 
         let mut entries = Vec::with_capacity(cases.len());
         let mut fallback = None;
@@ -2684,7 +2694,15 @@ impl super::Compiler {
         for case in cases {
             starts.push(self.code.len() as u32);
             for statement in &case.body {
-                self.statement(statement);
+                if let StatementKind::Function(function) = &statement.kind {
+                    if let Some(name) = &function.name
+                        && let Resolution::Local(local) = self.resolve(name)
+                    {
+                        self.emit_annexb_var_write(name, local);
+                    }
+                } else {
+                    self.statement(statement);
+                }
             }
         }
         let context = self
