@@ -1,49 +1,62 @@
 # Uglify captured-record benchmark
 
 This compares the production borrowed-view capture path with the control's
-per-invocation captured-record hydration. The control source must be based on
-the same production commit; `dynamic.c` hydration is the only source difference.
-The currently prepared pair is based on `a04f1321`:
+per-invocation captured-record hydration. Start the control from the exact
+production source tree and apply only the captured-record hydration change in
+`crates/native/kiln-backend-c/src/runtime/dynamic.c`. The old prepared pair
+based on `a04f1321` is stale and must not be used for a result.
 
-- production: `/var/tmp/kiln/kiln-uglify-bench`
-- control: `/var/tmp/kiln/kiln-uglify-control-matched`
+The harness requires both source-tree arguments. Before querying Node or
+launching either workload, it compares the indexed tracked-file inventories and
+the actual worktree bytes and executable bits. This includes dirty tracked
+overlays, so the control change can be committed or left uncommitted. The sole
+permitted tracked source difference is `dynamic.c`; workload and
+`package-lock.json` must also match this harness checkout's npm-compat corpus.
+Untracked build output, `node_modules`, and `target` are excluded. Evidence
+records both HEADs, the common-source digest, full tracked-tree digests, the
+two `dynamic.c` digests, and workload/lock digests.
 
-The workload imports and initializes Uglify before its timers, times the first
-minify separately, then times 24 calls in the same process. Both binaries need
-the host-backed realm clock, so build them as standalone release programs with
-`--node --profile native-release`. This bypasses the CLI, artifact-cache lookup,
-and development run policy during measurement. The Python harness records total
-process wall time as context, but computes the performance comparison from the
-in-process warmed batch only.
-
-Install the locked npm dependencies in both source trees, build the workload
-from each, then run the harness from the production tree:
+Create the control as a fresh worktree from the production source commit, then
+port the control behavior change into its `dynamic.c`. Review that diff to
+confirm it contains no other tracked changes. Install the locked npm
+dependencies in both source trees and build the workload from each:
 
 ```sh
+git worktree add /var/tmp/kiln-uglify-control <production-commit>
+
+cd <production-worktree>
 npm ci --prefix conformance/npm-compat
 kiln build conformance/npm-compat/benchmarks/uglify-capture.js --node \
   --profile native-release --output target/uglify-capture-production
 
-cd /var/tmp/kiln/kiln-uglify-control-matched
+cd /var/tmp/kiln-uglify-control
+# Apply the reviewed control-only dynamic.c change here.
 npm ci --prefix conformance/npm-compat
 kiln build conformance/npm-compat/benchmarks/uglify-capture.js --node \
   --profile native-release --output target/uglify-capture-control
 
-cd /var/tmp/kiln/kiln-uglify-bench
+cd <production-worktree>
 python3 bench/uglify-capture/compare.py \
   target/uglify-capture-production \
-  /var/tmp/kiln/kiln-uglify-control-matched/target/uglify-capture-control \
+  /var/tmp/kiln-uglify-control/target/uglify-capture-control \
   --production-source "$PWD" \
-  --control-source /var/tmp/kiln/kiln-uglify-control-matched \
+  --control-source /var/tmp/kiln-uglify-control \
   --results /tmp/uglify-capture-results.json
 ```
 
-The harness compares call count and output checksum against Node and between
-the two binaries, ignoring timing fields. It performs two alternating warmup
-pairs, then eight timed invocations in balanced production/control order. Each
-invocation is a standalone process with a bounded timeout and an isolated
-process group; timeout cleanup sends TERM and then KILL to that group. Evidence
-includes source revisions and `dynamic.c` hashes, workload and binary SHA-256,
-Node/Python/host versions, selected `KILN_*` settings, per-run internal and
-external timings, and medians. Recreate the control overlay from the final
-production commit before running if production has advanced beyond `a04f1321`.
+Both binaries are standalone release programs built with `--node --profile
+native-release`. This bypasses the CLI, artifact-cache lookup, and development
+run policy during measurement. The workload initializes Uglify before its
+timers, then times the first minify call separately from a warmed 24-call batch
+using the host-backed realm clock. The harness rejects unmatched source trees
+before running Node or either workload. It checks call count and output
+checksum against Node and between the binaries, ignoring timing fields; then
+it performs two alternating warmup pairs and eight timed invocations in
+balanced production/control order. Each invocation has a bounded timeout and
+an isolated process group with TERM/KILL cleanup.
+
+Evidence contains source revisions and matched-source provenance, workload,
+lock and binary SHA-256 digests, Node/Python/host versions, selected `KILN_*`
+settings, per-run internal and external timings, and medians. If production
+changes, recreate the control worktree from that candidate and reapply the
+reviewed `dynamic.c` control change before building.

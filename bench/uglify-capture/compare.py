@@ -18,6 +18,7 @@ import os
 import platform
 import signal
 import statistics
+import stat
 import subprocess
 import sys
 import time
@@ -28,6 +29,9 @@ REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "conformance" / "npm-compat"
 WORKLOAD = CORPUS / "benchmarks" / "uglify-capture.js"
 TIME_FIELDS = ("moduleInitMs", "firstCallMs", "warmed24Ms")
+DYNAMIC_CONTROL_FILE = "crates/native/kiln-backend-c/src/runtime/dynamic.c"
+WORKLOAD_RELATIVE = Path("conformance/npm-compat/benchmarks/uglify-capture.js")
+LOCK_RELATIVE = Path("conformance/npm-compat/package-lock.json")
 
 
 def digest_file(path: Path) -> str:
@@ -122,21 +126,148 @@ def git_head(path: Path | None) -> str | None:
     return result.stdout.decode().strip()
 
 
-def source_metadata(path: Path | None) -> dict[str, str | None] | None:
-    if path is None:
-        return None
-    dynamic = path / "crates/native/kiln-backend-c/src/runtime/dynamic.c"
-    if not dynamic.is_file():
-        raise RuntimeError(f"no dynamic.c found under source checkout {path}")
-    return {"head": git_head(path), "dynamic_c_sha256": digest_file(dynamic)}
+def tracked_paths(root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"cannot list tracked files under {root}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return sorted(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+
+
+def worktree_entry(root: Path, relative: str) -> tuple[str, int, bytes]:
+    """Read an indexed path from the worktree, including dirty tracked overlays."""
+    path = root / relative
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"tracked source file is missing under {root}: {relative}: {error}") from error
+    # Git tracks executability, not owner/group permission details.
+    mode = 0o111 if info.st_mode & 0o111 else 0
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink", mode, os.fsencode(os.readlink(path))
+    if stat.S_ISREG(info.st_mode):
+        try:
+            return "file", mode, path.read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"cannot read tracked source file {path}: {error}") from error
+    if stat.S_ISDIR(info.st_mode):
+        # A git submodule is represented by a tracked directory entry. Record the checked-out
+        # submodule revision rather than traversing its generated or independently ignored files.
+        revision = git_head(path)
+        if revision is None:
+            raise RuntimeError(f"tracked directory is not a readable submodule: {path}")
+        return "submodule", mode, revision.encode("ascii")
+    raise RuntimeError(f"unsupported tracked file kind under {root}: {relative}")
+
+
+def digest_entry(digest: "hashlib._Hash", relative: str,
+                 entry: tuple[str, int, bytes]) -> None:
+    kind, mode, contents = entry
+    name = os.fsencode(relative)
+    digest.update(len(name).to_bytes(8, "big"))
+    digest.update(name)
+    digest.update(kind.encode("ascii") + b"\0")
+    digest.update(mode.to_bytes(4, "big"))
+    digest.update(len(contents).to_bytes(8, "big"))
+    digest.update(contents)
+
+
+def compare_sources(production: Path, control: Path) -> dict[str, object]:
+    """Require identical tracked worktrees except the explicitly controlled dynamic.c file."""
+    production = production.resolve()
+    control = control.resolve()
+    if not production.is_dir() or not control.is_dir():
+        raise RuntimeError("production and control source paths must be directories")
+    production_paths = tracked_paths(production)
+    control_paths = tracked_paths(control)
+    if production_paths != control_paths:
+        production_only = sorted(set(production_paths) - set(control_paths))
+        control_only = sorted(set(control_paths) - set(production_paths))
+        raise RuntimeError(
+            "tracked source inventories differ; "
+            f"production-only={production_only[:8]!r}, control-only={control_only[:8]!r}"
+        )
+    if DYNAMIC_CONTROL_FILE not in production_paths:
+        raise RuntimeError(f"tracked control file is missing: {DYNAMIC_CONTROL_FILE}")
+
+    inventory_digest = hashlib.sha256()
+    common_digest = hashlib.sha256()
+    production_tree_digest = hashlib.sha256()
+    control_tree_digest = hashlib.sha256()
+    production_dynamic: tuple[str, int, bytes] | None = None
+    control_dynamic: tuple[str, int, bytes] | None = None
+    for relative in production_paths:
+        production_entry = worktree_entry(production, relative)
+        control_entry = worktree_entry(control, relative)
+        name = os.fsencode(relative)
+        inventory_digest.update(len(name).to_bytes(8, "big"))
+        inventory_digest.update(name)
+        digest_entry(production_tree_digest, relative, production_entry)
+        digest_entry(control_tree_digest, relative, control_entry)
+        if relative == DYNAMIC_CONTROL_FILE:
+            production_dynamic = production_entry
+            control_dynamic = control_entry
+            continue
+        if production_entry != control_entry:
+            raise RuntimeError(f"tracked source differs outside {DYNAMIC_CONTROL_FILE}: {relative}")
+        digest_entry(common_digest, relative, production_entry)
+
+    if production_dynamic is None or control_dynamic is None:
+        raise RuntimeError(f"tracked control file is missing: {DYNAMIC_CONTROL_FILE}")
+    if production_dynamic[0] != "file" or control_dynamic[0] != "file":
+        raise RuntimeError(f"{DYNAMIC_CONTROL_FILE} must be a regular tracked file in both trees")
+
+    # Keep each supplied tree tied to the harness checkout's benchmark inputs. This prevents a
+    # workload or dependency-lock drift from masquerading as a runtime-only comparison.
+    try:
+        harness_workload = WORKLOAD.read_bytes()
+        harness_lock = (CORPUS / "package-lock.json").read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"cannot read harness workload or package lock: {error}") from error
+    for label, root in (("production", production), ("control", control)):
+        try:
+            source_workload = (root / WORKLOAD_RELATIVE).read_bytes()
+            source_lock = (root / LOCK_RELATIVE).read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"cannot read {label} workload or package lock: {error}") from error
+        if source_workload != harness_workload:
+            raise RuntimeError(f"{label} workload differs from the harness workload")
+        if source_lock != harness_lock:
+            raise RuntimeError(f"{label} package-lock.json differs from the harness corpus")
+
+    return {
+        "production_head": git_head(production),
+        "control_head": git_head(control),
+        "tracked_file_count": len(production_paths),
+        "tracked_path_inventory_sha256": inventory_digest.hexdigest(),
+        "matched_source_sha256": common_digest.hexdigest(),
+        "production_tracked_tree_sha256": production_tree_digest.hexdigest(),
+        "control_tracked_tree_sha256": control_tree_digest.hexdigest(),
+        "dynamic_c_sha256": {
+            "production": hashlib.sha256(production_dynamic[2]).hexdigest(),
+            "control": hashlib.sha256(control_dynamic[2]).hexdigest(),
+        },
+        "workload_sha256": hashlib.sha256(harness_workload).hexdigest(),
+        "package_lock_sha256": hashlib.sha256(harness_lock).hexdigest(),
+        "only_allowed_source_difference": DYNAMIC_CONTROL_FILE,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("production", type=Path, help="prebuilt standalone production workload")
     parser.add_argument("control", type=Path, help="prebuilt standalone hydration-control workload")
-    parser.add_argument("--production-source", type=Path)
-    parser.add_argument("--control-source", type=Path)
+    parser.add_argument("--production-source", type=Path, required=True,
+                        help="production source worktree used to build its binary")
+    parser.add_argument("--control-source", type=Path, required=True,
+                        help="control source worktree used to build its binary")
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--rounds", type=int, default=8, help="even count of alternating timed runs")
     parser.add_argument("--timeout", type=float, default=120.0, help="per-process timeout in seconds")
@@ -144,6 +275,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.warmups < 1 or args.rounds < 4 or args.rounds % 2 or args.timeout <= 0:
         parser.error("warmups must be positive, rounds even and >= 4, and timeout positive")
+    # Validate provenance before even querying Node; the evidence must describe a
+    # source-matched pair, not merely two binaries that happen to agree.
+    source_match = compare_sources(args.production_source, args.control_source)
     binaries = {"production": args.production.resolve(), "control": args.control.resolve()}
     for path in binaries.values():
         if not path.is_file() or not path.stat().st_mode & 0o111:
@@ -160,10 +294,7 @@ def main() -> int:
     reference = parse_result("Node", node_output, node_error, node_code)
     evidence: dict[str, object] = {
         "source": {
-            "production": source_metadata(args.production_source.resolve()) if args.production_source else None,
-            "control": source_metadata(args.control_source.resolve()) if args.control_source else None,
-            "npm_lock_sha256": digest_file(CORPUS / "package-lock.json"),
-            "workload_sha256": digest_file(WORKLOAD),
+            **source_match,
         },
         "binaries": {label: {"path": str(path), "sha256": digest_file(path)}
                      for label, path in binaries.items()},
