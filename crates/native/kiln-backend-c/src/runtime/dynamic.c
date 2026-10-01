@@ -100,10 +100,14 @@ typedef struct kiln_dyn_scope {
     kiln_value with_object;
     int has_with_object;
     int strict;
-    /* Immutable closure captures stay in their serialized object as live cells. A function call
-     * scope can borrow that environment instead of rebuilding a malloc-backed binding table. */
+    /* Captured lexical bindings stay in their serialized environment as live cells. A function
+     * call scope borrows that environment instead of rebuilding a malloc-backed binding table. */
     kiln_value captured_environment;
     int has_captured_environment;
+    /* Ordered lexical/with records inherited by a closure. The flat environment above is kept
+     * as the lexical-cell index; this list preserves ObjectEnvironmentRecord position/identity. */
+    kiln_value captured_records;
+    int has_captured_records;
     /* Bindings live in a malloc-grown index for fast name lookup. Mirror each live value in a
      * GC object reachable from this stack scope: the collector scans C stacks, not arbitrary
      * malloc allocations. */
@@ -129,6 +133,8 @@ static int kiln_dyn_scope_predeclare_lexicals(kiln_dyn_scope *scope,
                                                const char *source, size_t source_len,
                                                size_t target_scope_id);
 static int kiln_dyn_source_may_have_function_declaration(const char *source, size_t source_len);
+static int kiln_dyn_private_environment_has(kiln_value environment, const char *name,
+                                           size_t name_len, int *found);
 
 static int kiln_dyn_has_line_terminator(const char *source, size_t start, size_t end) {
     for (size_t index = start; index < end; ++index) {
@@ -153,6 +159,8 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->strict = parent != NULL ? parent->strict : 0;
     scope->captured_environment = kiln_c99_undefined();
     scope->has_captured_environment = 0;
+    scope->captured_records = kiln_c99_undefined();
+    scope->has_captured_records = 0;
     scope->roots = kiln_c99_undefined();
     scope->var_target = NULL;
     scope->function_declaration_sites = NULL;
@@ -279,6 +287,13 @@ static int kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
             }
         }
         if (curr->has_captured_environment) {
+            int binding_present = 0;
+            int binding_status = kiln_dyn_private_environment_has(curr->captured_environment,
+                                                                  name, name_len,
+                                                                  &binding_present);
+            kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(curr->captured_environment));
+            if (binding_status != KILN_C99_OK) return binding_status;
+            if (!binding_present) continue;
             char *marker = (char *)malloc(name_len + 1);
             if (marker == NULL) return KILN_C99_OUT_OF_MEMORY;
             const unsigned char candidates[] = {
@@ -290,8 +305,10 @@ static int kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
                 marker[0] = (char)candidates[candidate];
                 memcpy(marker + 1, name, name_len);
                 int present = 0;
-                int status = kiln_c99_has_property(NULL, curr->captured_environment, marker,
-                                                   name_len + 1, &present, 0, thrown);
+                int status = kiln_dyn_private_environment_has(curr->captured_environment,
+                                                              marker, name_len + 1,
+                                                              &present);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(curr->captured_environment));
                 if (status != KILN_C99_OK) {
                     free(marker);
                     return status;
@@ -306,10 +323,8 @@ static int kiln_dyn_scope_restriction(kiln_dyn_scope *scope, const char *name,
                 }
             }
             free(marker);
-            if (restriction != KILN_DYN_BINDING_MUTABLE) {
-                *out = restriction;
-                return KILN_C99_OK;
-            }
+            *out = restriction;
+            return KILN_C99_OK;
         }
     }
     *out = KILN_DYN_BINDING_MUTABLE;
@@ -360,17 +375,49 @@ static int kiln_dyn_scope_set_key(kiln_dyn_scope *scope, const kiln_string *key,
     return result;
 }
 
+/* Captured environments are private null-prototype ordinary objects. Check their own-name
+ * membership, then read the data slot directly so Object.prototype pollution cannot become a
+ * captured binding and no accessor can run while resolving a lexical name. */
+static int kiln_dyn_private_environment_get(kiln_value environment, const char *name,
+                                            size_t name_len, kiln_value *out,
+                                            int *found) {
+    *found = 0;
+    if (environment.tag != KILN_VALUE_OBJECT)
+        return kiln_c99_internal_status("dynamic captured environment is not an object");
+    if (kiln_c99_object_of(environment)->prototype.tag != KILN_VALUE_NULL)
+        return kiln_c99_internal_status("dynamic captured environment gained a prototype");
+    int present = 0;
+    int status = kiln_c99_has_property(NULL, environment, name, name_len, &present, 0, NULL);
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(environment));
+    if (status != KILN_C99_OK || !present) return status;
+    kiln_property *slot = NULL;
+    status = kiln_c99_own_slot(environment, name, name_len, &slot);
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(environment));
+    if (status != KILN_C99_OK) return status;
+    if (slot == NULL || slot->accessor || slot->refused)
+        return kiln_c99_internal_status("dynamic captured environment contains a non-data slot");
+    *out = slot->value;
+    kiln_c99_gc_keep_alive(out);
+    *found = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_private_environment_has(kiln_value environment, const char *name,
+                                            size_t name_len, int *found) {
+    kiln_value ignored = kiln_c99_undefined();
+    return kiln_dyn_private_environment_get(environment, name, name_len, &ignored, found);
+}
+
 static int kiln_dyn_captured_get(kiln_dyn_scope *scope, const char *name, size_t name_len,
                                  kiln_value *out, int *found, kiln_value *thrown) {
+    (void)thrown;
     *found = 0;
     if (!scope->has_captured_environment) return KILN_C99_OK;
-    int present = 0;
-    int status = kiln_c99_has_property(NULL, scope->captured_environment, name, name_len,
-                                       &present, 0, thrown);
-    if (status != KILN_C99_OK || !present) return status;
     kiln_value stored = kiln_c99_undefined();
-    status = kiln_c99_get(NULL, scope->captured_environment, name, name_len, &stored, 0, thrown);
+    int status = kiln_dyn_private_environment_get(scope->captured_environment, name, name_len,
+                                                  &stored, found);
     if (status != KILN_C99_OK) return status;
+    if (!*found) return KILN_C99_OK;
     if (stored.tag == KILN_VALUE_CELL) {
         kiln_val *cell = kiln_c99_cell_of(stored);
         status = kiln_c99_val_check_tdz(*cell, thrown);
@@ -387,18 +434,131 @@ static int kiln_dyn_captured_update(kiln_dyn_scope *scope, const char *name, siz
                                     kiln_value value, int *found) {
     *found = 0;
     if (!scope->has_captured_environment) return KILN_C99_OK;
-    int present = 0;
-    int status = kiln_c99_has_property(NULL, scope->captured_environment, name, name_len,
-                                       &present, 0, NULL);
-    if (status != KILN_C99_OK || !present) return status;
     kiln_value stored = kiln_c99_undefined();
-    status = kiln_c99_get(NULL, scope->captured_environment, name, name_len, &stored, 0, NULL);
+    int status = kiln_dyn_private_environment_get(scope->captured_environment, name, name_len,
+                                                  &stored, found);
     if (status != KILN_C99_OK) return status;
+    if (!*found) return KILN_C99_OK;
     if (stored.tag == KILN_VALUE_CELL) {
         kiln_c99_val_store_cell(kiln_c99_cell_of(stored), kiln_val_from_boundary(value));
     } else {
         status = kiln_c99_put(NULL, scope->captured_environment, name, name_len, value, 0, NULL);
         if (status != KILN_C99_OK) return status;
+    }
+    *found = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_with_has_binding(kiln_host *host, kiln_value object, const char *name,
+                                    size_t name_len, int depth, int *found,
+                                    kiln_value *thrown);
+
+static int kiln_dyn_captured_records_get(kiln_host *host, kiln_value records,
+                                         const char *name, size_t name_len, int depth,
+                                         int read_value, kiln_value *out, int *found, int *is_with,
+                                         kiln_value *with_target, kiln_value *thrown) {
+    *found = 0;
+    *is_with = 0;
+    if (records.tag != KILN_VALUE_ARRAY)
+        return kiln_c99_internal_status("dynamic captured environment records");
+    kiln_array *array = kiln_c99_array_of(records);
+    for (size_t i = 0; i < array->count; ++i) {
+        kiln_value entry = kiln_val_to_boundary(array->elements[i]);
+        if (entry.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(entry)->count != 2)
+            return kiln_c99_internal_status("dynamic captured environment record entry");
+        kiln_array *pair = kiln_c99_array_of(entry);
+        int with_record = kiln_c99_truthy(kiln_val_to_boundary(pair->elements[0]));
+        kiln_value target = kiln_val_to_boundary(pair->elements[1]);
+        int present = 0;
+        int status;
+        if (with_record) {
+            status = kiln_dyn_with_has_binding(host, target, name, name_len, depth,
+                                               &present, thrown);
+            if (status == KILN_C99_OK && present && read_value)
+                status = kiln_c99_get(host, target, name, name_len, out, depth, thrown);
+        } else {
+            status = read_value
+                         ? kiln_dyn_private_environment_get(target, name, name_len, out,
+                                                           &present)
+                         : kiln_dyn_private_environment_has(target, name, name_len, &present);
+        }
+        if (status != KILN_C99_OK || !present) {
+            if (status != KILN_C99_OK) return status;
+            continue;
+        }
+        if (status != KILN_C99_OK) return status;
+        if (read_value && !with_record && out->tag == KILN_VALUE_CELL) {
+            kiln_val *cell = kiln_c99_cell_of(*out);
+            status = kiln_c99_val_check_tdz(*cell, thrown);
+            if (status != KILN_C99_OK) return status;
+            *out = kiln_val_to_boundary(*cell);
+        }
+        *found = 1;
+        *is_with = with_record;
+        if (with_record && with_target != NULL) *with_target = target;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_captured_records_has(kiln_host *host, kiln_value records,
+                                         const char *name, size_t name_len, int depth,
+                                         int *found, int *is_with, kiln_value *target_out,
+                                         kiln_value *thrown) {
+    *found = 0;
+    *is_with = 0;
+    if (records.tag != KILN_VALUE_ARRAY)
+        return kiln_c99_internal_status("dynamic captured environment records");
+    kiln_array *array = kiln_c99_array_of(records);
+    for (size_t i = 0; i < array->count; ++i) {
+        kiln_value entry = kiln_val_to_boundary(array->elements[i]);
+        if (entry.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(entry)->count != 2)
+            return kiln_c99_internal_status("dynamic captured environment record entry");
+        kiln_array *pair = kiln_c99_array_of(entry);
+        int with_record = kiln_c99_truthy(kiln_val_to_boundary(pair->elements[0]));
+        kiln_value target = kiln_val_to_boundary(pair->elements[1]);
+        int present = 0;
+        int status = with_record
+                         ? kiln_dyn_with_has_binding(host, target, name, name_len, depth,
+                                                     &present, thrown)
+                         : kiln_dyn_private_environment_has(target, name, name_len, &present);
+        if (status != KILN_C99_OK) return status;
+        if (!present) continue;
+        *found = 1;
+        *is_with = with_record;
+        if (target_out != NULL) *target_out = target;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_with_has_binding(kiln_host *host, kiln_value object, const char *name,
+                                    size_t name_len, int depth, int *found,
+                                    kiln_value *thrown) {
+    int present = 0;
+    int status = kiln_c99_has_property(host, object, name, name_len, &present, depth, thrown);
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(object));
+    if (status != KILN_C99_OK || !present) {
+        *found = 0;
+        return status;
+    }
+    kiln_value symbol = kiln_c99_undefined();
+    status = kiln_c99_symbol_of_key("@@unscopables", 13, &symbol);
+    if (status != KILN_C99_OK) return status;
+    kiln_value unscopables = kiln_c99_undefined();
+    status = kiln_c99_get_computed(host, object, symbol, &unscopables, depth, thrown);
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(object));
+    kiln_c99_gc_keep_alive(&symbol);
+    if (status != KILN_C99_OK) return status;
+    if (unscopables.tag == KILN_VALUE_OBJECT || unscopables.tag == KILN_VALUE_FUNCTION) {
+        kiln_value excluded = kiln_c99_undefined();
+        status = kiln_c99_get(host, unscopables, name, name_len, &excluded, depth, thrown);
+        kiln_c99_gc_keep_alive(&unscopables);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_truthy(excluded)) {
+            *found = 0;
+            return KILN_C99_OK;
+        }
     }
     *found = 1;
     return KILN_C99_OK;
@@ -431,8 +591,9 @@ static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t
     return 0;
 }
 
-static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t name_len,
-                              kiln_value *out, int *found, kiln_value *thrown) {
+static int kiln_dyn_scope_get(kiln_host *host, kiln_dyn_scope *scope, const char *name,
+                              size_t name_len, int depth, kiln_value *out, int *found,
+                              kiln_value *thrown) {
     kiln_dyn_scope *curr = scope;
     *found = 0;
     while (curr != NULL) {
@@ -452,23 +613,10 @@ static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t na
                 return KILN_C99_OK;
             }
         }
-        int status = kiln_dyn_captured_get(curr, name, name_len, out, found, thrown);
-        if (status != KILN_C99_OK || *found) return status;
-        curr = curr->parent;
-    }
-    return KILN_C99_OK;
-}
-
-static int kiln_dyn_scope_get_with(kiln_host *host, kiln_dyn_scope *scope, const char *name,
-                                   size_t name_len, int depth, kiln_value *out, int *found,
-                                   kiln_value *thrown) {
-    kiln_dyn_scope *curr = scope;
-    *found = 0;
-    while (curr != NULL) {
         if (curr->has_with_object) {
             int present = 0;
-            int status = kiln_c99_has_property(host, curr->with_object, name, name_len,
-                                               &present, depth, thrown);
+            int status = kiln_dyn_with_has_binding(host, curr->with_object, name, name_len,
+                                                   depth, &present, thrown);
             if (status != KILN_C99_OK) return status;
             if (present) {
                 status = kiln_c99_get(host, curr->with_object, name, name_len, out, depth,
@@ -477,29 +625,15 @@ static int kiln_dyn_scope_get_with(kiln_host *host, kiln_dyn_scope *scope, const
                 return status;
             }
         }
-        curr = curr->parent;
-    }
-    return KILN_C99_OK;
-}
-
-static int kiln_dyn_scope_set_with(kiln_host *host, kiln_dyn_scope *scope, const char *name,
-                                   size_t name_len, kiln_value value, int depth, int *found,
-                                   kiln_value *thrown) {
-    kiln_dyn_scope *curr = scope;
-    *found = 0;
-    while (curr != NULL) {
-        if (curr->has_with_object) {
-            int present = 0;
-            int status = kiln_c99_has_property(host, curr->with_object, name, name_len,
-                                               &present, depth, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (present) {
-                *found = 1;
-                status = kiln_c99_put(host, curr->with_object, name, name_len, value, 0,
-                                      thrown);
-                return status;
-            }
+        if (curr->has_captured_records) {
+            int is_with = 0;
+            int status = kiln_dyn_captured_records_get(host, curr->captured_records, name,
+                                                       name_len, depth, 1, out, found, &is_with,
+                                                       NULL, thrown);
+            if (status != KILN_C99_OK || *found) return status;
         }
+        int status = kiln_dyn_captured_get(curr, name, name_len, out, found, thrown);
+        if (status != KILN_C99_OK || *found) return status;
         curr = curr->parent;
     }
     return KILN_C99_OK;
@@ -509,6 +643,7 @@ static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
     size_t i;
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->roots));
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->captured_environment));
+    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(scope->captured_records));
     for (i = 0; i < scope->count; ++i) {
         free(scope->bindings[i].name);
     }
@@ -1930,6 +2065,28 @@ static int kiln_dyn_new_environment(kiln_value *out) {
     return status;
 }
 
+static int kiln_dyn_captured_record_push(kiln_value records, int with_record,
+                                         kiln_value value) {
+    kiln_value pair = kiln_c99_undefined();
+    int status = kiln_c99_new_array(&pair);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_array_push(pair, kiln_c99_boolean(with_record));
+        kiln_c99_gc_keep_alive(&pair);
+        kiln_c99_gc_keep_alive(&records);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_array_push(pair, value);
+        kiln_c99_gc_keep_alive(&pair);
+        kiln_c99_gc_keep_alive(&value);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_array_push(records, pair);
+        kiln_c99_gc_keep_alive(&records);
+        kiln_c99_gc_keep_alive(&pair);
+    }
+    return status;
+}
+
 static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                                        kiln_value env_obj, int depth,
                                        kiln_value *thrown) {
@@ -1973,7 +2130,10 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
         if (s->has_captured_environment && s->captured_environment.tag == KILN_VALUE_OBJECT) {
             kiln_object *captured = kiln_c99_object_of(s->captured_environment);
             if (captured->shape != NULL) kiln_c99_ensure_dictionary(captured);
-            for (size_t i = 0; i < captured->count; ++i) {
+            kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_environment));
+            size_t captured_count = captured->count;
+            for (size_t i = 0; i < captured_count; ++i) {
+                captured = kiln_c99_object_of(s->captured_environment);
                 const kiln_string *key_header = captured->properties[i].key;
                 if (key_header == NULL) continue;
                 kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0,
@@ -1982,8 +2142,9 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 uint8_t *bytes = NULL;
                 size_t byte_len = 0;
                 int status = kiln_c99_string_to_utf8_lossy(key, &bytes, &byte_len);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_environment));
                 if (status != KILN_C99_OK) return status;
-                if (byte_len == 1 && bytes[0] == 3) {
+                if (byte_len == 1 && (bytes[0] == 3 || bytes[0] == 4)) {
                     free(bytes);
                     continue;
                 }
@@ -1997,13 +2158,18 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                 int already_captured = 0;
                 status = kiln_c99_has_property(host, env_obj, (const char *)bytes,
                                                byte_len, &already_captured, depth, thrown);
+                kiln_c99_gc_keep_alive(&env_obj);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_environment));
                 if (status != KILN_C99_OK || already_captured) {
                     free(bytes);
                     if (status != KILN_C99_OK) return status;
                     continue;
                 }
+                captured = kiln_c99_object_of(s->captured_environment);
                 status = kiln_c99_put(host, env_obj, (const char *)bytes, byte_len,
                                       captured->properties[i].value, 0, thrown);
+                kiln_c99_gc_keep_alive(&env_obj);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_environment));
                 if (status != KILN_C99_OK) {
                     free(bytes);
                     return status;
@@ -2023,10 +2189,12 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
                     int marker_present = 0;
                     status = kiln_c99_has_property(host, s->captured_environment, marker,
                                                    byte_len + 1, &marker_present, depth, thrown);
+                    kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_environment));
                     if (status != KILN_C99_OK) break;
                     if (marker_present) {
                         status = kiln_c99_put(host, env_obj, marker, byte_len + 1,
                                               kiln_c99_boolean(1), 0, thrown);
+                        kiln_c99_gc_keep_alive(&env_obj);
                         break;
                     }
                 }
@@ -2036,6 +2204,82 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
             }
         }
     }
+    kiln_value records = kiln_c99_undefined();
+    int record_status = kiln_c99_new_array(&records);
+    if (record_status != KILN_C99_OK) return record_status;
+    for (kiln_dyn_scope *s = scope; s != NULL; s = s->parent) {
+        if (s->count > 0) {
+            kiln_value lexical = kiln_c99_undefined();
+            record_status = kiln_dyn_new_environment(&lexical);
+            if (record_status != KILN_C99_OK) return record_status;
+            kiln_c99_gc_keep_alive(&records);
+            kiln_c99_gc_keep_alive(&lexical);
+            for (size_t i = 0; i < s->count; ++i) {
+                if (s->bindings[i].value.tag != KILN_VALUE_CELL) {
+                    record_status = kiln_c99_make_cell(&s->bindings[i].value);
+                    if (record_status != KILN_C99_OK) return record_status;
+                    kiln_value rooted_cell = s->bindings[i].value;
+                    kiln_c99_gc_keep_alive(&rooted_cell);
+                    record_status = kiln_c99_put(NULL, s->roots, s->bindings[i].name,
+                                                 s->bindings[i].name_len, rooted_cell, 0, NULL);
+                    if (record_status != KILN_C99_OK) return record_status;
+                }
+                record_status = kiln_c99_put(host, lexical, s->bindings[i].name,
+                                             s->bindings[i].name_len,
+                                             s->bindings[i].value, 0, thrown);
+                kiln_c99_gc_keep_alive(&records);
+                kiln_c99_gc_keep_alive(&lexical);
+                kiln_c99_gc_keep_alive(&s->bindings[i].value);
+                if (record_status != KILN_C99_OK) return record_status;
+                if (s->bindings[i].restriction != KILN_DYN_BINDING_MUTABLE) {
+                    char *marker = (char *)malloc(s->bindings[i].name_len + 1);
+                    if (marker == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    marker[0] = s->bindings[i].restriction == KILN_DYN_BINDING_READ_ONLY
+                                    ? '\001'
+                                    : s->bindings[i].restriction == KILN_DYN_BINDING_FUNCTION_NAME
+                                          ? '\002'
+                                          : (char)s->bindings[i].restriction;
+                    memcpy(marker + 1, s->bindings[i].name, s->bindings[i].name_len);
+                    record_status = kiln_c99_put(host, lexical, marker,
+                                                 s->bindings[i].name_len + 1,
+                                                 kiln_c99_boolean(1), 0, thrown);
+                    kiln_c99_gc_keep_alive(&records);
+                    kiln_c99_gc_keep_alive(&lexical);
+                    free(marker);
+                    if (record_status != KILN_C99_OK) return record_status;
+                }
+            }
+            record_status = kiln_dyn_captured_record_push(records, 0, lexical);
+            if (record_status != KILN_C99_OK) return record_status;
+        }
+        if (s->has_with_object) {
+            record_status = kiln_dyn_captured_record_push(records, 1, s->with_object);
+            if (record_status != KILN_C99_OK) return record_status;
+        }
+        if (s->has_captured_records) {
+            if (s->captured_records.tag != KILN_VALUE_ARRAY)
+                return kiln_c99_internal_status("dynamic captured records are not an array");
+            kiln_array *inherited = kiln_c99_array_of(s->captured_records);
+            for (size_t i = 0; i < inherited->count; ++i) {
+                kiln_value entry = kiln_val_to_boundary(inherited->elements[i]);
+                record_status = kiln_c99_array_push(records, entry);
+                kiln_c99_gc_keep_alive(&records);
+                kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(s->captured_records));
+                kiln_c99_gc_keep_alive(&entry);
+                if (record_status != KILN_C99_OK) return record_status;
+            }
+        } else if (s->has_captured_environment && s->captured_environment.tag == KILN_VALUE_OBJECT) {
+            record_status = kiln_dyn_captured_record_push(records, 0,
+                                                           s->captured_environment);
+            if (record_status != KILN_C99_OK) return record_status;
+        }
+    }
+    const char records_marker[] = {'\004'};
+    record_status = kiln_c99_put(host, env_obj, records_marker, sizeof records_marker,
+                                 records, 0, thrown);
+    kiln_c99_gc_keep_alive(&env_obj);
+    kiln_c99_gc_keep_alive(&records);
+    if (record_status != KILN_C99_OK) return record_status;
     if (scope != NULL && scope->strict) {
         const char marker[] = {'\003'};
         int status = kiln_c99_put(host, env_obj, marker, sizeof marker,
@@ -2275,16 +2519,12 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             return closure_status;
         }
         int scope_found = 0;
-        int scope_status = kiln_dyn_scope_get(scope, name, name_len, out, &scope_found, thrown);
+        int scope_status = kiln_dyn_scope_get(host, scope, name, name_len, depth, out,
+                                              &scope_found, thrown);
         if (scope_status != KILN_C99_OK) return scope_status;
         if (scope_found) {
             return KILN_C99_OK;
         }
-        int with_found = 0;
-        int with_status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth, out,
-                                                  &with_found, thrown);
-        if (with_status != KILN_C99_OK) return with_status;
-        if (with_found) return KILN_C99_OK;
         kiln_value globals = kiln_c99_undefined();
         int status = kiln_c99_global_object(&globals);
         if (status == KILN_C99_OK) {
@@ -2465,28 +2705,18 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                                       "String property key needs a value");
                 }
                 int scope_found = 0;
-                status = kiln_dyn_scope_get(scope, key_name, key_len, &val, &scope_found,
-                                            thrown);
+                status = kiln_dyn_scope_get(host, scope, key_name, key_len, depth, &val,
+                                            &scope_found, thrown);
                 if (status != KILN_C99_OK) {
                     free(owned_key);
                     return status;
                 }
                 if (!scope_found) {
-                    int with_found = 0;
-                    status = kiln_dyn_scope_get_with(host, scope, key_name, key_len, depth, &val,
-                                                     &with_found, thrown);
-                    if (status != KILN_C99_OK) {
-                        free(owned_key);
-                        return status;
-                    }
-                    if (!with_found) {
-                        kiln_value globals = kiln_c99_undefined();
-                        int st = kiln_c99_global_object(&globals);
-                        if (st != KILN_C99_OK || kiln_c99_get(host, globals, key_name, key_len,
-                                                            &val, depth, thrown) != KILN_C99_OK) {
-                            val = kiln_c99_undefined();
-                        }
-                    }
+                    kiln_value globals = kiln_c99_undefined();
+                    int st = kiln_c99_global_object(&globals);
+                    if (st != KILN_C99_OK || kiln_c99_get(host, globals, key_name, key_len,
+                                                        &val, depth, thrown) != KILN_C99_OK) {
+                        val = kiln_c99_undefined();
                 }
             }
             int non_ascii_key = 0;
@@ -2823,18 +3053,40 @@ static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *sc
             return KILN_C99_OK;
         }
         int captured = 0;
-        int captured_status = kiln_dyn_captured_get(environment, name, name_len, current,
-                                                   &captured, thrown);
+        int is_captured_with = 0;
+        kiln_value captured_with_target = kiln_c99_undefined();
+        int captured_status = environment->has_captured_records
+                                  ? kiln_dyn_captured_records_get(host,
+                                        environment->captured_records, name, name_len, depth,
+                                        read_value, current, &captured, &is_captured_with,
+                                        &captured_with_target, thrown)
+                                  : KILN_C99_OK;
         if (captured_status != KILN_C99_OK) return captured_status;
         if (captured) {
-            *binding_scope = environment;
-            *reference = KILN_DYN_UPDATE_BINDING;
+            if (is_captured_with) {
+                *with_target = captured_with_target;
+                kiln_c99_gc_keep_alive(with_target);
+                *reference = KILN_DYN_UPDATE_WITH;
+            } else {
+                *binding_scope = environment;
+                *reference = KILN_DYN_UPDATE_BINDING;
+            }
             return KILN_C99_OK;
+        }
+        if (!environment->has_captured_records) {
+            captured_status = kiln_dyn_captured_get(environment, name, name_len, current,
+                                                    &captured, thrown);
+            if (captured_status != KILN_C99_OK) return captured_status;
+            if (captured) {
+                *binding_scope = environment;
+                *reference = KILN_DYN_UPDATE_BINDING;
+                return KILN_C99_OK;
+            }
         }
         if (environment->has_with_object) {
             int present = 0;
-            int status = kiln_c99_has_property(host, environment->with_object, name, name_len,
-                                               &present, depth, thrown);
+            int status = kiln_dyn_with_has_binding(host, environment->with_object, name,
+                                                   name_len, depth, &present, thrown);
             if (status != KILN_C99_OK) return status;
             if (present) {
                 *with_target = environment->with_object;
@@ -3022,18 +3274,10 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
             kiln_dyn_lexer_next(lex);
             if (lex->curr.kind != KILN_DYN_DOT && lex->curr.kind != KILN_DYN_LBRACKET && lex->curr.kind != KILN_DYN_LPAREN) {
                 int scope_found = 0;
-                int scope_status = kiln_dyn_scope_get(scope, name, name_len, out,
-                                                      &scope_found, thrown);
+                int scope_status = kiln_dyn_scope_get(host, scope, name, name_len, depth,
+                                                      out, &scope_found, thrown);
                 if (scope_status != KILN_C99_OK) return scope_status;
                 if (scope_found) {
-                    *out = kiln_c99_typeof(*out);
-                    return KILN_C99_OK;
-                }
-                int with_found = 0;
-                int with_status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                          out, &with_found, thrown);
-                if (with_status != KILN_C99_OK) return with_status;
-                if (with_found) {
                     *out = kiln_c99_typeof(*out);
                     return KILN_C99_OK;
                 }
@@ -3623,11 +3867,32 @@ static int kiln_dyn_eval_delete_identifier(kiln_host *host, kiln_dyn_lexer *lex,
             }
         }
         int captured = 0;
-        int captured_status = kiln_dyn_captured_get(environment, name, name_len, out,
-                                                    &captured, thrown);
+        int is_captured_with = 0;
+        kiln_value captured_target = kiln_c99_undefined();
+        int captured_status = environment->has_captured_records
+                                  ? kiln_dyn_captured_records_has(host,
+                                        environment->captured_records, name, name_len, depth,
+                                        &captured, &is_captured_with, &captured_target,
+                                        thrown)
+                                  : KILN_C99_OK;
         if (captured_status != KILN_C99_OK) return captured_status;
+        if (!environment->has_captured_records && environment->has_captured_environment) {
+            captured_status = kiln_dyn_private_environment_has(
+                environment->captured_environment, name, name_len, &captured);
+            if (captured_status != KILN_C99_OK) return captured_status;
+        }
         if (captured) {
-            *out = kiln_c99_boolean(0);
+            int deleted = 0;
+            if (is_captured_with) {
+                kiln_value key = kiln_c99_copy_text(name, name_len);
+                if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                captured_status = kiln_c99_delete_computed_or_throw(host, captured_target, key,
+                                                                    0, &deleted, depth, thrown);
+                kiln_c99_gc_keep_alive(&captured_target);
+                kiln_c99_gc_keep_alive(&key);
+                if (captured_status != KILN_C99_OK) return captured_status;
+            }
+            *out = kiln_c99_boolean(is_captured_with ? deleted : 0);
             kiln_dyn_lexer_next(lex);
             return KILN_C99_OK;
         }
@@ -3777,30 +4042,25 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                    lex->curr.kind == KILN_DYN_BIT_XOR_ASSIGN) {
             kiln_dyn_token_kind assignment = lex->curr.kind;
             kiln_dyn_lexer_next(lex);
+            kiln_value current = kiln_c99_undefined();
+            kiln_value with_target = kiln_c99_undefined();
+            kiln_value global_target = kiln_c99_undefined();
+            kiln_dyn_scope *binding_scope = NULL;
+            kiln_dyn_update_reference reference = KILN_DYN_UPDATE_GLOBAL;
+            int unresolvable = 0;
+            int status = kiln_dyn_resolve_update_reference(
+                host, scope, name, name_len, depth, 1, assignment != KILN_DYN_ASSIGN,
+                &current, &reference, &binding_scope, &with_target, &global_target,
+                &unresolvable, thrown);
+            if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&current);
+            kiln_c99_gc_keep_alive(&with_target);
+            kiln_c99_gc_keep_alive(&global_target);
             kiln_value rhs;
-            int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs,
+                                        thrown);
             if (status != KILN_C99_OK) return status;
             if (assignment != KILN_DYN_ASSIGN) {
-                kiln_value current;
-                int scope_found = 0;
-                status = kiln_dyn_scope_get(scope, name, name_len, &current, &scope_found,
-                                            thrown);
-                if (status != KILN_C99_OK) return status;
-                if (!scope_found) {
-                    int with_found = 0;
-                    status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                     &current, &with_found, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    if (!with_found) {
-                        kiln_value globals = kiln_c99_undefined();
-                        status = kiln_c99_global_object(&globals);
-                        if (status == KILN_C99_OK) {
-                            status = kiln_c99_get(host, globals, name, name_len, &current, depth,
-                                                  thrown);
-                        }
-                    }
-                    if (status != KILN_C99_OK) return status;
-                }
                 switch (assignment) {
                 case KILN_DYN_PLUS_ASSIGN: rhs = kiln_c99_binary(1, current, rhs); break;
                 case KILN_DYN_MINUS_ASSIGN: rhs = kiln_c99_binary(2, current, rhs); break;
@@ -3817,20 +4077,23 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                 }
             }
             int ignore_write = 0;
-            status = kiln_dyn_scope_check_write(scope, name, name_len, &ignore_write, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (!ignore_write && !kiln_dyn_scope_update(scope, name, name_len, rhs)) {
-                int with_found = 0;
-                status = kiln_dyn_scope_set_with(host, scope, name, name_len, rhs, depth,
-                                                 &with_found, thrown);
+            if (reference == KILN_DYN_UPDATE_BINDING) {
+                status = kiln_dyn_scope_check_write(binding_scope, name, name_len,
+                                                    &ignore_write, thrown);
                 if (status != KILN_C99_OK) return status;
-                if (!with_found) {
-                    kiln_value globals = kiln_c99_undefined();
-                    status = kiln_c99_global_object(&globals);
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_put(host, globals, name, name_len, rhs, 0, thrown);
-                        if (status != KILN_C99_OK) return status;
-                    }
+            }
+            if (!ignore_write) {
+                if (reference == KILN_DYN_UPDATE_BINDING) {
+                    if (!kiln_dyn_scope_update(binding_scope, name, name_len, rhs))
+                        return KILN_C99_OUT_OF_MEMORY;
+                } else if (reference == KILN_DYN_UPDATE_WITH) {
+                    status = kiln_c99_put(host, with_target, name, name_len, rhs, 0, thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else {
+                    if (unresolvable && scope->strict)
+                        return kiln_dyn_throw_unresolvable_reference(thrown, name, name_len);
+                    status = kiln_c99_put(host, global_target, name, name_len, rhs, 0, thrown);
+                    if (status != KILN_C99_OK) return status;
                 }
             }
             *out = rhs;
@@ -3848,22 +4111,16 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                     if (status != KILN_C99_OK) return status;
                     kiln_value target;
                     int scope_found = 0;
-                    status = kiln_dyn_scope_get(scope, name, name_len, &target, &scope_found,
-                                                thrown);
+                    status = kiln_dyn_scope_get(host, scope, name, name_len, depth, &target,
+                                                &scope_found, thrown);
                     if (status != KILN_C99_OK) return status;
                     if (!scope_found) {
-                        int with_found = 0;
-                        status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                         &target, &with_found, thrown);
+                        kiln_value globals = kiln_c99_undefined();
+                        status = kiln_c99_global_object(&globals);
                         if (status != KILN_C99_OK) return status;
-                        if (!with_found) {
-                            kiln_value globals = kiln_c99_undefined();
-                            status = kiln_c99_global_object(&globals);
-                            if (status != KILN_C99_OK) return status;
-                            status = kiln_c99_get(host, globals, name, name_len, &target, depth,
-                                                  thrown);
-                            if (status != KILN_C99_OK) return status;
-                        }
+                        status = kiln_c99_get(host, globals, name, name_len, &target, depth,
+                                              thrown);
+                        if (status != KILN_C99_OK) return status;
                     }
                     status = kiln_c99_put(host, target, prop, prop_len, rhs, 0, thrown);
                     if (status != KILN_C99_OK) return status;
@@ -3885,22 +4142,16 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
                     if (status != KILN_C99_OK) return status;
                     kiln_value target;
                     int scope_found = 0;
-                    status = kiln_dyn_scope_get(scope, name, name_len, &target, &scope_found,
-                                                thrown);
+                        status = kiln_dyn_scope_get(host, scope, name, name_len, depth,
+                                                    &target, &scope_found, thrown);
                     if (status != KILN_C99_OK) return status;
                     if (!scope_found) {
-                        int with_found = 0;
-                        status = kiln_dyn_scope_get_with(host, scope, name, name_len, depth,
-                                                         &target, &with_found, thrown);
+                        kiln_value globals = kiln_c99_undefined();
+                        status = kiln_c99_global_object(&globals);
                         if (status != KILN_C99_OK) return status;
-                        if (!with_found) {
-                            kiln_value globals = kiln_c99_undefined();
-                            status = kiln_c99_global_object(&globals);
-                            if (status != KILN_C99_OK) return status;
-                            status = kiln_c99_get(host, globals, name, name_len, &target, depth,
-                                                  thrown);
-                            if (status != KILN_C99_OK) return status;
-                        }
+                        status = kiln_c99_get(host, globals, name, name_len, &target, depth,
+                                              thrown);
+                        if (status != KILN_C99_OK) return status;
                     }
                     status = kiln_c99_set_computed(host, target, idx, rhs, depth, thrown);
                     if (status != KILN_C99_OK) return status;
@@ -5075,8 +5326,8 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     if (annex_b_alias) {
         kiln_value function = kiln_c99_undefined();
         int found = 0;
-        int status = kiln_dyn_scope_get(scope, function_name, function_name_len,
-                                        &function, &found, thrown);
+        int status = kiln_dyn_scope_get(host, scope, function_name, function_name_len,
+                                        depth, &function, &found, thrown);
         if (status != KILN_C99_OK || !found) {
             if (status == KILN_C99_OK) status = KILN_C99_INVALID_ARGUMENT;
             return status;
@@ -6963,14 +7214,20 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     if (env_val.tag == KILN_VALUE_OBJECT) {
         captured_scope.captured_environment = env_val;
         captured_scope.has_captured_environment = 1;
-        int strict_present = 0;
-        if (kiln_c99_has_property(NULL, env_val, "\003", 1, &strict_present, 0, NULL) ==
-                KILN_C99_OK && strict_present) {
-            kiln_value strict_marker = kiln_c99_undefined();
-            if (kiln_c99_get(NULL, env_val, "\003", 1, &strict_marker, 0, NULL) ==
-                KILN_C99_OK)
-                captured_scope.strict = kiln_c99_truthy(strict_marker);
+        int records_present = 0;
+        kiln_value records = kiln_c99_undefined();
+        if (kiln_dyn_private_environment_get(env_val, "\004", 1, &records,
+                                             &records_present) == KILN_C99_OK &&
+            records_present && records.tag == KILN_VALUE_ARRAY) {
+            captured_scope.captured_records = records;
+            captured_scope.has_captured_records = 1;
         }
+        int strict_present = 0;
+        kiln_value strict_marker = kiln_c99_undefined();
+        if (kiln_dyn_private_environment_get(env_val, "\003", 1, &strict_marker,
+                                             &strict_present) == KILN_C99_OK &&
+            strict_present)
+            captured_scope.strict = kiln_c99_truthy(strict_marker);
     }
     scope.strict = captured_scope.strict;
 
@@ -7017,8 +7274,9 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                             while (ppos < plen && p[ppos] != ',' && p[ppos] != '}' && p[ppos] != ' ' && p[ppos] != '\t') ppos++;
                             size_t vlen = ppos - vstart;
                             int scope_found = 0;
-                            int scope_status = kiln_dyn_scope_get(&scope, &p[vstart], vlen,
-                                                                  &dval, &scope_found, thrown);
+                            int scope_status = kiln_dyn_scope_get(host, &scope, &p[vstart],
+                                                                  vlen, depth, &dval,
+                                                                  &scope_found, thrown);
                             if (scope_status != KILN_C99_OK) {
                                 free(params_owned);
                                 kiln_dyn_scope_destroy(&scope);
