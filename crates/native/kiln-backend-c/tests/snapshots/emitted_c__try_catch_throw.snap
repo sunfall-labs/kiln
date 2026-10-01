@@ -1,15 +1,16 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1482
 expression: body(&unit)
 ---
-/* Program hash: 0ad5777a8e957cd5; bytecode version: 7. */
-static const uint8_t kiln_module_0ad5777a8e957cd533ffceae613c0290_string_1_data[4] = { 98, 111, 111, 109 };
-static const kiln_string kiln_module_0ad5777a8e957cd533ffceae613c0290_string_1 = { 4, KILN_STRING_LATIN1, kiln_module_0ad5777a8e957cd533ffceae613c0290_string_1_data };
-#define kiln_module_0ad5777a8e957cd533ffceae613c0290_constant_1 (&kiln_module_0ad5777a8e957cd533ffceae613c0290_string_1)
-static void kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_roots(void *heap, void *context, int phase) {
+/* Program hash: 1114daacffc2efe3; bytecode version: 13. */
+static const uint8_t kiln_module_1114daacffc2efe35070fc63f0038886_string_1_data[4] = { 98, 111, 111, 109 };
+static const kiln_string kiln_module_1114daacffc2efe35070fc63f0038886_string_1 = { 4, KILN_STRING_LATIN1, kiln_module_1114daacffc2efe35070fc63f0038886_string_1_data };
+#define kiln_module_1114daacffc2efe35070fc63f0038886_constant_1 (&kiln_module_1114daacffc2efe35070fc63f0038886_string_1)
+static void kiln_module_1114daacffc2efe35070fc63f0038886_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+static int kiln_module_1114daacffc2efe35070fc63f0038886_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
     const kiln_value *roots[] = { &kiln_c99_new_target, &kiln_c99_adopted_this, &kiln_c99_captured_arguments, &kiln_c99_frame_arguments_object, &kiln_c99_frame_callee };
     size_t index;
     (void)context;
@@ -17,8 +18,8 @@ static int kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_visit_roots(void *con
         if (visit(visit_context, roots[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;
     return KILN_C99_OK;
 }
-static int kiln_module_0ad5777a8e957cd533ffceae613c0290_body(kiln_host *host, kiln_value *result) {
-    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_roots, kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
+static int kiln_module_1114daacffc2efe35070fc63f0038886_body(kiln_host *host, kiln_value *result) {
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_1114daacffc2efe35070fc63f0038886_gc_roots, kiln_module_1114daacffc2efe35070fc63f0038886_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
     kiln_val locals[1];
@@ -29,7 +30,7 @@ static int kiln_module_0ad5777a8e957cd533ffceae613c0290_body(kiln_host *host, ki
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v2 = kiln_c99_candidate_literal(&kiln_module_0ad5777a8e957cd533ffceae613c0290_string_1); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
+    v2 = kiln_c99_candidate_literal(&kiln_module_1114daacffc2efe35070fc63f0038886_string_1); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
     *thrown = kiln_val_to_boundary(v2); goto kiln_block_6;
 kiln_block_6:;
     kiln_c99_forget_handled_throw(); v1 = kiln_val_from_boundary(*thrown);
@@ -39,42 +40,42 @@ kiln_block_6:;
     return KILN_C99_OK;
 }
 
-typedef struct kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_context {
+typedef struct kiln_module_1114daacffc2efe35070fc63f0038886_realm_context {
     kiln_host *host;
     kiln_value *result;
-} kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_context;
+} kiln_module_1114daacffc2efe35070fc63f0038886_realm_context;
 
-static int kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_visit_result(void *context, kiln_gc_visit_root_fn visit,
+static int kiln_module_1114daacffc2efe35070fc63f0038886_gc_visit_result(void *context, kiln_gc_visit_root_fn visit,
                                      void *visit_context) {
     if (context == NULL) return KILN_C99_OK;
     return visit(visit_context, context, KILN_GC_VISIT_VALUE);
 }
 
-static int kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_result_entry(void *result) {
+static int kiln_module_1114daacffc2efe35070fc63f0038886_gc_result_entry(void *result) {
     return kiln_realm_gc_register_roots_with_visitor(kiln_c99_gc_result_roots,
-             kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_visit_result, result, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+             kiln_module_1114daacffc2efe35070fc63f0038886_gc_visit_result, result, KILN_GC_ROOT_SURVIVES_TEARDOWN);
 }
 
-static int kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_entry(void *opaque) {
-    kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_context *context = (kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_context *)opaque;
+static int kiln_module_1114daacffc2efe35070fc63f0038886_realm_entry(void *opaque) {
+    kiln_module_1114daacffc2efe35070fc63f0038886_realm_context *context = (kiln_module_1114daacffc2efe35070fc63f0038886_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return kiln_module_0ad5777a8e957cd533ffceae613c0290_body(context->host, context->result);
+    return kiln_module_1114daacffc2efe35070fc63f0038886_body(context->host, context->result);
 }
 
-int kiln_module_0ad5777a8e957cd533ffceae613c0290(kiln_host *host, kiln_value *result) {
-    kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_context context;
+int kiln_module_1114daacffc2efe35070fc63f0038886(kiln_host *host, kiln_value *result) {
+    kiln_module_1114daacffc2efe35070fc63f0038886_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active()) return kiln_module_0ad5777a8e957cd533ffceae613c0290_body(host, result);
+    if (kiln_realm_is_active()) return kiln_module_1114daacffc2efe35070fc63f0038886_body(host, result);
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_0ad5777a8e957cd533ffceae613c0290_gc_result_entry, result);
+        status = kiln_realm_enter(realm, kiln_module_1114daacffc2efe35070fc63f0038886_gc_result_entry, result);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_0ad5777a8e957cd533ffceae613c0290_realm_entry, &context);
+        status = kiln_realm_enter(realm, kiln_module_1114daacffc2efe35070fc63f0038886_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {
