@@ -3265,6 +3265,7 @@ struct kiln_node_socket {
     size_t corked_write_len;
     size_t corked_write_capacity;
     unsigned int cork_depth;
+    kiln_value write_callbacks;
     int http_upgrade_pending;
     int http_upgraded;
     int connecting;
@@ -3457,6 +3458,7 @@ typedef struct kiln_node_completion {
     kiln_node_server *server;
     kiln_node_socket *socket;
     kiln_node_client_request *client_request;
+    kiln_value write_callbacks;
 } kiln_node_completion;
 
 /* One Node fs/promises request. The Promise and conversion mode stay in generated C; the Realm

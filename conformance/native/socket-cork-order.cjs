@@ -12,9 +12,11 @@ const server = net.createServer((socket) => {
 server.listen(0, '127.0.0.1', () => {
   const client = net.connect(server.address().port, '127.0.0.1', () => {
     client.cork();
-    client.write('first:');
-    client.write('second');
+    client.write('first:', () => console.log('write:first'));
+    client.write('second', () => console.log('write:second'));
     client.uncork();
-    client.end();
+    client.cork();
+    client.write(':third', () => console.log('write:third'));
+    client.end('fourth');
   });
 });

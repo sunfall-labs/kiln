@@ -25,9 +25,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 .set_non_enumerable("code", Value::String("ERR_STREAM_WRITE_AFTER_END".into()));
         }
         let callback = arguments
-            .get(2)
-            .filter(|value| is_callable(value))
-            .or_else(|| arguments.get(1).filter(|value| is_callable(value)));
+            .iter()
+            .skip(1)
+            .rev()
+            .find(|value| is_callable(value));
         if let Some(callback) = callback {
             let callback = Value::Bound(Rc::new(BoundFunction {
                 target: callback.clone(),
@@ -304,6 +305,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     pending_write: Vec::new(),
                     cork_depth: 0,
                     corked_write: Vec::new(),
+                    corked_callbacks: Vec::new(),
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
@@ -329,6 +331,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         true,
                     )
                 };
+                state.borrow_mut().connect_request = Some(request);
                 self.push_pending_node(PendingNodeRequest::Connect {
                     request,
                     target: PendingConnect::Net(state),
@@ -362,7 +365,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 if state.cork_depth != 0 {
                     state.cork_depth -= 1;
                 }
-                if state.cork_depth != 0 || state.corked_write.is_empty() {
+                if state.cork_depth != 0
+                    || (state.corked_write.is_empty() && state.corked_callbacks.is_empty())
+                {
                     return Ok(Value::Undefined);
                 }
                 let bytes = std::mem::take(&mut state.corked_write);
@@ -402,8 +407,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     if state.cork_depth != 0 {
                         state.corked_write.extend(bytes);
+                        if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                            state.corked_callbacks.push(callback.clone());
+                        }
                     } else {
                         state.pending_write.extend(bytes);
+                        if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                            state.corked_callbacks.push(callback.clone());
+                        }
                     }
                     return Ok(Value::Boolean(true));
                 }
@@ -414,6 +425,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
                     let mut state = state.borrow_mut();
+                    state.cork_depth = 0;
+                    let corked = std::mem::take(&mut state.corked_write);
+                    state.pending_write.extend(corked);
                     if let Some(data) = data {
                         state.pending_write.extend(data);
                     }
@@ -553,8 +567,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let mut state = state.borrow_mut();
             if state.cork_depth != 0 {
                 state.corked_write.extend(bytes);
+                if let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value)) {
+                    state.corked_callbacks.push(callback.clone());
+                }
                 return Ok(Value::Boolean(true));
             }
+        }
+        let mut write_callbacks = if matches!(native, Native::NodeSocketWrite | Native::NodeSocketEnd) {
+            std::mem::take(&mut state.borrow_mut().corked_callbacks)
+        } else {
+            Vec::new()
+        };
+        if native == Native::NodeSocketWrite
+            && let Some(callback) = arguments.iter().skip(1).rev().find(|value| is_callable(value))
+        {
+            write_callbacks.push(callback.clone());
         }
         if native == Native::NodeSocketWrite
             && let Some(id) = server
@@ -594,11 +621,23 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     (Value::Boolean(disposition.ready), actions)
                 }
                 Native::NodeSocketEnd => {
-                    let data = arguments
+                    let mut data = arguments
                         .first()
                         .filter(|value| !matches!(value, Value::Undefined))
                         .map(|value| node_body_bytes(Some(value)))
                         .transpose()?;
+                    let corked = {
+                        let mut state = state.borrow_mut();
+                        state.cork_depth = 0;
+                        std::mem::take(&mut state.corked_write)
+                    };
+                    if !corked.is_empty() {
+                        let mut bytes = corked;
+                        if let Some(data) = data.take() {
+                            bytes.extend(data);
+                        }
+                        data = Some(bytes);
+                    }
                     let (_, actions) = connection.driver.end(data);
                     (receiver.clone(), actions)
                 }
@@ -608,7 +647,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         };
         sync_node_socket_ready_state(&server, resource);
         for action in actions {
-            self.start_http_stream_action(&server, resource, action, instruction)?;
+            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
+                self.start_http_stream_action_with_callbacks(
+                    &server, resource, action, instruction, write_callbacks,
+                )?;
+                write_callbacks = Vec::new();
+            } else {
+                self.start_http_stream_action(&server, resource, action, instruction)?;
+            }
         }
         Ok(result)
     }
@@ -1516,6 +1562,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_write: Vec::new(),
             cork_depth: 0,
             corked_write: Vec::new(),
+            corked_callbacks: Vec::new(),
             end_requested: false,
             destroyed: false,
             connect_request: None,
@@ -1652,6 +1699,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     pending_write: Vec::new(),
                     cork_depth: 0,
                     corked_write: Vec::new(),
+                    corked_callbacks: Vec::new(),
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
@@ -1808,6 +1856,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         action: StreamAction,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        self.start_http_stream_action_with_callbacks(server, resource, action, instruction,
+                                                     Vec::new())
+    }
+
+    fn start_http_stream_action_with_callbacks(
+        &mut self,
+        server: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        action: StreamAction,
+        instruction: usize,
+        mut write_callbacks: Vec<Value>,
+    ) -> Result<(), ExecutionError> {
         match action {
             StreamAction::Cancel(request) => {
                 let host = self.async_host.ok_or_else(|| ExecutionError::Host {
@@ -1876,6 +1936,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     request,
                     server: Rc::clone(server),
                     resource,
+                    write_callbacks: if matches!(operation, AsyncHostOp::TcpWrite { .. }) {
+                        std::mem::take(&mut write_callbacks)
+                    } else {
+                        Vec::new()
+                    },
                 });
                 Ok(())
             }
@@ -4080,8 +4145,39 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Ok(())
                 }
                 PendingNodeRequest::Stream {
-                    server, resource, ..
+                    server, resource, write_callbacks, ..
                 } => {
+                    if !write_callbacks.is_empty() {
+                        let callback_args = match &completion.result {
+                            Ok(_) => Vec::new(),
+                            Err(error) => {
+                                let value = self.construct_error(
+                                    ErrorKind::Error,
+                                    &[Value::String(error.message.clone().into())],
+                                );
+                                if let Value::Object(object) = &value {
+                                    let mut object = object.borrow_mut();
+                                    object.set_non_enumerable(
+                                        "code",
+                                        Value::String(error.code.clone().into()),
+                                    );
+                                    object.set_non_enumerable(
+                                        "syscall",
+                                        Value::String(error.syscall.clone().into()),
+                                    );
+                                }
+                                vec![value]
+                            }
+                        };
+                        for callback in write_callbacks {
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                callback_args.clone(),
+                                self.instruction,
+                            )?;
+                        }
+                    }
                     // Only raw `node:net` sockets read and write through host operations;
                     // an HTTP connection's bytes belong to the engine (ADR 0046).
                     let mut server_state = server.borrow_mut();
@@ -4277,16 +4373,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 });
                             }
                         }
+                        let mut pending_write_callbacks = Vec::new();
                         let net_actions = if protocol == ServerProtocol::Net {
                             let mut actions = Vec::new();
-                            let (pending_write, end_requested) = {
+                            let (pending_write, end_requested, callbacks) = {
                                 let mut socket = socket_state.borrow_mut();
                                 (
                                     std::mem::take(&mut socket.pending_write),
                                     socket.end_requested,
+                                    std::mem::take(&mut socket.corked_callbacks),
                                 )
                             };
-                            if !pending_write.is_empty() {
+                            let has_callbacks = !callbacks.is_empty();
+                            pending_write_callbacks = callbacks;
+                            if !pending_write.is_empty() || has_callbacks {
                                 actions.extend(connection.driver.write(pending_write).1);
                             }
                             if end_requested {
@@ -4394,12 +4494,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             }
                         }
                         for action in net_actions {
-                            self.start_http_stream_action(
-                                &owner,
-                                resource,
-                                action,
-                                self.instruction,
-                            )?;
+                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })) {
+                                self.start_http_stream_action_with_callbacks(
+                                    &owner, resource, action, self.instruction,
+                                    pending_write_callbacks,
+                                )?;
+                                pending_write_callbacks = Vec::new();
+                            } else {
+                                self.start_http_stream_action(
+                                    &owner,
+                                    resource,
+                                    action,
+                                    self.instruction,
+                                )?;
+                            }
                         }
                         Ok(())
                     }

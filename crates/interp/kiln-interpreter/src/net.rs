@@ -22,6 +22,7 @@ pub(crate) struct NetSocketState {
     pub(crate) pending_write: Vec<u8>,
     pub(crate) cork_depth: usize,
     pub(crate) corked_write: Vec<u8>,
+    pub(crate) corked_callbacks: Vec<Value>,
     pub(crate) end_requested: bool,
     pub(crate) destroyed: bool,
     pub(crate) connect_request: Option<kiln_host_abi::RequestId>,
