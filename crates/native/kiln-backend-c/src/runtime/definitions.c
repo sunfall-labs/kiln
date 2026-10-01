@@ -268,6 +268,46 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
     return kiln_c99_get(host, descriptor, name, len, out, depth, thrown);
 }
 
+/* The callable `name` and `length` descriptors are virtual until a program explicitly defines
+ * them. Keep their value and attributes in one authority for both descriptor reads and
+ * defineProperty's merge. `preventExtensions` leaves configurable unchanged; freeze records its
+ * integrity on the shared own-property store, which seals these otherwise virtual descriptors
+ * without eagerly allocating two property records. */
+static int kiln_c99_callable_intrinsic_name_length(kiln_host *host, kiln_value target,
+                                                    const kiln_string *view,
+                                                    const kiln_string *canonical,
+                                                    kiln_property *out, int *found, int depth,
+                                                    kiln_value *thrown) {
+    kiln_value store;
+    int status;
+    *found = 0;
+    if ((target.tag != KILN_VALUE_FUNCTION && target.tag != KILN_VALUE_METHOD &&
+         target.tag != KILN_VALUE_BOUND && target.tag != KILN_VALUE_COMMONJS_REQUIRE) ||
+        (!kiln_c99_same_name_key(view, "name") &&
+         !kiln_c99_same_name_key(view, "length"))) {
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        store = kiln_c99_closure_store(kiln_c99_closure_of(target));
+    } else {
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, view, canonical)) {
+        return KILN_C99_OK;
+    }
+    memset(out, 0, sizeof *out);
+    out->key = view;
+    status = kiln_c99_get_key(host, target, view, canonical, &out->value, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    out->writable = 0;
+    out->enumerable = 0;
+    out->configurable = !(store.tag == KILN_VALUE_OBJECT &&
+                          kiln_c99_object_of(store)->frozen);
+    *found = 1;
+    return KILN_C99_OK;
+}
+
 /* `Object.defineProperty(target, key, descriptor)`.
  *
  * Defining is not assigning, and the difference is the whole reason the operation exists. An
@@ -480,23 +520,11 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
      * existing property while merging; materialize only when the successful merge is committed.
      * In particular `{ value: ... }` must retain configurable=true, and a failed redefinition
      * must not create observable storage. */
-    if ((target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
-         target.tag == KILN_VALUE_BOUND || target.tag == KILN_VALUE_COMMONJS_REQUIRE) &&
-        (kiln_c99_same_name_key(view, "name") ||
-         kiln_c99_same_name_key(view, "length")) &&
-        !kiln_c99_store_has(store, view, stable)) {
-        kiln_value intrinsic_value;
-        status = kiln_c99_get_key(host, target, view, stable, &intrinsic_value, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-        memset(&current, 0, sizeof current);
-        current.key = view;
-        current.value = intrinsic_value;
-        current.writable = 0;
-        current.enumerable = 0;
-        current.configurable = 1;
-        existed = 1;
-        intrinsic_callable_name_length = 1;
-    }
+    status = kiln_c99_callable_intrinsic_name_length(host, target, view, stable, &current,
+                                                    &intrinsic_callable_name_length, depth,
+                                                    thrown);
+    if (status != KILN_C99_OK) return status;
+    existed = intrinsic_callable_name_length;
     /* A new data property needs no dictionary entry. The bootstrap defines most built-in
      * methods this way; keeping their stores shaped lets all realms use the shared layout and
      * the object's inline value slots. Missing descriptor fields have the ordinary default
@@ -812,27 +840,33 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         /* The resolver facade decorates its callable require with an ordinary own-property
          * store. Describe a written key through that same store instead of sending this custom
          * callable tag to the exotic-object refusal below. */
-        status = kiln_c99_callable_store(target, &store, 0);
+        kiln_property intrinsic;
+        int intrinsic_found = 0;
+        status = kiln_c99_callable_intrinsic_name_length(host, target, view, canonical,
+                                                         &intrinsic, &intrinsic_found, depth,
+                                                         thrown);
         if (status != KILN_C99_OK) return status;
-        if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, view, canonical)) {
-            return kiln_c99_describe_property_key(host, store, view, canonical, out, found, depth,
-                                                  thrown);
+        if (!intrinsic_found) {
+            status = kiln_c99_callable_store(target, &store, 0);
+            if (status != KILN_C99_OK) return status;
+            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, view, canonical)) {
+                return kiln_c99_describe_property_key(host, store, view, canonical, out, found,
+                                                      depth, thrown);
+            }
+            return KILN_C99_OK;
         }
-        if (!kiln_c99_same_name_key(view, "name") &&
-            !kiln_c99_same_name_key(view, "length")) return KILN_C99_OK;
         status = kiln_c99_new_object(&built);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "value", 5,
-                                  kiln_c99_same_name_key(view, "name")
-                                      ? kiln_c99_copy_text("require", 7)
-                                      : kiln_c99_number(1.0), 0, NULL);
+            status = kiln_c99_put(NULL, built, "value", 5, intrinsic.value, 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_put(NULL, built, "writable", 8,
+                                  kiln_c99_boolean(intrinsic.writable), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                  kiln_c99_boolean(intrinsic.enumerable), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
-                                  NULL);
+            status = kiln_c99_put(NULL, built, "configurable", 12,
+                                  kiln_c99_boolean(intrinsic.configurable), 0, NULL);
         if (status == KILN_C99_OK) {
             *found = 1;
             *out = built;
@@ -1085,29 +1119,6 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         *out = built;
         return status;
     }
-    if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(view, "name")) {
-        /* Runtime supplied methods are function objects too. Their names come from the shared
-         * method registry, just as reads do; keep the descriptor non-writable and non-enumerable
-         * like Function.prototype's own name/length properties. */
-        const char *method_name = kiln_c99_method_name(target.bits);
-        kiln_value value = kiln_c99_copy_text(method_name == NULL ? "" : method_name,
-                                              method_name == NULL ? 0 : strlen(method_name));
-        status = kiln_c99_new_object(&built);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
-                                  NULL);
-        if (status == KILN_C99_OK) {
-            *found = 1;
-            *out = built;
-        }
-        return status;
-    }
     if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
         target.tag == KILN_VALUE_BOUND) {
         /* A function's own properties are `name`, `length`, `prototype`, and whatever a program
@@ -1120,36 +1131,37 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
         int is_name = kiln_c99_same_name_key(view, "name");
         if (is_name || kiln_c99_same_name_key(view, "length")) {
-            if (closure != NULL &&
-                kiln_c99_store_has(kiln_c99_closure_store(closure), view, canonical)) {
-                return kiln_c99_describe_property_key(
-                    host, kiln_c99_closure_store(closure), view, canonical, out, found,
-                    depth, thrown);
-            }
-            kiln_value value = closure == NULL ? kiln_c99_undefined() : is_name
-                                   ? (closure->name == NULL
-                                          ? kiln_c99_from_units(NULL, 0)
-                                          : kiln_c99_value(KILN_VALUE_STRING, 0,
-                                                           (const char *)closure->name,
-                                                           closure->name->unit_len))
-                                   : kiln_c99_number((double)closure->arity);
-            if (closure == NULL) {
-                status = kiln_c99_get_key(host, target, view, canonical, &value, depth, thrown);
+            kiln_property intrinsic;
+            int intrinsic_found = 0;
+            status = kiln_c99_callable_intrinsic_name_length(host, target, view, canonical,
+                                                             &intrinsic, &intrinsic_found,
+                                                             depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!intrinsic_found) {
+                status = kiln_c99_callable_store(target, &store, 0);
                 if (status != KILN_C99_OK) return status;
+                if (store.tag == KILN_VALUE_OBJECT &&
+                    kiln_c99_store_has(store, view, canonical)) {
+                    return kiln_c99_describe_property_key(host, store, view, canonical, out,
+                                                          found, depth, thrown);
+                }
+                return KILN_C99_OK;
             }
             status = kiln_c99_new_object(&built);
             if (status == KILN_C99_OK) {
-                status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+                status = kiln_c99_put(NULL, built, "value", 5, intrinsic.value, 0, NULL);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+                status = kiln_c99_put(NULL, built, "writable", 8,
+                                      kiln_c99_boolean(intrinsic.writable), 0, NULL);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+                status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                      kiln_c99_boolean(intrinsic.enumerable), 0, NULL);
             }
             if (status == KILN_C99_OK) {
-                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
-                                      NULL);
+                status = kiln_c99_put(NULL, built, "configurable", 12,
+                                      kiln_c99_boolean(intrinsic.configurable), 0, NULL);
             }
             *found = 1;
             *out = built;
