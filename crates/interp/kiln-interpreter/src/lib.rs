@@ -1001,22 +1001,22 @@ impl Closure {
 
     /// The text this function was written as, which is what `Function.prototype.toString` answers.
     ///
-    /// A borrow into the program's one copy of its source, so asking costs nothing and asking
-    /// twice costs nothing twice. The closure already carries the program for the reason
-    /// documented on `program` -- a function value that crossed a module boundary must be read
-    /// against its own tables -- and that is exactly what makes the span resolvable here.
+    /// The source slice as JavaScript UTF-16 units. The program and its optional parser-origin
+    /// mapping are shared across closures; this materializes only the requested slice. The
+    /// closure already carries the program for the reason documented on `program` -- a function
+    /// value that crossed a module boundary must be read against its own tables.
     ///
-    /// An empty answer where the span does not resolve. Every proto the compiler emits has a real
-    /// span, so this is unreachable in practice; it is written as an empty string rather than a
-    /// panic because a `toString` is not worth ending a program over.
+    /// A malformed proto index or scalar-source span retains the historical empty fallback. If
+    /// an origin is present, however, its map is the only lossless authority: a bad span is a
+    /// compiler invariant violation and must not silently return the escaped parser transport.
     pub fn source_units(&self) -> StringUnits {
         let Some(proto) = self.program.functions.get(self.function as usize) else {
             return StringUnits::default();
         };
         if let Some(origin) = &self.program.source_origin {
-            if let Some(source) = origin.slice_bytes(proto.span.start, proto.span.end) {
-                return source;
-            }
+            return origin
+                .slice_bytes(proto.span.start, proto.span.end)
+                .expect("compiler function span must resolve in its retained source origin");
         }
         StringUnits::from(
             self.program
@@ -1024,6 +1024,15 @@ impl Closure {
                 .get(proto.span.start as usize..proto.span.end as usize)
                 .unwrap_or(""),
         )
+    }
+
+    /// Lossy host/diagnostic spelling without paying the UTF-16 slice cost for ordinary source.
+    pub(crate) fn source_display_text(&self) -> String {
+        if self.program.source_origin.is_none() {
+            self.source_text().to_owned()
+        } else {
+            self.source_units().to_lossy_string()
+        }
     }
 
     /// Parser-source spelling for metadata and diagnostics that require Rust `str`.

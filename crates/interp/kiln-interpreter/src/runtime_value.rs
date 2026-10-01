@@ -553,7 +553,7 @@ impl Value {
             // `Function.prototype.toString`: the text the program wrote. The span and the source
             // both travel on the program the closure already carries, so this is a slice rather
             // than a reconstruction -- there is no spelling to invent and none to get wrong.
-            Self::Function(closure) => closure.source_units().to_lossy_string(),
+            Self::Function(closure) => closure.source_display_text(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) | Self::Shared(_) => "[object Object]".to_owned(),
