@@ -3275,6 +3275,11 @@ struct kiln_node_socket {
     int connecting;
     int pending_http_attach;
     int pending_read_after_write;
+    int read_paused;
+    int paused_read_eof;
+    uint8_t *paused_read_bytes;
+    size_t paused_read_len;
+    size_t paused_read_capacity;
     kiln_node_server *server;
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;

@@ -1556,6 +1556,10 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     if (socket->closing) return KILN_C99_OK;
     if (socket->close_request != 0) return KILN_C99_OK;
     socket->closing = 1;
+    free(socket->paused_read_bytes);
+    socket->paused_read_bytes = NULL;
+    socket->paused_read_len = 0;
+    socket->paused_read_capacity = 0;
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
     if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded) {
@@ -2664,6 +2668,23 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         kiln_node_socket *socket = work->socket;
         if (work->kind == KILN_REALM_OP_TCP_READ) {
             socket->read_request = 0;
+            if (socket->read_paused) {
+                if (completion->bytes_len == 0) {
+                    socket->paused_read_eof = 1;
+                } else {
+                    size_t total;
+                    if (completion->bytes_len > SIZE_MAX - socket->paused_read_len)
+                        return KILN_C99_OUT_OF_MEMORY;
+                    total = socket->paused_read_len + (size_t)completion->bytes_len;
+                    if (kiln_c99_reserve((void **)&socket->paused_read_bytes,
+                                         &socket->paused_read_capacity, total, 1) != KILN_C99_OK)
+                        return KILN_C99_OUT_OF_MEMORY;
+                    memcpy(socket->paused_read_bytes + socket->paused_read_len,
+                           completion->bytes, (size_t)completion->bytes_len);
+                    socket->paused_read_len = total;
+                }
+                return KILN_C99_OK;
+            }
             if (completion->bytes_len == 0) {
                 int status = kiln_c99_node_socket_ready_state(socket, "writeOnly", 9);
                 if (status != KILN_C99_OK) return status;
@@ -2689,6 +2710,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
                                             exception);
                 if (status != KILN_C99_OK || socket->closing) return status;
+                if (socket->read_paused) return KILN_C99_OK;
                 read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
                                                                   sizeof *read);
                 if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -4731,6 +4753,58 @@ static int kiln_c99_node_socket_flush_corked(kiln_node_socket *socket) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_node_socket_resume(kiln_node_socket *socket, int depth,
+                                        kiln_value *thrown) {
+    kiln_value data = kiln_c99_undefined();
+    kiln_node_completion *read;
+    uint8_t *paused_bytes = NULL;
+    size_t paused_len = 0;
+    int status = KILN_C99_OK;
+    kiln_c99_gc_keep_alive(&socket->object);
+    socket->read_paused = 0;
+    if (socket->paused_read_len != 0) {
+        /* Transfer ownership before emitting: a data handler may call resume recursively, and
+         * that nested call must never observe or deliver this chunk a second time. */
+        paused_bytes = socket->paused_read_bytes;
+        paused_len = socket->paused_read_len;
+        socket->paused_read_bytes = NULL;
+        socket->paused_read_len = 0;
+        socket->paused_read_capacity = 0;
+        if (socket->utf8) {
+            data = kiln_c99_copy_text((const char *)paused_bytes, paused_len);
+        } else {
+            status = kiln_c99_buffer_from_bytes(&data, paused_bytes, paused_len);
+        }
+        free(paused_bytes);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(&data);
+        kiln_c99_gc_keep_alive(&socket->object);
+        status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, depth, thrown);
+        kiln_c99_gc_keep_alive(&data);
+        kiln_c99_gc_keep_alive(&socket->object);
+        if (status != KILN_C99_OK || socket->closing) return status;
+    }
+    if (socket->paused_read_eof) {
+        if (socket->read_paused) return KILN_C99_OK;
+        socket->paused_read_eof = 0;
+        status = kiln_c99_node_socket_ready_state(socket, "writeOnly", 9);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_emit(socket->host, socket->object, "end",
+                                        kiln_c99_undefined(), 0, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_node_close_socket(socket, 1);
+    }
+    if (socket->read_paused) return KILN_C99_OK;
+    if (socket->resource == 0 || socket->read_request != 0 || socket->closing || socket->closed)
+        return KILN_C99_OK;
+    read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
+    if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+    read->kind = KILN_REALM_OP_TCP_READ;
+    kiln_c99_heap_store_pointer(read, &read->socket, socket);
+    return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                               NULL, 0, NULL, 0, read, &socket->read_request);
+}
+
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                              kiln_value receiver, const kiln_value *args, size_t argc,
                              int depth, kiln_value *thrown) {
@@ -5060,6 +5134,17 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 if (status != KILN_C99_OK) return status;
             }
             *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL) {
+            socket->read_paused = 1;
+            *result = socket->object;
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL) {
+            status = kiln_c99_node_socket_resume(socket, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            *result = socket->object;
             return KILN_C99_OK;
         }
         if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {

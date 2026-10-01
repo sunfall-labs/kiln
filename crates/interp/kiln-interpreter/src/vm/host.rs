@@ -363,6 +363,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     resource: None,
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                    read_paused: false,
                     connecting: true,
                     pending_write: Vec::new(),
                     cork_depth: 0,
@@ -919,15 +920,74 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             return self.dispatch_memory_readable(native, receiver, arguments, instruction);
         }
         if let Ok(state) = node_net_socket_state(receiver) {
+            let flow_control = matches!(
+                native,
+                Native::NodeReadablePause | Native::NodeReadableResume
+            );
+            if flow_control {
+                // Publish before draining buffered data: a data listener can recursively pause
+                // or destroy the socket, and the outer resume must not overwrite that decision.
+                state.borrow_mut().read_paused = native == Native::NodeReadablePause;
+            }
             let readable = Rc::clone(&state.borrow().readable);
-            return self.dispatch_readable_state(
+            let result = self.dispatch_readable_state(
                 native,
                 receiver,
                 arguments,
                 instruction,
                 &readable,
                 false,
-            );
+            )?;
+            if !matches!(
+                native,
+                Native::NodeReadablePause | Native::NodeReadableResume
+            ) {
+                return Ok(result);
+            }
+            let (paused, destroyed, owner, resource) = {
+                let state = state.borrow();
+                (
+                    state.read_paused,
+                    state.destroyed,
+                    state.owner.as_ref().and_then(Weak::upgrade),
+                    state.resource,
+                )
+            };
+            if destroyed {
+                return Ok(result);
+            }
+            let (Some(owner), Some(resource)) = (owner, resource) else {
+                // The socket may be paused before its connect event. The state bit is observed
+                // when the transport is attached, so no read is lost or submitted early.
+                return Ok(result);
+            };
+            let actions = {
+                let mut owner = owner.borrow_mut();
+                let Some(connection) = owner
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.resource() == resource)
+                else {
+                    return Err(ExecutionError::Host {
+                        instruction,
+                        message: "node:net socket lost its stream".into(),
+                    });
+                };
+                if connection.runtime_http {
+                    // Hyper owns reads until an upgrade transfers the transport to the socket.
+                    return Ok(result);
+                }
+                if paused {
+                    connection.driver.pause_reading();
+                    Vec::new()
+                } else {
+                    connection.driver.resume_reading()
+                }
+            };
+            for action in actions {
+                self.start_http_stream_action(&owner, resource, action, instruction)?;
+            }
+            return Ok(result);
         }
         let state = node_http_incoming(receiver)?;
         let (resource, readable) = {
@@ -1807,6 +1867,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             resource: None,
             object: None,
             readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+            read_paused: false,
             connecting: true,
             pending_write: Vec::new(),
             cork_depth: 0,
@@ -1948,6 +2009,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     resource: Some(accepted.resource.id),
                     object: None,
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                    read_paused: false,
                     connecting: false,
                     pending_write: Vec::new(),
                     cork_depth: 0,
@@ -2035,6 +2097,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     self.emit_http_server(state, "connection", vec![socket], instruction)?;
                 }
                 for action in net_actions {
+                    if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. }))
+                        && node_net_socket_state(&socket)
+                            .is_ok_and(|socket| socket.borrow().read_paused)
+                    {
+                        continue;
+                    }
                     self.start_http_stream_action(
                         state,
                         accepted.resource.id,
@@ -4872,6 +4940,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             }
                         }
                         for action in net_actions {
+                            if matches!(&action, StreamAction::Start(AsyncHostOp::TcpRead { .. }))
+                                && socket_state.borrow().read_paused
+                            {
+                                continue;
+                            }
                             if matches!(&action, StreamAction::Start(AsyncHostOp::TcpWrite { .. }))
                             {
                                 self.start_http_stream_action_with_callbacks(

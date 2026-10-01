@@ -18,6 +18,7 @@ pub(crate) struct NetSocketState {
     pub(crate) resource: Option<kiln_host_abi::ResourceId>,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
+    pub(crate) read_paused: bool,
     pub(crate) connecting: bool,
     pub(crate) pending_write: Vec<u8>,
     pub(crate) cork_depth: usize,
@@ -309,6 +310,8 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         }
         "__corkSocket" => Some(Value::Native(Native::NodeSocketCork, RealmId::PRIMARY)),
         "__uncorkSocket" => Some(Value::Native(Native::NodeSocketUncork, RealmId::PRIMARY)),
+        "__pauseSocket" => Some(Value::Native(Native::NodeReadablePause, RealmId::PRIMARY)),
+        "__resumeSocket" => Some(Value::Native(Native::NodeReadableResume, RealmId::PRIMARY)),
         "default" => Some(Value::Native(Native::NodeNet, RealmId::PRIMARY)),
         _ => None,
     }

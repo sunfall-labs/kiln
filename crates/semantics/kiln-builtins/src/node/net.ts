@@ -18,6 +18,16 @@ function socketUncork(this: any): any {
   return nativeModule.__uncorkSocket(this);
 }
 
+function socketPause(this: any): any {
+  if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
+  return nativeModule.__pauseSocket.call(this);
+}
+
+function socketResume(this: any): any {
+  if (!nativeModule) throw new Error("node:net requires the Node execution adapter");
+  return nativeModule.__resumeSocket.call(this);
+}
+
 const socketPrototypes = new WeakMap<object, object>();
 const decoratedSockets = new WeakSet<object>();
 
@@ -33,6 +43,8 @@ function decorateSocket(socket: any): any {
     Object.defineProperties(prototype, {
       cork: { configurable: true, writable: true, value: socketCork },
       uncork: { configurable: true, writable: true, value: socketUncork },
+      pause: { configurable: true, writable: true, value: socketPause },
+      resume: { configurable: true, writable: true, value: socketResume },
     });
     socketPrototypes.set(base, prototype);
   }
