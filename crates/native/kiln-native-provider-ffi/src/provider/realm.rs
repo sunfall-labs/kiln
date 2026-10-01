@@ -14,7 +14,7 @@ use kiln_runtime::{
 #[cfg(feature = "realm-http")]
 use kiln_runtime::{
     HttpCloseMode,
-    node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
+    node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
 };
 use kiln_string::StringUnits;
 use std::cell::{Cell, RefCell};
@@ -4577,6 +4577,39 @@ pub unsafe extern "C" fn kiln_realm_http_agent_connected_active(
 
 #[cfg(feature = "realm-http")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_agent_connect_failed_active(
+    host: *const u8,
+    host_len: u64,
+    port: u16,
+    out_request: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let (Some(realm), Some(out_request)) = (active_realm(), unsafe { out_request.as_mut() })
+        else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(host) = std::str::from_utf8(host) else {
+            return INVALID_ARGUMENT;
+        };
+        *out_request = 0;
+        match runtime.client_connection_failed(&HttpOrigin::http(host, port)) {
+            AgentFailure::Empty => 0,
+            AgentFailure::Connect { request } => {
+                *out_request = request;
+                1
+            }
+        }
+    })
+}
+
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_realm_http_agent_release_active(
     resource: u64,
     reusable: i32,
@@ -4864,6 +4897,7 @@ mod http_stubs {
     http_stub!(kiln_realm_http_agent_acquire_active(host: *const u8, host_len: u64, port: u16, request: u64, out_resource: *mut u64) -> i32);
     http_stub!(kiln_realm_http_client_owner_active(resource: u64, out_owner: *mut *mut c_void) -> i32);
     http_stub!(kiln_realm_http_agent_connected_active(host: *const u8, host_len: u64, port: u16, resource: u64, request: u64) -> i32);
+    http_stub!(kiln_realm_http_agent_connect_failed_active(host: *const u8, host_len: u64, port: u16, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_agent_release_active(resource: u64, reusable: i32, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_client_start_active(resource: u64, id: u64, request: *const HttpRequestView, high_water_mark: u64) -> i32);
     http_stub!(kiln_realm_http_client_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
@@ -6664,6 +6698,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected) => {
             const _: unsafe extern "C" fn(*const u8, u64, u16, u64, u64) -> i32 = kiln_realm_http_agent_connected_active;
+        };
+        (realm, kiln_realm_http_agent_connect_failed_active, realm_http_agent_connect_failed) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, *mut u64) -> i32 = kiln_realm_http_agent_connect_failed_active;
         };
         (realm, kiln_realm_http_agent_release_active, realm_http_agent_release) => {
             const _: unsafe extern "C" fn(u64, i32, *mut u64) -> i32 = kiln_realm_http_agent_release_active;

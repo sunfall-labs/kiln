@@ -158,6 +158,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire);
             (realm, kiln_realm_http_client_owner_active, realm_http_client_owner);
             (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected);
+            (realm, kiln_realm_http_agent_connect_failed_active, realm_http_agent_connect_failed);
             (realm, kiln_realm_http_agent_release_active, realm_http_agent_release);
             (realm, kiln_realm_http_client_start_active, realm_http_client_start);
             (realm, kiln_realm_http_client_write_active, realm_http_client_write);

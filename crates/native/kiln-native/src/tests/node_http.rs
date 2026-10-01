@@ -143,6 +143,8 @@ server.listen(0, "127.0.0.1", () => {
   request.on("socket", (socket) => {
     socketEvents++;
     if (request.socket !== socket || request.connection !== socket) throw new Error("client socket event identity");
+    if (!socket.connecting) throw new Error("client socket event must precede TCP connect");
+    socket.on("connect", () => console.log("client TCP connect event"));
     console.log("client socket event", request.socket === socket);
     console.log("client write after end", request.write("late", (error) => {
       console.log("client write callback", error.code);
@@ -157,7 +159,7 @@ server.listen(0, "127.0.0.1", () => {
     };
     assert_eq!(
         output,
-        "client socket event true\nclient write after end false\nclient write callback ERR_STREAM_WRITE_AFTER_END\nclient request error event ERR_STREAM_WRITE_AFTER_END\n200 false false false\n201 true false\ntrue true\n"
+        "client socket event true\nclient write after end false\nclient write callback ERR_STREAM_WRITE_AFTER_END\nclient request error event ERR_STREAM_WRITE_AFTER_END\nclient TCP connect event\n200 false false false\n201 true false\ntrue true\n"
     );
 }
 

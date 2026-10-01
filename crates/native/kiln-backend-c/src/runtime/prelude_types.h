@@ -3257,8 +3257,14 @@ struct kiln_node_socket {
     uint64_t shutdown_request;
     uint64_t close_request;
     uint64_t upgrade_request_id;
+    char *pending_write_bytes;
+    size_t pending_write_len;
+    size_t pending_write_capacity;
     int http_upgrade_pending;
     int http_upgraded;
+    int connecting;
+    int pending_http_attach;
+    int pending_read_after_write;
     kiln_node_server *server;
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;
@@ -3297,6 +3303,7 @@ typedef struct kiln_node_client_request {
     int sent;
     int response_started;
     int response_ended;
+    int socket_published;
     int utf8;
     struct kiln_node_client_request *next;
 } kiln_node_client_request;

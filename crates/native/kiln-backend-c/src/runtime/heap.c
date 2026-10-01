@@ -8296,6 +8296,9 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_NODE_SERVER:
         free(((kiln_node_server *)payload)->address);
         break;
+    case KILN_GC_NODE_SOCKET:
+        free(((kiln_node_socket *)payload)->pending_write_bytes);
+        break;
     case KILN_GC_NODE_RESPONSE: {
         kiln_node_response *response = (kiln_node_response *)payload;
         if (response->request_headers_owned && response->request_headers != NULL) {

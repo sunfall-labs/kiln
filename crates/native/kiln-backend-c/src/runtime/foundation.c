@@ -1,6 +1,8 @@
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
                                                                kiln_val value);
+static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                        kiln_value value, int depth, kiln_value *thrown);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
@@ -18,6 +20,8 @@ int kiln_realm_http_client_owner_active(uint64_t resource, void **out_owner);
 int kiln_realm_http_agent_connected_active(const uint8_t *host, uint64_t host_len,
                                            uint16_t port, uint64_t resource,
                                            uint64_t request);
+int kiln_realm_http_agent_connect_failed_active(const uint8_t *host, uint64_t host_len,
+                                                uint16_t port, uint64_t *out_request);
 int kiln_realm_http_agent_release_active(uint64_t resource, int reusable,
                                          uint64_t *out_request);
 int kiln_realm_http_client_start_active(uint64_t resource,
@@ -56,20 +60,13 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 
 static int kiln_c99_node_client_emit_socket(kiln_node_client_request *request,
-                                            kiln_node_socket *socket, int deferred,
                                             kiln_value *thrown) {
-    kiln_value emit, arguments[2], ignored, callback;
-    int status = kiln_c99_get(request->host, request->object, "emit", 4, &emit, 0, thrown);
-    if (status != KILN_C99_OK) return status;
-    arguments[0] = kiln_c99_copy_text("socket", 6);
-    arguments[1] = socket->object;
-    if (deferred) {
-        status = kiln_c99_bind_with(&callback, emit, request->object, arguments, 2);
-        if (status == KILN_C99_OK) status = kiln_c99_enqueue_next_tick(callback, NULL, 0);
-        return status;
-    }
-    return kiln_c99_call(request->host, &ignored, emit, request->object, arguments, 2, 0,
-                         thrown);
+    kiln_value argument = request->object;
+    int status;
+    (void)thrown;
+    status = kiln_c99_enqueue_next_tick(
+        kiln_c99_method(KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN), &argument, 1);
+    return status;
 }
 
 static int kiln_c99_node_client_attach(kiln_node_client_request *request,
@@ -78,19 +75,13 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
                                        kiln_value *thrown) {
     int status;
     if (request == NULL || socket == NULL) return KILN_C99_INVALID_ARGUMENT;
-    request->socket = socket;
-    request->next = socket->client_requests;
-    socket->client_requests = request;
+    kiln_c99_heap_store_pointer(request, &request->socket, socket);
+    kiln_c99_heap_store_pointer(request, &request->next, socket->client_requests);
+    kiln_c99_heap_store_pointer(socket, &socket->client_requests, request);
     if (attach_runtime) {
         status = kiln_c99_node_socket_object(socket, thrown);
         if (status != KILN_C99_OK) return status;
     }
-    /* Node publishes ClientRequest.socket/connection when the Agent attaches a socket. Keep
-     * the aliases identical for both newly connected and reused keep-alive sockets. */
-    status = kiln_c99_put(NULL, request->object, "socket", 6, socket->object, 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, request->object, "connection", 10, socket->object, 0, NULL);
-    if (status != KILN_C99_OK) return status;
     if (attach_runtime) {
         status = kiln_realm_http_client_attach_active(socket->resource,
                                                       kiln_c99_node_http_event,
@@ -98,9 +89,8 @@ static int kiln_c99_node_client_attach(kiln_node_client_request *request,
                                                       socket);
         if (status != KILN_C99_OK) return status;
     }
-    status = kiln_c99_node_client_emit_socket(request, socket, !attach_runtime, thrown);
-    if (status != KILN_C99_OK) return status;
-    return kiln_c99_node_client_try_start(request);
+    status = kiln_c99_node_client_emit_socket(request, thrown);
+    return status;
 }
 /* Date parsing is shared with the interpreter through the semantic provider. */
 double kiln_date_parse(const kiln_string *source);

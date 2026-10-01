@@ -215,6 +215,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER: return "createFetchServer";
     case KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND: return "fetchRespond";
+    case KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN: return "__kilnNodeClientSocketAssign";
+    case KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK: return "__kilnNodeSocketCloseTick";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_PROCESS_EXIT: return "exit";
