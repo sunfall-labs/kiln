@@ -854,38 +854,32 @@ impl NodePackageResolver {
             })
         ) {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
-                // ESM specifiers are URL references: percent escapes are decoded as UTF-8 before
-                // filesystem lookup. CommonJS resolution intentionally keeps its historical
-                // raw-path behavior. Preserve the original specifier for package/error identity.
-                let canonical_importer = canonical_importer(importer, self.project_root())?;
-                let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
-                let decoded_specifier = if request == NodeRequestKind::Import {
-                    decode_esm_relative_specifier(specifier, &canonical_importer)?
-                } else {
-                    PathBuf::from(specifier)
-                };
-                if request == NodeRequestKind::Import {
+                // Only percent-escaped ESM file URLs need URL decoding. Keep the package
+                // resolver's established extension aliases and package metadata path for all
+                // ordinary relative requests, and preserve CommonJS's raw-path behavior.
+                if request == NodeRequestKind::Import && specifier.contains('%') {
+                    let canonical_importer = canonical_importer(importer, self.project_root())?;
                     // The decoded path may legitimately contain `?` or `#`, which are filename
                     // bytes here rather than URL query/fragment delimiters. Do not feed it back
                     // through a specifier parser; validate the exact file URL target directly.
+                    let target = decode_esm_relative_specifier(specifier, &canonical_importer)?;
                     let canonical_target =
-                        fs::canonicalize(&decoded_specifier).map_err(|error| ResolveError::Io {
+                        fs::canonicalize(&target).map_err(|error| ResolveError::Io {
                             role: PathRole::Target,
-                            path: decoded_specifier.clone(),
+                            path: target.clone(),
                             kind: error.kind(),
                         })?;
                     return validate_node_target(
                         canonical_target,
                         ResolutionKind::Relative,
-                        None,
+                        nearest_package_json(&target),
                         self.project_root(),
                     );
                 }
+                let canonical_importer = canonical_importer(importer, self.project_root())?;
+                let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
                 let resolution = packages
-                    .resolve(
-                        importer_directory,
-                        decoded_specifier.to_string_lossy().as_ref(),
-                    )
+                    .resolve(importer_directory, specifier)
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
                     .package_json()
@@ -923,6 +917,18 @@ impl NodePackageResolver {
             self.project_root(),
         )
     }
+}
+
+fn nearest_package_json(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            return Some(manifest);
+        }
+        directory = current.parent();
+    }
+    None
 }
 
 /// Decode a relative ESM URL path for filesystem resolution. Encoded path separators are
@@ -1874,6 +1880,12 @@ mod tests {
         assert_eq!(resolved_tsx.kind, ResolutionKind::Relative);
         assert_eq!(resolved_tsx.path, fs::canonicalize(target_tsx).unwrap());
 
+        let node_resolver = NodeRuntimeResolver::new(&project.root).expect("valid node resolver");
+        let node_alias = node_resolver
+            .resolve_for_request("./dep.js", &importer, NodeRequestKind::Import)
+            .expect("ordinary ESM imports retain the .js to .ts alias");
+        assert_eq!(node_alias.path, resolved_ts.path);
+
         // A missing relative module reports as module resolution failure, not package not found
         let err = resolver
             .resolve("./nonexistent.js", &importer)
@@ -2427,19 +2439,32 @@ mod tests {
     #[test]
     fn esm_relative_specifiers_decode_file_url_escapes_but_require_does_not() {
         let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
         let importer = project.write("main.mjs", "");
-        let decoded_target = project.write("identity #%? ü 😀.mjs", "export {};");
+        let decoded_target = project.write("identity #%? ü 😀.js", "export {};");
         let raw_target = project.write(
-            "identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs",
+            "identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js",
             "module.exports = {};",
         );
         let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
-        let encoded = "./identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs";
+        let encoded = "./identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js";
 
         let imported = resolver
             .resolve_for_request(encoded, &importer, NodeRequestKind::Import)
             .expect("ESM URL escapes resolve to filename bytes");
         assert_eq!(imported.path, fs::canonicalize(decoded_target).unwrap());
+        assert_eq!(
+            node_module_format_for_path(&imported.path).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("decoded JS target retains package metadata");
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("package.json"))
+        );
 
         let required = resolver
             .resolve_for_request(encoded, &importer, NodeRequestKind::Require)
