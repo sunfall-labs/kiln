@@ -101,16 +101,10 @@ const slider = new Slider({
   min: 1,
   max: 32,
   value: workers(),
-  width: 240,
+  width: 260,
   onChange: (val: number) => {
     setWorkers(Math.round(val));
   },
-});
-
-const workerProgressBar = new ProgressBar({
-  value: (workers() / 32) * 100,
-  max: 100,
-  width: 140,
 });
 
 const decBtn = new Button({
@@ -119,7 +113,7 @@ const decBtn = new Button({
 });
 
 const defaultBtn = new Button({
-  label: '  8 (Default)  ',
+  label: '  8 Default  ',
   onPress: () => setWorkers(8),
 });
 
@@ -128,20 +122,45 @@ const incBtn = new Button({
   onPress: () => setWorkers((w: number) => Math.min(32, w + 1)),
 });
 
-const sliderControlRow = new HStack({
+const sliderRow = new HStack({
   spacing: 10,
-  children: [slider, workerProgressBar, decBtn, defaultBtn, incBtn],
+  children: [slider, new Spacer(), decBtn, defaultBtn, incBtn],
+});
+
+const utilLabel = new Text({
+  text: 'Allocation Utilization:',
+  variant: 'subheadline',
+  color: 'secondary',
+});
+
+const workerProgressBar = new ProgressBar({
+  value: (workers() / 32) * 100,
+  max: 100,
+  width: 200,
+});
+
+const utilValue = new Text({
+  text: `${Math.round((workers() / 32) * 100)}%`,
+  variant: 'subheadline',
+  color: 'secondary',
+});
+
+const utilRow = new HStack({
+  spacing: 12,
+  children: [utilLabel, new Spacer(), workerProgressBar, utilValue],
 });
 
 createEffect(() => {
   computeMetrics.text = `${workers()} Workers • ${workers() * 64} MB Heap`;
   slider.value = workers();
-  workerProgressBar.setValue((workers() / 32) * 100);
+  const pct = Math.round((workers() / 32) * 100);
+  workerProgressBar.setValue(pct);
+  utilValue.text = `${pct}%`;
 });
 
 const computeCard = new Card({
   width: 588,
-  children: [computeTitleRow, sliderControlRow],
+  children: [computeTitleRow, sliderRow, utilRow],
 });
 
 // ── Card 2: Native Target Architecture & Pipeline ───────────
@@ -153,7 +172,7 @@ const archHeader = new Text({
 const archSelect = new Select({
   options: ['aarch64-apple-darwin', 'x86_64-apple-darwin', 'wasm32-wasi'],
   selectedIndex: 0,
-  width: 200,
+  width: 190,
   onChange: (idx: number, val: string) => {
     console.log(`Target triple changed to: ${val}`);
     setTargetArch(val);
@@ -166,7 +185,7 @@ const archTitleRow = new HStack({
 });
 
 const progressLabel = new Text({
-  text: `Compilation Status: ${targetArch()} (Optimized)`,
+  text: `Target: ${targetArch()}`,
   variant: 'subheadline',
   color: 'secondary',
 });
@@ -174,17 +193,24 @@ const progressLabel = new Text({
 const compileBar = new ProgressBar({
   value: compileProgress(),
   max: 100,
-  width: 220,
+  width: 190,
+});
+
+const compilePctLabel = new Text({
+  text: `${compileProgress()}%`,
+  variant: 'subheadline',
+  color: 'secondary',
 });
 
 createEffect(() => {
-  progressLabel.text = `Compilation Status: ${targetArch()} (Optimized)`;
+  progressLabel.text = `Target: ${targetArch()}`;
   compileBar.setValue(compileProgress());
+  compilePctLabel.text = `${compileProgress()}%`;
 });
 
 const buildRow = new HStack({
   spacing: 12,
-  children: [progressLabel, new Spacer(), compileBar],
+  children: [progressLabel, new Spacer(), compileBar, compilePctLabel],
 });
 
 const targetCard = new Card({
@@ -356,12 +382,19 @@ win.content = new VStack({
     targetCard,
     profileCard,
     subsystemsCard,
+    new Spacer(),
     footerActionRow,
   ],
 });
 
 console.log('Presenting vibrant Apple-style macOS studio window...');
 win.show();
+if (process.env.KILN_SNAPSHOT) {
+  setTimeout(() => {
+    win.snapshot(process.env.KILN_SNAPSHOT!);
+    console.log(`Studio snapshot saved to: ${process.env.KILN_SNAPSHOT}`);
+  }, 300);
+}
 console.log('Window active! Event loop listening...');
 
 runLoop(win).then(() => {

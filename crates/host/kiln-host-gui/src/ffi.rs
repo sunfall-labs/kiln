@@ -340,6 +340,17 @@ pub unsafe extern "C" fn kiln_gui_appkit_window_set_content(win_id: u64, child_i
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_appkit_window_snapshot(id: u64, path: *const c_char) -> i32 {
+    if let Some(p) = unsafe { c_str_to_opt_string(path) } {
+        if crate::appkit::window_snapshot(id, &p) {
+            return 0;
+        }
+    }
+    -1
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_appkit_widget_create(
     id: u64,
     tag: *const c_char,
@@ -445,6 +456,11 @@ pub extern "C" fn kiln_gui_appkit_window_set_title(_: u64, _: *const c_char) -> 
 #[cfg(not(target_os = "macos"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_gui_appkit_window_set_content(_: u64, _: u64) -> i32 {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_appkit_window_snapshot(_: u64, _: *const c_char) -> i32 {
     -1
 }
 #[cfg(not(target_os = "macos"))]

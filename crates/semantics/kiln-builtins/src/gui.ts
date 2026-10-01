@@ -62,6 +62,7 @@ export interface PlatformDriver {
   reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
   disposeWidget(node: Node): void;
   pumpEvents(waitMs?: number): boolean;
+  snapshotWindow?(win: Window, path: string): boolean;
 }
 
 function toCStr(ffi: any, str: string): bigint {
@@ -567,6 +568,7 @@ export class AppKitDriver implements PlatformDriver {
         kiln_gui_appkit_window_close: { arguments: ["u64"], return: "i32" },
         kiln_gui_appkit_window_set_title: { arguments: ["u64", "pointer"], return: "i32" },
         kiln_gui_appkit_window_set_content: { arguments: ["u64", "u64"], return: "i32" },
+        kiln_gui_appkit_window_snapshot: { arguments: ["u64", "pointer"], return: "i32" },
         kiln_gui_appkit_widget_create: { arguments: ["u64", "pointer", "pointer"], return: "i32" },
         kiln_gui_appkit_widget_set_property: { arguments: ["u64", "pointer", "pointer", "f64"], return: "i32" },
         kiln_gui_appkit_widget_add_child: { arguments: ["u64", "u64"], return: "i32" },
@@ -651,6 +653,18 @@ export class AppKitDriver implements PlatformDriver {
       this.handles.delete(win.id);
       this.nodeByHandle.delete(handle);
     }
+  }
+
+  snapshotWindow(win: Window, path: string): boolean {
+    if (!this.appkit) return false;
+    const handle = this.handles.get(win.id);
+    if (!handle) return false;
+    try {
+      if (this.appkit.functions.kiln_gui_appkit_window_snapshot) {
+        return this.appkit.functions.kiln_gui_appkit_window_snapshot(handle, toCStr(this.ffi, path)) === 0;
+      }
+    } catch (_) {}
+    return false;
   }
 
   createWidget(node: Node): bigint | null {
@@ -1211,6 +1225,14 @@ export class Window extends Node {
     if (typeof G.__kilnGuiCloseWindow === "function") {
       G.__kilnGuiCloseWindow(this.id);
     }
+  }
+
+  snapshot(path: string): boolean {
+    const driver = getActiveDriver();
+    if (typeof (driver as any).snapshotWindow === "function") {
+      return (driver as any).snapshotWindow(this, path);
+    }
+    return false;
   }
 
   maximize(): void {

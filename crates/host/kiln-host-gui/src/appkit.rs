@@ -505,6 +505,40 @@ pub fn window_set_title(id: u64, title: &str) {
     }
 }
 
+pub fn window_snapshot(id: u64, path: &str) -> bool {
+    let win_ptr = {
+        let wins = WINDOWS.lock().unwrap();
+        wins.as_ref().and_then(|m| m.get(&id)).map(|e| e.window.0)
+    };
+    if let Some(win) = win_ptr {
+        unsafe {
+            let content_view: *mut Object = msg_send![win, contentView];
+            if content_view.is_null() {
+                return false;
+            }
+            let bounds: CGRect = msg_send![content_view, bounds];
+            let rep: *mut Object = msg_send![
+                content_view,
+                bitmapImageRepForCachingDisplayInRect: bounds
+            ];
+            if rep.is_null() {
+                return false;
+            }
+            let () = msg_send![content_view, cacheDisplayInRect: bounds toBitmapImageRep: rep];
+            let dict: *mut Object = msg_send![class!(NSDictionary), dictionary];
+            let png_data: *mut Object =
+                msg_send![rep, representationUsingType: 4usize properties: dict]; // NSPNGFileType = 4
+            if png_data.is_null() {
+                return false;
+            }
+            let path_obj = ns_string(path);
+            let success: bool = msg_send![png_data, writeToFile: path_obj atomically: YES];
+            return success;
+        }
+    }
+    false
+}
+
 pub fn window_set_content(win_id: u64, child_id: u64) {
     let (win_ptr, root_effect_ptr) = {
         let wins = WINDOWS.lock().unwrap();
@@ -621,6 +655,8 @@ pub fn widget_create(id: u64, tag: &str, text: &str) -> bool {
                 };
                 let () = msg_send![box_view, setContentViewMargins: margins];
                 let () = msg_send![box_view, setWantsLayer: YES];
+                let () =
+                    msg_send![box_view, setContentHuggingPriority: 250.0f32 forOrientation: 1isize];
                 let width_anchor: *mut Object = msg_send![box_view, widthAnchor];
                 let constraint: *mut Object =
                     msg_send![width_anchor, constraintGreaterThanOrEqualToConstant: 480.0f64];
