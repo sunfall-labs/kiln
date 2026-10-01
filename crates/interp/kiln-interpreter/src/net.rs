@@ -20,6 +20,8 @@ pub(crate) struct NetSocketState {
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
     pub(crate) connecting: bool,
     pub(crate) pending_write: Vec<u8>,
+    pub(crate) cork_depth: usize,
+    pub(crate) corked_write: Vec<u8>,
     pub(crate) end_requested: bool,
     pub(crate) destroyed: bool,
     pub(crate) connect_request: Option<kiln_host_abi::RequestId>,
@@ -184,6 +186,8 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         "destroy",
         Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
     );
+    data.set("cork", Value::Native(Native::NodeSocketCork, RealmId::PRIMARY));
+    data.set("uncork", Value::Native(Native::NodeSocketUncork, RealmId::PRIMARY));
     data.set("readyState", Value::String("open".into()));
     data.set("connecting", Value::Boolean(state.borrow().connecting));
     if state.borrow().connecting {
@@ -312,6 +316,8 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeSocketWrite => Some("write"),
         Native::NodeSocketEnd => Some("end"),
         Native::NodeSocketDestroy => Some("destroy"),
+        Native::NodeSocketCork => Some("cork"),
+        Native::NodeSocketUncork => Some("uncork"),
         Native::NodeServerListen => Some("listen"),
         Native::NodeServerClose => Some("close"),
         Native::NodeServerAddress => Some("address"),

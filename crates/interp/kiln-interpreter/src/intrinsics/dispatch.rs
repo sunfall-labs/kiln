@@ -2859,6 +2859,8 @@ pub(crate) fn call_native(
         | Native::NodeSocketWrite
         | Native::NodeSocketEnd
         | Native::NodeSocketDestroy
+        | Native::NodeSocketCork
+        | Native::NodeSocketUncork
         | Native::NodeReadablePush
         | Native::NodeReadableRead
         | Native::NodeReadableDestroy

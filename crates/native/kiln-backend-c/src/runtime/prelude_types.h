@@ -3260,6 +3260,11 @@ struct kiln_node_socket {
     char *pending_write_bytes;
     size_t pending_write_len;
     size_t pending_write_capacity;
+    /* Writes made between cork/uncork are retained as one ordered byte sequence. */
+    char *corked_write_bytes;
+    size_t corked_write_len;
+    size_t corked_write_capacity;
+    unsigned int cork_depth;
     int http_upgrade_pending;
     int http_upgraded;
     int connecting;

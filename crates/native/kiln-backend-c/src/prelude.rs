@@ -1031,6 +1031,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_END, 283, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN, 563, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK, 564, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_CORK, 565, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_UNCORK, 566, NodeNet; 0, 0),
     /* Three groups, and no precedence between them: `kiln_c99_invoke_method` routes this
      * code by receiver before it consults any group. See the comment there. */
     (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284, NodeHttp, NodeNet, NodeStream; 0, 0),

@@ -326,6 +326,8 @@ pub enum Native {
     NodeSocketWrite,
     NodeSocketEnd,
     NodeSocketDestroy,
+    NodeSocketCork,
+    NodeSocketUncork,
     NodeReadablePause,
     NodeReadableResume,
     NodeReadableSetEncoding,

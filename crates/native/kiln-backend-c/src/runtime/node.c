@@ -1534,6 +1534,12 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
         status = kiln_c99_define_method(socket->object, "destroy", 7,
                                         kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_DESTROY));
     if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(socket->object, "cork", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_CORK));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(socket->object, "uncork", 6,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_UNCORK));
+    if (status == KILN_C99_OK)
         status = kiln_c99_define_method(
             socket->object, "setEncoding", 11,
             kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
@@ -4217,6 +4223,44 @@ static int kiln_c99_node_fs_sync(kiln_host *host, kiln_value *result, uint64_t c
     return KILN_C99_INVALID_ARGUMENT;
 }
 
+static int kiln_c99_node_socket_flush_corked(kiln_node_socket *socket) {
+    kiln_node_completion *work;
+    int status;
+    if (socket->corked_write_len == 0) return KILN_C99_OK;
+    if ((socket->connecting && socket->resource == 0) || socket->pending_http_attach) {
+        size_t total;
+        if (socket->corked_write_len > SIZE_MAX - socket->pending_write_len)
+            return KILN_C99_OUT_OF_MEMORY;
+        total = socket->pending_write_len + socket->corked_write_len;
+        if (kiln_c99_reserve((void **)&socket->pending_write_bytes,
+                             &socket->pending_write_capacity, total, 1) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+        memcpy(socket->pending_write_bytes + socket->pending_write_len,
+               socket->corked_write_bytes, socket->corked_write_len);
+        socket->pending_write_len = total;
+    } else if (socket->upgrade_request_id != 0) {
+        status = kiln_realm_http_upgrade_write_active(
+            socket->resource, socket->upgrade_request_id,
+            (const uint8_t *)socket->corked_write_bytes, socket->corked_write_len);
+        if (status < 0) return status;
+    } else {
+        work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                           sizeof *work);
+        if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+        kiln_c99_heap_store_pointer(work, &work->socket, socket);
+        work->kind = KILN_REALM_OP_TCP_WRITE;
+        status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
+                                     socket->corked_write_bytes, socket->corked_write_len,
+                                     work, &socket->write_request);
+        if (status != KILN_C99_OK) {
+            kiln_c99_gc_release(work);
+            return status;
+        }
+    }
+    socket->corked_write_len = 0;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                              kiln_value receiver, const kiln_value *args, size_t argc,
                              int depth, kiln_value *thrown) {
@@ -4511,6 +4555,23 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         kiln_node_completion *work;
         int status;
         if (socket == NULL) return kiln_c99_throw_not_a(thrown, receiver, "Socket");
+        if (code == KILN_C99_METHOD_NODE_SOCKET_CORK) {
+            if (socket->cork_depth == UINT32_MAX)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "socket cork depth overflow");
+            socket->cork_depth++;
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_NODE_SOCKET_UNCORK) {
+            if (socket->cork_depth != 0) socket->cork_depth--;
+            if (socket->cork_depth == 0) {
+                status = kiln_c99_node_socket_flush_corked(socket);
+                if (status != KILN_C99_OK) return status;
+            }
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
             kiln_value encoding = argc > 0 ? kiln_c99_text(args[0])
                                            : kiln_c99_copy_text("utf8", 4);
@@ -4595,6 +4656,22 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (socket->write_closed && !socket->closed) {
                 kiln_c99_node_http_byte_span_release(&span);
                 return kiln_c99_node_write_after_end(host, receiver, args, argc, result);
+            }
+            if (socket->cork_depth != 0) {
+                if (span.len > SIZE_MAX - socket->corked_write_len ||
+                    kiln_c99_reserve((void **)&socket->corked_write_bytes,
+                                     &socket->corked_write_capacity,
+                                     socket->corked_write_len + span.len, 1) != KILN_C99_OK) {
+                    kiln_c99_node_http_byte_span_release(&span);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                if (span.len != 0)
+                    memcpy(socket->corked_write_bytes + socket->corked_write_len,
+                           span.bytes, span.len);
+                socket->corked_write_len += span.len;
+                kiln_c99_node_http_byte_span_release(&span);
+                *result = kiln_c99_boolean(1);
+                return KILN_C99_OK;
             }
             if (socket->connecting && socket->resource == 0) {
                 if (span.len > SIZE_MAX - socket->pending_write_len ||

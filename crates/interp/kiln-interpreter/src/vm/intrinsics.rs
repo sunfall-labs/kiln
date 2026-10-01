@@ -844,6 +844,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeSocketWrite
                 | Native::NodeSocketEnd
                 | Native::NodeSocketDestroy
+                | Native::NodeSocketCork
+                | Native::NodeSocketUncork
         ) {
             return self.dispatch_node_net(native, receiver, arguments, instruction);
         }

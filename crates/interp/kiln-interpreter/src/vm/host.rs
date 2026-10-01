@@ -302,6 +302,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                     connecting: true,
                     pending_write: Vec::new(),
+                    cork_depth: 0,
+                    corked_write: Vec::new(),
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
@@ -333,7 +335,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 });
                 Ok(socket)
             }
-            Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
+            Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy
+            | Native::NodeSocketCork | Native::NodeSocketUncork => {
                 self.dispatch_node_socket(native, receiver, arguments, instruction)
             }
             _ => unreachable!("only node:net natives dispatch here"),
@@ -348,6 +351,35 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_net_socket_state(receiver)?;
+        if native == Native::NodeSocketCork {
+            let mut state = state.borrow_mut();
+            state.cork_depth = state.cork_depth.saturating_add(1);
+            return Ok(Value::Undefined);
+        }
+        if native == Native::NodeSocketUncork {
+            let bytes = {
+                let mut state = state.borrow_mut();
+                if state.cork_depth != 0 {
+                    state.cork_depth -= 1;
+                }
+                if state.cork_depth != 0 || state.corked_write.is_empty() {
+                    return Ok(Value::Undefined);
+                }
+                let bytes = std::mem::take(&mut state.corked_write);
+                if state.connecting && state.resource.is_none() {
+                    state.pending_write.extend(bytes);
+                    return Ok(Value::Undefined);
+                }
+                bytes
+            };
+            self.dispatch_node_socket(
+                Native::NodeSocketWrite,
+                receiver,
+                &[crate::buffer::node_bytes_value(bytes)],
+                instruction,
+            )?;
+            return Ok(Value::Undefined);
+        }
         let (connecting, resource, destroyed, connect_request, agent_request) = {
             let state = state.borrow();
             (
@@ -368,7 +400,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         self.schedule_node_write_after_end(receiver, arguments, instruction)?;
                         return Ok(Value::Boolean(false));
                     }
-                    state.pending_write.extend(bytes);
+                    if state.cork_depth != 0 {
+                        state.corked_write.extend(bytes);
+                    } else {
+                        state.pending_write.extend(bytes);
+                    }
                     return Ok(Value::Boolean(true));
                 }
                 Native::NodeSocketEnd => {
@@ -511,6 +547,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let _ = node_stream_write_bytes(arguments.first())?;
             self.schedule_node_write_after_end(receiver, arguments, instruction)?;
             return Ok(Value::Boolean(false));
+        }
+        if native == Native::NodeSocketWrite {
+            let bytes = node_stream_write_bytes(arguments.first())?;
+            let mut state = state.borrow_mut();
+            if state.cork_depth != 0 {
+                state.corked_write.extend(bytes);
+                return Ok(Value::Boolean(true));
+            }
         }
         if native == Native::NodeSocketWrite
             && let Some(id) = server
@@ -1470,6 +1514,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
             connecting: true,
             pending_write: Vec::new(),
+            cork_depth: 0,
+            corked_write: Vec::new(),
             end_requested: false,
             destroyed: false,
             connect_request: None,
@@ -1604,6 +1650,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
                     connecting: false,
                     pending_write: Vec::new(),
+                    cork_depth: 0,
+                    corked_write: Vec::new(),
                     end_requested: false,
                     destroyed: false,
                     connect_request: None,
