@@ -171,10 +171,10 @@ console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/f
 fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
-    let root = TestDirectory::new("kiln-native-create-require #? ü");
+    let root = TestDirectory::new("kiln-native-create-require #%? ü");
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
         .expect("write package metadata");
-    let entry = root.path.join("entry with #? ü.mjs");
+    let entry = root.path.join("entry with #%? ü.mjs");
     fs::write(
         &entry,
         r#"import { createRequire } from "node:module";

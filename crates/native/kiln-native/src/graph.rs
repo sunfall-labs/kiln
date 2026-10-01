@@ -1010,16 +1010,24 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
 fn native_import_meta_bootstrap() -> String {
     r#"
 if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
-    const __kilnURLConstructor = URL;
+    const __kilnEncodeURIComponent = encodeURIComponent;
+    const __kilnApply = Reflect.apply;
+    const __kilnReplace = String.prototype.replace;
+    const __kilnPathEscapes = {"%2F":"/", "%24":"$", "%26":"&", "%2B":"+", "%2C":",", "%3B":";", "%3D":"=", "%3A":":", "%40":"@"};
+    const __kilnPathEscapePattern = /%(2F|24|26|2B|2C|3B|3D|3A|40)/g;
+    function __kilnPathToFileURL(path) {
+        const encoded = __kilnEncodeURIComponent(path);
+        const pathEncoded = __kilnApply(__kilnReplace, encoded, [__kilnPathEscapePattern, escape => __kilnPathEscapes[escape]]);
+        return "file://" + pathEncoded;
+    }
     const __kilnExecPath = globalThis.process.execPath;
-    // Let URL perform file-URL escaping. Concatenating a raw path makes `#` and `?`
-    // fragments/query delimiters and leaves spaces/non-ASCII bytes noncanonical, which
-    // prevents createRequire(import.meta.url) from matching the graph's captured importer.
-    const __kilnExecUrl = new __kilnURLConstructor("file://" + __kilnExecPath).href;
+    // Encode the raw filesystem path before assembling its URL. URL construction from
+    // `file://` + path treats `#` and `?` as URL syntax instead of path characters.
+    const __kilnExecUrl = __kilnPathToFileURL(__kilnExecPath);
     const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
     globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
         return {
-            url: isEntry ? __kilnExecUrl : new __kilnURLConstructor("file://" + sourceFilename).href,
+            url: isEntry ? __kilnExecUrl : __kilnPathToFileURL(sourceFilename),
             filename: isEntry ? __kilnExecPath : sourceFilename,
             dirname: isEntry ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,
@@ -3308,19 +3316,44 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *path, size_t path_len) {
+    static const char scheme[] = "file://";
+    if (url == NULL || path == NULL || url->unit_len < sizeof(scheme) - 1) return 0;
+    for (size_t i = 0; i < sizeof(scheme) - 1; ++i) {
+        if (kiln_string_unit_at(url, i) != (uint8_t)scheme[i]) return 0;
+    }
+    size_t unit = 7;
+    size_t byte = 0;
+    while (unit < url->unit_len && byte < path_len) {
+        uint16_t current = kiln_string_unit_at(url, unit++);
+        unsigned char decoded;
+        if (current == '%') {
+            if (unit + 1 >= url->unit_len) return 0;
+            uint16_t high = kiln_string_unit_at(url, unit++);
+            uint16_t low = kiln_string_unit_at(url, unit++);
+            int high_value = high >= '0' && high <= '9' ? (int)(high - '0') :
+                             high >= 'A' && high <= 'F' ? (int)(high - 'A') + 10 :
+                             high >= 'a' && high <= 'f' ? (int)(high - 'a') + 10 : -1;
+            int low_value = low >= '0' && low <= '9' ? (int)(low - '0') :
+                            low >= 'A' && low <= 'F' ? (int)(low - 'A') + 10 :
+                            low >= 'a' && low <= 'f' ? (int)(low - 'a') + 10 : -1;
+            if (high_value < 0 || low_value < 0) return 0;
+            decoded = (unsigned char)((high_value << 4) | low_value);
+        } else {
+            if (current > 0x7f) return 0;
+            decoded = (unsigned char)current;
+        }
+        if ((unsigned char)path[byte++] != decoded) return 0;
+    }
+    return unit == url->unit_len && byte == path_len;
+}
+
 static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
     if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
-    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7) && s->unit_len - 7 == path_len) {
-        if (path_len == 0) return 1;
-        for (size_t i = 0; i < path_len; ++i) {
-            if (kiln_string_unit_at(s, i + 7) != (uint8_t)path[i]) return 0;
-        }
-        return 1;
-    }
-    return 0;
+    return kiln_c99_file_url_matches_path(s, path, path_len);
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
