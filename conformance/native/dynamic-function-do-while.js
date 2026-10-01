@@ -51,5 +51,17 @@ if (stackedLabels() !== 3) {
   throw new Error("stacked labels on do-while remain iteration targets");
 }
 
+const nestedContinue = Function(`
+  var count = 0, innerTests = 0, outerTests = 0;
+  outer: do {
+    count++;
+    inner: do { continue outer; } while ((innerTests++, true));
+  } while ((outerTests++, count < 3));
+  return [count, innerTests, outerTests];
+`);
+if (nestedContinue().join(",") !== "3,0,3") {
+  throw new Error("a nested do-while propagates continue to the owning outer condition");
+}
+
 console.log("dynamic do-while:", onceEvents.join(","), continueEvents.join(","),
   breakSkipsTest(), labeled(), stackedLabels());
