@@ -4829,6 +4829,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         memset(&block, 0, sizeof block);
         block.src = body;
         block.len = body_len;
+        block.strict = block_scope.strict;
         block.break_label = lex->break_label;
         block.break_label_len = lex->break_label_len;
         block.active_labels = lex->active_labels;
