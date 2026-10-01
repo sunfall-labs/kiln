@@ -5,5 +5,7 @@ let rejected = false;
 try { assign(); } catch (error) { rejected = error instanceof TypeError; }
 if (!rejected) throw new Error('imported eval closure lost captured const authority');
 const named = makeNamed('(function self() { self = 1; return self; })');
-if (named() !== named) throw new Error('imported eval closure lost its immutable self binding');
+rejected = false;
+try { named(); } catch (error) { rejected = error instanceof TypeError; }
+if (!rejected) throw new Error('imported strict eval closure lost its immutable self binding');
 console.log('imported eval binding authority: ok');
