@@ -2428,7 +2428,7 @@ impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
         self.scopes.pop();
     }
 
-    fn visit_function(&mut self, function: &Function<'ast>, flags: oxc_ast_visit::ScopeFlags) {
+    fn visit_function(&mut self, function: &Function<'ast>, flags: oxc_syntax::scope::ScopeFlags) {
         let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
         let Some(body) = &function.body else {
             walk::walk_function(self, function, flags);
