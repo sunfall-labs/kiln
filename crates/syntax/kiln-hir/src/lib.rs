@@ -62,8 +62,8 @@ impl SourceOrigin {
     /// Build an origin from the parser transport and its byte-boundary map.
     ///
     /// Returns `None` for a malformed map or an offset that cannot be represented by parser
-    /// spans. Those conditions indicate an invalid transport, so callers should omit the origin
-    /// rather than retain a map that could produce the wrong function source.
+    /// spans. Those conditions indicate an invalid transport, so callers must reject the parse
+    /// rather than silently omit the origin or retain an incorrect source map.
     pub fn from_parser_transport(units: &[u16], byte_to_unit: &[usize]) -> Option<Arc<Self>> {
         // Folding an odd backslash before a lone surrogate removes the source backslash and maps
         // every byte of its replacement escape to the source range start, so boundaries repeat
