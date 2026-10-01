@@ -23,6 +23,20 @@ const nested = Function(
 );
 console.log("nested declaration:", nested());
 
+const asyncDeclaration = Function(
+  "return later().then(value => value + 1); async function later() { return 41; }",
+);
+asyncDeclaration().then(value => console.log("async declaration:", value));
+
+const stressDeclarations = Array.from({ length: 24 }, (_, index) =>
+  `function read${index}() { return seed.value + ${index}; }`,
+).join(" ");
+const stressCalls = Array.from({ length: 24 }, (_, index) => `read${index}()`).join(" + ");
+const manyCapturedDeclarations = Function(
+  `var seed = { value: 7 }; ${stressDeclarations} return ${stressCalls};`,
+);
+console.log("many captured declarations:", manyCapturedDeclarations());
+
 const prototypeWrite = Function(
   "function DefaultsError() {} DefaultsError.prototype = Object.create(Error.prototype); " +
     "DefaultsError.prototype.constructor = DefaultsError; " +

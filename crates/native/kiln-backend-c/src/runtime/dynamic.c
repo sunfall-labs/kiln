@@ -97,10 +97,27 @@ typedef struct kiln_dyn_scope {
     kiln_value with_object;
     int has_with_object;
     int strict;
+    /* Bindings live in a malloc-grown index for fast name lookup. Mirror each live value in a
+     * GC object reachable from this stack scope: the collector scans C stacks, not arbitrary
+     * malloc allocations. */
+    kiln_value roots;
     const char **function_declaration_sites;
     size_t function_declaration_count;
     size_t function_declaration_capacity;
 } kiln_dyn_scope;
+
+static int kiln_dyn_has_line_terminator(const char *source, size_t start, size_t end) {
+    for (size_t index = start; index < end; ++index) {
+        unsigned char byte = (unsigned char)source[index];
+        if (byte == '\n' || byte == '\r') return 1;
+        if (byte == 0xE2 && index + 2 < end &&
+            (unsigned char)source[index + 1] == 0x80 &&
+            ((unsigned char)source[index + 2] == 0xA8 ||
+             (unsigned char)source[index + 2] == 0xA9))
+            return 1;
+    }
+    return 0;
+}
 
 static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->bindings = NULL;
@@ -110,6 +127,7 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->with_object = kiln_c99_undefined();
     scope->has_with_object = 0;
     scope->strict = parent != NULL ? parent->strict : 0;
+    scope->roots = kiln_c99_undefined();
     scope->function_declaration_sites = NULL;
     scope->function_declaration_count = 0;
     scope->function_declaration_capacity = 0;
@@ -124,6 +142,8 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
                 kiln_c99_val_store_cell(kiln_c99_cell_of(scope->bindings[i].value),
                                         kiln_val_from_boundary(val));
             } else {
+                if (kiln_c99_put(NULL, scope->roots, name, name_len, val, 0, NULL) != KILN_C99_OK)
+                    return 0;
                 scope->bindings[i].value = val;
             }
             return 1;
@@ -136,6 +156,13 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
         scope->bindings = new_b;
         scope->capacity = new_cap;
     }
+    if (scope->roots.tag == KILN_VALUE_UNDEFINED) {
+        int status = kiln_c99_new_object(&scope->roots);
+        if (status == KILN_C99_OK) status = kiln_c99_set_prototype(scope->roots, kiln_c99_null());
+        if (status != KILN_C99_OK) return 0;
+    }
+    /* Publish the value before storing its only long-lived copy in malloc-backed bindings. */
+    if (kiln_c99_put(NULL, scope->roots, name, name_len, val, 0, NULL) != KILN_C99_OK) return 0;
     char *dup = (char *)malloc(name_len + 1);
     if (dup == NULL) return 0;
     memcpy(dup, name, name_len);
@@ -246,6 +273,8 @@ static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t
                     kiln_c99_val_store_cell(kiln_c99_cell_of(curr->bindings[i].value),
                                             kiln_val_from_boundary(val));
                 } else {
+                    if (kiln_c99_put(NULL, curr->roots, name, name_len, val, 0, NULL) != KILN_C99_OK)
+                        return 0;
                     curr->bindings[i].value = val;
                 }
                 return 1;
@@ -330,6 +359,7 @@ static int kiln_dyn_scope_set_with(kiln_host *host, kiln_dyn_scope *scope, const
 
 static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
     size_t i;
+    kiln_c99_gc_keep_alive((const void *)scope->roots.ptr);
     for (i = 0; i < scope->count; ++i) {
         free(scope->bindings[i].name);
     }
@@ -861,8 +891,12 @@ static int kiln_dyn_capture_environment(kiln_host *host, kiln_dyn_scope *scope,
             if (s->bindings[i].value.tag != KILN_VALUE_CELL) {
                 status = kiln_c99_make_cell(&s->bindings[i].value);
                 if (status != KILN_C99_OK) return status;
+                kiln_value rooted_cell = s->bindings[i].value;
+                kiln_c99_gc_keep_alive((const void *)rooted_cell.ptr);
+                status = kiln_c99_put(NULL, s->roots, s->bindings[i].name,
+                                      s->bindings[i].name_len, rooted_cell, 0, NULL);
+                if (status != KILN_C99_OK) return status;
             }
-            kiln_c99_gc_keep_alive(&s->bindings[i].value);
             status = kiln_c99_put(host, env_obj, s->bindings[i].name,
                                   s->bindings[i].name_len, s->bindings[i].value, 0, thrown);
             if (status != KILN_C99_OK) return status;
@@ -1010,7 +1044,11 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         size_t async_end = lex->pos;
         kiln_dyn_token_kind previous = lex->prev_kind;
         kiln_dyn_lexer_next(lex);
-        if (lex->curr.kind == KILN_DYN_KW_FUNCTION) {
+        size_t function_start = lex->curr.start == NULL
+                                    ? async_end
+                                    : (size_t)(lex->curr.start - lex->src);
+        if (lex->curr.kind == KILN_DYN_KW_FUNCTION &&
+            !kiln_dyn_has_line_terminator(lex->src, async_end, function_start)) {
             asynchronous = 1;
         } else {
             kiln_dyn_token_free(&lex->curr);
@@ -2322,6 +2360,12 @@ static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
     const char *site = lex->curr.start;
     if (!kiln_dyn_scope_has_function_declaration(scope, site))
         KILN_C99_REFUSE("block-level function declarations in a dynamic Function body");
+    if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_KW_FUNCTION)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                        "Expected function after async");
+    }
     kiln_dyn_lexer_next(lex);
     if (lex->curr.kind == KILN_DYN_STAR) kiln_dyn_lexer_next(lex);
     if (lex->curr.kind != KILN_DYN_IDENT)
@@ -2925,6 +2969,21 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     }
     if (lex->curr.kind == KILN_DYN_KW_FUNCTION)
         return kiln_dyn_consume_function_declaration(lex, scope, thrown);
+    if (lex->curr.kind == KILN_DYN_KW_ASYNC) {
+        kiln_dyn_lexer look;
+        memset(&look, 0, sizeof look);
+        look.src = lex->src;
+        look.len = lex->len;
+        look.pos = lex->pos;
+        look.prev_kind = lex->prev_kind;
+        kiln_dyn_lexer_next(&look);
+        int async_declaration = look.curr.kind == KILN_DYN_KW_FUNCTION &&
+            !kiln_dyn_has_line_terminator(
+                lex->src, lex->pos, (size_t)(look.curr.start - lex->src));
+        kiln_dyn_token_free(&look.curr);
+        if (async_declaration)
+            return kiln_dyn_consume_function_declaration(lex, scope, thrown);
+    }
     if (lex->curr.kind == KILN_DYN_LBRACE) {
         kiln_dyn_lexer_next(lex);
         while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
@@ -2986,18 +3045,30 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
                               (previous == KILN_DYN_IDENT || previous == KILN_DYN_NUM ||
                                previous == KILN_DYN_STR || previous == KILN_DYN_RPAREN ||
                                previous == KILN_DYN_RBRACKET ||
-                               previous == KILN_DYN_KW_RETURN);
+                               previous == KILN_DYN_KW_RETURN ||
+                               previous == KILN_DYN_KW_ASYNC);
         int declaration_start = statement_start ||
                                 kiln_dyn_function_statement_boundary(previous) ||
                                 line_terminated;
-        if (brace_depth == 0 && kind == KILN_DYN_KW_FUNCTION &&
-            declaration_start) {
+        if (brace_depth == 0 && declaration_start &&
+            (kind == KILN_DYN_KW_FUNCTION || kind == KILN_DYN_KW_ASYNC)) {
             kiln_dyn_lexer look;
             memset(&look, 0, sizeof look);
             look.src = source;
             look.len = source_len;
             look.pos = token_start;
             kiln_dyn_lexer_next(&look);
+            int async_declaration = kind == KILN_DYN_KW_ASYNC;
+            if (async_declaration) {
+                size_t async_end = look.pos;
+                kiln_dyn_lexer_next(&look);
+                if (look.curr.kind != KILN_DYN_KW_FUNCTION ||
+                    kiln_dyn_has_line_terminator(
+                        source, async_end, (size_t)(look.curr.start - source))) {
+                    kiln_dyn_token_free(&look.curr);
+                    goto declaration_scan_done;
+                }
+            }
             kiln_dyn_lexer_next(&look);
             if (look.curr.kind == KILN_DYN_IDENT) {
                 if (decl_count == decl_capacity) {
@@ -3021,6 +3092,7 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
             }
             kiln_dyn_token_free(&look.curr);
         }
+declaration_scan_done:
         if (kind == KILN_DYN_LBRACE) {
             brace_depth++;
             if (brace_depth == 1) statement_start = 0;
@@ -3066,8 +3138,13 @@ static int kiln_dyn_hoist_function_declarations(kiln_host *host, const char *sou
                 if (scope->bindings[slot].value.tag != KILN_VALUE_CELL) {
                     status = kiln_c99_make_cell(&scope->bindings[slot].value);
                     if (status != KILN_C99_OK) goto done;
+                    kiln_value rooted_cell = scope->bindings[slot].value;
+                    kiln_c99_gc_keep_alive((const void *)rooted_cell.ptr);
+                    status = kiln_c99_put(NULL, scope->roots, scope->bindings[slot].name,
+                                          scope->bindings[slot].name_len,
+                                          rooted_cell, 0, NULL);
+                    if (status != KILN_C99_OK) goto done;
                 }
-                kiln_c99_gc_keep_alive(&scope->bindings[slot].value);
                 break;
             }
         }
