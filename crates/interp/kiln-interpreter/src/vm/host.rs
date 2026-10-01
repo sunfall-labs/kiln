@@ -20,9 +20,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         } else {
             (
                 arguments.first().cloned().unwrap_or(Value::Undefined),
-                arguments.get(1).cloned().unwrap_or(Value::Undefined),
+                // Node overloads `connect(port, callback)` as an omitted-host call. Treat the
+                // callback as the callback argument, not as a host to stringify.
+                if arguments.get(1).is_some_and(is_callable) {
+                    Value::Undefined
+                } else {
+                    arguments.get(1).cloned().unwrap_or(Value::Undefined)
+                },
             )
         };
+        if !matches!(port_value, Value::Number(_) | Value::String(_)) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "The options.port property must be one of type number or string".into(),
+            });
+        }
         let port = self.as_number_argument(Some(&port_value), instruction)?;
         if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
             return Err(ExecutionError::InvalidPort);
