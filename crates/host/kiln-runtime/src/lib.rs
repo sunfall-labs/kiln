@@ -4284,7 +4284,7 @@ impl RealmHostProvider for TokioHost {
             let prefix_writer = Rc::clone(&writer);
             let prefix_completion = Arc::clone(&write_completion);
             let task = tokio::task::spawn_local(async move {
-                let result = async {
+                let writing = async {
                     let mut writer = prefix_writer.lock().await;
                     let mut offset = 0usize;
                     for boundary in write_fences {
@@ -4302,9 +4302,20 @@ impl RealmHostProvider for TokioHost {
                     }
                     writer.write_all(&pending_write[offset..]).await?;
                     writer.flush().await
+                };
+                tokio::pin!(writing);
+                tokio::select! {
+                    biased;
+                    result = &mut writing => prefix_completion.complete(result),
+                    // An abort can complete the shared fence state while this task is blocked
+                    // on a raw write. Dropping that future prevents later append bytes from
+                    // escaping after their callbacks were failed.
+                    result = prefix_completion.wait() => {
+                        if result.is_ok() {
+                            prefix_completion.complete(Ok(()));
+                        }
+                    }
                 }
-                .await;
-                prefix_completion.complete(result);
             });
             Some(task.abort_handle())
         };

@@ -376,11 +376,12 @@ impl HttpClientEngine {
                 shared.shutdown.notify_one();
             }
             HttpCloseMode::Abort => {
+                if shared.abort_pending.replace(true) {
+                    return true;
+                }
                 if let Some(connection) = shared.connection.borrow_mut().take() {
                     connection.abort();
                 }
-                shared.abort_pending.set(true);
-                shared.dispatcher.set_failed(false);
                 let table = Rc::clone(&self.connections);
                 tokio::task::spawn_local(async move {
                     shared.fail_outstanding("socket hang up");

@@ -10,6 +10,7 @@
 //! the language never observes a callback from inside another.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::future::Future;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::pin::Pin;
@@ -245,6 +246,16 @@ impl UpgradeWriteCompletion {
             }
             notified.await;
         }
+    }
+
+    fn fence_result(&self, fence: u64) -> Option<std::io::Result<()>> {
+        self.fences
+            .lock()
+            .ok()
+            .and_then(|fences| fences.get(&fence).cloned().flatten())
+            .map(|result| {
+                result.map_err(|failure| std::io::Error::new(failure.kind, failure.message))
+            })
     }
 
     pub(crate) fn complete(&self, result: std::io::Result<()>) {
@@ -627,6 +638,7 @@ struct UpgradeWrite {
     header_end: Cell<Option<usize>>,
     next_fence: Cell<u64>,
     fences: RefCell<Vec<UpgradeWriteFenceBoundary>>,
+    published_fences: RefCell<HashSet<u64>>,
 }
 
 impl UpgradeWrite {
@@ -644,6 +656,7 @@ impl UpgradeWrite {
             header_end: Cell::new(None),
             next_fence: Cell::new(1),
             fences: RefCell::new(Vec::new()),
+            published_fences: RefCell::new(HashSet::new()),
         }
     }
 
@@ -691,11 +704,13 @@ impl UpgradeWrite {
         fence
     }
 
-    fn take_fences(&self) -> (Vec<u64>, Vec<UpgradeWriteFenceBoundary>) {
+    fn fences_for_transport(&self) -> (Vec<u64>, Vec<UpgradeWriteFenceBoundary>) {
         let header_end = self.header_end.get().unwrap_or(0);
         let mut header = Vec::new();
         let mut trailing = Vec::new();
-        for mut boundary in std::mem::take(&mut *self.fences.borrow_mut()) {
+        // Keep the original boundaries and append order until the connection task retires.
+        // Abort cleanup may need to publish any fence the task had not delivered yet.
+        for mut boundary in self.fences.borrow().iter().copied() {
             if boundary.offset <= header_end {
                 header.push(boundary.fence);
             } else {
@@ -711,6 +726,18 @@ impl UpgradeWrite {
             .borrow()
             .iter()
             .map(|boundary| boundary.fence)
+            .collect()
+    }
+
+    fn claim_fence(&self, fence: u64) -> bool {
+        self.published_fences.borrow_mut().insert(fence)
+    }
+
+    fn unpublished_fences(&self) -> Vec<u64> {
+        let published = self.published_fences.borrow();
+        self.fence_order()
+            .into_iter()
+            .filter(|fence| !published.contains(fence))
             .collect()
     }
 
@@ -739,6 +766,36 @@ impl ConnectionShared {
 
     fn flush_deferred(&self) -> bool {
         self.dispatcher.flush_deferred()
+    }
+}
+
+/// Publish one append completion exactly once. The claim is recorded before calling language
+/// code, since a callback can reenter `close(Abort)` and take over the remaining fences.
+fn publish_upgrade_fence(
+    shared: &ConnectionShared,
+    id: u64,
+    writes: &UpgradeWrite,
+    fence: u64,
+) -> bool {
+    let Some(result) = writes.completion.fence_result(fence) else {
+        return true;
+    };
+    if !writes.claim_fence(fence) {
+        return true;
+    }
+    match result {
+        Ok(()) => shared.dispatch(&HttpEvent {
+            write_fence: fence,
+            ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+        }),
+        Err(error) => {
+            let message = error.to_string();
+            shared.dispatch(&HttpEvent {
+                write_fence: fence,
+                message: message.as_bytes(),
+                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+            })
+        }
     }
 }
 
@@ -1355,11 +1412,53 @@ impl HttpServerEngine {
                 // The abort takes effect at the task's next poll; until `Closed` has been
                 // published the connection counts as in flight, and it is published from a
                 // task, never from inside the caller's own call.
-                shared.abort_pending.set(true);
-                shared.dispatcher.set_failed(false);
+                if shared.abort_pending.replace(true) {
+                    return true;
+                }
                 let table = Rc::clone(&self.connections);
                 tokio::task::spawn_local(async move {
-                    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    let writes: Vec<(u64, Rc<UpgradeWrite>)> = {
+                        let mut pending = shared.upgrade_writes.borrow_mut();
+                        let mut writes = pending.drain().collect::<Vec<_>>();
+                        writes.sort_by_key(|(id, _)| *id);
+                        writes
+                    };
+                    for (id, writes) in writes {
+                        writes.completion.complete(Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "HTTP connection aborted during protocol upgrade",
+                        )));
+                        for fence in writes.unpublished_fences() {
+                            if shared.dispatcher.failed() {
+                                break;
+                            }
+                            if !writes.claim_fence(fence) {
+                                continue;
+                            }
+                            let Some(result) = writes.completion.fence_result(fence) else {
+                                continue;
+                            };
+                            match result {
+                                Ok(()) => {
+                                    let _ = shared.dispatch(&HttpEvent {
+                                        write_fence: fence,
+                                        ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+                                    });
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    let _ = shared.dispatch(&HttpEvent {
+                                        write_fence: fence,
+                                        message: message.as_bytes(),
+                                        ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if !shared.dispatcher.failed() {
+                        let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    }
                     shared.abort_pending.set(false);
                     table.borrow_mut().remove(&shared.resource);
                 });
@@ -1579,13 +1678,14 @@ async fn serve(
             let mut head = parts.read_buf.to_vec();
             head.extend_from_slice(&remaining_prefix);
             let request_id = shared.upgrade_request_id.get();
-            let writes = shared.upgrade_writes.borrow_mut().remove(&request_id);
+            let writes = shared.upgrade_writes.borrow().get(&request_id).cloned();
             let pending_write = writes
                 .as_ref()
                 .map_or_else(Vec::new, |writes| writes.take_trailing());
-            let (header_fences, write_fences) = writes
-                .as_ref()
-                .map_or_else(|| (Vec::new(), Vec::new()), |writes| writes.take_fences());
+            let (header_fences, write_fences) = writes.as_ref().map_or_else(
+                || (Vec::new(), Vec::new()),
+                |writes| writes.fences_for_transport(),
+            );
             let mut fence_order = header_fences.clone();
             fence_order.extend(write_fences.iter().map(|boundary| boundary.fence));
             let write_completion = writes
@@ -1624,38 +1724,35 @@ async fn serve(
                 }
             } else {
                 for fence in fence_order {
-                    match write_completion.wait_fence(fence).await {
-                        Ok(()) => {
-                            let _ = shared.dispatch(&HttpEvent {
-                                write_fence: fence,
-                                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, request_id)
-                            });
+                    let _ = write_completion.wait_fence(fence).await;
+                    // Abort cleanup takes over any completion not yet delivered.
+                    if shared.abort_pending.get() || shared.dispatcher.failed() {
+                        break;
+                    }
+                    if let Some(writes) = &writes
+                        && !publish_upgrade_fence(&shared, request_id, writes, fence)
+                    {
+                        break;
+                    }
+                }
+                if !shared.abort_pending.get() && !shared.dispatcher.failed() {
+                    match write_completion.wait().await {
+                        Ok(())
+                            if writes
+                                .as_ref()
+                                .is_some_and(|writes| writes.drain_needed.get()) =>
+                        {
+                            let _ =
+                                shared.dispatch(&HttpEvent::bare(HttpEventKind::Drain, request_id));
                         }
+                        Ok(()) => {}
                         Err(error) => {
                             let message = error.to_string();
                             let _ = shared.dispatch(&HttpEvent {
-                                write_fence: fence,
                                 message: message.as_bytes(),
-                                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, request_id)
+                                ..HttpEvent::bare(HttpEventKind::Error, request_id)
                             });
                         }
-                    }
-                }
-                match write_completion.wait().await {
-                    Ok(())
-                        if writes
-                            .as_ref()
-                            .is_some_and(|writes| writes.drain_needed.get()) =>
-                    {
-                        let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Drain, request_id));
-                    }
-                    Ok(()) => {}
-                    Err(error) => {
-                        let message = error.to_string();
-                        let _ = shared.dispatch(&HttpEvent {
-                            message: message.as_bytes(),
-                            ..HttpEvent::bare(HttpEventKind::Error, request_id)
-                        });
                     }
                 }
                 transferred = true;
@@ -1682,14 +1779,9 @@ async fn serve(
             message.clone(),
         )));
         for fence in writes.fence_order() {
-            let _ = shared.dispatch(&HttpEvent {
-                write_fence: fence,
-                message: message.as_bytes(),
-                ..HttpEvent::bare(
-                    HttpEventKind::UpgradeWriteComplete,
-                    shared.upgrade_request_id.get(),
-                )
-            });
+            if !publish_upgrade_fence(&shared, shared.upgrade_request_id.get(), &writes, fence) {
+                break;
+            }
         }
     }
     trace!(
@@ -1706,8 +1798,14 @@ async fn serve(
         let _ = shared.dispatch(&event);
     }
     let _ = shared.flush_deferred();
-    if !transferred {
+    if !transferred && !shared.dispatcher.failed() {
         let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    }
+    if transferred {
+        shared
+            .upgrade_writes
+            .borrow_mut()
+            .remove(&shared.upgrade_request_id.get());
     }
     table.borrow_mut().remove(&shared.resource);
 }
@@ -2154,6 +2252,140 @@ mod tests {
                 cancelled.wait().await.unwrap_err().kind(),
                 std::io::ErrorKind::Interrupted,
             );
+        });
+    }
+
+    struct FenceRecorder {
+        events: RefCell<Vec<(HttpEventKind, u64, u64, Vec<u8>)>>,
+        on_fence: RefCell<Option<Box<dyn Fn()>>>,
+    }
+
+    impl HttpDispatch for FenceRecorder {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
+            self.events.borrow_mut().push((
+                event.kind,
+                event.id,
+                event.write_fence,
+                event.message.to_vec(),
+            ));
+            if event.kind == HttpEventKind::UpgradeWriteComplete
+                && let Some(callback) = self.on_fence.borrow().as_ref()
+            {
+                callback();
+            }
+            0
+        }
+
+        fn checkpoint(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn abort_publishes_each_upgrade_fence_once_before_closed() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (_client, server) = tokio::io::duplex(64);
+            let resource = ResourceId::new(71);
+            let dispatch = Rc::new(FenceRecorder {
+                events: RefCell::new(Vec::new()),
+                on_fence: RefCell::new(None),
+            });
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                dispatch.clone(),
+            ));
+
+            let shared = Rc::clone(&engine.borrow().connections.borrow()[&resource].shared);
+            let writes = Rc::new(UpgradeWrite::new());
+            let successful = writes.register_fence(0);
+            let pending = writes.register_fence(8);
+            writes.completion.complete_fence(successful, Ok(()));
+            assert_eq!(
+                writes.fences_for_transport(),
+                (
+                    vec![successful],
+                    vec![UpgradeWriteFenceBoundary {
+                        fence: pending,
+                        offset: 8,
+                    }],
+                ),
+            );
+            shared.upgrade_request_id.set(99);
+            shared.upgrade_writes.borrow_mut().insert(99, writes);
+
+            // Closing reentrantly from the first completion callback must not schedule a
+            // second cleanup or duplicate the remaining append completions.
+            let engine_weak = Rc::downgrade(&engine);
+            *dispatch.on_fence.borrow_mut() = Some(Box::new(move || {
+                if let Some(engine) = engine_weak.upgrade() {
+                    assert!(engine.borrow_mut().close(resource, HttpCloseMode::Abort));
+                }
+            }));
+            assert!(engine.borrow_mut().close(resource, HttpCloseMode::Abort));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+                if engine.borrow().open_connections() == 0 {
+                    break;
+                }
+            }
+            assert_eq!(engine.borrow().open_connections(), 0);
+            assert_eq!(
+                &*dispatch.events.borrow(),
+                &[
+                    (
+                        HttpEventKind::UpgradeWriteComplete,
+                        99,
+                        successful,
+                        Vec::new()
+                    ),
+                    (
+                        HttpEventKind::UpgradeWriteComplete,
+                        99,
+                        pending,
+                        b"HTTP connection aborted during protocol upgrade".to_vec(),
+                    ),
+                    (HttpEventKind::Closed, 0, 0, Vec::new()),
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn abort_does_not_clear_a_latched_language_failure() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (_client, server) = tokio::io::duplex(64);
+            let resource = ResourceId::new(72);
+            let dispatch = Rc::new(FenceRecorder {
+                events: RefCell::new(Vec::new()),
+                on_fence: RefCell::new(None),
+            });
+            let mut engine = HttpServerEngine::default();
+            assert!(engine.attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                dispatch.clone(),
+            ));
+            let shared = Rc::clone(&engine.connections.borrow()[&resource].shared);
+            shared.dispatcher.set_failed(true);
+            let writes = Rc::new(UpgradeWrite::new());
+            writes.register_fence(0);
+            shared.upgrade_writes.borrow_mut().insert(99, writes);
+
+            assert!(engine.close(resource, HttpCloseMode::Abort));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+                if engine.open_connections() == 0 {
+                    break;
+                }
+            }
+            assert_eq!(engine.open_connections(), 0);
+            assert!(dispatch.events.borrow().is_empty());
         });
     }
 
