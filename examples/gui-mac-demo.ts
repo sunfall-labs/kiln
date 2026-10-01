@@ -30,6 +30,9 @@ import {
   Toggle,
   createSignal,
   createEffect,
+  createMemo,
+  isPending,
+  flush,
   runLoop,
   systemTheme,
   getActiveDriver,
@@ -87,7 +90,7 @@ const computeHeader = new Text({
 });
 
 const computeMetrics = new Text({
-  text: `${workers()} Workers • ${workers() * 64} MB Heap`,
+  text: () => `${workers()} Workers • ${workers() * 64} MB Heap`,
   variant: 'headline',
   color: 'blue',
 });
@@ -100,7 +103,7 @@ const computeTitleRow = new HStack({
 const slider = new Slider({
   min: 1,
   max: 32,
-  value: workers(),
+  value: workers,
   width: 260,
   onChange: (val: number) => {
     setWorkers(Math.round(val));
@@ -134,13 +137,13 @@ const utilLabel = new Text({
 });
 
 const workerProgressBar = new ProgressBar({
-  value: (workers() / 32) * 100,
+  value: () => (workers() / 32) * 100,
   max: 100,
   width: 200,
 });
 
 const utilValue = new Text({
-  text: `${Math.round((workers() / 32) * 100)}%`,
+  text: () => `${Math.round((workers() / 32) * 100)}%`,
   variant: 'subheadline',
   color: 'secondary',
 });
@@ -148,14 +151,6 @@ const utilValue = new Text({
 const utilRow = new HStack({
   spacing: 12,
   children: [utilLabel, new Spacer(), workerProgressBar, utilValue],
-});
-
-createEffect(() => {
-  computeMetrics.text = `${workers()} Workers • ${workers() * 64} MB Heap`;
-  slider.value = workers();
-  const pct = Math.round((workers() / 32) * 100);
-  workerProgressBar.setValue(pct);
-  utilValue.text = `${pct}%`;
 });
 
 const computeCard = new Card({
@@ -185,27 +180,21 @@ const archTitleRow = new HStack({
 });
 
 const progressLabel = new Text({
-  text: `Target: ${targetArch()}`,
+  text: () => `Target: ${targetArch()}`,
   variant: 'subheadline',
   color: 'secondary',
 });
 
 const compileBar = new ProgressBar({
-  value: compileProgress(),
+  value: compileProgress,
   max: 100,
   width: 190,
 });
 
 const compilePctLabel = new Text({
-  text: `${compileProgress()}%`,
+  text: () => `${compileProgress()}%`,
   variant: 'subheadline',
   color: 'secondary',
-});
-
-createEffect(() => {
-  progressLabel.text = `Target: ${targetArch()}`;
-  compileBar.setValue(compileProgress());
-  compilePctLabel.text = `${compileProgress()}%`;
 });
 
 const buildRow = new HStack({
@@ -239,13 +228,9 @@ const inputRow = new HStack({
 });
 
 const sessionReadout = new Text({
-  text: `Session: @${handle()} • us-west-2 • Latency: 0.14ms`,
+  text: () => `Session: @${handle()} • Region: us-west-2 • Latency: 0.14ms • Tab: ${activeTab()}`,
   variant: 'subheadline',
   color: 'secondary',
-});
-
-createEffect(() => {
-  sessionReadout.text = `Session: @${handle()} • Region: us-west-2 • Latency: 0.14ms • Tab: ${activeTab()}`;
 });
 
 const profileCard = new Card({
@@ -255,7 +240,7 @@ const profileCard = new Card({
 
 // ── Card 4: Runtime Subsystems & Features ────────────────────
 const metalSwitch = new Toggle({
-  checked: metalAccel(),
+  checked: metalAccel,
   onToggle: (checked: boolean) => setMetalAccel(checked),
 });
 
@@ -265,15 +250,9 @@ const metalLabel = new Text({
 });
 
 const metalPill = new Text({
-  text: metalAccel() ? '🟢 ACCELERATED' : '⚪ CPU RENDER',
+  text: () => (metalAccel() ? '🟢 ACCELERATED' : '⚪ CPU RENDER'),
   variant: 'badge',
-  color: metalAccel() ? 'green' : 'secondary',
-});
-
-createEffect(() => {
-  metalSwitch.checked = metalAccel();
-  metalPill.text = metalAccel() ? '🟢 ACCELERATED' : '⚪ CPU RENDER';
-  metalPill.setProperty('color', metalAccel() ? 'green' : 'secondary');
+  color: () => (metalAccel() ? 'green' : 'secondary'),
 });
 
 const metalRow = new HStack({
@@ -282,7 +261,7 @@ const metalRow = new HStack({
 });
 
 const telemetrySwitch = new Toggle({
-  checked: telemetry(),
+  checked: telemetry,
   onToggle: (checked: boolean) => setTelemetry(checked),
 });
 
@@ -292,15 +271,9 @@ const telemetryLabel = new Text({
 });
 
 const telemetryPill = new Text({
-  text: telemetry() ? '🟢 STREAMING' : '⚪ PAUSED',
+  text: () => (telemetry() ? '🟢 STREAMING' : '⚪ PAUSED'),
   variant: 'badge',
-  color: telemetry() ? 'green' : 'secondary',
-});
-
-createEffect(() => {
-  telemetrySwitch.checked = telemetry();
-  telemetryPill.text = telemetry() ? '🟢 STREAMING' : '⚪ PAUSED';
-  telemetryPill.setProperty('color', telemetry() ? 'green' : 'secondary');
+  color: () => (telemetry() ? 'green' : 'secondary'),
 });
 
 const telemetryRow = new HStack({
@@ -310,15 +283,11 @@ const telemetryRow = new HStack({
 
 const strictCheckbox = new Checkbox({
   label: 'Enforce strict ADR-0074 type conformance and memory invariants',
-  checked: strictChecks(),
+  checked: strictChecks,
   onToggle: (checked: boolean) => {
     setStrictChecks(checked);
     console.log(`Strict checks toggled: ${checked}`);
   },
-});
-
-createEffect(() => {
-  strictCheckbox.checked = strictChecks();
 });
 
 const subsystemsCard = new Card({
