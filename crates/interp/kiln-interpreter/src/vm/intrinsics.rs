@@ -2014,15 +2014,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
+                let module_namespace = matches!(
+                    &source,
+                    Value::Object(object) if object.borrow().is_module_namespace()
+                );
                 for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
-                    let value = match property {
-                        Property::Value(value) => value,
-                        Property::Accessor { get, .. } => match get {
-                            Some(getter) => {
-                                self.call_value(&getter, source.clone(), Vec::new(), instruction)?
-                            }
-                            None => Value::Undefined,
-                        },
+                    let value = if module_namespace {
+                        // Namespace slots are snapshots of export cells for reflection. The
+                        // language-visible value operation is [[Get]], which refreshes that
+                        // snapshot from the live cell before returning it.
+                        self.read_property_key(
+                            &source,
+                            PropertyKeyRef::Units(&key),
+                            instruction,
+                        )?
+                    } else {
+                        match property {
+                            Property::Value(value) => value,
+                            Property::Accessor { get, .. } => match get {
+                                Some(getter) => self.call_value(
+                                    &getter,
+                                    source.clone(),
+                                    Vec::new(),
+                                    instruction,
+                                )?,
+                                None => Value::Undefined,
+                            },
+                        }
                     };
                     items.push(if matches!(native, Native::ObjectValues) {
                         value

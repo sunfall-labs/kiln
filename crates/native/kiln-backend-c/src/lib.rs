@@ -4413,6 +4413,22 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         size_t source = order[index];
         kiln_property *slot;
         kiln_value value = values[source];
+        const kiln_string *key = kiln_c99_intern(names[source], name_lengths[source]);
+        size_t existing;
+        if (key == NULL) {{
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto namespace_failure;
+        }}
+        /* An instantiated namespace is first created empty, then filled with its export cells.
+         * After evaluation the launcher publishes the same export names again. Treat that as a
+         * value refresh, not a second property insertion: namespace [[OwnPropertyKeys]] is
+         * unique, and existing export descriptors remain writable/non-configurable. */
+        for (existing = 0; existing < data->count; ++existing) {{
+            if (data->properties[existing].key == key) {{
+                kiln_c99_heap_store_value(data, &data->properties[existing].value, value);
+                goto namespace_entry_done;
+            }}
+        }}
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
         if (status != KILN_C99_OK) {{
@@ -4432,11 +4448,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot = &data->properties[insert_at];
         /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
          * the launcher's names are its own, and this seam promises nothing about their life. */
-        slot->key = kiln_c99_intern(names[source], name_lengths[source]);
-        if (slot->key == NULL) {{
-            status = KILN_C99_OUT_OF_MEMORY;
-            goto namespace_failure;
-        }}
+        slot->key = key;
         data->count += 1;
         kiln_c99_heap_store_value(data, &slot->value, value);
         slot->symbol_hidden = 0;
@@ -4445,6 +4457,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot->configurable = 0;
         slot->accessor = 0;
         slot->refused = 0;
+namespace_entry_done:;
     }}
     if (!extending) {{
         kiln_property *tag;
