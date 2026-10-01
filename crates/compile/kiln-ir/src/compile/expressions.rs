@@ -2025,6 +2025,42 @@ impl super::Compiler {
             })));
             return;
         }
+
+        /* An identifier resolved through a `with` object is a Reference whose base is the
+         * first object environment that has the name. A plain `with_scoped_load` correctly
+         * reads the value, but discards that base; calling the resulting value with `undefined`
+         * changes `this` for `with (o) { method() }`. Keep the selected object under the
+         * callee for Apply, and leave argument evaluation until after resolution, as ordinary
+         * call evaluation requires. Parentheses preserve the Identifier AST and use this same
+         * path; comma expressions are values and intentionally take the ordinary path below.
+         */
+        if let ExpressionKind::Identifier(name) = &callee.kind {
+            let scopes = self.with_scopes_for(name);
+            if !scopes.is_empty() {
+                let key = self.constant_index(Constant::String(name.to_owned().into()));
+                let mut found = Vec::with_capacity(scopes.len());
+                for with in &scopes {
+                    self.load_with_object(with);
+                    self.code.push(Instruction::WithHas(key));
+                    let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+                    self.load_with_object(with);
+                    self.code.push(Instruction::Dup);
+                    self.code.push(Instruction::GetProperty(key));
+                    self.array_literal(arguments, span);
+                    self.code.push(Instruction::Apply);
+                    found.push(self.emit_jump(Instruction::Jump(0)));
+                    self.patch_jump(miss);
+                }
+                self.push_constant(Constant::Undefined);
+                self.load_lexically(name);
+                self.array_literal(arguments, span);
+                self.code.push(Instruction::Apply);
+                for jump in found {
+                    self.patch_jump(jump);
+                }
+                return;
+            }
+        }
         match &callee.kind {
             // `super.m(...)` resolves the method on the home object's prototype but runs it
             // against the current receiver, which is precisely the `[this, callee, arguments]`
