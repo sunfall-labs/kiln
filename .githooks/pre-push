@@ -10,4 +10,10 @@ if [[ -n ${KILN_SKIP_PRE_PUSH:-} ]]; then
 	exit 0
 fi
 cd "$(git rev-parse --show-toplevel)"
+# Apple's /usr/bin/git is an xcrun shim that exports SDKROOT (the Xcode SDK) to everything it runs,
+# hooks included; an interactive shell does not have it. With it set, native links in the checks
+# below fail with "tapi error: malformed file ... unknown architecture" on Xcode 27's .tbd files,
+# although the same checks pass from a shell (2026-10-02; docs/issues/toolchain-sdkroot). The
+# hook runs what a developer would run by hand, so it drops what git added.
+unset SDKROOT
 exec bash scripts/pre-push.sh

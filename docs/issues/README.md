@@ -7,7 +7,7 @@ line is the truth.
 
 | | in progress | ready | needs triage | other open | closed |
 |---|---:|---:|---:|---:|---:|
-| **all features** | 5 | 31 | 3 | 10 | 159 |
+| **all features** | 5 | 31 | 4 | 10 | 159 |
 
 | feature | PRD | in progress | ready | needs triage | other open | closed |
 |---|---|---:|---:|---:|---:|---:|
@@ -100,4 +100,5 @@ line is the truth.
 | [`tagged-template-cache`](tagged-template-cache/) | PRD: Tagged Template Object Caching Across Evaluations |  |  |  |  | 4 |
 | [`template-hole-stringifies-a-symbol`](template-hole-stringifies-a-symbol/) | PRD: Template Hole Evaluation Disallows Symbol Coercion |  |  |  |  | 1 |
 | [`thirdparty-regressions-2026-09-05`](thirdparty-regressions-2026-09-05/) | PRD: Fix Native Inline Method Call Site Cache Collisions |  |  |  |  | 1 |
+| [`toolchain-sdkroot`](toolchain-sdkroot/) |  |  |  | 1 |  |  |
 | [`yield-star-delegation`](yield-star-delegation/) | PRD: Specification-Compliant `yield*` Iterator Delegation Protocol |  |  |  |  | 1 |
