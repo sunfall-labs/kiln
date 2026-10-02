@@ -1046,85 +1046,98 @@ impl super::Compiler {
             Upvalue(u32),
             Global(u32),
         }
-        let (place, kind, imported, needs_tdz_check) = match self.resolve_or_capture(target) {
-            Resolution::Local(local) if local.celled => {
-                (Place::Cell(local.slot), local.kind, local.imported, false)
-            }
-            Resolution::Local(local) => (
-                Place::Local(local.slot),
-                local.kind,
-                local.imported,
-                !local.initialized,
-            ),
-            Resolution::Upvalue(index) => {
-                // Capture addresses do not carry declaration kind. Consult the same nearest
-                // enclosing declaration that resolve_or_capture selected for this upvalue.
-                let owner = self
-                    .enclosing
-                    .iter()
-                    .rev()
-                    .flat_map(|level| level.scopes.iter().rev())
-                    .find_map(|scope| scope.get(target))
-                    .expect("captured assignment has an owning declaration");
-                (Place::Upvalue(index), owner.kind, owner.imported, false)
-            }
-            Resolution::Global(slot) => {
-                let module = &self.enclosing[0].scopes[0];
-                let local = module
-                    .get(target)
-                    .copied()
-                    .expect("Global resolution just found this name in module scope");
-                (
-                    Place::Global(slot),
+        let (place, kind, imported, needs_tdz_check, function_name) =
+            match self.resolve_or_capture(target) {
+                Resolution::Local(local) if local.celled => (
+                    Place::Cell(local.slot),
                     local.kind,
                     local.imported,
-                    // Module slots retain their own uninitialized state, and LoadGlobal reads
-                    // that cell at call time. The function may be compiled before the module
-                    // declaration but invoked after its initializer, so compiler-order state
-                    // cannot stand in for the actual runtime TDZ check here.
                     false,
-                )
-            }
-            // A `var` this program declared on the global object. `ThrowReference` reads it and
-            // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
-            // difference is that declaration instantiation already created the property, so the
-            // read cannot throw and the write cannot be the one that creates it.
-            Resolution::GlobalObject => {
-                let name = self.constant_index(Constant::String(target.to_owned().into()));
-                return Some((
-                    vec![Instruction::ThrowReference(name)],
-                    vec![Instruction::StoreGlobalBinding(name)],
-                ));
-            }
-            Resolution::Unresolved => {
-                let _ = span;
-                let name = self.constant_index(Constant::String(target.to_owned().into()));
-                // Sloppy code settles an unresolvable reference against the global object, which
-                // creates the property rather than refusing the write. Strict code raises the
-                // `ReferenceError` where the assignment happens rather than when it is compiled.
-                //
-                // Only the *store* differs. A compound assignment reads first, and reading a name
-                // nothing bound is still a `ReferenceError` in both modes -- `undeclared += 1`
-                // throws in sloppy code too -- so the load stays `ThrowReference`, which is also
-                // the instruction that finds a global the program installed earlier.
-                if self.strict {
-                    // Where the reference is *resolved*, which is before the right-hand side is
-                    // evaluated. Strict mode refuses to create a global by assignment, and
-                    // whether this name is one it would have to create can only be answered at
-                    // run time -- a `var` in global code, or a `globalThis.x = 1` a line above,
-                    // makes it a perfectly ordinary write.
-                    self.code.push(Instruction::RequireGlobalBinding(name));
+                    local.eval_declaration == Some(EvalDeclaration::FunctionName),
+                ),
+                Resolution::Local(local) => (
+                    Place::Local(local.slot),
+                    local.kind,
+                    local.imported,
+                    !local.initialized,
+                    local.eval_declaration == Some(EvalDeclaration::FunctionName),
+                ),
+                Resolution::Upvalue(index) => {
+                    // Capture addresses do not carry declaration kind. Consult the same nearest
+                    // enclosing declaration that resolve_or_capture selected for this upvalue.
+                    let owner = self
+                        .enclosing
+                        .iter()
+                        .rev()
+                        .flat_map(|level| level.scopes.iter().rev())
+                        .find_map(|scope| scope.get(target))
+                        .expect("captured assignment has an owning declaration");
+                    (
+                        Place::Upvalue(index),
+                        owner.kind,
+                        owner.imported,
+                        false,
+                        owner.eval_declaration == Some(EvalDeclaration::FunctionName),
+                    )
                 }
-                return Some((
-                    vec![Instruction::ThrowReference(name)],
-                    vec![if self.strict {
-                        Instruction::StoreGlobalBindingStrict(name)
-                    } else {
-                        Instruction::StoreGlobalBinding(name)
-                    }],
-                ));
-            }
-        };
+                Resolution::Global(slot) => {
+                    let module = &self.enclosing[0].scopes[0];
+                    let local = module
+                        .get(target)
+                        .copied()
+                        .expect("Global resolution just found this name in module scope");
+                    (
+                        Place::Global(slot),
+                        local.kind,
+                        local.imported,
+                        // Module slots retain their own uninitialized state, and LoadGlobal reads
+                        // that cell at call time. The function may be compiled before the module
+                        // declaration but invoked after its initializer, so compiler-order state
+                        // cannot stand in for the actual runtime TDZ check here.
+                        false,
+                        false,
+                    )
+                }
+                // A `var` this program declared on the global object. `ThrowReference` reads it and
+                // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
+                // difference is that declaration instantiation already created the property, so the
+                // read cannot throw and the write cannot be the one that creates it.
+                Resolution::GlobalObject => {
+                    let name = self.constant_index(Constant::String(target.to_owned().into()));
+                    return Some((
+                        vec![Instruction::ThrowReference(name)],
+                        vec![Instruction::StoreGlobalBinding(name)],
+                    ));
+                }
+                Resolution::Unresolved => {
+                    let _ = span;
+                    let name = self.constant_index(Constant::String(target.to_owned().into()));
+                    // Sloppy code settles an unresolvable reference against the global object, which
+                    // creates the property rather than refusing the write. Strict code raises the
+                    // `ReferenceError` where the assignment happens rather than when it is compiled.
+                    //
+                    // Only the *store* differs. A compound assignment reads first, and reading a name
+                    // nothing bound is still a `ReferenceError` in both modes -- `undeclared += 1`
+                    // throws in sloppy code too -- so the load stays `ThrowReference`, which is also
+                    // the instruction that finds a global the program installed earlier.
+                    if self.strict {
+                        // Where the reference is *resolved*, which is before the right-hand side is
+                        // evaluated. Strict mode refuses to create a global by assignment, and
+                        // whether this name is one it would have to create can only be answered at
+                        // run time -- a `var` in global code, or a `globalThis.x = 1` a line above,
+                        // makes it a perfectly ordinary write.
+                        self.code.push(Instruction::RequireGlobalBinding(name));
+                    }
+                    return Some((
+                        vec![Instruction::ThrowReference(name)],
+                        vec![if self.strict {
+                            Instruction::StoreGlobalBindingStrict(name)
+                        } else {
+                            Instruction::StoreGlobalBinding(name)
+                        }],
+                    ));
+                }
+            };
         let is_upvalue = matches!(&place, Place::Upvalue(_));
         let (load, store): (Vec<Instruction>, Instruction) = match place {
             Place::Local(slot) => (
@@ -1157,11 +1170,18 @@ impl super::Compiler {
             prefix.extend(load.iter().cloned());
             prefix.push(Instruction::Pop);
         }
-        let store = if imported
+        let store = if function_name && !self.strict {
+            // A named function expression's inner binding is immutable, but sloppy writes to it
+            // are ignored rather than thrown. `const` shares the same source-level declaration
+            // kind, so carry its distinct binding marker through this store decision.
+            vec![Instruction::Pop]
+        } else if function_name
+            || imported
             || matches!(
                 kind,
                 VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing
-            ) {
+            )
+        {
             // Reaching PutValue is a runtime TypeError, after RHS evaluation. A dead write
             // must not reject compilation, and a logical assignment may skip PutValue entirely.
             let message =
