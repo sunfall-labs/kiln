@@ -9,4 +9,9 @@ cd "$(git rev-parse --show-toplevel)"
 # although the same checks pass from a shell (2026-10-02; docs/issues/toolchain-sdkroot). The
 # hook runs what a developer would run by hand, so it drops what git added.
 unset SDKROOT
+# Unlike pre-push, keep git's own variables here: for `git commit -a` or a partial commit,
+# GIT_INDEX_FILE names the temporary index being committed, which is what --staged must read.
+# core.hooksPath can reach a repository that is not kiln -- a test's fixture repository inherits
+# it through GIT_CONFIG_PARAMETERS when git was run with -c -- and there is nothing to guard there.
+[[ -x scripts/check-issue-deletions.sh ]] || exit 0
 exec scripts/check-issue-deletions.sh --staged
