@@ -1,7 +1,5 @@
 
-/* Append everything source yields to target, which is what array spread, for...of and
- * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
- * the observable @@iterator lookup proves that the canonical method is still selected. */
+/* The canonical string iterator walks code points without observing @@iterator again. */
 static int kiln_c99_string_iterator_append(kiln_value target, kiln_value source) {
     uint16_t *units = NULL;
     size_t count = 0;
@@ -25,6 +23,9 @@ static int kiln_c99_string_iterator_append(kiln_value target, kiln_value source)
     return KILN_C99_OK;
 }
 
+/* Append everything source yields to target, which is what array spread, for...of and
+ * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
+ * the observable @@iterator lookup proves that the canonical method is still selected. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
