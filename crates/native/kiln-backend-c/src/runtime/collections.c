@@ -75,7 +75,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
  * omitted by `is_reference` because numeric coercion treats it specially. */
 static int kiln_c99_can_be_held_weakly(kiln_value value) {
     if (value.tag == KILN_VALUE_SYMBOL) {
-        const kiln_symbol *symbol = (const kiln_symbol *)(uintptr_t)value.bits;
+        const kiln_symbol *symbol = kiln_c99_symbol_of(value);
         return symbol != NULL && symbol->registry_id == 0;
     }
     return kiln_c99_is_reference(value) || value.tag == KILN_VALUE_DATE;
