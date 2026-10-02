@@ -40,6 +40,16 @@ class GateResultTests(unittest.TestCase):
         doc = results.workspace(self.log("test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"), 0)
         self.assertEqual(doc["outcomes"]["passed"], 2)
 
+    def test_workspace_collects_summaries_after_a_failing_target(self):
+        log = self.log(
+            "test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+            "test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s\n"
+        )
+        doc = results.workspace(log, 101)
+        self.assertEqual(doc["verdict"], "failed")
+        self.assertEqual(doc["outcomes"], {"total": 7, "passed": 5, "failed": 1, "ignored": 1})
+        self.assertEqual(doc["suites"], 2)
+
     def test_envelope_rejects_empty_and_inconsistent_counts(self):
         for counts in ({"total": 0, "passed": 0, "failed": 0}, {"total": 1, "passed": 2, "failed": 0}):
             with self.assertRaises(results.ResultError):
