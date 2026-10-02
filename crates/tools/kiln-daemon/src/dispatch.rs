@@ -1352,6 +1352,13 @@ mod module_identity_tests {
         let project = dir.join("project");
         let source_dir = project.join("src");
         std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        // Canonical, like every path the resolver hands the daemon: `graph_module_identity`
+        // strips the *canonical* project root, and on macOS `temp_dir()` is `/var/folders/...`
+        // while its canonical form is `/private/var/...`, so an uncanonicalized fixture path
+        // never has the root as a prefix and both identities collapse to the absolute path.
+        let dir = std::fs::canonicalize(&dir).expect("canonicalize temporary project");
+        let project = dir.join("project");
+        let source_dir = project.join("src");
         let path = source_dir.join("private.ts");
         let path_string = path.to_str().expect("UTF-8 test path");
         let source = "class Cache { #value = 1; read() { return this.#value; } }";
