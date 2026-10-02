@@ -320,6 +320,7 @@ output.chmod(0o755)
             for case, options in (
                 ("build", {"build_fail": True}),
                 ("runtime", {"runtime_exit": 3}),
+                ("nonzero-oracle", {"runtime_exit": 3, "node_exit": 3}),
                 ("release-output", {"runtime_stdout": "wrong\\n"}),
             ):
                 with self.subTest(case=case):
@@ -328,6 +329,10 @@ output.chmod(0o755)
                                                     update=True, **options)
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("refusing to update thirdparty baseline", result.stderr)
+                    if case == "nonzero-oracle":
+                        self.assertIn("Node oracle exited 3", result.stderr)
+                    if case == "release-output":
+                        self.assertIn("native-release output differs from Node oracle", result.stderr)
                     self.assertEqual(baseline_path.read_bytes(), original)
 
     def test_empty_normal_comparison_is_rejected_and_partial_update_provenance_is_scoped(self):

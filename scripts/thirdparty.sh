@@ -441,23 +441,48 @@ for index, name in enumerate(bundle_names, 1):
     bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
     oracle = subprocess.run(["node", bundle_path], capture_output=True, env=oracle_env)
     expected_result = (oracle.returncode, oracle.stdout, oracle.stderr)
-    release = subprocess.run([bin_path], capture_output=True, env=oracle_env)
-    if (release.returncode, release.stdout, release.stderr) != expected_result:
-        message = f"{name}: native {profile} output differs from Node oracle"
+    def describe_result(result):
+        def excerpt(stream):
+            text = stream.decode("utf-8", errors="replace")
+            return repr(text[:240]) + ("…" if len(text) > 240 else "")
+        return (
+            f"exit={result.returncode}, stdout={excerpt(result.stdout)}, "
+            f"stderr={excerpt(result.stderr)}"
+        )
+
+    if oracle.returncode != 0:
+        message = (
+            f"{name}: Node oracle exited {oracle.returncode}; refusing performance measurement "
+            f"({describe_result(oracle)})"
+        )
         regressions.append(message)
         measurement_failures.append(message)
-        print(f"[{index}/{len(bundle_names)}] {name:16} PROFILE VALIDATION FAILED", flush=True)
+        print(f"[{index}/{len(bundle_names)}] {name:16} NODE ORACLE FAILED", flush=True)
+        continue
+
+    release = subprocess.run([bin_path], capture_output=True, env=oracle_env)
+    if (release.returncode, release.stdout, release.stderr) != expected_result:
+        message = (
+            f"{name}: native {profile} output differs from Node oracle "
+            f"(Node: {describe_result(oracle)}; native: {describe_result(release)})"
+        )
+        regressions.append(message)
+        measurement_failures.append(message)
+        print(f"[{index}/{len(bundle_names)}] {name:16} PROFILE VALIDATION FAILED ({message})", flush=True)
         continue
 
     # Warmup passes to avoid page-fault noise on fresh binaries
     failed = False
     for _ in range(max(2, warmup)):
-        proc = subprocess.run([bin_path], capture_output=True)
+        proc = subprocess.run([bin_path], capture_output=True, env=oracle_env)
         if (proc.returncode, proc.stdout, proc.stderr) != expected_result:
-            message = f"{name}: native warmup output differed from Node oracle"
+            message = (
+                f"{name}: native warmup output differed from Node oracle "
+                f"(Node: {describe_result(oracle)}; native: {describe_result(proc)})"
+            )
             regressions.append(message)
             measurement_failures.append(message)
-            print(f"[{index}/{len(bundle_names)}] {name:16} WARMUP VALIDATION FAILED", flush=True)
+            print(f"[{index}/{len(bundle_names)}] {name:16} WARMUP VALIDATION FAILED ({message})", flush=True)
             failed = True
             break
 
@@ -468,13 +493,16 @@ for index, name in enumerate(bundle_names, 1):
     times = []
     for _ in range(passes):
         t0 = time.perf_counter()
-        proc = subprocess.run([bin_path], capture_output=True)
+        proc = subprocess.run([bin_path], capture_output=True, env=oracle_env)
         t1 = time.perf_counter()
         if (proc.returncode, proc.stdout, proc.stderr) != expected_result:
-            message = f"{name}: native timed output differed from Node oracle"
+            message = (
+                f"{name}: native timed output differed from Node oracle "
+                f"(Node: {describe_result(oracle)}; native: {describe_result(proc)})"
+            )
             regressions.append(message)
             measurement_failures.append(message)
-            print(f"[{index}/{len(bundle_names)}] {name:16} TIMED VALIDATION FAILED", flush=True)
+            print(f"[{index}/{len(bundle_names)}] {name:16} TIMED VALIDATION FAILED ({message})", flush=True)
             failed = True
             break
         times.append((t1 - t0) * 1000.0)
