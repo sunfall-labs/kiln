@@ -118,6 +118,7 @@ int main(void) {
     kiln_c99_gc_collect(&heap, 1);
     heap.enabled = 0;
     source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
     if (source_object == NULL || source_object->dictionary_index != index ||
         kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK ||
         kiln_c99_as_number(value) != 39.0) return 7;
