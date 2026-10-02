@@ -89,6 +89,9 @@ const OP_ACTOR_BIND_RECEIVER: u32 = 33;
 const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
 const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
 const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
+/// A port arrived in this realm (`workers::hold`) or is leaving it in a message (`release`).
+const OP_PORT_HOLD: u32 = 39;
+const OP_PORT_RELEASE: u32 = 40;
 const ACTOR_WORKER_ENTRY: &str = "kiln:actors/worker";
 
 fn actor_scheduler(virtual_clock: bool) -> std::io::Result<Arc<PinnedTurnScheduler>> {
@@ -622,6 +625,8 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                 write(1, second);
             }
             OP_CLOSE => workers::close(a),
+            OP_PORT_HOLD => workers::hold(a),
+            OP_PORT_RELEASE => workers::release(a),
             OP_STATE => write(0, u64::from(workers::state(a))),
             OP_TERMINATE => write(0, u64::from(workers::terminate(a))),
             OP_REAP => workers::reap(a),

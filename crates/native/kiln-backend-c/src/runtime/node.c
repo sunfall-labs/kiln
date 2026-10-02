@@ -3468,6 +3468,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 #define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
 #define KILN_C99_WORKER_OP_ACTOR_PLAIN_MESSAGE 38
+#define KILN_C99_WORKER_OP_PORT_HOLD 39
+#define KILN_C99_WORKER_OP_PORT_RELEASE 40
 
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
                                            kiln_value source, size_t budget);
@@ -4012,6 +4014,8 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         return kiln_c99_worker_take(first, result);
     case KILN_C99_WORKER_OP_CLOSE:
     case KILN_C99_WORKER_OP_REAP:
+    case KILN_C99_WORKER_OP_PORT_HOLD:
+    case KILN_C99_WORKER_OP_PORT_RELEASE:
         (void)kiln_worker_op((uint32_t)op, first, NULL);
         *result = kiln_c99_undefined();
         return KILN_C99_OK;

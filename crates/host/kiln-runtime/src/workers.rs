@@ -315,11 +315,16 @@ struct Endpoint {
     /// Only this host worker may drain a bound actor inbox. Endpoint numbers are visible to
     /// JavaScript, so the realm binding alone would not prevent another realm taking a message.
     actor_reader: Option<u64>,
+    /// The worker realm holding this end (its key), 0 for a main realm or a port in transit.
+    /// A worker that ends closes every end it holds, so each peer sees `close` as in node --
+    /// including a port that arrived in a message, which no other record ties to the realm.
+    holder: u64,
 }
 
 impl Endpoint {
     fn new(peer: u64) -> Self {
         Self {
+            holder: current_key(),
             peer,
             queue: VecDeque::new(),
             waits: HashMap::new(),
@@ -1019,6 +1024,35 @@ pub fn unsubscribe(port: u64, id: u64) {
     }
 }
 
+/// This realm now holds `port`: it arrived here in a message (or was made here), and closes
+/// with this realm if the realm is a worker that ends first.
+pub fn hold(port: u64) {
+    if let Some(endpoint) = ports().endpoints.get_mut(&port) {
+        endpoint.holder = current_key();
+    }
+}
+
+/// `port` is leaving this realm in a message: no realm holds it until one receives it, so
+/// this realm ending does not close it -- nor drop what was queued for its receiver.
+pub fn release(port: u64) {
+    if let Some(endpoint) = ports().endpoints.get_mut(&port) {
+        endpoint.holder = 0;
+    }
+}
+
+/// Close every end worker `key` holds: its realm has ended.
+fn close_held(key: u64) {
+    let held: Vec<u64> = ports()
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| endpoint.holder == key)
+        .map(|(port, _)| *port)
+        .collect();
+    for port in held {
+        close(port);
+    }
+}
+
 /// Close `port`: what was queued for it is dropped (a moved store is freed with it), and its
 /// peer learns, after the messages already queued for the peer, that this end has gone.
 pub fn close(port: u64) {
@@ -1478,6 +1512,12 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
         if let Some(endpoint) = ports.endpoints.get_mut(&parent) {
             endpoint.awaits_exit = true;
         }
+        // The worker's own ends are its realm's from the start, not the spawning realm's.
+        for port in [spec.port, spec.control] {
+            if let Some(endpoint) = ports.endpoints.get_mut(&port) {
+                endpoint.holder = key;
+            }
+        }
         parent
     };
     let context = Arc::new(WorkerContext {
@@ -1755,6 +1795,7 @@ fn complete_worker(context: &WorkerContext, code: i32) {
         Message::new(kind::EXIT, value_tokens(Token::Number(f64::from(code)))),
     );
     close(context.spec.port);
+    close_held(context.key);
     {
         let mut ports = ports();
         if let Some(endpoint) = ports.endpoints.get_mut(&context.parent) {
@@ -2113,6 +2154,60 @@ mod tests {
         fn finish(&mut self) -> i32 {
             self.finished.fetch_add(1, Ordering::AcqRel);
             7
+        }
+    }
+
+    #[test]
+    fn an_ending_worker_closes_the_ports_it_holds_but_not_ports_in_transit() {
+        let spec = |port, control| WorkerSpec {
+            entry: WorkerEntry::Eval(String::new()),
+            argv: Vec::new(),
+            info: String::new(),
+            port,
+            control,
+            pipe_stdio: true,
+        };
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        // `held` arrives in the worker; `sent` leaves it in a message and must outlive it with
+        // what was queued for its receiver.
+        let (held_partner, held) = channel();
+        let (sent_partner, sent) = channel();
+        release(held);
+        release(sent);
+        let (id, _) = spawn(spec(port, control), move |_| {
+            hold(held);
+            hold(sent);
+            assert!(post(
+                sent_partner,
+                Message::new(0, value_tokens(Token::Null))
+            ));
+            release(sent);
+            0
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state(held_partner) & STATE_PEER_CLOSED == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_ne!(
+            state(held_partner) & STATE_PEER_CLOSED,
+            0,
+            "a held port closes with its realm"
+        );
+        assert_eq!(
+            state(sent) & STATE_QUEUED,
+            STATE_QUEUED,
+            "a port in transit keeps its queue"
+        );
+        assert_eq!(
+            state(sent_partner) & STATE_PEER_CLOSED,
+            0,
+            "and stays entangled"
+        );
+        reap(id);
+        for port in [parent, control_peer, held_partner, sent, sent_partner] {
+            close(port);
         }
     }
 

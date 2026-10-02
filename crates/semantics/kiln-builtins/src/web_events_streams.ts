@@ -453,6 +453,9 @@ delete (globalThis as any).__kilnPortWait;
   const OP_BROADCAST_JOIN = 7, OP_BROADCAST_POST = 8, OP_SPAWN = 9, OP_TERMINATE = 10, OP_SELF = 11;
   const OP_CANCEL_WAIT = 12, OP_REAP = 13, OP_STDIO = 14;
   const OP_POST_PLAIN = 21;
+  // Which realm holds an endpoint: the one that made or received it. A worker that ends closes
+  // what it holds, so a port that went to it in a message closes with it, as in node.
+  const OP_PORT_HOLD = 39, OP_PORT_RELEASE = 40;
   // `kiln_runtime::workers::kind` and `STATE_*`.
   const KIND_USER = 0, KIND_TERMINATE = 7;
   const STATE_PEER_CLOSED = 2, STATE_GONE = 4;
@@ -1310,11 +1313,16 @@ delete (globalThis as any).__kilnPortWait;
         port.#other = null;
         port.#remote = 0;
         stopWaiting(port);
+        __kilnWorkerOp(OP_PORT_RELEASE, endpoint);
         return endpoint;
       };
+      // Only a port that arrived in a message is adopted here: `internalPort` also wraps
+      // endpoints this realm merely borrows (an actor's shared mailbox), which must not close
+      // with it.
       remotePort = (endpoint: number): MessagePort => {
         const port = new MessagePort();
         port.#remote = endpoint;
+        __kilnWorkerOp(OP_PORT_HOLD, endpoint);
         return port;
       };
       internalPort = (endpoint: number, kinds: any, target: any, broadcast: boolean): MessagePort => {

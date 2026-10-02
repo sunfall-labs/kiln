@@ -250,6 +250,9 @@ const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
 const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
 const OP_ACTOR_PREPARE: u32 = 37;
 const OP_ACTOR_PLAIN_MESSAGE: u32 = 38;
+/// A port arrived in this realm (`workers::hold`) or is leaving it in a message (`release`).
+const OP_PORT_HOLD: u32 = 39;
+const OP_PORT_RELEASE: u32 = 40;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -525,6 +528,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             OP_CLOSE => {
                 workers::close(endpoint_of(first));
+                Value::Undefined
+            }
+            OP_PORT_HOLD => {
+                workers::hold(endpoint_of(first));
+                Value::Undefined
+            }
+            OP_PORT_RELEASE => {
+                workers::release(endpoint_of(first));
                 Value::Undefined
             }
             OP_STATE => Value::Number(f64::from(workers::state(endpoint_of(first)))),
