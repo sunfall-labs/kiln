@@ -327,6 +327,11 @@ present_bundles = [
     if os.path.exists(os.path.join(bundles_dir, f"{name}.bundle.js"))
 ]
 absent_bundles = [name for name in bundle_names if name not in present_bundles]
+if not present_bundles:
+    sys.exit(
+        f"thirdparty benchmark selected {len(bundle_names)} bundle(s), but none are present; "
+        "refusing an empty timing comparison or baseline update"
+    )
 if not update:
     unverifiable = []
     changed_inputs = []
@@ -358,6 +363,7 @@ print(f"thirdparty baseline (profile={profile}, threshold={threshold:.1f}%, min_
 measured = {}
 regressions = []
 gains = []
+measurement_failures = []
 
 build_jobs = os.environ.get("KILN_THIRDPARTY_BUILD_JOBS", os.environ.get("KILN_JOBS", os.cpu_count() or 4))
 max_workers = min(len(bundle_names), int(build_jobs))
@@ -422,26 +428,53 @@ for index, name in enumerate(bundle_names, 1):
         print(f"[{index}/{len(bundle_names)}] {name:16} (bundle absent on disk; skipped)", flush=True)
         continue
     if not bin_path:
-        regressions.append(f"{name}: native compilation failed ({err_msg})")
+        message = f"{name}: native compilation failed ({err_msg})"
+        regressions.append(message)
+        measurement_failures.append(message)
         print(f"[{index}/{len(bundle_names)}] {name:16} COMPILE FAILED ({err_msg})", flush=True)
         continue
 
+    # Validate the exact profile being timed, independently of the dev-profile parity lane.
+    # A release build that computes different bytes is not a performance measurement.
+    oracle_env = os.environ.copy()
+    oracle_env["TZ"] = "UTC"
+    bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
+    oracle = subprocess.run(["node", bundle_path], capture_output=True, env=oracle_env)
+    expected_result = (oracle.returncode, oracle.stdout, oracle.stderr)
+    release = subprocess.run([bin_path], capture_output=True, env=oracle_env)
+    if (release.returncode, release.stdout, release.stderr) != expected_result:
+        message = f"{name}: native {profile} output differs from Node oracle"
+        regressions.append(message)
+        measurement_failures.append(message)
+        print(f"[{index}/{len(bundle_names)}] {name:16} PROFILE VALIDATION FAILED", flush=True)
+        continue
+
     # Warmup passes to avoid page-fault noise on fresh binaries
+    failed = False
     for _ in range(max(2, warmup)):
-        subprocess.run([bin_path], capture_output=True)
+        proc = subprocess.run([bin_path], capture_output=True)
+        if (proc.returncode, proc.stdout, proc.stderr) != expected_result:
+            message = f"{name}: native warmup output differed from Node oracle"
+            regressions.append(message)
+            measurement_failures.append(message)
+            print(f"[{index}/{len(bundle_names)}] {name:16} WARMUP VALIDATION FAILED", flush=True)
+            failed = True
+            break
+
+    if failed:
+        continue
 
     # Execute passes
     times = []
-    failed = False
     for _ in range(passes):
         t0 = time.perf_counter()
         proc = subprocess.run([bin_path], capture_output=True)
         t1 = time.perf_counter()
-        if proc.returncode != 0:
-            err_snippet = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
-            err_msg = err_snippet[-1] if err_snippet else f"exit {proc.returncode}"
-            regressions.append(f"{name}: native execution failed ({err_msg})")
-            print(f"[{index}/{len(bundle_names)}] {name:16} RUN FAILED ({err_msg})", flush=True)
+        if (proc.returncode, proc.stdout, proc.stderr) != expected_result:
+            message = f"{name}: native timed output differed from Node oracle"
+            regressions.append(message)
+            measurement_failures.append(message)
+            print(f"[{index}/{len(bundle_names)}] {name:16} TIMED VALIDATION FAILED", flush=True)
             failed = True
             break
         times.append((t1 - t0) * 1000.0)
@@ -478,6 +511,14 @@ measurement_elapsed = time.perf_counter() - measurement_started
 print(f"serial warmup/measurement phase completed in {measurement_elapsed:.2f}s", flush=True)
 
 if update:
+    if measurement_failures:
+        sys.exit(
+            "refusing to update thirdparty baseline because measurements failed: "
+            + "; ".join(measurement_failures)
+        )
+    if not measured:
+        sys.exit("refusing to update thirdparty baseline because no bundle was measured")
+
     if baseline.get("schema") == 1:
         # Preserve an old unqualified file for audit, but never treat its entries as comparable.
         baseline = {
@@ -498,7 +539,7 @@ if update:
         baseline["platforms"][platform_key] = platform_record
     platform_record["platform"] = platform_details
     platform_record["profile"] = profile
-    platform_record["provenance"] = {
+    run_provenance = {
         "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "source_commit": git_output("rev-parse", "HEAD"),
         "source_diff_sha256": hashlib.sha256((git_output("diff", "--binary", "HEAD") or "").encode()).hexdigest(),
@@ -506,8 +547,27 @@ if update:
         "kiln_binary_sha256": file_sha256(kiln) if os.path.isfile(kiln) else None,
         "rustc_version": tool_version(os.environ.get("RUSTC", "rustc")),
         "clang_version": tool_version(os.environ.get("CC", "clang")),
+        "profile": profile,
+        "passes": passes,
+        "warmup": warmup,
+        "threshold_pct": threshold,
+        "min_delta_ms": min_delta_ms,
     }
-    platform_record.setdefault("bundles", {}).update(measured)
+    bundles = platform_record.setdefault("bundles", {})
+    previous_provenance = platform_record.get("provenance")
+    for bundle_record in bundles.values():
+        if "measurement_provenance" not in bundle_record:
+            # Older schema-2 records only had one platform-wide provenance object. Preserve
+            # its scope before replacing it with the provenance for this partial update.
+            bundle_record["measurement_provenance"] = previous_provenance
+    for name, bundle_record in measured.items():
+        bundle_record["measurement_provenance"] = run_provenance
+    bundles.update(measured)
+    platform_record["provenance"] = {
+        "scope": "latest_update",
+        "updated_bundles": sorted(measured),
+        **run_provenance,
+    }
     os.makedirs(os.path.dirname(os.path.abspath(baseline_path)), exist_ok=True)
     with open(baseline_path, "w") as handle:
         json.dump(baseline, handle, indent=2, sort_keys=True)

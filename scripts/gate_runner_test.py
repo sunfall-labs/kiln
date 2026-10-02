@@ -108,6 +108,57 @@ sys.exit(8 if mismatch == 'status' else 7)
             self.assertEqual((root / "kiln.calls").read_text(), "interpreter\nnative\n")
             return result
 
+    def benchmark_fixture(self, root, bundle_names, baseline_path, *, build_fail=False,
+                          runtime_exit=0, node_exit=0, runtime_stdout="oracle\n", runtime_stderr="",
+                          runtime_sleep=0, update=False, create_bundles=True):
+        (root / "probes").mkdir(exist_ok=True)
+        if create_bundles:
+            for name in bundle_names:
+                node_exit_statement = f"process.exitCode = {node_exit};\n" if node_exit else ""
+                (root / f"{name}.bundle.js").write_text(
+                    "process.stdout.write('oracle\\n');\n" + node_exit_statement
+                )
+        kiln = root / "kiln"
+        kiln.write_text("""#!/usr/bin/env python3
+import os, pathlib, sys
+if 'build' in sys.argv:
+    if os.environ.get('FIXTURE_BUILD_FAIL') == '1':
+        print('intentional build failure', file=sys.stderr)
+        sys.exit(3)
+    output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+    output.write_text('''#!/usr/bin/env python3
+import os, sys
+import time
+time.sleep(float(os.environ.get('FIXTURE_BINARY_SLEEP', '0')))
+sys.stdout.write(os.environ.get('FIXTURE_BINARY_STDOUT', ''))
+sys.stderr.write(os.environ.get('FIXTURE_BINARY_STDERR', ''))
+sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
+''')
+    output.chmod(0o755)
+""")
+        kiln.chmod(0o755)
+        environment = dict(
+            os.environ,
+            KILN_BIN=str(kiln),
+            KILN_THIRDPARTY_DIR=str(root),
+            KILN_THIRDPARTY_NATIVE="0",
+            KILN_JOBS="1",
+            KILN_THIRDPARTY_BUILD_JOBS="1",
+            FIXTURE_BUILD_FAIL="1" if build_fail else "0",
+            FIXTURE_BINARY_EXIT=str(runtime_exit),
+            FIXTURE_BINARY_STDOUT=runtime_stdout,
+            FIXTURE_BINARY_STDERR=runtime_stderr,
+            FIXTURE_BINARY_SLEEP=str(runtime_sleep),
+        )
+        command = [
+            str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
+            "--bundles", ",".join(bundle_names), "--passes", "1", "--warmup", "0",
+            "--baseline-file", str(baseline_path),
+        ]
+        if update:
+            command.append("--update")
+        return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+
     def test_each_engine_runs_once_and_nonzero_status_is_compared(self):
         result = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -203,7 +254,9 @@ output.chmod(0o755)
                     break
                 output.append(line)
             self.assertEqual(status, 0, "".join(output))
-            self.assertEqual(binary_log.read_text(), "run\n" * 3)
+            # One Node-oracle and one release-profile validation precede two warmups
+            # and one timed pass.
+            self.assertEqual(binary_log.read_text(), "run\n" * 4)
             self.assertIn("gate barrier wait completed", "".join(output))
             self.assertIn("serial warmup/measurement phase completed", "".join(output))
             measured_baseline = json.loads(baseline_path.read_text())
@@ -219,9 +272,12 @@ output.chmod(0o755)
             self.assertTrue(platform_record["provenance"]["rustc_version"])
             self.assertTrue(platform_record["provenance"]["clang_version"])
             self.assertEqual(
-                platform_record["bundles"]["fixture"]["workload_sha256"],
-                hashlib.sha256((root / "fixture.bundle.js").read_bytes()).hexdigest(),
+                    platform_record["bundles"]["fixture"]["workload_sha256"],
+                    hashlib.sha256((root / "fixture.bundle.js").read_bytes()).hexdigest(),
             )
+            self.assertEqual(platform_record["bundles"]["fixture"]["measurement_provenance"]["profile"],
+                             "native-release")
+            self.assertEqual(platform_record["provenance"]["scope"], "latest_update")
 
     def test_benchmark_rejects_baseline_from_another_platform_before_building(self):
         with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-platform-") as directory:
@@ -255,6 +311,77 @@ output.chmod(0o755)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("Cross-platform timings are incomparable", result.stderr)
             self.assertFalse(kiln_log.exists(), "a mismatched baseline must be rejected before compilation")
+
+    def test_update_refuses_failed_build_run_or_release_output_without_changing_baseline(self):
+        with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-update-failure-") as directory:
+            root = Path(directory)
+            baseline_path = root / "baseline.json"
+            original = b'{"schema":2,"platforms":{},"sentinel":"unchanged"}\n'
+            for case, options in (
+                ("build", {"build_fail": True}),
+                ("runtime", {"runtime_exit": 3}),
+                ("release-output", {"runtime_stdout": "wrong\\n"}),
+            ):
+                with self.subTest(case=case):
+                    baseline_path.write_bytes(original)
+                    result = self.benchmark_fixture(root, ["fixture"], baseline_path,
+                                                    update=True, **options)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("refusing to update thirdparty baseline", result.stderr)
+                    self.assertEqual(baseline_path.read_bytes(), original)
+
+    def test_empty_normal_comparison_is_rejected_and_partial_update_provenance_is_scoped(self):
+        with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-update-scope-") as directory:
+            root = Path(directory)
+            baseline_path = root / "baseline.json"
+            initial = self.benchmark_fixture(root, ["first", "second"], baseline_path, update=True)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            baseline = json.loads(baseline_path.read_text())
+            _, record = next(iter(baseline["platforms"].items()))
+            old_second_provenance = record["bundles"]["second"]["measurement_provenance"]
+
+            partial = self.benchmark_fixture(root, ["first"], baseline_path, update=True)
+            self.assertEqual(partial.returncode, 0, partial.stdout + partial.stderr)
+            baseline = json.loads(baseline_path.read_text())
+            _, record = next(iter(baseline["platforms"].items()))
+            self.assertEqual(record["provenance"]["scope"], "latest_update")
+            self.assertEqual(record["provenance"]["updated_bundles"], ["first"])
+            self.assertEqual(record["bundles"]["second"]["measurement_provenance"], old_second_provenance)
+            self.assertEqual(record["bundles"]["first"]["measurement_provenance"]["passes"], 1)
+
+            (root / "first.bundle.js").unlink()
+            (root / "second.bundle.js").unlink()
+            before = baseline_path.read_bytes()
+            empty_update = self.benchmark_fixture(root, ["first", "second"], baseline_path,
+                                                  update=True, create_bundles=False)
+            self.assertNotEqual(empty_update.returncode, 0, empty_update.stdout + empty_update.stderr)
+            self.assertIn("none are present", empty_update.stderr)
+            self.assertEqual(baseline_path.read_bytes(), before)
+
+            empty = self.benchmark_fixture(root, ["first", "second"], baseline_path,
+                                           create_bundles=False)
+            self.assertNotEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+            self.assertIn("none are present", empty.stderr)
+            self.assertEqual(baseline_path.read_bytes(), before)
+
+    def test_deliberate_update_accepts_a_timing_regression(self):
+        with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-update-regression-") as directory:
+            root = Path(directory)
+            baseline_path = root / "baseline.json"
+            initial = self.benchmark_fixture(root, ["fixture"], baseline_path, update=True)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            baseline = json.loads(baseline_path.read_text())
+            _, record = next(iter(baseline["platforms"].items()))
+            record["bundles"]["fixture"]["median_ms"] = 0.01
+            baseline_path.write_text(json.dumps(baseline))
+
+            update = self.benchmark_fixture(root, ["fixture"], baseline_path,
+                                            runtime_sleep=0.02, update=True)
+            self.assertEqual(update.returncode, 0, update.stdout + update.stderr)
+            self.assertIn("REGRESSED", update.stdout)
+            refreshed = json.loads(baseline_path.read_text())
+            _, refreshed_record = next(iter(refreshed["platforms"].items()))
+            self.assertGreater(refreshed_record["bundles"]["fixture"]["median_ms"], 0.01)
 
 
 if __name__ == "__main__":
