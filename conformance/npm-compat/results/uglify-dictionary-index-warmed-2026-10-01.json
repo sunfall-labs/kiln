@@ -1,0 +1,186 @@
+{
+  "binaries": {
+    "control": {
+      "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/uglify-production-cli67",
+      "sha256": "9238826aec4dd48964ac9e4576407f6a3213e34c52635da33e98b49275aad92e"
+    },
+    "production": {
+      "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/uglify-production-cli68",
+      "sha256": "5149a2e54f25a0965401ea35e5a62847ba5916c5d81def58c91bf185638eea42"
+    }
+  },
+  "build": {
+    "candidate_cli_binary_sha256": "b5db3599e0e535470ba752125df87f3ff6660e58a04f0bcfef7206025d0b940b",
+    "candidate_cli_source": "6fcb1358d40eef53295d3a1411e9b1053492081b",
+    "candidate_workload_source": "faa11a115cac2c6de30a9411eb6582546892f290",
+    "node_adapter": true,
+    "profile": "native-release",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "control_reuse": {
+    "cli67_binary_sha256": "9238826aec4dd48964ac9e4576407f6a3213e34c52635da33e98b49275aad92e",
+    "control_rebuild": "not required; frozen source provenance verifies pre-index runtime with fixture-only difference",
+    "record": "results/dictionary-index-baseline.json at fb7750ef"
+  },
+  "correctness": {
+    "all_outputs_match_node": true,
+    "every_native_run_calls": 25,
+    "every_native_run_checksum": 2612876640,
+    "node_calls": 25,
+    "node_checksum": 2612876640
+  },
+  "date": "2026-10-01",
+  "environment": {
+    "KILN_JOBS": "1",
+    "host": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "node": "v26.8.1"
+  },
+  "full_run_record": "target/npm-compat-evidence/cli68-dictionary-index-warmed.json",
+  "method": {
+    "order": "alternating balanced production/control",
+    "source_check": "2,874 tracked paths; all actual bytes equal outside the five pinned files; same workload and package lock",
+    "timed_runs_per_binary": 4,
+    "warmup_pairs": 2
+  },
+  "node": {
+    "firstCallMs": 18.135114,
+    "moduleInitMs": 29.865645,
+    "version": "v26.8.1",
+    "warmed24Ms": 41.492249
+  },
+  "raw_logs": "target/npm-compat-evidence/cli68-dictionary-index-warmed-raw",
+  "runs": {
+    "control": [
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 4170.5212329999995,
+        "moduleInitMs": 2052.3608,
+        "wallSeconds": 113.63952052895911,
+        "warmed24Ms": 107390.438205
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 4113.831899,
+        "moduleInitMs": 2046.3009690000001,
+        "wallSeconds": 113.28937441599555,
+        "warmed24Ms": 107103.841329
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 4124.2132249999995,
+        "moduleInitMs": 2029.379606,
+        "wallSeconds": 113.4212067349581,
+        "warmed24Ms": 107239.272638
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 4124.594487999999,
+        "moduleInitMs": 2018.2882069999998,
+        "wallSeconds": 113.16573354997672,
+        "warmed24Ms": 106996.131762
+      }
+    ],
+    "production": [
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 842.7794309999999,
+        "moduleInitMs": 458.21084499999995,
+        "wallSeconds": 23.545659165945835,
+        "warmed24Ms": 22215.589061
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 837.59482,
+        "moduleInitMs": 456.92134,
+        "wallSeconds": 23.32823763694614,
+        "warmed24Ms": 22005.298844999998
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 844.5152069999999,
+        "moduleInitMs": 457.262742,
+        "wallSeconds": 23.56783014908433,
+        "warmed24Ms": 22235.201524
+      },
+      {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 831.978395,
+        "moduleInitMs": 453.407407,
+        "wallSeconds": 23.464732187916525,
+        "warmed24Ms": 22150.785701
+      }
+    ]
+  },
+  "schema": 1,
+  "scope": "Uglify 24-call warmed batch; native-release --node; dictionary property index",
+  "source": {
+    "control_head": "cbd6f5d3531894b6b3e01dfed5e49b678a4ad483",
+    "control_tracked_tree_sha256": "eb9acde872b4b90787888b19998c3dfb25ddc46bc6045aac581256c85b4702e8",
+    "matched_source_sha256": "87f7be1212b03306fba2584d6dc71f3df14ff5452c2dec19a91f8d63bc9404b2",
+    "only_allowed_source_differences": {
+      "crates/native/kiln-backend-c/src/runtime/heap.c": {
+        "control_sha256": "1417c74b45150dcefc9a755be363eda32d57375bb35059a70d2d9dfc4b332ca2",
+        "production_sha256": "ef1e82fcbdbe2bb9aff467f243caa33fe1bd3cb6157352805624702c756f761a"
+      },
+      "crates/native/kiln-backend-c/src/runtime/prelude_types.h": {
+        "control_sha256": "c6b435768f176af1bdb6faa705c20dfa145c2ce5b1ab0cef6d52cdbcbfc398f3",
+        "production_sha256": "d198e378bde807a6278c2b0bb1e8ce4a57b3f7bac778232b5172c3b91e793438"
+      },
+      "crates/native/kiln-backend-c/src/runtime/properties.c": {
+        "control_sha256": "92b0dcacc82b088435b9f8d4bf878fe984085888fccaa0ed632238a96f62d6eb",
+        "production_sha256": "3758a4fabc90ae39af900678010ca06c96c8e3f2a28606ddff2094682068ee39"
+      },
+      "crates/native/kiln-backend-c/src/runtime/shapes.c": {
+        "control_sha256": "4a4d668c2e1c80bf89e619ef18afc5606adf238d61d698556f1a729f5f8bfd5d",
+        "production_sha256": "b5ab5846e0c2e5ee89e9c50c24998d54df9d954a4884ba7d9a3dfcf5d4279e7a"
+      },
+      "crates/native/kiln-backend-c/src/runtime/spread.c": {
+        "control_sha256": "de1a318fd4482ff06977f008075800da683a64afaf21a6ad3505cfd76a8e6827",
+        "production_sha256": "5985283d17da7a3fc49ace8f1dedf139595d761727fcecb595f0fc9a501b2306"
+      }
+    },
+    "package_lock_sha256": "3b03faa7c97402e5e01e2f52eb2f73c7317faf178318c065c6fcd38af3249680",
+    "production_head": "0334256b143ca070a98cceb4ed4e827ab964b769",
+    "production_tracked_tree_sha256": "a025e763d92375a8d45fa7a217c93d51534520fc816b55867d6cc1bac4de5e9b",
+    "reviewed_control_commit": "9e775ce4",
+    "reviewed_delta_sha256": "461f6eb6f2003143f7f6981cde8b8e2e816685290db8675eff7eee41a2e929ab",
+    "reviewed_production_commit": "8b8931ae",
+    "tracked_file_count": 2874,
+    "tracked_path_inventory_sha256": "319fbf2a692715902df2cdd6f84586e68d1db01bfa1bd7dcb0539c84568610b2",
+    "workload_sha256": "659885c6171511cbe4335e39625119b133b6034f3f692b7478c4b8ae15bbf1d0"
+  },
+  "state": "complete",
+  "summary": {
+    "firstCallMs": {
+      "control_median": 4124.403856499999,
+      "production_median": 840.1871255
+    },
+    "moduleInitMs": {
+      "control_median": 2037.8402875000002,
+      "production_median": 457.092041
+    },
+    "wallSeconds": {
+      "control_median": 113.35529057547683,
+      "production_median": 23.50519567693118
+    },
+    "warmed24Ms": {
+      "control_median": 107171.55698349999,
+      "production_median": 22183.187381
+    },
+    "warmed24_speedup": 4.83120640613138
+  },
+  "timing_units": {
+    "firstCallMs": "milliseconds",
+    "moduleInitMs": "milliseconds",
+    "wallSeconds": "seconds including process startup",
+    "warmed24Ms": "milliseconds for 24 calls"
+  }
+}
