@@ -69,7 +69,7 @@ fn native_unhandled_top_level_rejection_exits_with_a_live_handle() {
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("spawn fixture");
         let started = Instant::now();
         let status = loop {
@@ -140,7 +140,9 @@ fn native_unsettled_top_level_await_warns_and_exits_13() {
             },
         )
         .expect("fixture builds");
-    let output = Command::new(&report.output).output().expect("run fixture");
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run fixture");
     // Node's answer, and the interpreter's (issue 09 of `.scratch/full-runtime`): the warning
     // and status 13, which is the one status `main` does not fold to 1.
     assert_eq!(output.status.code(), Some(13));
@@ -1306,7 +1308,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run owned-result host");
+    let output = command
+        .output_when_launchable()
+        .expect("run owned-result host");
     assert!(
         output.status.success(),
         "owned-result host failed with {:?}: {}",
@@ -1435,7 +1439,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run malformed-host scalar host");
+    let output = command
+        .output_when_launchable()
+        .expect("run malformed-host scalar host");
     assert!(
         output.status.success(),
         "malformed-host scalar failed: {}",

@@ -696,7 +696,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run shared createRequire host");
+    let output = command
+        .output_when_launchable()
+        .expect("run shared createRequire host");
     assert!(
         output.status.success(),
         "shared createRequire host failed with {:?}: {}",

@@ -984,7 +984,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run embedded scheduling graph");
+    let output = command
+        .output_when_launchable()
+        .expect("run embedded scheduling graph");
     assert!(
         output.status.success(),
         "embedded scheduling graph failed: {}",
@@ -1093,7 +1095,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run delayed dynamic host");
+    let output = command
+        .output_when_launchable()
+        .expect("run delayed dynamic host");
     assert!(
         output.status.success(),
         "delayed dynamic host failed with {:?}: {}",
@@ -3337,7 +3341,9 @@ int main(void) {
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run embedding host");
+    let output = command
+        .output_when_launchable()
+        .expect("run embedding host");
     assert!(
         output.status.success(),
         "embedding host failed: {}",
@@ -3448,7 +3454,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run throw graph host");
+    let output = command
+        .output_when_launchable()
+        .expect("run throw graph host");
     assert!(
         output.status.success(),
         "throw graph host failed with {:?}: {}",
@@ -4061,7 +4069,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .link_executable(&[host_object], &host_executable, &host_link)
         .expect("link null-host executable");
     let output = Command::new(&host_executable)
-        .output()
+        .output_when_launchable()
         .expect("run null-host executable");
     assert!(
         output.status.success(),
@@ -4292,7 +4300,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run shared graph host");
+    let output = command
+        .output_when_launchable()
+        .expect("run shared graph host");
     assert!(
         output.status.success(),
         "shared graph host failed with {:?}: {}",
@@ -4414,7 +4424,7 @@ int main(void) {{
         .link_executable(&[host_object], &host_executable, &link_options)
         .expect("link same-basename host");
     let output = Command::new(&host_executable)
-        .output()
+        .output_when_launchable()
         .expect("run same-basename host");
     assert!(
         output.status.success(),
@@ -5127,7 +5137,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run delayed dynamic host");
+    let output = command
+        .output_when_launchable()
+        .expect("run delayed dynamic host");
     assert!(
         output.status.success(),
         "delayed dynamic host failed with {:?}: {}",

@@ -393,7 +393,9 @@ fn release_pruning_preserves_superclass_tdz() {
             &NativeBuildOptions::new(project.path.join("tdz"), NativeProfile::Release),
         )
         .unwrap();
-    let result = Command::new(report.output).output().unwrap();
+    let result = Command::new(report.output)
+        .output_when_launchable()
+        .unwrap();
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert!(
@@ -762,7 +764,7 @@ fn compact_function_context_is_omitted_only_when_unused() {
         )
         .expect("build compact context fixture");
     let result = Command::new(&report.output)
-        .output()
+        .output_when_launchable()
         .expect("run context fixture");
     assert!(
         result.status.success(),
@@ -805,7 +807,7 @@ fn dead_phi_pruning_preserves_effects_parallel_copies_and_suspension() {
         )
         .expect("build dead phi fixture");
     let result = Command::new(&report.output)
-        .output()
+        .output_when_launchable()
         .expect("run dead phi fixture");
     assert!(
         result.status.success(),
