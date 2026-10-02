@@ -1002,6 +1002,7 @@ fn native_get_builtin_module_bootstrap() -> String {
         r#"
 if (typeof globalThis.process !== "undefined" && globalThis.process !== null && !globalThis.process.getBuiltinModule) {{
     const __kilnBuiltinModuleNames = new Set([{list}]);
+    const __kilnBuiltinCreateRequire = process.__kilnNativeModules.__kilnHostModuleCreateRequire;
     let __kilnBuiltinRequire;
     globalThis.process.getBuiltinModule = function getBuiltinModule(id) {{
         if (typeof id !== "string") {{
@@ -1011,8 +1012,7 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
         if (!__kilnBuiltinModuleNames.has(name)) return undefined;
         if (__kilnBuiltinRequire === undefined) {{
             __kilnBuiltinRequire =
-                globalThis.process.__kilnNativeModules.__kilnHostModuleCreateRequire(
-                    "/kiln/runtime-bootstrap.ts");
+                __kilnBuiltinCreateRequire("/kiln/runtime-bootstrap.ts");
         }}
         return __kilnBuiltinRequire("node:" + name);
     }};
@@ -4245,7 +4245,9 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value modules_obj = kiln_c99_undefined();
     int status = kiln_c99_process_object(&proc_obj);
     if (status != KILN_C99_OK) return status;
-    status = kiln_c99_new_object(&modules_obj);
+    /* Extend the realm's existing capability table. Replacing it would discard host loader
+     * and crypto hooks installed by process initialization before the TypeScript bootstrap. */
+    status = kiln_c99_get(host, proc_obj, "__kilnNativeModules", 19, &modules_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     kiln_value net_obj = kiln_c99_undefined();
@@ -4399,8 +4401,7 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, modules_obj, "ffi", 3, ffi_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
-    status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
-    return status;
+    return KILN_C99_OK;
 }
 
 /* A thread-mode worker realm's own `process.env` view: the process environment every realm
