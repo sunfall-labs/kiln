@@ -1159,60 +1159,65 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         if matches!(value, Value::Undefined) {
             return Ok(Vec::new());
         }
-        // A bare string is treated as a one-element list, and so is a `Intl.Locale`.
-        let elements: Vec<Value> = match value {
-            Value::String(_) | Value::Intl(_) => vec![value.clone()],
-            Value::Array(array) => array.borrow().clone(),
-            Value::Undefined | Value::Null => {
-                return Err(type_error("locales is not an object"));
-            }
-            _ => {
-                let length = self.read_property(value, "length", instruction)?;
-                let length = self.as_number_argument(Some(&length), instruction)?;
-                if !length.is_finite() || length < 0.0 {
-                    Vec::new()
-                } else {
-                    let mut out = Vec::new();
-                    for index in 0..(length as u64) {
-                        let key = index.to_string();
-                        let element = self.read_property(value, &key, instruction)?;
-                        if matches!(element, Value::Undefined) {
-                            continue;
-                        }
-                        out.push(element);
-                    }
-                    out
-                }
-            }
-        };
-
         let mut seen: Vec<String> = Vec::new();
-        for element in elements {
-            let tag = match &element {
-                Value::Intl(value) => match value.as_ref() {
-                    IntlValue::Locale(tag) => tag.clone(),
-                    _ => return Err(type_error("a locale list element is not a string")),
-                },
-                Value::String(text) => text
-                    .to_scalar_string()
-                    .map_err(|_| range("locale contains a lone surrogate"))?,
-                Value::Object(_) | Value::Array(_) => {
-                    let primitive =
-                        self.as_primitive(&element, PrimitiveHint::String, instruction)?;
-                    primitive.to_display_string()
-                }
-                _ => {
-                    return Err(type_error(
-                        "a locale list element is not a string or object",
-                    ));
-                }
-            };
-            let canonical = engine::locale::canonicalize(&tag).map_err(failure)?;
-            if !seen.contains(&canonical) {
-                seen.push(canonical);
+        // A bare string is treated as a one-element list, and so is a `Intl.Locale`.
+        if matches!(value, Value::String(_) | Value::Intl(_)) {
+            self.add_canonical_locale(value.clone(), instruction, &mut seen)?;
+            return Ok(seen);
+        }
+        if matches!(value, Value::Undefined | Value::Null) {
+            return Err(type_error("locales is not an object"));
+        }
+
+        let length = self.read_property(value, "length", instruction)?;
+        let length = self.as_number_argument(Some(&length), instruction)?;
+        if !length.is_finite() || length < 0.0 {
+            return Ok(seen);
+        }
+        // Read and validate each entry before touching the next one. A malformed locale at index
+        // zero must throw before a getter at index one runs. HasProperty also distinguishes a
+        // sparse hole (which is skipped) from a present `undefined` (which is an invalid locale).
+        for index in 0..(length as u64) {
+            let key = Value::String(StringUnits::from(index.to_string()));
+            if !crate::object_helpers::has_property_checked(&self.intrinsics, value, &key)? {
+                continue;
             }
+            let key = index.to_string();
+            let element = self.read_property(value, &key, instruction)?;
+            self.add_canonical_locale(element, instruction, &mut seen)?;
         }
         Ok(seen)
+    }
+
+    fn add_canonical_locale(
+        &mut self,
+        element: Value,
+        instruction: usize,
+        seen: &mut Vec<String>,
+    ) -> Result<(), ExecutionError> {
+        let tag = match &element {
+            Value::Intl(value) => match value.as_ref() {
+                IntlValue::Locale(tag) => tag.clone(),
+                _ => return Err(type_error("a locale list element is not a string")),
+            },
+            Value::String(text) => text
+                .to_scalar_string()
+                .map_err(|_| range("locale contains a lone surrogate"))?,
+            Value::Object(_) | Value::Array(_) => {
+                let primitive = self.as_primitive(&element, PrimitiveHint::String, instruction)?;
+                primitive.to_display_string()
+            }
+            _ => {
+                return Err(type_error(
+                    "a locale list element is not a string or object",
+                ));
+            }
+        };
+        let canonical = engine::locale::canonicalize(&tag).map_err(failure)?;
+        if !seen.contains(&canonical) {
+            seen.push(canonical);
+        }
+        Ok(())
     }
 
     /// `CoerceOptionsToObject`/`GetOptionsObject`: `undefined` becomes an empty bag.
