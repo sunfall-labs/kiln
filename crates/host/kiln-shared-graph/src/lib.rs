@@ -75,6 +75,28 @@ pub enum UnsupportedKind {
 }
 
 impl UnsupportedKind {
+    /// The stable number an engine's inspector reports a refusal by, across the provider ABI.
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Proxy => 1,
+            Self::Function => 2,
+            Self::CustomPrototype => 3,
+            Self::InternalSlots => 4,
+            Self::Symbol => 5,
+        }
+    }
+
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            1 => Self::Proxy,
+            2 => Self::Function,
+            3 => Self::CustomPrototype,
+            4 => Self::InternalSlots,
+            5 => Self::Symbol,
+            _ => return None,
+        })
+    }
+
     /// What a refused value is, in the words a program's author uses: the one text both engines
     /// put in `share`'s `TypeError`.
     pub fn describe(self) -> &'static str {

@@ -730,7 +730,8 @@ int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect
     (void)root; (void)inspect; (void)unit; (void)context; (void)out;
     return -2;
 }
-int kiln_shared_graph_refusal(const char **text) {
+int kiln_shared_graph_refusal(uint32_t kind, const char **text) {
+    (void)kind;
     *text = "cannot share a function";
     return 0;
 }

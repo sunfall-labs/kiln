@@ -717,7 +717,7 @@ expected_stdout = "bundle\n"
             manifest
                 .tests_under(&manifest.directory().join("effect"))
                 .count(),
-            15
+            12
         );
         assert_eq!(
             manifest

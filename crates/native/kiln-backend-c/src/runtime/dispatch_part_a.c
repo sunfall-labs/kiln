@@ -1986,14 +1986,18 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_SHARE_RAW) {
-        int status = kiln_c99_share_value(argc > 0 ? args[0] : kiln_c99_undefined(), result);
+        kiln_value input = argc > 0 ? args[0] : kiln_c99_undefined();
+        int status = kiln_c99_share_value(input, result);
         const char *refusal = NULL;
-        /* The provider words the refusal (`kiln-shared-graph`), so both engines say the same. */
+        /* The provider words the refusal (`kiln-shared-graph`), so both engines say the same: the
+         * build's own reason for a graph, the value's kind for a root never built. */
+        uint32_t kind = input.tag == KILN_VALUE_OBJECT || input.tag == KILN_VALUE_ARRAY
+                            ? 0 : kiln_c99_shared_refusal_kind(input);
         if (status == KILN_C99_INVALID_ARGUMENT)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                        kiln_shared_graph_refusal(&refusal) == 0
+                                        kiln_shared_graph_refusal(kind, &refusal) == 0
                                             ? refusal
-                                            : "cannot share this value or property graph");
+                                            : "cannot share this value");
         return status;
     }
     if (code == KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW)

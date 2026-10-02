@@ -1563,6 +1563,25 @@ static kiln_object *kiln_c99_shared_source_store(uint64_t id, kiln_array **array
     return NULL;
 }
 
+/* Why `share` refuses a value that is not plain data, in `kiln-shared-graph`'s kind codes
+ * (1 Proxy, 2 function, 3 custom prototype, 4 internal state, 5 symbol), so the provider words
+ * it exactly as the interpreter does. The order is the interpreter's. */
+static uint32_t kiln_c99_shared_refusal_kind(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_PROXY: return 1;
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_METHOD:
+    case KILN_VALUE_BOUND:
+    case KILN_VALUE_SETTLER:
+    case KILN_VALUE_COMMONJS_REQUIRE: return 2;
+    case KILN_VALUE_SYMBOL: return 5;
+    default: return 4;
+    }
+}
+/* An inspector status for a refusal of `kind`; the provider reads `-(16 + kind)`. */
+#define KILN_C99_SHARED_REFUSED(kind) (-(16 + (int)(kind)))
+
 static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_field *field) {
     field->value_bits = value.bits;
     switch (value.tag) {
@@ -1593,7 +1612,10 @@ static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_fie
         field->value_node = facade->node;
         break;
     }
-    default: field->value_kind = 9; break;
+    default:
+        field->value_kind = 9;
+        field->value_bits = kiln_c99_shared_refusal_kind(value);
+        break;
     }
     return 0;
 }
@@ -1610,23 +1632,27 @@ static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t i
     if (array == NULL && store == NULL) return -1;
     if (index == UINT64_MAX) {
         kiln_value prototype = store == NULL ? kiln_c99_undefined() : store->prototype;
-        if (node == NULL || (array != NULL && array->match_index >= 0) ||
+        if (node == NULL) return -1;
+        if ((array != NULL && array->match_index >= 0) ||
             (store != NULL && (store->error_brand || store->arguments_brand ||
-                               store->module_namespace))) return -1;
+                               store->module_namespace))) return KILN_C99_SHARED_REFUSED(4);
         if (array == NULL) {
             if (prototype.tag != KILN_VALUE_UNDEFINED && prototype.tag != KILN_VALUE_NULL &&
                 !(prototype.tag == KILN_VALUE_BUILTIN &&
-                  prototype.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE)) return -1;
+                  prototype.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE))
+                return KILN_C99_SHARED_REFUSED(3);
         } else if (prototype.tag != KILN_VALUE_UNDEFINED &&
                    !(prototype.tag == KILN_VALUE_BUILTIN &&
-                     prototype.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE)) return -1;
+                     prototype.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE))
+            return KILN_C99_SHARED_REFUSED(3);
         if (array != NULL && array->count > UINT32_MAX) return -1;
         if (store != NULL) {
             for (size_t at = 0; at < named; ++at) {
                 const kiln_string *key = store->shape != NULL
                                              ? store->shape->keys[at]
                                              : store->properties[at].key;
-                if (key != NULL && (key->flags & KILN_STRING_PRIVATE_KEY) != 0) return -1;
+                if (key != NULL && (key->flags & KILN_STRING_PRIVATE_KEY) != 0)
+                    return KILN_C99_SHARED_REFUSED(3);
             }
         }
         node->kind = array == NULL ? 1 : 2;

@@ -241,6 +241,8 @@ impl InterpreterInspector {
             || object.shadow_realm.is_some()
             || object.weak_shared_target.is_some()
             || !object.finalization_cells.is_empty()
+            // A collection, and anything else the engine keeps in internal slots.
+            || object.properties.iter().any(|slot| slot.internal)
         {
             return Err(UnsupportedKind::InternalSlots);
         }

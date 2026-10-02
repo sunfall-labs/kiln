@@ -319,12 +319,17 @@ struct Endpoint {
     /// A worker that ends closes every end it holds, so each peer sees `close` as in node --
     /// including a port that arrived in a message, which no other record ties to the realm.
     holder: u64,
+    /// While in transit, the endpoint whose queue holds the message carrying this one: closing
+    /// that endpoint drops the message, so it closes this port too -- a port sent to a worker
+    /// that dies before it reads it closes with it, as in node. 0 once a realm holds it.
+    via: u64,
 }
 
 impl Endpoint {
     fn new(peer: u64) -> Self {
         Self {
             holder: current_key(),
+            via: 0,
             peer,
             queue: VecDeque::new(),
             waits: HashMap::new(),
@@ -954,6 +959,7 @@ pub fn post(from: u64, message: Message) -> bool {
     };
     target.queue.push_back(message);
     target.wake();
+    carry_released(&mut ports, peer);
     true
 }
 
@@ -968,7 +974,25 @@ pub fn enqueue(port: u64, message: Message) -> bool {
     };
     target.queue.push_back(message);
     target.wake();
+    carry_released(&mut ports, port);
     true
+}
+
+thread_local! {
+    /// Ports this thread released while encoding the message it is about to post.
+    static RELEASED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The ports released for the message just queued at `target` travel in its queue.
+fn carry_released(ports: &mut Ports, target: u64) {
+    for port in RELEASED.with(|released| std::mem::take(&mut *released.borrow_mut())) {
+        if port != target
+            && let Some(endpoint) = ports.endpoints.get_mut(&port)
+            && endpoint.holder == 0
+        {
+            endpoint.via = target;
+        }
+    }
 }
 
 /// The oldest message queued for `port`.
@@ -1029,6 +1053,7 @@ pub fn unsubscribe(port: u64, id: u64) {
 pub fn hold(port: u64) {
     if let Some(endpoint) = ports().endpoints.get_mut(&port) {
         endpoint.holder = current_key();
+        endpoint.via = 0;
     }
 }
 
@@ -1037,6 +1062,7 @@ pub fn hold(port: u64) {
 pub fn release(port: u64) {
     if let Some(endpoint) = ports().endpoints.get_mut(&port) {
         endpoint.holder = 0;
+        RELEASED.with(|released| released.borrow_mut().push(port));
     }
 }
 
@@ -1060,6 +1086,13 @@ pub fn close(port: u64) {
     let Some(endpoint) = ports.endpoints.remove(&port) else {
         return;
     };
+    // Ports travelling in the messages dropped with this queue close with it.
+    let carried: Vec<u64> = ports
+        .endpoints
+        .iter()
+        .filter(|(_, other)| other.via == port)
+        .map(|(id, _)| *id)
+        .collect();
     if let Some(peer) = ports.endpoints.get_mut(&endpoint.peer) {
         peer.peer = 0;
         if !peer.awaits_exit {
@@ -1080,6 +1113,9 @@ pub fn close(port: u64) {
     let peer = endpoint.peer;
     drop(ports);
     drop(endpoint);
+    for port in carried {
+        close(port);
+    }
     if let Some(reservations) = ACTOR_RESERVATIONS.get() {
         lock(reservations).retain(|_, entry| {
             let affected = entry.receiver == port
@@ -2183,6 +2219,13 @@ fn interrupt_waits(key: u64) {
 mod tests {
     use super::*;
 
+    /// Held by every test that starts a worker or reads [`running`]: the count is the process's,
+    /// so a worker another test starts in parallel would move it under an assertion.
+    fn worker_tests() -> MutexGuard<'static, ()> {
+        static WORKER_TESTS: Mutex<()> = Mutex::new(());
+        lock(&WORKER_TESTS)
+    }
+
     #[tokio::test]
     async fn async_wait_is_notified_without_a_value_change_and_counts_in_fifo_order() {
         let cell = std::sync::atomic::AtomicI32::new(0);
@@ -2258,6 +2301,7 @@ mod tests {
 
     #[test]
     fn an_ending_worker_closes_the_ports_it_holds_but_not_ports_in_transit() {
+        let _workers = worker_tests();
         let spec = |port, control| WorkerSpec {
             entry: WorkerEntry::Eval(String::new()),
             argv: Vec::new(),
@@ -2311,7 +2355,34 @@ mod tests {
     }
 
     #[test]
+    fn a_port_in_a_message_closes_when_the_queue_holding_it_does() {
+        let (receiver, sender) = channel();
+        let (partner, travelling) = channel();
+        release(travelling);
+        assert!(post(sender, Message::new(0, value_tokens(Token::Null))));
+        // Never read: closing the receiver drops the message and the port inside it.
+        close(receiver);
+        assert_eq!(state(travelling), STATE_GONE);
+        assert_ne!(state(partner) & STATE_PEER_CLOSED, 0);
+        let (receiver, sender) = channel();
+        let (partner2, adopted) = channel();
+        release(adopted);
+        assert!(post(sender, Message::new(0, value_tokens(Token::Null))));
+        hold(adopted);
+        close(receiver);
+        assert_ne!(
+            state(adopted),
+            STATE_GONE,
+            "an adopted port no longer travels"
+        );
+        for port in [sender, partner, partner2, adopted] {
+            close(port);
+        }
+    }
+
+    #[test]
     fn scheduled_worker_finishes_two_turns_and_wakes_for_termination() {
+        let _workers = worker_tests();
         use super::*;
 
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
@@ -2385,6 +2456,7 @@ mod tests {
 
     #[test]
     fn terminated_scheduled_worker_does_not_park_again() {
+        let _workers = worker_tests();
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
         let (parent, port) = channel();
         let (control, control_peer) = channel();
@@ -2435,6 +2507,7 @@ mod tests {
 
     #[test]
     fn cancelled_before_factory_still_reports_exit_and_releases_running_count() {
+        let _workers = worker_tests();
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2986,6 +3059,7 @@ mod tests {
 
     #[test]
     fn a_broadcast_group_is_the_programs_own() {
+        let _workers = worker_tests();
         // Two top-level realms on two threads are two programs: the same name is two groups.
         let here = broadcast_join("kiln-test-scoped");
         let there = std::thread::spawn(|| broadcast_join("kiln-test-scoped"))
@@ -3039,6 +3113,7 @@ mod tests {
 
     #[test]
     fn a_notify_wakes_a_waiter_on_another_thread() {
+        let _workers = worker_tests();
         let key = (0xfeed, 8);
         let waiter = std::thread::spawn(move || wait(key, || true, None));
         while notify(key, 1) == 0 {
@@ -3054,6 +3129,7 @@ mod tests {
 
     #[test]
     fn a_worker_reports_online_then_its_exit_code() {
+        let _workers = worker_tests();
         let (parent, port) = channel();
         let (control, _unused) = channel();
         let spec = WorkerSpec {
