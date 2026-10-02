@@ -2276,10 +2276,6 @@ fn inspect_nested_at(value: &Value, depth: usize, seen: &mut Vec<usize>, column:
     }
 }
 
-pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> String {
-    inspect_object_at(object, depth, seen, 0)
-}
-
 fn inspect_object_at(
     object: &ObjectData,
     depth: usize,
