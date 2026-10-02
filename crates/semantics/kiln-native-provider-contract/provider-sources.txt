@@ -11,6 +11,10 @@ crates/foundation/kiln-host-abi/src/lib.rs
 crates/foundation/kiln-number-core/Cargo.toml
 crates/foundation/kiln-number-core/src/lib.rs
 crates/foundation/kiln-number-core/src/typed_order.rs
+crates/foundation/kiln-date-core/Cargo.toml
+crates/foundation/kiln-date-core/src/lib.rs
+crates/foundation/kiln-key-core/Cargo.toml
+crates/foundation/kiln-key-core/src/lib.rs
 crates/foundation/kiln-string/Cargo.toml
 crates/foundation/kiln-string/src/lib.rs
 crates/native/kiln-native-provider-ffi/Cargo.toml
@@ -24,6 +28,7 @@ crates/semantics/kiln-temporal/Cargo.toml
 crates/semantics/kiln-temporal/src/lib.rs
 crates/semantics/kiln-intl/Cargo.toml
 crates/semantics/kiln-intl/src/collator.rs
+crates/semantics/kiln-intl/src/casemap.rs
 crates/semantics/kiln-intl/src/datetime.rs
 crates/semantics/kiln-intl/src/displaynames.rs
 crates/semantics/kiln-intl/src/duration.rs
@@ -58,6 +63,9 @@ crates/host/kiln-runtime/src/turn_scheduler.rs
 crates/host/kiln-runtime/src/worker_pool.rs
 crates/host/kiln-runtime/src/workers.rs
 crates/host/kiln-runtime/src/uring.rs
+crates/host/kiln-shared-graph/Cargo.toml
+crates/host/kiln-shared-graph/src/arena.rs
+crates/host/kiln-shared-graph/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/main.rs
 crates/native/kiln-native/Cargo.toml
@@ -69,6 +77,8 @@ crates/semantics/kiln-native-provider-contract/c/kiln_string_number.c
 crates/semantics/kiln-native-provider-contract/c/ffc.h
 crates/native/kiln-native-provider-ffi/src/provider/bigint.rs
 crates/native/kiln-native-provider-ffi/src/provider/bigint_stubs.rs
+crates/native/kiln-native-provider-ffi/src/provider/date.rs
+crates/native/kiln-native-provider-ffi/src/provider/keys.rs
 crates/native/kiln-native-provider-ffi/src/provider/ffi_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/heap.rs
 crates/native/kiln-native-provider-ffi/src/provider/intl.rs
@@ -82,6 +92,8 @@ crates/native/kiln-native-provider-ffi/src/provider/realm/reclaim.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm/shared_graph.rs
 crates/native/kiln-native-provider-ffi/src/provider/regexp.rs
 crates/native/kiln-native-provider-ffi/src/provider/regexp_stubs.rs
+crates/semantics/kiln-regexp/Cargo.toml
+crates/semantics/kiln-regexp/src/lib.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/workers.rs
