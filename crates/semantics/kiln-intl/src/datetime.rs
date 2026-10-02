@@ -1506,6 +1506,13 @@ fn adjust_numeric_widths(
     options: &Options,
     zero_digit: &str,
 ) -> Vec<(&'static str, String)> {
+    // Keep the ordinary formatter and parts formatter byte-for-byte aligned. ICU's resolved
+    // pattern can legitimately use a two-digit field for a plain `numeric` request (for example,
+    // the German short date pattern); only undo that padding when a competing explicit 2-digit
+    // field caused ICU's global alignment behavior.
+    if !needs_numeric_width_adjustment(options) {
+        return parts;
+    }
     for (kind, text) in &mut parts {
         let requested = match *kind {
             "month" => options.month.as_deref(),
@@ -1777,6 +1784,26 @@ mod tests {
                 ("year", "1970".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn ordinary_numeric_patterns_keep_format_and_parts_consistent() {
+        let formatter = DateTimeFormat::new(
+            &["de".to_owned()],
+            Options {
+                time_zone: utc(),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let formatted = formatter.format(0.0).unwrap();
+        let parts = formatter
+            .format_to_parts(0.0)
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<String>();
+        assert_eq!(formatted, parts);
     }
 
     #[test]

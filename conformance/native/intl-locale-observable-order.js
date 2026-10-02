@@ -18,3 +18,25 @@ try {
 console.log(locale([, 'en']));
 try { locale([undefined]); }
 catch (error) { console.log(error.name); }
+
+const symbolLocale = Symbol('locales');
+const symbolEvents = [];
+for (const key of ['length', '0']) {
+  Object.defineProperty(Symbol.prototype, key, {
+    configurable: true,
+    get() {
+      if (this === symbolLocale || !(this instanceof Symbol) || this.valueOf() !== symbolLocale) {
+        throw new Error(`ToObject receiver lost for ${key}`);
+      }
+      symbolEvents.push(key);
+      return key === 'length' ? 1 : 'en';
+    }
+  });
+}
+console.log(locale(symbolLocale), symbolEvents.join(','));
+delete Symbol.prototype.length;
+delete Symbol.prototype[0];
+
+// Only Intl.Locale is a single-element special case. Other Intl objects are array-like inputs;
+// without a length they request the default locale list.
+console.log(locale(new Intl.DateTimeFormat()));

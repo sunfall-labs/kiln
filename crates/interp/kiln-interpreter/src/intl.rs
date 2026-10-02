@@ -1161,25 +1161,29 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
         let mut seen: Vec<String> = Vec::new();
         // A bare string is treated as a one-element list, and so is a `Intl.Locale`.
-        if matches!(value, Value::String(_) | Value::Intl(_)) {
+        if matches!(value, Value::String(_))
+            || matches!(value, Value::Intl(intl) if matches!(intl.as_ref(), IntlValue::Locale(_)))
+        {
             self.add_canonical_locale(value.clone(), instruction, &mut seen)?;
             return Ok(seen);
         }
-        if matches!(value, Value::Undefined | Value::Null) {
-            return Err(type_error("locales is not an object"));
-        }
+        // CanonicalizeLocaleList performs ToObject before LengthOfArrayLike. This matters for
+        // primitive receivers: inherited accessors on Symbol.prototype must observe the boxed
+        // Symbol as `this`, and inherited indexed accessors must use the same wrapper.
+        let object = crate::properties::to_object(value)
+            .ok_or_else(|| type_error("locales is not an object"))?;
 
-        let length = self.array_like_length(value, instruction)?;
+        let length = self.array_like_length(&object, instruction)?;
         // Read and validate each entry before touching the next one. A malformed locale at index
         // zero must throw before a getter at index one runs. HasProperty also distinguishes a
         // sparse hole (which is skipped) from a present `undefined` (which is an invalid locale).
         for index in 0..length {
             let key = Value::String(StringUnits::from(index.to_string()));
-            if !self.has(value, &key, instruction)? {
+            if !self.has(&object, &key, instruction)? {
                 continue;
             }
             let key = index.to_string();
-            let element = self.read_property(value, &key, instruction)?;
+            let element = self.read_property(&object, &key, instruction)?;
             self.add_canonical_locale(element, instruction, &mut seen)?;
         }
         Ok(seen)

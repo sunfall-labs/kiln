@@ -737,7 +737,7 @@ pub(super) fn wrapped_primitive(value: &Value) -> Option<Value> {
 /// number" where the specification boxes the number and copies onto the box, and
 /// `Object.prototype.hasOwnProperty.call(undefined, "x")` answered `false` where it owes a
 /// `TypeError` -- an answer a feature-detect reads as "no such property".
-pub(super) fn to_object(value: &Value) -> Option<Value> {
+pub(crate) fn to_object(value: &Value) -> Option<Value> {
     match value {
         Value::Undefined | Value::Null => None,
         Value::Boolean(_)
