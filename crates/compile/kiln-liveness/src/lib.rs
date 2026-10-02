@@ -384,17 +384,32 @@ fn mark_resolved_export_path_live(
         return;
     }
 
+    // A side-effect-free ESM barrel need not be emitted just to forward a demanded export.
+    // `reduce_to_live` rewrites the importing edge to the canonical provider when this path is
+    // absent from `live`. Keep the module itself only when it is the export's actual provider or
+    // package metadata does not license skipping its evaluation.
+    let resolved_provider_is_owner = match resolved {
+        ResolvedExport::Local { module, .. }
+        | ResolvedExport::CommonJsNamed { module, .. }
+        | ResolvedExport::Namespace { module } => module == owner,
+        ResolvedExport::Ambiguous => true,
+    };
+    let retain_owner = resolved_provider_is_owner
+        || !package_declares_no_side_effects(&node.path, graph.project_root());
+
     if let Some(export) = node.program.exports.iter().find(|export| {
         !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
             && export.exported == exported_name
     }) {
-        let newly_live = live.insert(node.path.clone());
-        let newly_demanded = live_export_slots
-            .entry(node.path.clone())
-            .or_default()
-            .insert(export.local_slot);
-        if newly_live || newly_demanded {
-            queue.push_back(node.path.clone());
+        if retain_owner {
+            let newly_live = live.insert(node.path.clone());
+            let newly_demanded = live_export_slots
+                .entry(node.path.clone())
+                .or_default()
+                .insert(export.local_slot);
+            if newly_live || newly_demanded {
+                queue.push_back(node.path.clone());
+            }
         }
         if let Some((index, import)) = node
             .program
@@ -403,9 +418,11 @@ fn mark_resolved_export_path_live(
             .enumerate()
             .find(|(_, import)| import.local_slot == export.local_slot)
         {
-            let newly_imported = live_imports.insert((node.path.clone(), index));
-            if newly_imported {
-                queue.push_back(node.path.clone());
+            if retain_owner {
+                let newly_imported = live_imports.insert((node.path.clone(), index));
+                if newly_imported {
+                    queue.push_back(node.path.clone());
+                }
             }
             if import.imported != kiln_ir::NAMESPACE_IMPORT
                 && let Some(dependency) = node
@@ -448,7 +465,7 @@ fn mark_resolved_export_path_live(
         if graph.resolved_export(&dependency.target, exported_name) != Some(resolved) {
             continue;
         }
-        if live.insert(node.path.clone()) {
+        if retain_owner && live.insert(node.path.clone()) {
             queue.push_back(node.path.clone());
         }
         mark_resolved_export_path_live(

@@ -4481,6 +4481,17 @@ fn executable_graph_omits_unused_modules_only_with_package_permission() {
     assert!(names.contains(std::ffi::OsStr::new("used.js")));
     assert!(!names.contains(std::ffi::OsStr::new("index.js")));
     assert!(!names.contains(std::ffi::OsStr::new("unused.js")));
+
+    let (reduced, _) = graph
+        .reduce_to_live(&selected.demand())
+        .expect("rewrite the live import around the omitted barrel");
+    let entry_node = reduced.module(&entry).expect("retained entry module");
+    assert!(
+        entry_node
+            .dependencies
+            .iter()
+            .any(|dependency| { dependency.target.ends_with("node_modules/example/used.js") })
+    );
 }
 
 #[test]
