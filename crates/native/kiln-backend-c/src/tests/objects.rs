@@ -56,6 +56,7 @@ int main(void) {
         !deleted || b->shape != NULL || b->count != 3 || a->count != 5) return 10;
     return 0;
 }
+
 "#;
     let run = run_with_main(&generated, wrapper, "final-builtin-layout");
     assert!(
@@ -66,6 +67,88 @@ int main(void) {
     );
 }
 
+#[test]
+fn large_dictionary_lookup_cache_is_private_and_gc_owned() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value source = kiln_c99_undefined(), readonly = kiln_c99_undefined(), value;
+    kiln_object *source_object, *readonly_object;
+    kiln_c99_no_write_frame frame;
+    kiln_c99_clone_arena arena = {0};
+    kiln_dictionary_index *index;
+    size_t slot;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 0;
+    kiln_c99_gc_heap_register(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    if (kiln_c99_new_object(&source) != KILN_C99_OK ||
+        kiln_c99_new_object(&readonly) != KILN_C99_OK) return 1;
+    for (size_t i = 0; i < 40; ++i) {
+        char key[16];
+        int len = snprintf(key, sizeof key, "key%02zu", i);
+        if (len <= 0 || (size_t)len >= sizeof key ||
+            kiln_c99_define_method(source, key, (size_t)len,
+                                   kiln_c99_number((double)i)) != KILN_C99_OK ||
+            kiln_c99_define_method(readonly, key, (size_t)len,
+                                   kiln_c99_number((double)(i + 100))) != KILN_C99_OK)
+            return 2;
+    }
+    source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
+    if (source_object->count != 40 || source_object->dictionary_index != NULL) return 3;
+    slot = kiln_c99_own_index(source_object, NULL, "key39", 5);
+    if (slot != 39 || source_object->dictionary_index == NULL) return 4;
+    index = source_object->dictionary_index;
+    if (kiln_c99_own_index(source_object, NULL, "key17", 5) != 17 ||
+        source_object->dictionary_index != index) return 5;
+
+    /* Read-only workers get the same answer without publishing a mutable side index. */
+    kiln_c99_no_write_enter(&heap, &frame);
+    slot = kiln_c99_own_index(readonly_object, NULL, "key39", 5);
+    kiln_c99_no_write_leave(&frame);
+    if (slot != 39 || readonly_object->dictionary_index != NULL) return 6;
+
+    /* The object remains valid through collection, and its cache remains attached to the
+     * owning object rather than becoming an untraced pointer edge. */
+    heap.enabled = 1;
+    kiln_c99_gc_collect(&heap, 1);
+    heap.enabled = 0;
+    source_object = kiln_c99_object_of(source);
+    if (source_object == NULL || source_object->dictionary_index != index ||
+        kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_as_number(value) != 39.0) return 7;
+
+    /* A prepared cross-region clone owns fresh object storage and never aliases the source
+     * cache; arena discard frees its own side storage without relying on object finalizers. */
+    if (kiln_c99_clone_arena_prepare(&arena, &heap, source,
+                                     2 * heap.nursery.capacity) != KILN_C99_OK ||
+        !arena.certified || arena.capsule.root.tag != KILN_VALUE_OBJECT) return 8;
+    {
+        kiln_object *copy = kiln_c99_object_of(arena.capsule.root);
+        if (copy == NULL || copy == source_object || copy->dictionary_index != NULL ||
+            copy->count != source_object->count) {
+            kiln_c99_clone_arena_dispose(&arena);
+            return 9;
+        }
+    }
+    kiln_c99_clone_arena_dispose(&arena);
+    if (source_object->dictionary_index != index ||
+        kiln_c99_own_index(readonly_object, NULL, "key17", 5) != 17) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "dictionary-index-ownership");
+    assert!(
+        run.status.success(),
+        "dictionary index ownership failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
 #[test]
 fn compact_property_records_trace_the_live_data_or_accessor_arm() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
