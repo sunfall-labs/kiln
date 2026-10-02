@@ -1611,7 +1611,10 @@ int main(void) {
 fn split_instantiation_call_sites_use_declared_shared_receiver_helper() {
     let mut module = super::module(
         super::program(
-            vec![Constant::Number(1.0f64.to_bits()), Constant::String("toString".into())],
+            vec![
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("toString".into()),
+            ],
             vec![
                 Instruction::Const(0),
                 Instruction::CallMethod { name: 1, argc: 0 },
@@ -1633,7 +1636,11 @@ fn split_instantiation_call_sites_use_declared_shared_receiver_helper() {
     .expect("split module emits");
     let instantiation = emitted.instantiation.expect("instantiation entry emitted");
 
-    assert!(instantiation.source.contains("kiln_c99_normalize_closure_receiver"));
+    assert!(
+        instantiation
+            .source
+            .contains("kiln_c99_normalize_closure_receiver")
+    );
     assert!(runtime_prelude_header().contains(
         "extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);"
     ));

@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // Array spread on a collection must use its @@iterator property, including an override on a
 // Map subclass. The backing Map is intentionally empty so a collection-internal shortcut is
 // observably different from the protocol.
