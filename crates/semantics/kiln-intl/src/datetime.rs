@@ -452,7 +452,7 @@ impl DateTimeFormat {
         };
         preferences.hour_cycle = hour_cycle;
         let zero_digit = DecimalFormatter::try_new(
-            preferences.clone().into(),
+            (&preferences).into(),
             DecimalFormatterOptions::default(),
         )
         .map(|formatter| {
