@@ -103,6 +103,294 @@
         "status": "inferred from retained validation record",
         "working_tree_dirty": null
       }
+    },
+    "linux-x86-64-amd-ryzen-7-5800h-with-radeon-graphics-native-release": {
+      "bundles": {
+        "acorn": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 18.04,
+          "min_ms": 17.65,
+          "workload_sha256": "d7a25c3ae2c13bc03bba2b39509ace8a9da3ba724cd104a0fee12b9c81322c85"
+        },
+        "chalk": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 6.97,
+          "min_ms": 6.38,
+          "workload_sha256": "d7e4e94569ca1fdc4b96dc7acd72c7c2303796424f05d2e6b7301914afde7679"
+        },
+        "datefns": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 6.26,
+          "min_ms": 5.89,
+          "workload_sha256": "ce95a12f95374f0f48f55bcfae44cd4165467c3fd025c369e3060e1bea9d9153"
+        },
+        "dayjs": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 7.61,
+          "min_ms": 7.13,
+          "workload_sha256": "2a33388f7530caf4578f5b5fe329175b401396aac2bae43921d41d73001e0c6c"
+        },
+        "immer": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 5.42,
+          "min_ms": 5.25,
+          "workload_sha256": "a13a0c461d27fb8432b4e502df510210046eb816af29e08556b5f12dcdf9c7ef"
+        },
+        "marked": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 11.45,
+          "min_ms": 11.25,
+          "workload_sha256": "e39b413c126685ca22512df10ad2ecf9450ccbbbe615edb4ec8a36f81904ca61"
+        },
+        "ms": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 5.04,
+          "min_ms": 4.69,
+          "workload_sha256": "8f38f4b197a1728e97c058156ebe4272a7c26628862488b25861957aee0781d0"
+        },
+        "mustache": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 5.28,
+          "min_ms": 5.01,
+          "workload_sha256": "09f1b5f9afd5e91bea5eac60a765dffcdda00b36c2c99df1732342f3d75952f2"
+        },
+        "postcss": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 11.73,
+          "min_ms": 11.25,
+          "workload_sha256": "4a97abb64d9265c7a15dc08b8d69ebd9891926b42353ff5f121847350cfeabdd"
+        },
+        "rxjs": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 18.68,
+          "min_ms": 17.88,
+          "workload_sha256": "08e318d8db0e2c3747637f0c711feaf173b654d53ef318d3d1389a5e5709caf6"
+        },
+        "semver": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 9.36,
+          "min_ms": 8.9,
+          "workload_sha256": "fb4ee2c5a2e4b203cacaf733c5605ff48617299c0183588f3b89eea9d7b27762"
+        },
+        "uuid": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 5.28,
+          "min_ms": 4.93,
+          "workload_sha256": "8f4e8b08001cbd944890f86a6b4f734e42dd21136979f3d8858fd053b4b59520"
+        },
+        "vue-reactivity": {
+          "measurement_provenance": {
+            "clang_version": "clang version 22.1.8",
+            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "min_delta_ms": 3.0,
+            "passes": 21,
+            "profile": "native-release",
+            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "threshold_pct": 25.0,
+            "warmup": 3,
+            "working_tree_dirty": true
+          },
+          "median_ms": 6.83,
+          "min_ms": 6.46,
+          "workload_sha256": "e35013989c50b64a681f1381d45366afe6d44bca961ab1a6e84a1f89e642c0f6"
+        }
+      },
+      "platform": {
+        "cpu_model": "AMD Ryzen 7 5800H with Radeon Graphics",
+        "machine": "x86_64",
+        "release": "7.2.6-1-cachyos",
+        "system": "Linux"
+      },
+      "profile": "native-release",
+      "provenance": {
+        "clang_version": "clang version 22.1.8",
+        "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+        "min_delta_ms": 3.0,
+        "passes": 21,
+        "profile": "native-release",
+        "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+        "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+        "scope": "latest_update",
+        "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+        "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "threshold_pct": 25.0,
+        "updated_bundles": [
+          "acorn",
+          "chalk",
+          "datefns",
+          "dayjs",
+          "immer",
+          "marked",
+          "ms",
+          "mustache",
+          "postcss",
+          "rxjs",
+          "semver",
+          "uuid",
+          "vue-reactivity"
+        ],
+        "warmup": 3,
+        "working_tree_dirty": true
+      }
     }
   },
   "schema": 2,
