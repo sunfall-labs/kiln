@@ -94,7 +94,14 @@ console.log(asynchronous.kindMarker === undefined, asynchronous.customMarker ===
 
 asynchronous.constructor = ordinary;
 console.log(asynchronous.constructor === ordinary);
-delete asynchronous.constructor;
+if (!Reflect.deleteProperty(asynchronous, "constructor") ||
+    Reflect.ownKeys(asynchronous).includes("constructor")) {
+  throw new Error("deleting a configurable closure property must remove the own property");
+}
+Object.defineProperty(asynchronous, "lockedKindTag", { value: 1, configurable: false });
+if (Reflect.deleteProperty(asynchronous, "lockedKindTag") || asynchronous.lockedKindTag !== 1) {
+  throw new Error("deleting a non-configurable closure property must fail");
+}
 Object.setPrototypeOf(asynchronous, Function.prototype);
 console.log(asynchronous.constructor === Function, asynchronous instanceof AsyncFunction);
 Object.setPrototypeOf(asynchronous, null);

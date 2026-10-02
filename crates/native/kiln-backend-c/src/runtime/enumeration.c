@@ -715,6 +715,17 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         }
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        /* Function-owned properties live in the closure's ordinary property store. Keep
+         * deletion on that same authority used by reads and writes; treating the function as a
+         * non-object here would report success while leaving an own property visible. */
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         int found;
         int enumerable;
