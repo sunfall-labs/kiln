@@ -68,6 +68,8 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run wpt-update` | regenerate the WPT baseline; deliberate, and the diff is the record |
 | `mise run wpt-fetch` | fetch the pinned WPT directories into `~/.cache/kiln`, once per machine |
 | `mise run http-close` | the Node HTTP close contract, across all four seams |
+| `mise run gui-smoke` | kiln:gui against the real window system (macOS; needs a logged-in session) |
+| `mise run gui-types` | the `@kiln/gui` declarations match `gui.ts`; the GUI examples type-check |
 | `mise run silent-undefined` | the expensive native-`undefined` class; several hundred compiles, not per-commit |
 | `mise run facts` | check the committed whole-program facts baseline for benchmarks and bundles |
 | `mise run facts-update` | regenerate the facts baseline; deliberate, and the diff is the record |

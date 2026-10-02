@@ -1,3184 +1,2693 @@
-// Virtual native GUI built-in module for Kiln (ADR 0074).
-// Exposes cross-platform native UI widget primitives, an in-memory virtual tree
-// for headless testability, and a fine-grained universal renderer seam for SolidJS 2.0.
+// kiln:gui — native desktop UI for kiln programs (ADR 0074).
+//
+// Layers, bottom to top:
+//
+//   1. Reactivity    signals, memos and effects with owners; glitch-free (push-pull)
+//   2. Control flow  Show, For, Index, Switch/Match, Dynamic, context
+//   3. Hosts         where widgets live: the native library (AppKit today) or an in-memory
+//                    headless host for tests and for engines without FFI
+//   4. Widgets       Node and its subclasses; layout semantics are decided here, once
+//   5. JSX           lazy elements, insert(), render(), runApp()
+//   6. Event loop    drains host events in batches between bounded native waits
+//   7. OS services   dialogs, clipboard, appearance, notifications, menus, tray, shortcuts
 
-const G = globalThis as any;
-let nextNodeId = 1;
-export const nodeRegistry = new Map<number, Node>();
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 1. Reactivity
+//
+// Signals push "maybe stale" marks down the graph; effects pull from their sources when they
+// run. A memo recomputes only when a source really changed, and an effect never sees two
+// sources from different moments (no glitches). A write outside `batch` flushes before it
+// returns, so `setCount(1); label.text` reads the new text.
 
-export type ButtonVariant = "primary" | "secondary" | "destructive" | "flat" | "ghost";
-export type ControlSize = "sm" | "md" | "lg";
+export type Accessor<T> = () => T;
+export type Setter<T> = (value: T | ((prev: T) => T)) => T;
+export type MaybeAccessor<T> = T | Accessor<T>;
+type Cleanup = () => void;
 
-export interface GtkStyleOptions {
-  class?: string;
-  css?: string;
+const CLEAN = 0;
+const CHECK = 1;
+const DIRTY = 2;
+
+interface Owner {
+  owner: Owner | null;
+  owned: Computation<any>[] | null;
+  cleanups: Cleanup[] | null;
+  context: Map<object, unknown> | null;
 }
 
-export interface MacStyleOptions {
-  bezelStyle?: "rounded" | "regularSquare" | "disclosure" | "inline" | "circular";
-  tint?: string;
-  keyEquivalent?: string;
+interface Source {
+  observers: Set<Computation<any>>;
 }
 
-export interface WinStyleOptions {
-  variant?: "accent" | "standard";
-  material?: "mica" | "acrylic";
-  cornerPreference?: "rounded" | "square";
-}
-
-export interface PlatformStyles {
-  gtk?: GtkStyleOptions;
-  mac?: MacStyleOptions;
-  win?: WinStyleOptions;
-}
-
-export interface ButtonOptions {
-  label?: string;
-  variant?: ButtonVariant;
-  size?: ControlSize;
-  disabled?: boolean;
-  platform?: PlatformStyles;
-  onPress?: () => void;
-}
-
-// Platform OS Windowing Drivers (ADR 0074)
-export interface PlatformDriver {
-  readonly name: string;
-  init(): boolean;
-  getHandle(nodeId: number): bigint | null;
-  createWindow(win: Window): bigint | null;
-  showWindow(win: Window): void;
-  closeWindow(win: Window): void;
-  maximizeWindow?(win: Window): void;
-  unmaximizeWindow?(win: Window): void;
-  minimizeWindow?(win: Window): void;
-  setFullscreen?(win: Window, fullscreen: boolean): void;
-  setResizable?(win: Window, resizable: boolean): void;
-  setWindowContent(winHandle: bigint, childHandle: bigint): void;
-  createWidget(node: Node): bigint | null;
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void;
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
-  removeChild(parentHandle: bigint, childHandle: bigint): void;
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void;
-  disposeWidget(node: Node): void;
-  pumpEvents(waitMs?: number): boolean;
-  snapshotWindow?(win: Window, path: string): boolean;
-}
-
-function toCStr(ffi: any, str: string): bigint {
-  const enc = new TextEncoder();
-  const bytes = enc.encode(str + "\0");
-  return ffi.getRawPointer(bytes.buffer);
-}
-
-function fromCStr(ffi: any, ptr: bigint, maxLen = 4096): string {
-  if (!ptr || !ffi || typeof ffi.toArrayBuffer !== "function") return "";
-  try {
-    const buf = ffi.toArrayBuffer(ptr, maxLen);
-    const u8 = new Uint8Array(buf);
-    let len = 0;
-    while (len < u8.length && u8[len] !== 0) len++;
-    return new TextDecoder().decode(u8.subarray(0, len));
-  } catch (_) {
-    return "";
-  }
-}
-
-export class Gtk4Driver implements PlatformDriver {
-  readonly name = "gtk4";
-  private initialized = false;
-  private gtk: any = null;
-  private ffi: any = null;
-  private handles = new Map<number, bigint>();
-  private nodeByHandle = new Map<bigint, number>();
-  private callbacks = new Map<number, bigint[]>();
-
-  init(): boolean {
-    if (this.initialized) return this.gtk !== null;
-    this.initialized = true;
-    try {
-      this.ffi = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.ffi) || null;
-      if (!this.ffi) return false;
-      const hasDisplay = typeof process !== "undefined" && process.env && (process.env.WAYLAND_DISPLAY || process.env.DISPLAY);
-      if (!hasDisplay) return false;
-      if (process.platform !== "linux") return false;
-
-      this.gtk = this.ffi.dlopen("libgtk-4.so.1", {
-        gtk_init_check: { arguments: [], return: "i32" },
-        gtk_window_new: { arguments: [], return: "pointer" },
-        gtk_window_set_title: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_window_set_default_size: { arguments: ["pointer", "i32", "i32"], return: "void" },
-        gtk_window_set_child: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_window_present: { arguments: ["pointer"], return: "void" },
-        gtk_window_close: { arguments: ["pointer"], return: "void" },
-        gtk_window_maximize: { arguments: ["pointer"], return: "void" },
-        gtk_window_unmaximize: { arguments: ["pointer"], return: "void" },
-        gtk_window_minimize: { arguments: ["pointer"], return: "void" },
-        gtk_window_fullscreen: { arguments: ["pointer"], return: "void" },
-        gtk_window_unfullscreen: { arguments: ["pointer"], return: "void" },
-        gtk_window_set_resizable: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_box_new: { arguments: ["i32", "i32"], return: "pointer" },
-        gtk_box_append: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_box_remove: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_button_new_with_label: { arguments: ["pointer"], return: "pointer" },
-        gtk_button_set_label: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_label_new: { arguments: ["pointer"], return: "pointer" },
-        gtk_label_set_text: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_entry_new: { arguments: [], return: "pointer" },
-        gtk_editable_set_text: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_editable_get_text: { arguments: ["pointer"], return: "pointer" },
-        gtk_switch_new: { arguments: [], return: "pointer" },
-        gtk_switch_set_active: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_switch_get_active: { arguments: ["pointer"], return: "i32" },
-        gtk_scale_new_with_range: { arguments: ["i32", "f64", "f64", "f64"], return: "pointer" },
-        gtk_range_set_value: { arguments: ["pointer", "f64"], return: "void" },
-        gtk_range_get_value: { arguments: ["pointer"], return: "f64" },
-        gtk_widget_set_margin_top: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_widget_set_margin_bottom: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_widget_set_margin_start: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_widget_set_margin_end: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_widget_set_halign: { arguments: ["pointer", "i32"], return: "void" },
-        gtk_widget_set_valign: { arguments: ["pointer", "i32"], return: "void" },
-        g_signal_connect_data: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "i32"], return: "u64" },
-        g_main_context_iteration: { arguments: ["pointer", "i32"], return: "i32" },
-        g_main_context_pending: { arguments: ["pointer"], return: "i32" },
-        gdk_display_get_default: { arguments: [], return: "pointer" },
-        gtk_css_provider_new: { arguments: [], return: "pointer" },
-        gtk_css_provider_load_from_string: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_style_context_add_provider_for_display: { arguments: ["pointer", "pointer", "u32"], return: "void" },
-        gtk_widget_add_css_class: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_widget_remove_css_class: { arguments: ["pointer", "pointer"], return: "void" },
-        gtk_widget_set_sensitive: { arguments: ["pointer", "i32"], return: "void" },
-      });
-
-      if (this.gtk && this.gtk.functions && this.gtk.functions.gtk_init_check && this.gtk.functions.gtk_init_check() === 1) {
-        return true;
-      }
-    } catch (_) {}
-    this.gtk = null;
-    return false;
-  }
-
-  getHandle(nodeId: number): bigint | null {
-    return this.handles.get(nodeId) || null;
-  }
-
-  createWindow(win: Window): bigint | null {
-    if (!this.gtk) return null;
-    let handle = this.handles.get(win.id);
-    if (handle) return handle;
-
-    try {
-      handle = this.gtk.functions.gtk_window_new();
-      this.handles.set(win.id, handle);
-      this.nodeByHandle.set(handle, win.id);
-      this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, win.title || "Kiln Window"));
-      this.gtk.functions.gtk_window_set_default_size(handle, win.width || 800, win.height || 600);
-
-      const closeCallbackPtr = this.gtk.lib.registerCallback(
-        { arguments: ["pointer", "pointer"], return: "i32" },
-        () => {
-          win.visible = false;
-          turnMailbox.post(win.id, "close");
-          return 0;
-        }
-      );
-      this.callbacks.set(win.id, [closeCallbackPtr]);
-      this.gtk.functions.g_signal_connect_data(handle, toCStr(this.ffi, "close-request"), closeCallbackPtr, 0n, 0n, 0);
-      return handle;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  setWindowContent(winHandle: bigint, childHandle: bigint): void {
-    if (!this.gtk) return;
-    try {
-      this.gtk.functions.gtk_widget_set_margin_top(childHandle, 24);
-      this.gtk.functions.gtk_widget_set_margin_bottom(childHandle, 24);
-      this.gtk.functions.gtk_widget_set_margin_start(childHandle, 24);
-      this.gtk.functions.gtk_widget_set_margin_end(childHandle, 24);
-      this.gtk.functions.gtk_window_set_child(winHandle, childHandle);
-    } catch (_) {}
-  }
-
-  showWindow(win: Window): void {
-    if (!this.gtk) return;
-    let winHandle = this.handles.get(win.id);
-    if (!winHandle) {
-      winHandle = this.createWindow(win);
-    }
-    if (winHandle) {
-      if (win.content) {
-        const childHandle = this.createWidget(win.content);
-        if (childHandle) {
-          this.setWindowContent(winHandle, childHandle);
-        }
-      }
-      this.gtk.functions.gtk_window_present(winHandle);
-      this.pumpEvents();
-    }
-  }
-
-  closeWindow(win: Window): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk) {
-      try {
-        this.gtk.functions.gtk_window_close(handle);
-      } catch (_) {}
-      this.handles.delete(win.id);
-      this.callbacks.delete(win.id);
-      this.nodeByHandle.delete(handle);
-    }
-  }
-
-  maximizeWindow(win: Window): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk?.functions?.gtk_window_maximize) {
-      try {
-        this.gtk.functions.gtk_window_maximize(handle);
-      } catch (_) {}
-    }
-  }
-
-  unmaximizeWindow(win: Window): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk?.functions?.gtk_window_unmaximize) {
-      try {
-        this.gtk.functions.gtk_window_unmaximize(handle);
-      } catch (_) {}
-    }
-  }
-
-  minimizeWindow(win: Window): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk?.functions?.gtk_window_minimize) {
-      try {
-        this.gtk.functions.gtk_window_minimize(handle);
-      } catch (_) {}
-    }
-  }
-
-  setFullscreen(win: Window, fullscreen: boolean): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk?.functions) {
-      try {
-        if (fullscreen) {
-          if (this.gtk.functions.gtk_window_fullscreen) {
-            this.gtk.functions.gtk_window_fullscreen(handle);
-          }
-        } else {
-          if (this.gtk.functions.gtk_window_unfullscreen) {
-            this.gtk.functions.gtk_window_unfullscreen(handle);
-          }
-        }
-      } catch (_) {}
-    }
-  }
-
-  setResizable(win: Window, resizable: boolean): void {
-    const handle = this.handles.get(win.id);
-    if (handle && this.gtk?.functions?.gtk_window_set_resizable) {
-      try {
-        this.gtk.functions.gtk_window_set_resizable(handle, resizable ? 1 : 0);
-      } catch (_) {}
-    }
-  }
-
-  addGlobalCss(css: string): boolean {
-    if (!this.init() || !this.gtk) return false;
-    try {
-      const display = this.gtk.functions.gdk_display_get_default();
-      if (!display) return false;
-      const provider = this.gtk.functions.gtk_css_provider_new();
-      this.gtk.functions.gtk_css_provider_load_from_string(provider, toCStr(this.ffi, css));
-      this.gtk.functions.gtk_style_context_add_provider_for_display(display, provider, 600 /* GTK_STYLE_PROVIDER_PRIORITY_APPLICATION */);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  applyWidgetStyling(node: Node, handle: bigint): void {
-    if (!this.gtk) return;
-    try {
-      const ffi = this.ffi;
-      const gtk = this.gtk;
-
-      // Sensitivity / disabled
-      const disabled = node.getProperty("disabled");
-      if (disabled !== undefined && gtk.functions.gtk_widget_set_sensitive) {
-        gtk.functions.gtk_widget_set_sensitive(handle, disabled ? 0 : 1);
-      }
-
-      // Semantic variant
-      const variant = node.getProperty("variant");
-      if (variant && gtk.functions.gtk_widget_add_css_class) {
-        if (variant === "primary") {
-          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "suggested-action"));
-        } else if (variant === "destructive") {
-          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "destructive-action"));
-        } else if (variant === "flat" || variant === "ghost") {
-          gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, "flat"));
-        }
-      }
-
-      // Platform GTK styles
-      const platform = node.getProperty("platform") as PlatformStyles | undefined;
-      if (platform?.gtk) {
-        if (platform.gtk.class && gtk.functions.gtk_widget_add_css_class) {
-          const classes = platform.gtk.class.split(/\s+/).filter(Boolean);
-          for (let i = 0; i < classes.length; i++) {
-            gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, classes[i]));
-          }
-        }
-        if (platform.gtk.css) {
-          const className = `kiln-node-${node.id}`;
-          if (gtk.functions.gtk_widget_add_css_class) {
-            gtk.functions.gtk_widget_add_css_class(handle, toCStr(ffi, className));
-          }
-          this.addGlobalCss(`.${className} { ${platform.gtk.css} }`);
-        }
-      }
-    } catch (_) {}
-  }
-
-  createWidget(node: Node): bigint | null {
-    if (!this.gtk) return null;
-    let handle = this.handles.get(node.id);
-    if (handle) return handle;
-
-    try {
-      const ffi = this.ffi;
-      const gtk = this.gtk;
-      const nodeCallbacks: bigint[] = [];
-
-      if (node.tag === "vstack") {
-        const spacing = node.getProperty("spacing") || 0;
-        handle = gtk.functions.gtk_box_new(1 /* GTK_ORIENTATION_VERTICAL */, spacing);
-      } else if (node.tag === "hstack") {
-        const spacing = node.getProperty("spacing") || 0;
-        handle = gtk.functions.gtk_box_new(0 /* GTK_ORIENTATION_HORIZONTAL */, spacing);
-      } else if (node.tag === "button") {
-        const label = node.getProperty("label") || "";
-        handle = gtk.functions.gtk_button_new_with_label(toCStr(ffi, String(label)));
-        const callbackPtr = gtk.lib.registerCallback(
-          { arguments: ["pointer", "pointer"], return: "void" },
-          () => {
-            turnMailbox.post(node.id, "click");
-          }
-        );
-        nodeCallbacks.push(callbackPtr);
-        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "clicked"), callbackPtr, 0n, 0n, 0);
-      } else if (node.tag === "text") {
-        const text = node.getProperty("text") || "";
-        handle = gtk.functions.gtk_label_new(toCStr(ffi, String(text)));
-      } else if (node.tag === "textinput") {
-        handle = gtk.functions.gtk_entry_new();
-        const val = node.getProperty("value");
-        if (val) gtk.functions.gtk_editable_set_text(handle, toCStr(ffi, String(val)));
-        const changedCallbackPtr = gtk.lib.registerCallback(
-          { arguments: ["pointer", "pointer"], return: "void" },
-          () => {
-            const text = fromCStr(ffi, gtk.functions.gtk_editable_get_text(handle));
-            turnMailbox.post(node.id, "input", text);
-            turnMailbox.post(node.id, "change", text);
-          }
-        );
-        nodeCallbacks.push(changedCallbackPtr);
-        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "changed"), changedCallbackPtr, 0n, 0n, 0);
-      } else if (node.tag === "slider") {
-        const min = node.getProperty("min") || 0;
-        const max = node.getProperty("max") || 100;
-        handle = gtk.functions.gtk_scale_new_with_range(0, min, max, 1.0);
-        const val = node.getProperty("value");
-        if (val !== undefined) gtk.functions.gtk_range_set_value(handle, Number(val));
-        const sliderCallbackPtr = gtk.lib.registerCallback(
-          { arguments: ["pointer", "pointer"], return: "void" },
-          () => {
-            const currentVal = gtk.functions.gtk_range_get_value(handle);
-            turnMailbox.post(node.id, "change", currentVal);
-          }
-        );
-        nodeCallbacks.push(sliderCallbackPtr);
-        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "value-changed"), sliderCallbackPtr, 0n, 0n, 0);
-      } else if (node.tag === "toggle") {
-        handle = gtk.functions.gtk_switch_new();
-        const chk = node.getProperty("checked");
-        if (chk) gtk.functions.gtk_switch_set_active(handle, 1);
-        const toggleCallbackPtr = gtk.lib.registerCallback(
-          { arguments: ["pointer", "i32", "pointer"], return: "i32" },
-          () => {
-            const active = gtk.functions.gtk_switch_get_active(handle) !== 0;
-            turnMailbox.post(node.id, "toggle", active);
-            return 0;
-          }
-        );
-        nodeCallbacks.push(toggleCallbackPtr);
-        gtk.functions.g_signal_connect_data(handle, toCStr(ffi, "state-set"), toggleCallbackPtr, 0n, 0n, 0);
-      } else {
-        handle = gtk.functions.gtk_box_new(1, 0);
-      }
-
-      if (handle) {
-        this.handles.set(node.id, handle);
-        this.nodeByHandle.set(handle, node.id);
-        if (nodeCallbacks.length > 0) {
-          this.callbacks.set(node.id, nodeCallbacks);
-        }
-        this.applyWidgetStyling(node, handle);
-        if (node.tag === "vstack" || node.tag === "hstack") {
-          for (let i = 0; i < node.children.length; i++) {
-            const childHandle = this.createWidget(node.children[i]);
-            if (childHandle) {
-              gtk.functions.gtk_box_append(handle, childHandle);
-            }
-          }
-        }
-      }
-    } catch (_) {
-      return null;
-    }
-    return handle || null;
-  }
-
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void {
-    if (!this.gtk) return;
-    try {
-      if (tag === "button" && name === "label") {
-        this.gtk.functions.gtk_button_set_label(handle, toCStr(this.ffi, String(value)));
-      } else if (tag === "text" && (name === "text" || name === "value")) {
-        this.gtk.functions.gtk_label_set_text(handle, toCStr(this.ffi, String(value)));
-      } else if (tag === "textinput" && name === "value") {
-        this.gtk.functions.gtk_editable_set_text(handle, toCStr(this.ffi, String(value)));
-      } else if (tag === "slider" && name === "value") {
-        this.gtk.functions.gtk_range_set_value(handle, Number(value));
-      } else if (tag === "toggle" && name === "checked") {
-        this.gtk.functions.gtk_switch_set_active(handle, value ? 1 : 0);
-      } else if (tag === "window" && name === "title") {
-        this.gtk.functions.gtk_window_set_title(handle, toCStr(this.ffi, String(value)));
-      }
-
-      if (name === "variant" || name === "disabled" || name === "platform") {
-        const nodeId = this.nodeByHandle.get(handle);
-        if (nodeId !== undefined) {
-          const node = nodeRegistry.get(nodeId);
-          if (node) {
-            this.applyWidgetStyling(node, handle);
-          }
-        }
-      }
-    } catch (_) {}
-  }
-
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
-    if (!this.gtk) return;
-    try {
-      this.gtk.functions.gtk_box_append(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  removeChild(parentHandle: bigint, childHandle: bigint): void {
-    if (!this.gtk) return;
-    try {
-      this.gtk.functions.gtk_box_remove(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
-    if (!this.gtk) return;
-    try {
-      this.gtk.functions.gtk_box_remove(parentHandle, childHandle);
-      this.gtk.functions.gtk_box_append(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  disposeWidget(node: Node): void {
-    const handle = this.handles.get(node.id);
-    if (handle) {
-      if (node.tag === "window" && this.gtk) {
-        try {
-          this.gtk.functions.gtk_window_close(handle);
-        } catch (_) {}
-      }
-      this.nodeByHandle.delete(handle);
-      this.handles.delete(node.id);
-      this.callbacks.delete(node.id);
-    }
-    this.callbacks.delete(node.id);
-  }
-
-  pumpEvents(): boolean {
-    if (!this.gtk) return false;
-    let hadEvents = false;
-    try {
-      while (this.gtk.functions.g_main_context_iteration(0n, 0) !== 0) {
-        hadEvents = true;
-      }
-    } catch (_) {}
-    return hadEvents;
-  }
-}
-
-export class AppKitDriver implements PlatformDriver {
-  readonly name = "appkit";
-  private initialized = false;
-  private appkit: any = null;
-  private ffi: any = null;
-  private handles = new Map<number, bigint>();
-  private nodeByHandle = new Map<bigint, number>();
-
-  init(): boolean {
-    if (this.initialized) return this.appkit !== null;
-    this.initialized = true;
-    if (typeof process === "undefined" || process.platform !== "darwin") return false;
-    try {
-      this.ffi = (process as any).__kilnNativeModules?.ffi || null;
-      if (!this.ffi) return false;
-
-      const fs = (process as any).__kilnNativeModules?.fs || null;
-      const suffix = this.ffi.suffix || ".dylib";
-      const cwd = typeof process.cwd === "function" ? process.cwd() : ".";
-      const candidates = [
-        process.env?.KILN_HOST_GUI_LIB,
-        cwd + "/target/release/libkiln_host_gui" + suffix,
-        cwd + "/target/debug/libkiln_host_gui" + suffix,
-        "./target/release/libkiln_host_gui" + suffix,
-        "./target/debug/libkiln_host_gui" + suffix,
-      ].filter(Boolean) as string[];
-
-      let targetLib: string | null = null;
-      if (fs && typeof fs.existsSync === "function") {
-        for (const candidate of candidates) {
-          try {
-            if (fs.existsSync(candidate)) {
-              targetLib = candidate;
-              break;
-            }
-          } catch (_) {}
-        }
-      }
-      if (!targetLib && candidates.length > 0) targetLib = candidates[1] || candidates[0];
-      if (!targetLib) return false;
-
-      this.appkit = this.ffi.dlopen(targetLib, {
-        kiln_gui_appkit_init: { arguments: [], return: "i32" },
-        kiln_gui_appkit_window_create: { arguments: ["u64", "pointer", "f64", "f64"], return: "i32" },
-        kiln_gui_appkit_window_show: { arguments: ["u64"], return: "i32" },
-        kiln_gui_appkit_window_close: { arguments: ["u64"], return: "i32" },
-        kiln_gui_appkit_window_set_title: { arguments: ["u64", "pointer"], return: "i32" },
-        kiln_gui_appkit_window_set_content: { arguments: ["u64", "u64"], return: "i32" },
-        kiln_gui_appkit_window_snapshot: { arguments: ["u64", "pointer"], return: "i32" },
-        kiln_gui_appkit_widget_create: { arguments: ["u64", "pointer", "pointer"], return: "i32" },
-        kiln_gui_appkit_widget_set_property: { arguments: ["u64", "pointer", "pointer", "f64"], return: "i32" },
-        kiln_gui_appkit_widget_add_child: { arguments: ["u64", "u64"], return: "i32" },
-        kiln_gui_appkit_widget_remove_child: { arguments: ["u64", "u64"], return: "i32" },
-        kiln_gui_appkit_widget_destroy: { arguments: ["u64"], return: "i32" },
-        kiln_gui_appkit_pump_events: { arguments: ["f64"], return: "i32" },
-        kiln_gui_appkit_poll_event: { arguments: ["pointer", "pointer", "u64", "pointer", "u64"], return: "i32" },
-      });
-
-      if (
-        this.appkit &&
-        this.appkit.functions &&
-        this.appkit.functions.kiln_gui_appkit_init &&
-        this.appkit.functions.kiln_gui_appkit_init() === 0
-      ) {
-        return true;
-      }
-    } catch (_) {}
-    this.appkit = null;
-    return false;
-  }
-
-  getHandle(nodeId: number): bigint | null {
-    return this.handles.get(nodeId) || null;
-  }
-
-  createWindow(win: Window): bigint | null {
-    if (!this.appkit) return null;
-    let handle = this.handles.get(win.id);
-    if (handle) return handle;
-
-    try {
-      const res = this.appkit.functions.kiln_gui_appkit_window_create(
-        BigInt(win.id),
-        toCStr(this.ffi, win.title || "Kiln Window"),
-        Number(win.width || 500),
-        Number(win.height || 320)
-      );
-      if (res === 0) {
-        handle = BigInt(win.id);
-        this.handles.set(win.id, handle);
-        this.nodeByHandle.set(handle, win.id);
-        return handle;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  setWindowContent(winHandle: bigint, childHandle: bigint): void {
-    if (!this.appkit) return;
-    try {
-      this.appkit.functions.kiln_gui_appkit_window_set_content(winHandle, childHandle);
-    } catch (_) {}
-  }
-
-  showWindow(win: Window): void {
-    win.visible = true;
-    if (!this.appkit) return;
-    let winHandle = this.handles.get(win.id);
-    if (!winHandle) {
-      winHandle = this.createWindow(win);
-    }
-    if (winHandle) {
-      if (win.content) {
-        const childHandle = this.createWidget(win.content);
-        if (childHandle) {
-          this.setWindowContent(winHandle, childHandle);
-        }
-      }
-      this.appkit.functions.kiln_gui_appkit_window_show(BigInt(win.id));
-      this.pumpEvents();
-    }
-  }
-
-  closeWindow(win: Window): void {
-    win.visible = false;
-    if (!this.appkit) return;
-    const handle = this.handles.get(win.id);
-    if (handle) {
-      try {
-        this.appkit.functions.kiln_gui_appkit_window_close(BigInt(win.id));
-      } catch (_) {}
-      this.handles.delete(win.id);
-      this.nodeByHandle.delete(handle);
-    }
-  }
-
-  snapshotWindow(win: Window, path: string): boolean {
-    if (!this.appkit) return false;
-    const handle = this.handles.get(win.id);
-    if (!handle) return false;
-    try {
-      if (this.appkit.functions.kiln_gui_appkit_window_snapshot) {
-        return this.appkit.functions.kiln_gui_appkit_window_snapshot(handle, toCStr(this.ffi, path)) === 0;
-      }
-    } catch (_) {}
-    return false;
-  }
-
-  createWidget(node: Node): bigint | null {
-    if (!this.appkit) return null;
-    let handle = this.handles.get(node.id);
-    if (handle) return handle;
-
-    try {
-      let text = (node as any).text || "";
-      if (node.tag === "box" || node.tag === "grid") {
-        text = JSON.stringify(node.properties);
-      } else if (node.tag === "button") {
-        text = String(node.getProperty("label") || text);
-      } else if (node.tag === "text") {
-        text = String(node.getProperty("text") || text);
-      } else if (node.tag === "textinput") {
-        text = String(node.getProperty("value") || text);
-      } else if (node.tag === "segmented") {
-        text = String(node.getProperty("items") || text);
-      } else if (node.tag === "select" || node.tag === "dropdown") {
-        text = String(node.getProperty("options") || text);
-      } else if (node.tag === "checkbox") {
-        text = String(node.getProperty("label") || text);
-      } else if (node.tag === "icon" || node.tag === "image") {
-        text = String(node.getProperty("name") || node.getProperty("symbol") || text);
-      }
-
-      const res = this.appkit.functions.kiln_gui_appkit_widget_create(
-        BigInt(node.id),
-        toCStr(this.ffi, node.tag),
-        toCStr(this.ffi, text)
-      );
-      if (res === 0) {
-        handle = BigInt(node.id);
-        this.handles.set(node.id, handle);
-        this.nodeByHandle.set(handle, node.id);
-
-        if (node.tag === "slider") {
-          const val = node.getProperty("value");
-          if (val !== undefined) this.updateProperty(handle, node.tag, "value", val);
-          const min = node.getProperty("min");
-          if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
-          const max = node.getProperty("max");
-          if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
-        } else if (node.tag === "toggle" || node.tag === "checkbox") {
-          const chk = node.getProperty("checked");
-          if (chk !== undefined) this.updateProperty(handle, node.tag, "checked", chk);
-        } else if (node.tag === "text") {
-          const variant = node.getProperty("variant");
-          if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
-          const color = node.getProperty("color");
-          if (color !== undefined) this.updateProperty(handle, node.tag, "color", color);
-          const size = node.getProperty("size");
-          if (size !== undefined) this.updateProperty(handle, node.tag, "size", size);
-        } else if (node.tag === "button") {
-          const variant = node.getProperty("variant");
-          if (variant !== undefined) this.updateProperty(handle, node.tag, "variant", variant);
-          const icon = node.getProperty("icon");
-          if (icon !== undefined) this.updateProperty(handle, node.tag, "icon", icon);
-        } else if (node.tag === "textinput") {
-          const placeholder = node.getProperty("placeholder");
-          if (placeholder !== undefined) this.updateProperty(handle, node.tag, "placeholder", placeholder);
-        } else if (node.tag === "segmented") {
-          const items = node.getProperty("items");
-          if (items !== undefined) this.updateProperty(handle, node.tag, "items", items);
-          const idx = node.getProperty("selectedIndex");
-          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
-        } else if (node.tag === "select" || node.tag === "dropdown") {
-          const opts = node.getProperty("options");
-          if (opts !== undefined) this.updateProperty(handle, node.tag, "options", opts);
-          const idx = node.getProperty("selectedIndex");
-          if (idx !== undefined) this.updateProperty(handle, node.tag, "selectedIndex", idx);
-        } else if (node.tag === "progressbar" || node.tag === "progress") {
-          const val = node.getProperty("value");
-          if (val !== undefined) this.updateProperty(handle, node.tag, "value", val);
-          const max = node.getProperty("max");
-          if (max !== undefined) this.updateProperty(handle, node.tag, "max", max);
-          const min = node.getProperty("min");
-          if (min !== undefined) this.updateProperty(handle, node.tag, "min", min);
-          const ind = node.getProperty("indeterminate");
-          if (ind !== undefined) this.updateProperty(handle, node.tag, "indeterminate", ind);
-        }
-
-        if (node.tag === "grid" || node.tag === "box") {
-          const style = node.getProperty("style");
-          if (style !== undefined) this.updateProperty(handle, node.tag, "style", style);
-          const columns = node.getProperty("columns");
-          if (columns !== undefined) this.updateProperty(handle, node.tag, "columns", columns);
-          const rows = node.getProperty("rows");
-          if (rows !== undefined) this.updateProperty(handle, node.tag, "rows", rows);
-          const gap = node.getProperty("gap");
-          if (gap !== undefined) this.updateProperty(handle, node.tag, "gap", gap);
-        }
-
-        const isContainer =
-          node.tag === "vstack" ||
-          node.tag === "hstack" ||
-          node.tag === "card" ||
-          node.tag === "box" ||
-          node.tag === "grid" ||
-          node.tag === "scroll" ||
-          node.tag === "scrollview";
-
-        if (isContainer) {
-          const spacing = node.getProperty("spacing");
-          if (spacing !== undefined) this.updateProperty(handle, node.tag, "spacing", spacing);
-          const alignment = node.getProperty("alignment");
-          if (alignment !== undefined) this.updateProperty(handle, node.tag, "alignment", alignment);
-          const padding = node.getProperty("padding");
-          if (padding !== undefined) this.updateProperty(handle, node.tag, "padding", padding);
-          for (let i = 0; i < node.children.length; i++) {
-            const childHandle = this.createWidget(node.children[i]);
-            if (childHandle) {
-              this.appkit.functions.kiln_gui_appkit_widget_add_child(handle, childHandle);
-            }
-          }
-        }
-
-        const width = node.getProperty("width");
-        if (width !== undefined) this.updateProperty(handle, node.tag, "width", width);
-        const height = node.getProperty("height");
-        if (height !== undefined) this.updateProperty(handle, node.tag, "height", height);
-        return handle;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void {
-    if (!this.appkit) return;
-    try {
-      if (tag === "window" && name === "title") {
-        this.appkit.functions.kiln_gui_appkit_window_set_title(handle, toCStr(this.ffi, String(value)));
-      } else {
-        const valStr =
-          typeof value === "object" && value !== null
-            ? JSON.stringify(value)
-            : typeof value === "string"
-            ? value
-            : String(value ?? "");
-        const valNum = typeof value === "number" ? value : (typeof value === "boolean" ? (value ? 1 : 0) : 0);
-        this.appkit.functions.kiln_gui_appkit_widget_set_property(
-          handle,
-          toCStr(this.ffi, name),
-          toCStr(this.ffi, valStr),
-          valNum
-        );
-      }
-    } catch (_) {}
-  }
-
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
-    if (!this.appkit) return;
-    try {
-      this.appkit.functions.kiln_gui_appkit_widget_add_child(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  removeChild(parentHandle: bigint, childHandle: bigint): void {
-    if (!this.appkit) return;
-    try {
-      this.appkit.functions.kiln_gui_appkit_widget_remove_child(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {
-    if (!this.appkit) return;
-    try {
-      this.appkit.functions.kiln_gui_appkit_widget_remove_child(parentHandle, childHandle);
-      this.appkit.functions.kiln_gui_appkit_widget_add_child(parentHandle, childHandle);
-    } catch (_) {}
-  }
-
-  disposeWidget(node: Node): void {
-    const handle = this.handles.get(node.id);
-    if (handle) {
-      if (node.tag === "window" && this.appkit) {
-        try {
-          this.appkit.functions.kiln_gui_appkit_window_close(handle);
-        } catch (_) {}
-      } else if (this.appkit && this.appkit.functions.kiln_gui_appkit_widget_destroy) {
-        try {
-          this.appkit.functions.kiln_gui_appkit_widget_destroy(handle);
-        } catch (_) {}
-      }
-      this.nodeByHandle.delete(handle);
-      this.handles.delete(node.id);
-    }
-  }
-
-  pumpEvents(waitMs = 0): boolean {
-    if (!this.appkit) return false;
-    let hadEvents = false;
-    try {
-      if (this.appkit.functions.kiln_gui_appkit_pump_events(waitMs) !== 0) {
-        hadEvents = true;
-      }
-      const outIdBuf = new BigUint64Array(1);
-      const outIdPtr = this.ffi.getRawPointer(outIdBuf.buffer);
-      const outTypeBuf = new Uint8Array(64);
-      const outTypePtr = this.ffi.getRawPointer(outTypeBuf.buffer);
-      const outValBuf = new Uint8Array(256);
-      const outValPtr = this.ffi.getRawPointer(outValBuf.buffer);
-
-      while (
-        this.appkit.functions.kiln_gui_appkit_poll_event(
-          outIdPtr,
-          outTypePtr,
-          64n,
-          outValPtr,
-          256n
-        ) === 1
-      ) {
-        hadEvents = true;
-        const targetId = Number(outIdBuf[0]);
-        let typeLen = 0;
-        while (typeLen < outTypeBuf.length && outTypeBuf[typeLen] !== 0) typeLen++;
-        const eventType = new TextDecoder().decode(outTypeBuf.subarray(0, typeLen));
-
-        let valLen = 0;
-        while (valLen < outValBuf.length && outValBuf[valLen] !== 0) valLen++;
-        const eventVal = new TextDecoder().decode(outValBuf.subarray(0, valLen));
-
-        if (targetId > 0 && eventType) {
-          if (eventType === "close") {
-            const winNode = nodeRegistry.get(targetId);
-            if (winNode && winNode.tag === "window") {
-              (winNode as any).visible = false;
-            }
-            turnMailbox.post(targetId, eventType);
-          } else if (eventType === "change") {
-            const num = Number(eventVal);
-            turnMailbox.post(targetId, eventType, isNaN(num) ? eventVal : num);
-          } else if (eventType === "input") {
-            turnMailbox.post(targetId, eventType, eventVal);
-          } else if (eventType === "toggle") {
-            turnMailbox.post(targetId, eventType, eventVal === "true");
-          } else {
-            turnMailbox.post(targetId, eventType);
-          }
-        }
-      }
-    } catch (_) {}
-    return hadEvents;
-  }
-}
-
-
-export class Win32Driver implements PlatformDriver {
-  readonly name = "win32";
-  private initialized = false;
-  private handles = new Map<number, bigint>();
-
-  init(): boolean {
-    if (this.initialized) return true;
-    this.initialized = true;
-    return typeof process !== "undefined" && process.platform === "win32";
-  }
-
-  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
-  createWindow(win: Window): bigint | null { return null; }
-  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
-  showWindow(win: Window): void { win.visible = true; }
-  closeWindow(win: Window): void { win.visible = false; }
-  createWidget(node: Node): bigint | null { return null; }
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  removeChild(parentHandle: bigint, childHandle: bigint): void {}
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  disposeWidget(node: Node): void { this.handles.delete(node.id); }
-  pumpEvents(): boolean { return false; }
-}
-
-export class HeadlessDriver implements PlatformDriver {
-  readonly name = "headless";
-  private handles = new Map<number, bigint>();
-
-  init(): boolean { return true; }
-  getHandle(nodeId: number): bigint | null { return this.handles.get(nodeId) || null; }
-  createWindow(win: Window): bigint | null { return null; }
-  setWindowContent(winHandle: bigint, childHandle: bigint): void {}
-  showWindow(win: Window): void { win.visible = true; }
-  closeWindow(win: Window): void { win.visible = false; }
-  createWidget(node: Node): bigint | null { return null; }
-  updateProperty(handle: bigint, tag: string, name: string, value: any): void {}
-  insertChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  removeChild(parentHandle: bigint, childHandle: bigint): void {}
-  reorderChild(parentHandle: bigint, childHandle: bigint, anchorHandle: bigint | null): void {}
-  disposeWidget(node: Node): void { this.handles.delete(node.id); }
-  pumpEvents(): boolean { return false; }
-}
-
-let activeDriver: PlatformDriver | null = null;
-
-export function getActiveDriver(): PlatformDriver {
-  if (activeDriver) return activeDriver;
-
-  if (typeof process !== "undefined") {
-    if (process.platform === "linux") {
-      const gtk = new Gtk4Driver();
-      if (gtk.init()) {
-        activeDriver = gtk;
-        return activeDriver;
-      }
-    } else if (process.platform === "darwin") {
-      const appkit = new AppKitDriver();
-      if (appkit.init()) {
-        activeDriver = appkit;
-        return activeDriver;
-      }
-    } else if (process.platform === "win32") {
-      const win32 = new Win32Driver();
-      if (win32.init()) {
-        activeDriver = win32;
-        return activeDriver;
-      }
-    }
-  }
-
-  activeDriver = new HeadlessDriver();
-  return activeDriver;
-}
-
-// ─────────────────────────────────────────────────────────────
-// Fine-grained Reactive System (SolidJS 2.0 Async-First Core)
-// ─────────────────────────────────────────────────────────────
-
-interface Computation {
-  id: number;
-  fn: () => any;
-  apply?: (val: any) => void | (() => void);
-  cleanups: (() => void)[];
-  sources: Set<Signal<any> | Memo<any>>;
-  stale: boolean;
-  pending: boolean;
-  epoch: number;
-  disposed: boolean;
-}
-
-let nextCompId = 1;
-let currentListener: Computation | null = null;
+let currentOwner: Owner | null = null;
+let listener: Computation<any> | null = null;
 let batchDepth = 0;
-let isFlushPending = false;
-const pendingComputations: Set<Computation> = new Set();
+let rootDepth = 0;
+let flushing = false;
+let nextComputationId = 1;
+const effectQueue: Computation<any>[] = [];
+const mountQueue: Cleanup[] = [];
 
-export function untrack<T>(fn: () => T): T {
-  const prev = currentListener;
-  currentListener = null;
-  try {
-    return fn();
-  } finally {
-    currentListener = prev;
-  }
-}
-
-function scheduleFlush(): void {
-  if (batchDepth > 0) return;
-  if (!isFlushPending) {
-    isFlushPending = true;
-    if (typeof queueMicrotask === "function") {
-      queueMicrotask(flush);
-    } else {
-      Promise.resolve().then(flush);
-    }
-  }
-}
-
-export function flush(): void {
-  isFlushPending = false;
-  while (pendingComputations.size > 0) {
-    const list = Array.from(pendingComputations);
-    pendingComputations.clear();
-    for (let i = 0; i < list.length; i++) {
-      const c = list[i];
-      if (c.stale && !c.disposed) {
-        runComputation(c);
-      }
-    }
-  }
-}
-
-class Signal<T> {
+class SignalState<T> implements Source {
+  observers = new Set<Computation<any>>();
   value: T;
-  subscribers: Set<Computation> = new Set();
-
-  constructor(value: T) {
+  equals: ((a: T, b: T) => boolean) | false;
+  constructor(value: T, equals: ((a: T, b: T) => boolean) | false) {
     this.value = value;
+    this.equals = equals;
   }
 
   read(): T {
-    if (currentListener && !currentListener.disposed) {
-      this.subscribers.add(currentListener);
-      currentListener.sources.add(this);
-    }
+    track(this);
     return this.value;
   }
 
-  write(next: T | ((prev: T) => T)): void {
-    const val = typeof next === "function" ? (next as any)(this.value) : next;
-    if (val !== this.value) {
-      this.value = val;
-      const subs = Array.from(this.subscribers);
-      for (let i = 0; i < subs.length; i++) {
-        subs[i].stale = true;
-        pendingComputations.add(subs[i]);
-      }
-      scheduleFlush();
-    }
+  write(next: T): void {
+    if (this.equals && this.equals(this.value, next)) return;
+    this.value = next;
+    for (const o of this.observers) mark(o, DIRTY);
+    commit();
   }
 }
 
-class Memo<T> {
-  computation: Computation;
+class Computation<T> implements Owner, Source {
+  readonly id = nextComputationId++;
+  owner: Owner | null;
+  owned: Computation<any>[] | null = null;
+  cleanups: Cleanup[] | null = null;
+  context: Map<object, unknown> | null = null;
+  observers = new Set<Computation<any>>();
+  sources = new Set<Source>();
+  state = DIRTY;
+  disposed = false;
+  epoch = 0;
+  pending: SignalState<boolean> | null = null;
+  settled = false;
+  fn: (prev: T) => T | PromiseLike<T>;
   value: T;
-  subscribers: Set<Computation> = new Set();
+  readonly memo: boolean;
+  equals: ((a: T, b: T) => boolean) | false;
+  apply: ((value: T) => void | Cleanup) | null;
 
-  constructor(fn: () => T | Promise<T>) {
-    this.value = undefined as any;
-    this.computation = {
-      id: nextCompId++,
-      fn,
-      cleanups: [],
-      sources: new Set(),
-      stale: true,
-      pending: false,
-      epoch: 0,
-      disposed: false,
-    };
-    runComputation(this.computation, (res) => {
-      this.value = res;
-    });
+  constructor(
+    fn: (prev: T) => T | PromiseLike<T>,
+    value: T,
+    memo: boolean,
+    equals: ((a: T, b: T) => boolean) | false,
+    apply: ((value: T) => void | Cleanup) | null,
+  ) {
+    this.fn = fn;
+    this.value = value;
+    this.memo = memo;
+    this.equals = equals;
+    this.apply = apply;
+    this.owner = currentOwner;
+    if (currentOwner) (currentOwner.owned || (currentOwner.owned = [])).push(this);
   }
 
   read(): T {
-    if (currentListener && !currentListener.disposed) {
-      this.subscribers.add(currentListener);
-      currentListener.sources.add(this);
-    }
-    if (this.computation.stale) {
-      runComputation(this.computation, (res) => {
-        this.value = res;
-      });
-    }
+    if (this.state !== CLEAN && !this.disposed) update(this);
+    track(this);
     return this.value;
   }
+}
 
-  notifySubscribers(): void {
-    const subs = Array.from(this.subscribers);
-    for (let i = 0; i < subs.length; i++) {
-      subs[i].stale = true;
-      pendingComputations.add(subs[i]);
-    }
-    scheduleFlush();
+function track(source: Source): void {
+  if (listener && !listener.disposed) {
+    source.observers.add(listener);
+    listener.sources.add(source);
   }
 }
 
-function runComputation(c: Computation, onResult?: (val: any) => void): void {
-  if (c.disposed) return;
-
-  for (let i = 0; i < c.cleanups.length; i++) {
-    c.cleanups[i]();
-  }
-  c.cleanups = [];
-
-  const srcs = Array.from(c.sources);
-  for (let i = 0; i < srcs.length; i++) {
-    srcs[i].subscribers.delete(c);
-  }
-  c.sources.clear();
-  c.stale = false;
-
-  const currentEpoch = ++c.epoch;
-  const prev = currentListener;
-  currentListener = c;
-  let raw: any;
-  try {
-    raw = c.fn();
-  } finally {
-    currentListener = prev;
-  }
-
-  // Handle Promise (Solid 2.0 First-Class Async)
-  if (raw && typeof raw.then === "function") {
-    c.pending = true;
-    raw.then(
-      (resolved: any) => {
-        if (c.disposed || c.epoch !== currentEpoch) return;
-        c.pending = false;
-        if (c.apply) {
-          const cleanup = c.apply(resolved);
-          if (typeof cleanup === "function") c.cleanups.push(cleanup);
-        } else if (typeof resolved === "function") {
-          c.cleanups.push(resolved);
-        }
-        if (onResult) onResult(resolved);
-      },
-      (err: any) => {
-        if (c.disposed || c.epoch !== currentEpoch) return;
-        c.pending = false;
-        console.error("Async computation rejected:", err);
-      }
-    );
+function mark(c: Computation<any>, state: number): void {
+  if (c.state >= state || c.disposed) return;
+  const wasClean = c.state === CLEAN;
+  c.state = state;
+  if (!wasClean) return;
+  if (c.memo) {
+    for (const o of c.observers) mark(o, CHECK);
   } else {
-    c.pending = false;
-    if (c.apply) {
-      const cleanup = c.apply(raw);
-      if (typeof cleanup === "function") c.cleanups.push(cleanup);
-    } else if (typeof raw === "function") {
-      c.cleanups.push(raw);
-    }
-    if (onResult) onResult(raw);
+    effectQueue.push(c);
   }
 }
 
-export function createSignal<T>(initialValue: T): [() => T, (value: T | ((prev: T) => T)) => void] {
-  const s = new Signal(initialValue);
-  return [() => s.read(), (v) => s.write(v)];
+function update(c: Computation<any>): void {
+  if (c.state === CHECK) {
+    for (const s of c.sources) {
+      if (s instanceof Computation) {
+        if (s.state !== CLEAN) update(s);
+        if ((c.state as number) === DIRTY) break;
+      }
+    }
+  }
+  if (c.state === DIRTY) run(c);
+  else c.state = CLEAN;
 }
 
-export function createMemo<T>(fn: () => T | Promise<T>): () => T {
-  const m = new Memo<T>(fn);
-  m.computation.apply = (val) => {
-    m.value = val;
-    m.notifySubscribers();
-  };
-  return () => m.read();
+function isThenable(v: unknown): v is PromiseLike<unknown> {
+  return v !== null && (typeof v === "object" || typeof v === "function") && typeof (v as any).then === "function";
 }
 
-export function isPending(accessor: () => any): boolean {
-  let pending = false;
-  const prev = currentListener;
-  const tempComp: Computation = {
-    id: nextCompId++,
-    fn: accessor,
-    cleanups: [],
-    sources: new Set(),
-    stale: false,
-    pending: false,
-    epoch: 0,
-    disposed: false,
-  };
-  currentListener = tempComp;
+function run<T>(c: Computation<T>): void {
+  cleanNode(c);
+  // Clean before running: a write to something this computation already read marks it again.
+  c.state = CLEAN;
+  const prevOwner = currentOwner;
+  const prevListener = listener;
+  currentOwner = listener = c;
+  const epoch = ++c.epoch;
+  let next: T | PromiseLike<T>;
   try {
-    accessor();
-    for (const src of tempComp.sources) {
-      if (src instanceof Memo && src.computation.pending) {
-        pending = true;
+    next = c.fn(c.value);
+  } finally {
+    currentOwner = prevOwner;
+    listener = prevListener;
+  }
+  if (isThenable(next)) {
+    setPending(c, true);
+    next.then(
+      (value) => {
+        if (c.disposed || c.epoch !== epoch) return;
+        batch(() => {
+          setPending(c, false);
+          settle(c, value);
+        });
+      },
+      (error) => {
+        if (c.disposed || c.epoch !== epoch) return;
+        setPending(c, false);
+        reportError(error);
+      },
+    );
+    return;
+  }
+  if (c.pending && c.pending.value) setPending(c, false);
+  settle(c, next);
+}
+
+function setPending(c: Computation<any>, on: boolean): void {
+  if (!c.pending) {
+    if (!on) return;
+    c.pending = new SignalState(false, (a, b) => a === b);
+  }
+  c.pending.write(on);
+}
+
+function settle<T>(c: Computation<T>, value: T): void {
+  const prev = c.value;
+  const first = !c.settled;
+  c.settled = true;
+  c.value = value;
+  if (c.memo) {
+    if (first || !c.equals || !c.equals(prev, value)) {
+      for (const o of c.observers) mark(o, DIRTY);
+    }
+    return;
+  }
+  if (c.apply) {
+    const apply = c.apply;
+    const prevOwner = currentOwner;
+    currentOwner = c;
+    try {
+      const cleanup = untrack(() => apply(value));
+      if (typeof cleanup === "function") onCleanup(cleanup);
+    } finally {
+      currentOwner = prevOwner;
+    }
+  }
+}
+
+function cleanNode(o: Owner): void {
+  if (o.owned) {
+    const owned = o.owned;
+    o.owned = null;
+    for (let i = owned.length - 1; i >= 0; i--) dispose(owned[i]);
+  }
+  if (o.cleanups) {
+    const cleanups = o.cleanups;
+    o.cleanups = null;
+    for (let i = cleanups.length - 1; i >= 0; i--) cleanups[i]();
+  }
+  if (o instanceof Computation) {
+    for (const s of o.sources) s.observers.delete(o);
+    o.sources.clear();
+  }
+}
+
+function dispose(c: Computation<any>): void {
+  if (c.disposed) return;
+  c.disposed = true;
+  cleanNode(c);
+  c.state = CLEAN;
+}
+
+function reportError(error: unknown): void {
+  console.error("kiln:gui:", error);
+}
+
+function commit(): void {
+  if (batchDepth === 0 && !flushing) flush();
+}
+
+function runMounts(): void {
+  while (mountQueue.length > 0) {
+    const mounts = mountQueue.splice(0, mountQueue.length);
+    for (const m of mounts) m();
+  }
+}
+
+/** Runs every pending effect now. Writes outside `batch` already do this. */
+export function flush(): void {
+  if (flushing) return;
+  flushing = true;
+  let failure: { error: unknown } | null = null;
+  try {
+    let rounds = 0;
+    while (effectQueue.length > 0 || mountQueue.length > 0) {
+      if (++rounds > 100000) {
+        for (const e of effectQueue) e.state = CLEAN;
+        effectQueue.length = 0;
+        throw new Error("kiln:gui: effects keep re-triggering each other (a write cycle)");
+      }
+      if (effectQueue.length > 0) {
+        const queue = effectQueue.splice(0, effectQueue.length);
+        // Parents were created first; running them first disposes children they replace.
+        queue.sort((a, b) => a.id - b.id);
+        for (const e of queue) {
+          if (e.disposed || e.state === CLEAN) continue;
+          try {
+            update(e);
+          } catch (error) {
+            e.state = CLEAN;
+            if (!failure) failure = { error };
+          }
+        }
+      } else if (rootDepth === 0) {
+        runMounts();
+      } else {
         break;
       }
     }
   } finally {
-    currentListener = prev;
-    const srcs = Array.from(tempComp.sources);
-    for (let i = 0; i < srcs.length; i++) {
-      srcs[i].subscribers.delete(tempComp);
-    }
+    flushing = false;
   }
-  return pending;
+  if (failure) throw failure.error;
 }
 
-export function latest<T>(accessor: () => T): T {
-  flush();
-  return accessor();
+export interface SignalOptions<T> {
+  /** `false` notifies on every write; the default skips writes of an identical value. */
+  equals?: false | ((prev: T, next: T) => boolean);
 }
 
-export function createEffect<T>(
-  depsOrFn: () => T | Promise<T>,
-  apply?: (value: T) => void | (() => void)
-): () => void {
-  const isSplit = typeof apply === "function";
-  const c: Computation = {
-    id: nextCompId++,
-    fn: depsOrFn,
-    apply: isSplit ? apply : undefined,
-    cleanups: [],
-    sources: new Set(),
-    stale: false,
-    pending: false,
-    epoch: 0,
-    disposed: false,
-  };
+const sameValue = (a: unknown, b: unknown) => a === b || (a !== a && b !== b);
 
-  runComputation(c);
-
-  return () => {
-    c.disposed = true;
-    for (let i = 0; i < c.cleanups.length; i++) {
-      c.cleanups[i]();
-    }
-    c.cleanups = [];
-    const srcs = Array.from(c.sources);
-    for (let i = 0; i < srcs.length; i++) {
-      srcs[i].subscribers.delete(c);
-    }
-    c.sources.clear();
-    pendingComputations.delete(c);
-  };
+export function createSignal<T>(value: T, options?: SignalOptions<T>): [Accessor<T>, Setter<T>] {
+  const equals = options && options.equals !== undefined ? options.equals : sameValue;
+  const s = new SignalState<T>(value, equals);
+  return [
+    () => s.read(),
+    (next) => {
+      const value = typeof next === "function" ? (next as (prev: T) => T)(s.value) : next;
+      s.write(value);
+      return value;
+    },
+  ];
 }
 
-export function batch<T>(fn: () => T): T {
-  batchDepth++;
+/**
+ * A derived value, recomputed only when a source it read changed. `fn` may return a promise:
+ * the memo keeps its previous value until it settles, and `isPending` reports the wait.
+ */
+export function createMemo<T>(fn: (prev: T | undefined) => T | PromiseLike<T>, initial?: T, options?: SignalOptions<T>): Accessor<T> {
+  const equals = options && options.equals !== undefined ? options.equals : sameValue;
+  const c = new Computation<T>(fn as any, initial as T, true, equals, null);
+  batch(() => update(c));
+  return () => c.read();
+}
+
+/**
+ * Runs `fn` now and again whenever what it read changes. With two arguments, `compute` is
+ * tracked and `apply` receives its result untracked; a function returned from `apply` runs as
+ * the cleanup before the next run. Returns a function that stops the effect.
+ */
+export function createEffect<T>(compute: (prev: T | undefined) => T | PromiseLike<T>, apply?: (value: T) => void | Cleanup): Cleanup {
+  const c = new Computation<T>(compute as any, undefined as T, false, false, apply || null);
+  // The first run is batched: a write inside it re-runs it afterwards, never inside itself.
+  batch(() => update(c));
+  return () => dispose(c);
+}
+
+/** Runs `fn` with a fresh owner that lives until `dispose` is called. */
+export function createRoot<T>(fn: (dispose: Cleanup) => T): T {
+  const root: Owner = { owner: currentOwner, owned: null, cleanups: null, context: null };
+  const prevOwner = currentOwner;
+  const prevListener = listener;
+  currentOwner = root;
+  listener = null;
+  rootDepth++;
+  try {
+    return fn(() => cleanNode(root));
+  } finally {
+    currentOwner = prevOwner;
+    listener = prevListener;
+    if (--rootDepth === 0 && batchDepth === 0 && !flushing) runMounts();
+  }
+}
+
+export function untrack<T>(fn: () => T): T {
+  const prev = listener;
+  listener = null;
   try {
     return fn();
   } finally {
-    batchDepth--;
-    if (batchDepth === 0) {
-      flush();
-    }
+    listener = prev;
   }
 }
 
-export function onCleanup(fn: () => void): void {
-  if (currentListener) {
-    currentListener.cleanups.push(fn);
+/** Defers effects until `fn` returns, then runs each affected effect once. */
+export function batch<T>(fn: () => T): T {
+  batchDepth++;
+  let result: T;
+  try {
+    result = fn();
+  } finally {
+    batchDepth--;
+  }
+  commit();
+  return result;
+}
+
+/** Registers `fn` to run when the current owner (component, effect, root) is disposed. */
+export function onCleanup(fn: Cleanup): Cleanup {
+  if (currentOwner) (currentOwner.cleanups || (currentOwner.cleanups = [])).push(fn);
+  return fn;
+}
+
+/** Runs `fn` once, after the tree being built right now is in place. */
+export function onMount(fn: () => void): void {
+  const owner = currentOwner;
+  mountQueue.push(() => runWithOwner(owner, () => untrack(fn)));
+  if (rootDepth === 0) commit();
+}
+
+export function getOwner(): Owner | null {
+  return currentOwner;
+}
+
+export function runWithOwner<T>(owner: Owner | null, fn: () => T): T {
+  const prev = currentOwner;
+  currentOwner = owner;
+  try {
+    return fn();
+  } finally {
+    currentOwner = prev;
   }
 }
+
+/** Tracks only `deps`; `fn` runs untracked with their values (and the previous ones). */
+export function on<D, T>(deps: Accessor<D>, fn: (value: D, prev: D | undefined) => T, options?: { defer?: boolean }): (prev?: T) => T | undefined {
+  let prevValue: D | undefined;
+  let defer = !!(options && options.defer);
+  return () => {
+    const value = deps();
+    if (defer) {
+      defer = false;
+      prevValue = value;
+      return undefined;
+    }
+    const result = untrack(() => fn(value, prevValue));
+    prevValue = value;
+    return result;
+  };
+}
+
+/** True while an async memo that `accessor` reads is waiting for its promise. Tracked. */
+export function isPending(accessor: Accessor<unknown>): boolean {
+  const probe = runWithOwner(null, () => new Computation<void>(() => undefined, undefined, true, false, null));
+  const prev = listener;
+  listener = probe;
+  try {
+    accessor();
+  } finally {
+    listener = prev;
+  }
+  let pending = false;
+  for (const s of probe.sources) {
+    if (s instanceof Computation) {
+      if (!s.pending) s.pending = new SignalState(false, (a, b) => a === b);
+      if (s.pending.read()) pending = true;
+    }
+  }
+  dispose(probe);
+  return pending;
+}
+
+export interface Context<T> {
+  readonly id: object;
+  readonly defaultValue: T;
+  Provider: (props: { value: T; children?: unknown }) => unknown;
+}
+
+export function createContext<T>(defaultValue: T): Context<T> {
+  const id = {};
+  return {
+    id,
+    defaultValue,
+    Provider: (props) =>
+      createMemo(() => {
+        const owner = currentOwner!;
+        owner.context = new Map([[id, props.value as unknown]]);
+        return renderChildren(props.children);
+      }),
+  };
+}
+
+export function useContext<T>(context: Context<T>): T {
+  for (let o = currentOwner; o; o = o.owner) {
+    if (o.context && o.context.has(context.id)) return o.context.get(context.id) as T;
+  }
+  return context.defaultValue;
+}
+
+const read = <T,>(v: MaybeAccessor<T>): T => (typeof v === "function" ? (v as Accessor<T>)() : v);
+
+/**
+ * Maps a list by item identity: an item that stays keeps its mapped result (and its widgets),
+ * a new item is mapped once, a removed item's result is disposed.
+ */
+export function mapArray<T, U>(list: Accessor<readonly T[] | null | undefined | false>, map: (item: T, index: Accessor<number>) => U): Accessor<U[]> {
+  let items: T[] = [];
+  let mapped: U[] = [];
+  let disposers: Cleanup[] = [];
+  let indexes: Setter<number>[] = [];
+  const owner = currentOwner;
+  onCleanup(() => {
+    for (const d of disposers) d();
+  });
+  return () => {
+    const next = (list() || []) as T[];
+    return untrack(() => {
+      const reuse = new Map<T, number[]>();
+      for (let i = 0; i < items.length; i++) {
+        const queue = reuse.get(items[i]);
+        if (queue) queue.push(i);
+        else reuse.set(items[i], [i]);
+      }
+      const nextMapped: U[] = [];
+      const nextDisposers: Cleanup[] = [];
+      const nextIndexes: Setter<number>[] = [];
+      for (let j = 0; j < next.length; j++) {
+        const queue = reuse.get(next[j]);
+        if (queue && queue.length > 0) {
+          const i = queue.shift()!;
+          nextMapped[j] = mapped[i];
+          nextDisposers[j] = disposers[i];
+          nextIndexes[j] = indexes[i];
+          indexes[i](j);
+          disposers[i] = () => {};
+        } else {
+          const item = next[j];
+          runWithOwner(owner, () =>
+            createRoot((d) => {
+              const [index, setIndex] = createSignal(j);
+              nextDisposers[j] = d;
+              nextIndexes[j] = setIndex;
+              nextMapped[j] = map(item, index);
+            }),
+          );
+        }
+      }
+      for (const d of disposers) d();
+      items = next.slice();
+      mapped = nextMapped;
+      disposers = nextDisposers;
+      indexes = nextIndexes;
+      return mapped.slice();
+    });
+  };
+}
+
+/** Maps a list by position: each slot keeps its result and receives its item as a signal. */
+export function indexArray<T, U>(list: Accessor<readonly T[] | null | undefined | false>, map: (item: Accessor<T>, index: number) => U): Accessor<U[]> {
+  let mapped: U[] = [];
+  let setters: Setter<T>[] = [];
+  let disposers: Cleanup[] = [];
+  const owner = currentOwner;
+  onCleanup(() => {
+    for (const d of disposers) d();
+  });
+  return () => {
+    const next = (list() || []) as T[];
+    return untrack(() => {
+      for (let i = 0; i < Math.min(next.length, mapped.length); i++) setters[i](() => next[i]);
+      for (let i = mapped.length; i < next.length; i++) {
+        runWithOwner(owner, () =>
+          createRoot((d) => {
+            const [item, setItem] = createSignal(next[i], { equals: false });
+            setters[i] = setItem;
+            disposers[i] = d;
+            mapped[i] = map(item, i);
+          }),
+        );
+      }
+      for (let i = next.length; i < mapped.length; i++) disposers[i]();
+      mapped.length = setters.length = disposers.length = next.length;
+      return mapped.slice();
+    });
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 2. Control flow
+//
+// JSX here is evaluated without a compiler, so a dynamic expression is written as a function:
+// `<text>{() => count()}</text>`, `<Show when={visible}>`. Components receive props as given.
+
+export function Show<T>(props: {
+  when: MaybeAccessor<T | null | undefined | false>;
+  fallback?: unknown;
+  keyed?: boolean;
+  children?: unknown | ((value: T) => unknown);
+}): Accessor<unknown> {
+  const condition = createMemo<T | null | undefined | false>(() => read(props.when), undefined, {
+    equals: props.keyed ? sameValue : (a, b) => !a === !b,
+  });
+  return createMemo(() => {
+    const value = condition();
+    if (!value) return renderChildren(props.fallback);
+    const children = props.children;
+    if (typeof children === "function" && children.length > 0) {
+      return renderChildren(untrack(() => (children as (v: T) => unknown)(value as T)));
+    }
+    return renderChildren(children);
+  });
+}
+
+export function For<T>(props: {
+  each: MaybeAccessor<readonly T[] | null | undefined | false>;
+  fallback?: unknown;
+  children: (item: T, index: Accessor<number>) => unknown;
+}): Accessor<unknown> {
+  const mapped = mapArray(() => read(props.each), (item, index) => renderChildren(props.children(item, index)));
+  const fallback = createMemo(() => (props.fallback !== undefined && mapped().length === 0 ? renderChildren(props.fallback) : null));
+  return () => fallback() || mapped();
+}
+
+export function Index<T>(props: {
+  each: MaybeAccessor<readonly T[] | null | undefined | false>;
+  fallback?: unknown;
+  children: (item: Accessor<T>, index: number) => unknown;
+}): Accessor<unknown> {
+  const mapped = indexArray(() => read(props.each), (item, index) => renderChildren(props.children(item, index)));
+  const fallback = createMemo(() => (props.fallback !== undefined && mapped().length === 0 ? renderChildren(props.fallback) : null));
+  return () => fallback() || mapped();
+}
+
+interface MatchCase {
+  readonly kilnMatch: true;
+  when: MaybeAccessor<unknown>;
+  children?: unknown;
+}
+
+export function Match<T>(props: { when: MaybeAccessor<T | null | undefined | false>; children?: unknown | ((value: T) => unknown) }): MatchCase {
+  return { kilnMatch: true, when: props.when, children: props.children };
+}
+
+export function Switch(props: { fallback?: unknown; children?: unknown }): Accessor<unknown> {
+  const cases = (flatten(props.children) as unknown[])
+    .map((c) => (c instanceof JsxElement ? c.render() : c))
+    .filter((c): c is MatchCase => !!c && (c as MatchCase).kilnMatch === true);
+  const chosen = createMemo(
+    () => {
+      for (let i = 0; i < cases.length; i++) {
+        const value = read(cases[i].when);
+        if (value) return [i, value] as [number, unknown];
+      }
+      return [-1, undefined] as [number, unknown];
+    },
+    undefined,
+    { equals: (a, b) => a[0] === b[0] && !a[1] === !b[1] },
+  );
+  return createMemo(() => {
+    const [i, value] = chosen();
+    if (i < 0) return renderChildren(props.fallback);
+    const children = cases[i].children;
+    return renderChildren(typeof children === "function" && children.length > 0 ? untrack(() => (children as (v: unknown) => unknown)(value)) : children);
+  });
+}
+
+/** Renders `component` (a tag, widget class or function) with the remaining props. */
+export function Dynamic(props: { component: MaybeAccessor<Component | string | null | undefined> } & Record<string, unknown>): Accessor<unknown> {
+  const component = createMemo(() => {
+    const c = props.component;
+    return typeof c === "function" && !isWidgetClass(c) && c.length === 0 ? (c as Accessor<Component | string>)() : c;
+  });
+  return createMemo(() => {
+    const c = component();
+    if (!c) return undefined;
+    const rest: Record<string, unknown> = {};
+    for (const key of Object.keys(props)) if (key !== "component") rest[key] = props[key];
+    return renderChildren(new JsxElement(c as Component, rest));
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 3. Hosts
+
+/** An event from a host: which widget, what happened, and its payload. */
+export interface HostEvent {
+  handle: number;
+  kind: number;
+  a: number;
+  b: number;
+  text: string;
+}
+
+const EVENT_PRESS = 1;
+const EVENT_INPUT = 2;
+const EVENT_SUBMIT = 3;
+const EVENT_CHANGE = 4;
+const EVENT_CLOSE = 5;
+const EVENT_RESIZE = 6;
+const EVENT_MENU = 7;
+const EVENT_HOTKEY = 8;
+const EVENT_TRAY = 9;
+const EVENT_QUIT = 10;
+
+const EVENT_NAMES: Record<number, string> = {
+  [EVENT_PRESS]: "press",
+  [EVENT_INPUT]: "input",
+  [EVENT_SUBMIT]: "submit",
+  [EVENT_CHANGE]: "change",
+  [EVENT_CLOSE]: "close",
+  [EVENT_RESIZE]: "resize",
+};
+
+/** Where widgets live. The native library and the headless host implement the same contract. */
+export interface Host {
+  /** `"appkit"`, `"headless"`. */
+  readonly name: string;
+  /** True when widgets are real windows that need the event loop. */
+  readonly interactive: boolean;
+  create(kind: string): number;
+  set(handle: number, name: string, value: unknown): void;
+  insert(parent: number, child: number, before: number): void;
+  remove(parent: number, child: number): void;
+  destroy(handle: number): void;
+  call(handle: number, command: string, arg?: string): void;
+  /** Processes OS events for up to `ms`, returning early when any arrive. */
+  wait(ms: number): void;
+  nextEvent(): HostEvent | null;
+  /** How many tree or property operations the host has seen; the event loop reads activity. */
+  readonly operations: number;
+  readonly services: Services;
+}
+
+export interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
+export interface Services {
+  dialog(kind: "open" | "save" | "folder" | "message" | "confirm", options: Record<string, unknown>): unknown;
+  clipboardRead(): string;
+  clipboardWrite(text: string): void;
+  clipboardClear(): void;
+  isDark(): boolean;
+  notify(title: string, body: string, appName: string): void;
+  appPath(name: string): string;
+  singleInstance(appId: string): boolean;
+  setMenu(spec: unknown[]): void;
+  trayCreate(spec: unknown): number;
+  trayUpdate(id: number, spec: unknown): void;
+  trayDestroy(id: number): void;
+  hotkeyRegister(accelerator: string): number;
+  hotkeyUnregister(id: number): void;
+}
+
+interface HeadlessWidget {
+  handle: number;
+  kind: string;
+  props: Record<string, unknown>;
+  children: number[];
+  parent: number;
+}
+
+/**
+ * Keeps the widget tree in memory. Used for tests (`useHeadless()`), and whenever no native
+ * backend is available. `inspect()` prints what a native host would have built.
+ */
+export class HeadlessHost implements Host {
+  readonly name = "headless";
+  readonly interactive = false;
+  operations = 0;
+  readonly widgets = new Map<number, HeadlessWidget>();
+  readonly notifications: { title: string; body: string }[] = [];
+  /** Answers for dialogs, by kind; a dialog without one is cancelled. */
+  readonly dialogAnswers: Record<string, unknown> = {};
+  menu: unknown[] = [];
+  private next = 1;
+  private clipboard = "";
+  private events: HostEvent[] = [];
+  dark = false;
+
+  create(kind: string): number {
+    const handle = this.next++;
+    this.widgets.set(handle, { handle, kind, props: {}, children: [], parent: 0 });
+    this.operations++;
+    return handle;
+  }
+  set(handle: number, name: string, value: unknown): void {
+    const w = this.widget(handle);
+    w.props[name] = value;
+    this.operations++;
+  }
+  insert(parent: number, child: number, before: number): void {
+    const p = this.widget(parent);
+    const c = this.widget(child);
+    if (c.parent) this.remove(c.parent, child);
+    const at = before ? p.children.indexOf(before) : -1;
+    if (at >= 0) p.children.splice(at, 0, child);
+    else p.children.push(child);
+    c.parent = parent;
+    this.operations++;
+  }
+  remove(parent: number, child: number): void {
+    const p = this.widget(parent);
+    const at = p.children.indexOf(child);
+    if (at >= 0) p.children.splice(at, 1);
+    this.widget(child).parent = 0;
+    this.operations++;
+  }
+  destroy(handle: number): void {
+    const w = this.widgets.get(handle);
+    if (!w) return;
+    if (w.parent && this.widgets.has(w.parent)) this.remove(w.parent, handle);
+    this.widgets.delete(handle);
+    this.operations++;
+  }
+  call(handle: number, command: string, arg?: string): void {
+    const w = this.widget(handle);
+    if (command === "show") w.props.visible = true;
+    if (command === "close" || command === "hide") w.props.visible = false;
+    void arg;
+  }
+  wait(_ms: number): void {}
+  nextEvent(): HostEvent | null {
+    return this.events.shift() || null;
+  }
+  /** Queues an event as if the OS had delivered it; the next drain dispatches it. */
+  post(event: HostEvent): void {
+    this.events.push(event);
+  }
+
+  private widget(handle: number): HeadlessWidget {
+    const w = this.widgets.get(handle);
+    if (!w) throw new Error(`kiln:gui: headless host has no widget ${handle}`);
+    return w;
+  }
+
+  /** The widget tree under `handle` as indented text, props sorted, layout omitted. */
+  inspect(handle: number, depth = 0): string {
+    const w = this.widget(handle);
+    const props = Object.keys(w.props)
+      .filter((k) => k !== "layout")
+      .sort()
+      .map((k) => `${k}=${JSON.stringify(w.props[k])}`)
+      .join(" ");
+    let out = `${"  ".repeat(depth)}<${w.kind}${props ? " " + props : ""}>`;
+    for (const c of w.children) out += "\n" + this.inspect(c, depth + 1);
+    return out;
+  }
+
+  readonly services: Services = {
+    dialog: (kind) => (kind in this.dialogAnswers ? this.dialogAnswers[kind] : kind === "message" ? true : null),
+    clipboardRead: () => this.clipboard,
+    clipboardWrite: (text) => {
+      this.clipboard = text;
+    },
+    clipboardClear: () => {
+      this.clipboard = "";
+    },
+    isDark: () => this.dark,
+    notify: (title, body) => {
+      this.notifications.push({ title, body });
+    },
+    appPath: (name) => fallbackPath(name),
+    singleInstance: () => true,
+    setMenu: (spec) => {
+      this.menu = spec;
+    },
+    trayCreate: () => this.next++,
+    trayUpdate: () => {},
+    trayDestroy: () => {},
+    hotkeyRegister: () => this.next++,
+    hotkeyUnregister: () => {},
+  };
+}
+
+function env(name: string): string | undefined {
+  return typeof process !== "undefined" && process.env ? process.env[name] : undefined;
+}
+
+function fallbackPath(name: string): string {
+  const home = env("HOME") || env("USERPROFILE") || "/";
+  switch (name) {
+    case "home":
+      return home;
+    case "temp":
+      return env("TMPDIR") || env("TEMP") || "/tmp";
+    case "desktop":
+      return home + "/Desktop";
+    case "documents":
+      return home + "/Documents";
+    case "downloads":
+      return home + "/Downloads";
+    default:
+      return home + "/." + name;
+  }
+}
+
+const ABI_VERSION = 2;
+
+const NATIVE_FUNCTIONS: Record<string, { arguments: string[]; return: string }> = {
+  kiln_gui_abi_version: { arguments: [], return: "u32" },
+  kiln_gui_result: { arguments: ["pointer", "u64"], return: "i32" },
+  kiln_gui_init: { arguments: [], return: "i32" },
+  kiln_gui_create: { arguments: ["pointer"], return: "u32" },
+  kiln_gui_set_text: { arguments: ["u32", "pointer", "pointer"], return: "i32" },
+  kiln_gui_set_number: { arguments: ["u32", "pointer", "f64"], return: "i32" },
+  kiln_gui_insert: { arguments: ["u32", "u32", "u32"], return: "i32" },
+  kiln_gui_remove: { arguments: ["u32", "u32"], return: "i32" },
+  kiln_gui_destroy: { arguments: ["u32"], return: "i32" },
+  kiln_gui_call: { arguments: ["u32", "pointer", "pointer"], return: "i32" },
+  kiln_gui_wait: { arguments: ["f64"], return: "i32" },
+  kiln_gui_next_event: { arguments: ["pointer"], return: "i32" },
+  kiln_gui_dialog: { arguments: ["pointer", "pointer"], return: "i32" },
+  kiln_gui_clipboard_read: { arguments: [], return: "i32" },
+  kiln_gui_clipboard_write: { arguments: ["pointer"], return: "i32" },
+  kiln_gui_clipboard_clear: { arguments: [], return: "i32" },
+  kiln_gui_is_dark: { arguments: [], return: "i32" },
+  kiln_gui_notify: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
+  kiln_gui_app_path: { arguments: ["pointer"], return: "i32" },
+  kiln_gui_single_instance: { arguments: ["pointer"], return: "i32" },
+  kiln_gui_set_menu: { arguments: ["pointer"], return: "i32" },
+  kiln_gui_tray_create: { arguments: ["pointer"], return: "u32" },
+  kiln_gui_tray_update: { arguments: ["u32", "pointer"], return: "i32" },
+  kiln_gui_tray_destroy: { arguments: ["u32"], return: "i32" },
+  kiln_gui_hotkey_register: { arguments: ["pointer"], return: "u32" },
+  kiln_gui_hotkey_unregister: { arguments: ["u32"], return: "i32" },
+};
+
+/** The native library (`libkiln_host_gui`), bound through FFI. Every failure throws its reason. */
+class NativeHost implements Host {
+  readonly interactive = true;
+  operations = 0;
+  private header = new ArrayBuffer(32);
+  private header32 = new Uint32Array(this.header);
+  private header64 = new Float64Array(this.header);
+  private textBuffer = new Uint8Array(4096);
+  private decoder = new TextDecoder();
+
+  readonly name: string;
+  private fn: Record<string, (...args: unknown[]) => any>;
+
+  constructor(name: string, fn: Record<string, (...args: unknown[]) => any>) {
+    this.name = name;
+    this.fn = fn;
+  }
+
+  /** Reads the text a call stored (a result or an error message) of `length` bytes. */
+  private result(length: number): string {
+    if (length <= 0) return "";
+    if (length > this.textBuffer.length) this.textBuffer = new Uint8Array(length * 2);
+    const n = this.fn.kiln_gui_result(this.textBuffer, length);
+    return this.decoder.decode(this.textBuffer.subarray(0, n));
+  }
+
+  private check(code: number, what: string): number {
+    if (code === -2) throw new Error(`kiln:gui: ${what}: ${this.result(1 << 16)}`);
+    return code;
+  }
+
+  create(kind: string): number {
+    this.operations++;
+    const handle = this.fn.kiln_gui_create(kind);
+    if (!handle) throw new Error(`kiln:gui: create <${kind}>: ${this.result(1 << 16)}`);
+    return handle;
+  }
+  set(handle: number, name: string, value: unknown): void {
+    this.operations++;
+    if (typeof value === "number") this.check(this.fn.kiln_gui_set_number(handle, name, value), `set ${name}`);
+    else if (typeof value === "boolean") this.check(this.fn.kiln_gui_set_number(handle, name, value ? 1 : 0), `set ${name}`);
+    else if (value === null || value === undefined) this.check(this.fn.kiln_gui_set_text(handle, name, ""), `set ${name}`);
+    else if (typeof value === "object") this.check(this.fn.kiln_gui_set_text(handle, name, JSON.stringify(value)), `set ${name}`);
+    else this.check(this.fn.kiln_gui_set_text(handle, name, String(value)), `set ${name}`);
+  }
+  insert(parent: number, child: number, before: number): void {
+    this.operations++;
+    this.check(this.fn.kiln_gui_insert(parent, child, before), "insert");
+  }
+  remove(parent: number, child: number): void {
+    this.operations++;
+    this.check(this.fn.kiln_gui_remove(parent, child), "remove");
+  }
+  destroy(handle: number): void {
+    this.operations++;
+    this.check(this.fn.kiln_gui_destroy(handle), "destroy");
+  }
+  call(handle: number, command: string, arg = ""): void {
+    this.operations++;
+    this.check(this.fn.kiln_gui_call(handle, command, arg), command);
+  }
+  wait(ms: number): void {
+    this.check(this.fn.kiln_gui_wait(ms), "wait");
+  }
+  nextEvent(): HostEvent | null {
+    if (this.fn.kiln_gui_next_event(this.header) !== 1) return null;
+    const textLength = this.header32[6];
+    return {
+      handle: this.header32[0],
+      kind: this.header32[1],
+      a: this.header64[1],
+      b: this.header64[2],
+      text: this.result(textLength),
+    };
+  }
+
+  readonly services: Services = {
+    dialog: (kind, options) => {
+      const n = this.check(this.fn.kiln_gui_dialog(kind, JSON.stringify(options)), `${kind} dialog`);
+      return n < 0 ? null : JSON.parse(this.result(n));
+    },
+    clipboardRead: () => {
+      const n = this.check(this.fn.kiln_gui_clipboard_read(), "clipboard");
+      return n < 0 ? "" : this.result(n);
+    },
+    clipboardWrite: (text) => {
+      this.check(this.fn.kiln_gui_clipboard_write(text), "clipboard");
+    },
+    clipboardClear: () => {
+      this.check(this.fn.kiln_gui_clipboard_clear(), "clipboard");
+    },
+    isDark: () => this.check(this.fn.kiln_gui_is_dark(), "appearance") === 1,
+    notify: (title, body, appName) => {
+      this.check(this.fn.kiln_gui_notify(title, body, appName), "notification");
+    },
+    appPath: (name) => this.result(this.check(this.fn.kiln_gui_app_path(name), "path")),
+    singleInstance: (appId) => this.check(this.fn.kiln_gui_single_instance(appId), "single instance") === 1,
+    setMenu: (spec) => {
+      this.check(this.fn.kiln_gui_set_menu(JSON.stringify(spec)), "menu");
+    },
+    trayCreate: (spec) => {
+      const id = this.fn.kiln_gui_tray_create(JSON.stringify(spec));
+      if (!id) throw new Error(`kiln:gui: tray: ${this.result(1 << 16)}`);
+      return id;
+    },
+    trayUpdate: (id, spec) => {
+      this.check(this.fn.kiln_gui_tray_update(id, JSON.stringify(spec)), "tray");
+    },
+    trayDestroy: (id) => {
+      this.check(this.fn.kiln_gui_tray_destroy(id), "tray");
+    },
+    hotkeyRegister: (accelerator) => {
+      const id = this.fn.kiln_gui_hotkey_register(accelerator);
+      if (!id) throw new Error(`kiln:gui: shortcut ${accelerator}: ${this.result(1 << 16)}`);
+      return id;
+    },
+    hotkeyUnregister: (id) => {
+      this.check(this.fn.kiln_gui_hotkey_unregister(id), "shortcut");
+    },
+  };
+}
+
+function dirname(path: string): string {
+  const at = path.lastIndexOf("/");
+  return at > 0 ? path.slice(0, at) : ".";
+}
+
+/** Finds and binds the native library, or says why it could not. */
+function openNative(): NativeHost | string {
+  const modules = typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
+  const ffi = modules && modules.ffi;
+  if (!ffi) return "this engine has no FFI (the interpreter); run natively with `kiln run --native` or `kiln build`";
+  const fs = modules.fs;
+  const file = "libkiln_host_gui" + (ffi.suffix || ".dylib");
+  const exe = typeof process.execPath === "string" ? dirname(process.execPath) : ".";
+  const cwd = typeof process.cwd === "function" ? process.cwd() : ".";
+  const explicit = env("KILN_GUI_LIB");
+  const candidates = explicit
+    ? [explicit]
+    : [exe + "/" + file, exe + "/../lib/" + file, exe + "/../Frameworks/" + file, cwd + "/target/release/" + file, cwd + "/target/debug/" + file];
+  const path = candidates.find((p) => !fs || fs.existsSync(p));
+  if (!path) return `${file} not found (looked in ${candidates.join(", ")}); set KILN_GUI_LIB to its path`;
+  let lib: any;
+  try {
+    lib = ffi.dlopen(path, NATIVE_FUNCTIONS);
+  } catch (error) {
+    return `could not load ${path}: ${error}`;
+  }
+  const fn = lib.functions;
+  const version = fn.kiln_gui_abi_version();
+  if (version !== ABI_VERSION) return `${path} speaks ABI ${version}, this library needs ${ABI_VERSION}; rebuild kiln-host-gui`;
+  const host = new NativeHost(process.platform === "darwin" ? "appkit" : process.platform, fn);
+  if (fn.kiln_gui_init() !== 0) {
+    const scratch = new Uint8Array(4096);
+    const n = fn.kiln_gui_result(scratch, scratch.length);
+    return new TextDecoder().decode(scratch.subarray(0, n));
+  }
+  return host;
+}
+
+let activeHost: Host | null = null;
+let fallbackReason: string | null = null;
+let warnedHeadless = false;
+
+/** The host widgets are created in. Chosen on first use: native when possible, else headless. */
+export function currentHost(): Host {
+  if (activeHost) return activeHost;
+  if (env("KILN_GUI") === "headless") return (activeHost = new HeadlessHost());
+  const native = openNative();
+  if (typeof native === "string") {
+    fallbackReason = native;
+    activeHost = new HeadlessHost();
+  } else {
+    activeHost = native;
+  }
+  return activeHost;
+}
+
+/** Switches to a fresh in-memory host (for tests) and returns it. Call before creating widgets. */
+export function useHeadless(): HeadlessHost {
+  const host = new HeadlessHost();
+  activeHost = host;
+  fallbackReason = null;
+  warnedHeadless = true;
+  return host;
+}
+
+function warnIfHeadless(): void {
+  if (warnedHeadless || !fallbackReason) return;
+  warnedHeadless = true;
+  console.error(`kiln:gui: no native window system (${fallbackReason}); running headless. Set KILN_GUI=headless to silence this.`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 4. Widgets
+//
+// A Node mirrors one native widget. It exists in JavaScript from construction; its native
+// widget exists only while it is attached to a shown window ("mounted"). Removing a node keeps
+// it; disposing it (directly, or when the reactive owner that created it is disposed) destroys
+// it and its subtree.
+//
+// Layout is decided here: each widget class supplies flexbox defaults, the `style` object and
+// individual props refine them, and the host receives the result as one `layout` value.
+
+type Handler = (...args: any[]) => void;
+
+/** Props that feed the layout object rather than going to the widget directly. */
+const LAYOUT_PROPS = new Set([
+  "width", "height", "minWidth", "minHeight", "maxWidth", "maxHeight", "aspectRatio",
+  "grow", "shrink", "basis", "alignSelf", "margin", "padding", "gap", "rowGap", "columnGap",
+  "align", "justify", "wrap", "direction", "columns", "rows", "gridColumn", "gridRow", "style", "hidden",
+]);
+
+/** Props every widget forwards to its host. */
+const COMMON_NATIVE = ["hidden", "disabled", "tooltip", "opacity"];
+
+const ALIGN: Record<string, string> = { start: "start", leading: "start", top: "start", center: "center", end: "end", trailing: "end", bottom: "end", stretch: "stretch", baseline: "baseline" };
+const JUSTIFY: Record<string, string> = { start: "start", center: "center", end: "end", between: "space-between", around: "space-around", evenly: "space-evenly" };
+
+let nextNodeId = 1;
+const mounted = new Map<number, Node>(); // host handle -> node
 
 export class Node {
-  readonly id: number;
-  readonly tag: string;
+  readonly id = nextNodeId++;
   parent: Node | null = null;
-  children: Node[] = [];
-  properties: Record<string, any> = {};
-  private listeners: Record<string, Function[]> = {};
-  private propertyCleanups: Map<string, () => void> = new Map();
+  readonly children: Node[] = [];
+  /** The current value of every prop, as last set or as last reported by the widget. */
+  readonly props: Record<string, any> = {};
+  /** The host handle while mounted, else 0. */
+  handle = 0;
+  disposed = false;
+  private bindings: Map<string, { stop: Cleanup; value: unknown }> | null = null;
+  private listeners: Map<string, Handler[]> | null = null;
 
-  constructor(tag: string) {
-    this.id = nextNodeId++;
-    this.tag = tag;
-    nodeRegistry.set(this.id, this);
+  /** The host widget kind (`"text"`, `"container"`); empty for nodes with no widget. */
+  get kind(): string {
+    return "container";
   }
 
-  dispose(): void {
-    for (const cleanup of this.propertyCleanups.values()) {
-      cleanup();
+  /** Prop names this widget forwards to the host, beyond the common ones. */
+  protected nativeProps(): readonly string[] {
+    return [];
+  }
+
+  /** Whether children go inside this widget. */
+  get holdsChildren(): boolean {
+    return false;
+  }
+
+  constructor(props?: Record<string, unknown> | null, children?: unknown) {
+    if (currentOwner) onCleanup(() => this.dispose());
+    if (props) this.assign(props);
+    if (children !== undefined) this.append(children);
+  }
+
+  /** Sets several props (and `children`, and `on…` handlers) at once. */
+  assign(props: Record<string, unknown>): this {
+    batch(() => {
+      for (const key of Object.keys(props)) {
+        if (key === "children") this.append(props.children);
+        else if (key === "ref") (props.ref as (node: this) => void)(this);
+        else this.set(key, props[key]);
+      }
+    });
+    return this;
+  }
+
+  /** A prop's current value (plain, untracked: wrap reads in your own signals to react). */
+  get(name: string): any {
+    return this.props[name];
+  }
+
+  /**
+   * Sets a prop. A function binds it: the prop follows the function's reactive value until the
+   * prop is set again or the node is disposed. `onX` props set the handler for event `x`.
+   */
+  set(name: string, value: unknown): this {
+    if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110 && name.charCodeAt(2) < 91) {
+      this.props[name] = value;
+      this.handlerChanged(name, value);
+      return this;
     }
-    this.propertyCleanups.clear();
-    nodeRegistry.delete(this.id);
-    const driver = getActiveDriver();
-    if (driver) {
-      driver.disposeWidget(this);
+    const bound = this.bindings && this.bindings.get(name);
+    if (bound) {
+      bound.stop();
+      this.bindings!.delete(name);
     }
-    for (let i = 0; i < this.children.length; i++) {
-      this.children[i].dispose();
+    if (typeof value === "function") {
+      const binding = { stop: () => {}, value: undefined as unknown };
+      (this.bindings || (this.bindings = new Map())).set(name, binding);
+      binding.stop = runWithOwner(null, () =>
+        createEffect(
+          () => (value as Accessor<unknown>)(),
+          (v) => {
+            binding.value = v;
+            this.write(name, v);
+          },
+        ),
+      );
+      return this;
     }
-    if (this.parent) {
-      this.parent.removeChild(this);
+    this.write(name, value);
+    return this;
+  }
+
+  /** Called when an `on…` handler prop is set or cleared. */
+  protected handlerChanged(_name: string, _handler: unknown): void {}
+
+  protected write(name: string, value: unknown): void {
+    const prev = this.props[name];
+    if (prev === value && (typeof value !== "object" || value === null)) return;
+    this.props[name] = value;
+    this.propChanged(name, value, prev);
+  }
+
+  /** Records a value the widget itself reported (user input) without echoing it back. */
+  protected adopt(name: string, value: unknown): void {
+    this.props[name] = value;
+    // A native widget already shows what the person did; the headless mirror is told instead.
+    if (this.handle && !currentHost().interactive) this.sendProp(name, value);
+  }
+
+  /**
+   * After a handler ran for user input, a bound (controlled) prop that the program did not
+   * follow is put back, so the widget shows the program's value, as a controlled input should.
+   */
+  protected reassert(name: string): void {
+    const bound = this.bindings && this.bindings.get(name);
+    if (bound && bound.value !== this.props[name]) {
+      this.props[name] = bound.value;
+      this.propChanged(name, bound.value, undefined);
     }
   }
 
-  get firstChild(): Node | null {
-    return this.children.length > 0 ? this.children[0] : null;
+  protected propChanged(name: string, value: unknown, _prev: unknown): void {
+    if (!this.handle) return;
+    if (LAYOUT_PROPS.has(name)) {
+      currentHost().set(this.handle, "layout", this.layout());
+      if (name === "hidden") currentHost().set(this.handle, "hidden", !!value);
+      if ((name === "align" || name === "direction") && this.holdsChildren) {
+        for (const child of this.children) child.relayout();
+      }
+      return;
+    }
+    if (COMMON_NATIVE.indexOf(name) >= 0 || this.nativeProps().indexOf(name) >= 0) {
+      this.sendProp(name, value);
+    }
   }
 
-  get nextSibling(): Node | null {
-    if (!this.parent) return null;
-    const siblings = this.parent.children;
-    const index = siblings.indexOf(this);
-    if (index >= 0 && index + 1 < siblings.length) {
-      return siblings[index + 1];
+  /** Sends one prop to the host; widgets rename or convert here. */
+  protected sendProp(name: string, value: unknown): void {
+    currentHost().set(this.handle, name, value === undefined ? null : value);
+  }
+
+  protected relayout(): void {
+    if (this.handle) currentHost().set(this.handle, "layout", this.layout());
+  }
+
+  /** Whether the parent lays children out in a row. */
+  protected inRow(): boolean {
+    return !!this.parent && this.parent.isRow();
+  }
+
+  isRow(): boolean {
+    return false;
+  }
+
+  /** Flexbox defaults for this widget, before `style` and individual props. */
+  protected layoutDefaults(_style: Record<string, unknown>): void {}
+
+  /** The complete layout object the host receives. */
+  layout(): Record<string, unknown> {
+    const style: Record<string, unknown> = {};
+    this.layoutDefaults(style);
+    const p = this.props;
+    if (p.style) Object.assign(style, p.style);
+    const direct: [string, string][] = [
+      ["width", "width"], ["height", "height"], ["minWidth", "minWidth"], ["minHeight", "minHeight"],
+      ["maxWidth", "maxWidth"], ["maxHeight", "maxHeight"], ["aspectRatio", "aspectRatio"],
+      ["grow", "flexGrow"], ["shrink", "flexShrink"], ["basis", "flexBasis"], ["margin", "margin"],
+      ["padding", "padding"], ["gap", "gap"], ["rowGap", "rowGap"], ["columnGap", "columnGap"],
+      ["gridColumn", "gridColumn"], ["gridRow", "gridRow"],
+    ];
+    for (const [prop, key] of direct) if (p[prop] !== undefined) style[key] = p[prop];
+    if (typeof p.grow === "boolean") style.flexGrow = p.grow ? 1 : 0;
+    if (p.alignSelf !== undefined) style.alignSelf = ALIGN[p.alignSelf] || p.alignSelf;
+    if (p.align !== undefined) style.alignItems = ALIGN[p.align] || p.align;
+    if (p.justify !== undefined) style.justifyContent = JUSTIFY[p.justify] || p.justify;
+    if (p.wrap !== undefined) style.flexWrap = p.wrap ? "wrap" : "nowrap";
+    if (p.hidden) style.display = "none";
+    return style;
+  }
+
+  // ── Tree ──
+
+  /** Appends children: nodes, text, arrays, JSX elements, or functions (reactive regions). */
+  append(children: unknown): this {
+    if (!this.holdsChildren) {
+      if (children === undefined || children === null) return this;
+      throw new Error(`kiln:gui: <${this.constructor.name}> does not take children`);
     }
-    return null;
+    insert(this, children, null);
+    return this;
+  }
+
+  /** Inserts `child` before `before` (or last). Moves a child that is attached elsewhere. */
+  insertBefore(child: Node, before: Node | null): void {
+    if (child === this || child.contains(this)) throw new Error("kiln:gui: a node cannot contain itself");
+    if (child.parent) child.parent.detach(child);
+    const at = before ? this.children.indexOf(before) : -1;
+    if (at >= 0) this.children.splice(at, 0, child);
+    else this.children.push(child);
+    child.parent = this;
+    if (this.handle && child.materializable) {
+      child.mount();
+      const host = currentHost();
+      host.insert(this.handle, child.handle, this.mountedAfter(child));
+      host.set(child.handle, "layout", child.layout());
+    }
   }
 
   appendChild(child: Node): void {
     this.insertBefore(child, null);
   }
 
+  /** Detaches `child`, keeping it (and its widget) for reuse. Use `dispose()` to destroy it. */
   removeChild(child: Node): void {
-    const index = this.children.indexOf(child);
-    if (index >= 0) {
-      this.children.splice(index, 1);
-      child.parent = null;
-      const driver = getActiveDriver();
-      const parentHandle = driver.getHandle(this.id);
-      const childHandle = driver.getHandle(child.id);
-      if (parentHandle && childHandle) {
-        driver.removeChild(parentHandle, childHandle);
-      }
-      if (typeof G.__kilnGuiRemoveNode === "function") {
-        G.__kilnGuiRemoveNode(this.id, child.id);
-      }
-    }
+    if (child.parent === this) this.detach(child);
   }
 
-  insertBefore(child: Node, anchor: Node | null): void {
-    if (child.parent) {
-      child.parent.removeChild(child);
-    }
-    child.parent = this;
-    if (anchor) {
-      const index = this.children.indexOf(anchor);
-      if (index >= 0) {
-        this.children.splice(index, 0, child);
-      } else {
-        this.children.push(child);
-      }
-    } else {
-      this.children.push(child);
-    }
-    const driver = getActiveDriver();
-    const parentHandle = driver.getHandle(this.id);
-    if (parentHandle) {
-      const childHandle = driver.createWidget(child);
-      if (childHandle) {
-        const anchorHandle = anchor ? driver.getHandle(anchor.id) || null : null;
-        driver.insertChild(parentHandle, childHandle, anchorHandle);
-      }
-    }
-    if (typeof G.__kilnGuiInsertNode === "function") {
-      G.__kilnGuiInsertNode(this.id, child.id, anchor ? anchor.id : 0);
-    }
+  private detach(child: Node): void {
+    const at = this.children.indexOf(child);
+    if (at >= 0) this.children.splice(at, 1);
+    child.parent = null;
+    if (this.handle && child.handle) currentHost().remove(this.handle, child.handle);
   }
 
-  moveChild(child: Node, beforeAnchor: Node | null): void {
-    const oldIndex = this.children.indexOf(child);
-    if (oldIndex < 0) return;
-    this.children.splice(oldIndex, 1);
-    if (beforeAnchor) {
-      const newIndex = this.children.indexOf(beforeAnchor);
-      if (newIndex >= 0) {
-        this.children.splice(newIndex, 0, child);
-      } else {
-        this.children.push(child);
-      }
-    } else {
-      this.children.push(child);
-    }
-    const driver = getActiveDriver();
-    const parentHandle = driver.getHandle(this.id);
-    const childHandle = driver.getHandle(child.id);
-    if (parentHandle && childHandle) {
-      const anchorHandle = beforeAnchor ? driver.getHandle(beforeAnchor.id) || null : null;
-      driver.reorderChild(parentHandle, childHandle, anchorHandle);
-    }
-  }
-
-  setProperty(name: string, value: any): void {
-    const existingCleanup = this.propertyCleanups.get(name);
-    if (existingCleanup) {
-      existingCleanup();
-      this.propertyCleanups.delete(name);
-    }
-
-    if (name.startsWith("on") && typeof value === "function") {
-      let eventName = name.slice(2).toLowerCase();
-      if (eventName === "press") eventName = "click";
-      if (eventName === "valuechange") eventName = "change";
-      this.addEventListener(eventName, value);
-      if (eventName === "change") {
-        this.addEventListener("input", value);
-        this.addEventListener("toggle", value);
-      }
-      if (eventName === "toggle") {
-        this.addEventListener("change", value);
-      }
-      return;
-    }
-
-    // Solid 2.0: If value is a reactive signal or accessor function, bind reactively
-    if (typeof value === "function") {
-      const stop = createEffect(value, (resolvedVal: any) => {
-        this.applyRawProperty(name, resolvedVal);
-      });
-      if (stop) {
-        this.propertyCleanups.set(name, stop);
-      }
-      return;
-    }
-
-    this.applyRawProperty(name, value);
-  }
-
-  private applyRawProperty(name: string, value: any): void {
-    this.properties[name] = value;
-    const driver = getActiveDriver();
-    const handle = driver.getHandle(this.id);
-    if (handle) {
-      driver.updateProperty(handle, this.tag, name, value);
-    }
-    if (typeof G.__kilnGuiSetProperty === "function") {
-      G.__kilnGuiSetProperty(this.id, name, value);
-    }
-  }
-
-  getProperty(name: string): any {
-    return this.properties[name];
-  }
-
-  addEventListener(event: string, handler: Function): void {
-    if (!this.listeners[event]) {
-      this.listeners[event] = [];
-    }
-    this.listeners[event].push(handler);
-    if (typeof G.__kilnGuiAddEventListener === "function") {
-      G.__kilnGuiAddEventListener(this.id, event);
-    }
-  }
-
-  on(event: string, handler: Function): void {
-    this.addEventListener(event, handler);
-  }
-
-  removeEventListener(event: string, handler: Function): void {
-    const list = this.listeners[event];
-    if (list) {
-      const index = list.indexOf(handler);
-      if (index >= 0) {
-        list.splice(index, 1);
-      }
-    }
-  }
-
-  off(event: string, handler: Function): void {
-    this.removeEventListener(event, handler);
-  }
-
-  dispatchEvent(event: string, ...args: any[]): void {
-    if ((event === "input" || event === "change") && typeof args[0] === "string") {
-      this.properties.value = args[0];
-    } else if (event === "change" && typeof args[0] === "number") {
-      this.properties.value = args[0];
-    } else if (event === "toggle" && typeof args[0] === "boolean") {
-      this.properties.checked = args[0];
-    } else if (event === "close") {
-      this.properties.visible = false;
-    }
-    const list = this.listeners[event];
-    if (list) {
-      for (let i = 0; i < list.length; i++) {
-        list[i](...args);
-      }
-    }
-  }
-}
-
-export class Window extends Node {
-  constructor(options?: { title?: string; width?: number; height?: number }) {
-    super("window");
-    if (options) {
-      if (options.title !== undefined) this.title = options.title;
-      if (options.width !== undefined) this.width = options.width;
-      if (options.height !== undefined) this.height = options.height;
-    }
-  }
-
-  get title(): string {
-    return this.properties.title || "";
-  }
-  set title(val: string) {
-    this.setProperty("title", val);
-  }
-
-  get width(): number {
-    return this.properties.width || 800;
-  }
-  set width(val: number) {
-    this.setProperty("width", val);
-  }
-
-  get height(): number {
-    return this.properties.height || 600;
-  }
-  set height(val: number) {
-    this.setProperty("height", val);
-  }
-
-  get visible(): boolean {
-    return !!this.properties.visible;
-  }
-  set visible(val: boolean) {
-    this.setProperty("visible", val);
-  }
-
-  get style(): any {
-    return this.properties.style;
-  }
-  set style(val: any) {
-    this.setProperty("style", val);
-  }
-
-  private _content: Node | null = null;
-
-  get content(): Node | null {
-    if (this._content) return this._content;
-    if (this.children.length === 0) return null;
-    if (this.children.length === 1 && !this.properties.style) {
-      return this.children[0];
-    }
-    const root = new VStack({
-      spacing: (this.properties.style && this.properties.style.gap !== undefined) ? this.properties.style.gap : 14,
-    });
-    const childList = [...this.children];
-    for (let i = 0; i < childList.length; i++) {
-      root.appendChild(childList[i]);
-    }
-    this._content = root;
-    return root;
-  }
-  set content(node: Node | null) {
-    this._content = node;
-    while (this.children.length > 0) {
-      this.removeChild(this.children[0]);
-    }
-    if (node) {
-      super.appendChild(node);
-      const driver = getActiveDriver();
-      const winHandle = driver.getHandle(this.id);
-      if (winHandle) {
-        const childHandle = driver.createWidget(node);
-        if (childHandle) {
-          driver.setWindowContent(winHandle, childHandle);
-        }
-      }
-    }
-  }
-
-  override appendChild(child: Node): void {
-    if (this._content && this._content !== child) {
-      this._content.appendChild(child);
-      return;
-    }
-    super.appendChild(child);
-  }
-
-  show(): void {
-    this.visible = true;
-    const driver = getActiveDriver();
-    driver.showWindow(this);
-    if (typeof G.__kilnGuiShowWindow === "function") {
-      G.__kilnGuiShowWindow(this.id);
-    }
-  }
-
-  close(): void {
-    this.visible = false;
-    const driver = getActiveDriver();
-    driver.closeWindow(this);
-    if (typeof G.__kilnGuiCloseWindow === "function") {
-      G.__kilnGuiCloseWindow(this.id);
-    }
-  }
-
-  snapshot(path: string): boolean {
-    const driver = getActiveDriver();
-    if (typeof (driver as any).snapshotWindow === "function") {
-      return (driver as any).snapshotWindow(this, path);
-    }
+  contains(node: Node): boolean {
+    for (let n: Node | null = node; n; n = n.parent) if (n === this) return true;
     return false;
   }
 
-  maximize(): void {
-    const driver = getActiveDriver();
-    if (typeof driver.maximizeWindow === "function") {
-      driver.maximizeWindow(this);
-    }
-    this.dispatchEvent("maximize");
+  /** Markers (region anchors) have no widget. */
+  get materializable(): boolean {
+    return true;
   }
 
-  unmaximize(): void {
-    const driver = getActiveDriver();
-    if (typeof driver.unmaximizeWindow === "function") {
-      driver.unmaximizeWindow(this);
+  /** The handle of the first mounted sibling after `child`, which the host inserts before. */
+  private mountedAfter(child: Node): number {
+    for (let i = this.children.indexOf(child) + 1; i < this.children.length; i++) {
+      if (this.children[i].handle) return this.children[i].handle;
     }
-    this.dispatchEvent("unmaximize");
+    return 0;
+  }
+
+  /** Creates the widget (and its subtree's) in the host with the current props. */
+  mount(): void {
+    if (this.handle || this.disposed || !this.materializable) return;
+    const host = currentHost();
+    this.handle = host.create(this.kind);
+    mounted.set(this.handle, this);
+    for (const name of COMMON_NATIVE) if (this.props[name] !== undefined && name !== "hidden") this.sendProp(name, this.props[name]);
+    if (this.props.hidden) host.set(this.handle, "hidden", true);
+    for (const name of this.nativeProps()) if (this.props[name] !== undefined) this.sendProp(name, this.props[name]);
+    host.set(this.handle, "layout", this.layout());
+    for (const child of this.children) {
+      if (!child.materializable) continue;
+      child.mount();
+      host.insert(this.handle, child.handle, 0);
+    }
+  }
+
+  /** Destroys this node's widget subtree and stops its bindings. Idempotent. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.parent) this.parent.detach(this);
+    this.release();
+  }
+
+  private release(): void {
+    this.disposed = true;
+    if (this.bindings) {
+      for (const b of this.bindings.values()) b.stop();
+      this.bindings = null;
+    }
+    const children = this.children.splice(0, this.children.length);
+    for (const child of children) {
+      child.parent = null;
+      child.release();
+    }
+    if (this.handle) {
+      mounted.delete(this.handle);
+      const handle = this.handle;
+      this.handle = 0;
+      currentHost().destroy(handle);
+    }
+    this.listeners = null;
+  }
+
+  // ── Events ──
+
+  /** Adds a listener for event `name`; returns a function that removes it. */
+  on(name: string, handler: Handler): Cleanup {
+    const map = this.listeners || (this.listeners = new Map());
+    const list = map.get(name) || [];
+    list.push(handler);
+    map.set(name, list);
+    return () => {
+      const at = list.indexOf(handler);
+      if (at >= 0) list.splice(at, 1);
+    };
+  }
+
+  /** Calls the `on<Name>` prop handler, then listeners, inside one batch. */
+  emit(name: string, ...args: unknown[]): void {
+    batch(() => {
+      const prop = this.props["on" + name.charAt(0).toUpperCase() + name.slice(1)];
+      if (typeof prop === "function") prop(...args);
+      const list = this.listeners && this.listeners.get(name);
+      if (list) for (const h of list.slice()) h(...args);
+    });
+  }
+
+  /**
+   * A user action, from the host or from `fire()` in tests: updates the props the widget
+   * changed, emits the event, then restores controlled props.
+   */
+  receive(_event: string, _a: number, _b: number, _text: string): void {}
+
+  toString(): string {
+    return inspect(this);
+  }
+}
+
+/** An invisible anchor that marks where a reactive region's nodes go. */
+class Marker extends Node {
+  get materializable(): boolean {
+    return false;
+  }
+  get kind(): string {
+    return "";
+  }
+}
+
+// ── Containers ──
+
+export interface LayoutProps {
+  width?: MaybeAccessor<number | string>;
+  height?: MaybeAccessor<number | string>;
+  minWidth?: MaybeAccessor<number | string>;
+  minHeight?: MaybeAccessor<number | string>;
+  maxWidth?: MaybeAccessor<number | string>;
+  maxHeight?: MaybeAccessor<number | string>;
+  aspectRatio?: MaybeAccessor<number>;
+  grow?: MaybeAccessor<number | boolean>;
+  shrink?: MaybeAccessor<number>;
+  basis?: MaybeAccessor<number | string>;
+  alignSelf?: MaybeAccessor<Align>;
+  margin?: MaybeAccessor<Edges>;
+  gridColumn?: MaybeAccessor<number | string>;
+  gridRow?: MaybeAccessor<number | string>;
+  hidden?: MaybeAccessor<boolean>;
+  disabled?: MaybeAccessor<boolean>;
+  tooltip?: MaybeAccessor<string>;
+  opacity?: MaybeAccessor<number>;
+  /** Raw flexbox/grid properties (camelCase CSS names), applied before the props above. */
+  style?: MaybeAccessor<Record<string, unknown>>;
+  ref?: (node: any) => void;
+}
+
+export type Align = "start" | "center" | "end" | "stretch" | "baseline";
+export type Edges = number | string | [number, number] | [number, number, number, number] | { top?: number; right?: number; bottom?: number; left?: number };
+
+export interface ContainerProps extends LayoutProps {
+  padding?: MaybeAccessor<Edges>;
+  gap?: MaybeAccessor<number>;
+  /** Cross-axis alignment of children. */
+  align?: MaybeAccessor<Align>;
+  /** Main-axis distribution of children. */
+  justify?: MaybeAccessor<"start" | "center" | "end" | "between" | "around" | "evenly">;
+  wrap?: MaybeAccessor<boolean>;
+  background?: MaybeAccessor<string>;
+  cornerRadius?: MaybeAccessor<number>;
+  borderWidth?: MaybeAccessor<number>;
+  borderColor?: MaybeAccessor<string>;
+  /** Makes the whole container clickable. */
+  onPress?: () => void;
+  children?: unknown;
+}
+
+const PAINT = ["background", "cornerRadius", "borderWidth", "borderColor"];
+const PAINT_AND_PRESS = [...PAINT, "pressable"];
+
+/** A flexbox container. `direction` is `"column"` unless set. Prefer VStack and HStack. */
+export class Box extends Node {
+  constructor(props?: ContainerProps & { direction?: MaybeAccessor<"row" | "column"> }, children?: unknown) {
+    super(props as Record<string, unknown>, children);
+  }
+  get holdsChildren(): boolean {
+    return true;
+  }
+  protected nativeProps(): readonly string[] {
+    return PAINT_AND_PRESS;
+  }
+  /** A container with `onPress` is clickable as a whole (a list row, a card). */
+  protected handlerChanged(name: string, handler: unknown): void {
+    if (name === "onPress") this.write("pressable", typeof handler === "function");
+  }
+  receive(event: string, _a?: number, _b?: number, _text?: string): void {
+    if (event === "press" && !this.props.disabled) this.emit("press");
+  }
+  /** Presses the container as a person would. */
+  press(): void {
+    fire(this, "press");
+  }
+  isRow(): boolean {
+    const d = this.props.direction || (this.props.style && this.props.style.flexDirection);
+    return d === "row" || d === "row-reverse";
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexDirection = this.props.direction || "column";
+    s.alignItems = "stretch";
+    if (this.inRow()) s.minWidth = 0;
+  }
+}
+
+/** Children top to bottom, stretched to the stack's width. */
+export class VStack extends Box {
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexDirection = "column";
+    s.alignItems = "stretch";
+    s.gap = 8;
+    if (this.inRow()) s.minWidth = 0;
+  }
+  isRow(): boolean {
+    return false;
+  }
+}
+
+/** Children left to right, centred vertically. */
+export class HStack extends Box {
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexDirection = "row";
+    s.alignItems = "center";
+    s.gap = 8;
+    if (this.inRow()) s.minWidth = 0;
+  }
+  isRow(): boolean {
+    return true;
+  }
+}
+
+/** A grouped surface: padded, rounded, filled. */
+export class Card extends Box {
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexDirection = this.props.direction || "column";
+    s.alignItems = "stretch";
+    s.gap = 8;
+    s.padding = 14;
+    if (this.inRow()) s.minWidth = 0;
+  }
+  mount(): void {
+    const p = this.props;
+    if (p.background === undefined) p.background = "fill";
+    if (p.cornerRadius === undefined) p.cornerRadius = 10;
+    if (p.borderWidth === undefined) p.borderWidth = 1;
+    if (p.borderColor === undefined) p.borderColor = "separator";
+    super.mount();
+  }
+}
+
+export interface GridProps extends ContainerProps {
+  /** `"1fr 2fr"`, `"200px auto"`, `"repeat(3, 1fr)"`, or a count of equal columns. */
+  columns?: MaybeAccessor<string | number>;
+  rows?: MaybeAccessor<string | number>;
+  rowGap?: MaybeAccessor<number>;
+  columnGap?: MaybeAccessor<number>;
+}
+
+/** CSS grid. Children take `gridColumn` / `gridRow` (`2`, `"span 2"`, `"1 / 3"`). */
+export class Grid extends Box {
+  constructor(props?: GridProps, children?: unknown) {
+    super(props, children);
+  }
+  layout(): Record<string, unknown> {
+    const s = super.layout();
+    if (this.props.columns !== undefined) s.gridTemplateColumns = this.props.columns;
+    if (this.props.rows !== undefined) s.gridTemplateRows = this.props.rows;
+    return s;
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.display = "grid";
+    s.gap = 8;
+    if (this.inRow()) s.minWidth = 0;
+  }
+  isRow(): boolean {
+    return false;
+  }
+}
+
+/** A vertically scrolling column. Fills the space its parent gives it. */
+export class ScrollView extends Box {
+  get kind(): string {
+    return "scroll";
+  }
+  protected nativeProps(): readonly string[] {
+    return [];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexGrow = 1;
+    s.flexShrink = 1;
+    s.minHeight = 0;
+    s.minWidth = 0;
+    s.gap = 8;
+  }
+  isRow(): boolean {
+    return false;
+  }
+}
+
+/** Takes the free space along its parent's axis. */
+export class Spacer extends Node {
+  constructor(props?: LayoutProps) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "spacer";
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexGrow = 1;
+    s.flexShrink = 1;
+  }
+}
+
+/** A hairline across its parent's axis. */
+export class Divider extends Node {
+  constructor(props?: LayoutProps) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "divider";
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    if (this.inRow()) {
+      s.width = 1;
+      s.alignSelf = "stretch";
+    } else {
+      s.height = 1;
+      s.alignSelf = "stretch";
+    }
+    s.flexShrink = 0;
+  }
+}
+
+// ── Window ──
+
+export interface WindowProps extends ContainerProps {
+  title?: MaybeAccessor<string>;
+  /** Content size in points. */
+  width?: MaybeAccessor<number>;
+  height?: MaybeAccessor<number>;
+  minWidth?: MaybeAccessor<number>;
+  minHeight?: MaybeAccessor<number>;
+  resizable?: MaybeAccessor<boolean>;
+  /** The background: `"window"` (default), `"sidebar"`, `"translucent"`, `"hud"`, `"content"`. */
+  material?: MaybeAccessor<string>;
+  onClose?: () => void;
+  onResize?: (width: number, height: number) => void;
+}
+
+const openWindows = new Set<Window>();
+
+/** A top-level window. Its content is a padded column; `show()` puts it on screen. */
+export class Window extends Box {
+  constructor(props?: WindowProps, children?: unknown) {
+    super(props, children);
+  }
+  get kind(): string {
+    return "window";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["title", "width", "height", "minWidth", "minHeight", "resizable", "material", "background", "pressable"];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexDirection = "column";
+    s.alignItems = "stretch";
+    s.padding = 20;
+    s.gap = 12;
+  }
+  isRow(): boolean {
+    return false;
+  }
+  layout(): Record<string, unknown> {
+    // A window's size props size the window, not its content box.
+    const s = super.layout();
+    delete s.width;
+    delete s.height;
+    delete s.minWidth;
+    delete s.minHeight;
+    return s;
+  }
+  protected propChanged(name: string, value: unknown, prev: unknown): void {
+    if (name === "width" || name === "height" || name === "minWidth" || name === "minHeight") {
+      if (this.handle) this.sendProp(name, value);
+      return;
+    }
+    super.propChanged(name, value, prev);
+  }
+
+  get title(): string {
+    return this.props.title || "";
+  }
+  set title(value: string) {
+    this.set("title", value);
+  }
+  get visible(): boolean {
+    return openWindows.has(this);
+  }
+
+  show(): void {
+    if (this.disposed) throw new Error("kiln:gui: this window was disposed");
+    const host = currentHost();
+    if (!host.interactive) warnIfHeadless();
+    if (this.props.width === undefined) this.props.width = 800;
+    if (this.props.height === undefined) this.props.height = 600;
+    this.mount();
+    host.call(this.handle, "show");
+    openWindows.add(this);
+    eventLoop.start();
+  }
+
+  /** Closes the window (it can be shown again) and calls `onClose`. */
+  close(): void {
+    if (!openWindows.has(this)) return;
+    openWindows.delete(this);
+    if (this.handle) currentHost().call(this.handle, "close");
+    this.emit("close");
+    eventLoop.windowClosed();
   }
 
   minimize(): void {
-    const driver = getActiveDriver();
-    if (typeof driver.minimizeWindow === "function") {
-      driver.minimizeWindow(this);
-    }
-    this.dispatchEvent("minimize");
+    if (this.handle) currentHost().call(this.handle, "minimize");
+  }
+  maximize(): void {
+    if (this.handle) currentHost().call(this.handle, "maximize");
+  }
+  unmaximize(): void {
+    if (this.handle) currentHost().call(this.handle, "unmaximize");
+  }
+  setFullscreen(on: boolean): void {
+    if (this.handle) currentHost().call(this.handle, "fullscreen", on ? "true" : "false");
+  }
+  center(): void {
+    if (this.handle) currentHost().call(this.handle, "center");
+  }
+  /** Writes the window's contents as a PNG (native hosts only). */
+  snapshot(path: string): void {
+    if (!this.handle) throw new Error("kiln:gui: show the window before taking a snapshot");
+    currentHost().call(this.handle, "snapshot", path);
   }
 
-  setFullscreen(fullscreen: boolean): void {
-    const driver = getActiveDriver();
-    if (typeof driver.setFullscreen === "function") {
-      driver.setFullscreen(this, fullscreen);
-    }
-    this.setProperty("fullscreen", fullscreen);
+  dispose(): void {
+    openWindows.delete(this);
+    super.dispose();
+    eventLoop.windowClosed();
   }
 
-  get fullscreen(): boolean {
-    return !!this.properties.fullscreen;
-  }
-  set fullscreen(val: boolean) {
-    this.setFullscreen(val);
-  }
-
-  setResizable(resizable: boolean): void {
-    const driver = getActiveDriver();
-    if (typeof driver.setResizable === "function") {
-      driver.setResizable(this, resizable);
-    }
-    this.setProperty("resizable", resizable);
-  }
-
-  get resizable(): boolean {
-    return this.properties.resizable !== false;
-  }
-  set resizable(val: boolean) {
-    this.setResizable(val);
-  }
-}
-
-export class VStack extends Node {
-  constructor(options?: { spacing?: number; alignment?: string; padding?: number; width?: number; height?: number; children?: Node[] }) {
-    super("vstack");
-    if (options) {
-      if (options.spacing !== undefined) this.setProperty("spacing", options.spacing);
-      if (options.alignment !== undefined) this.setProperty("alignment", options.alignment);
-      if (options.padding !== undefined) this.setProperty("padding", options.padding);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.children) {
-        for (let i = 0; i < options.children.length; i++) {
-          this.appendChild(options.children[i]);
-        }
-      }
-    }
-  }
-
-  get spacing(): number {
-    return this.properties.spacing || 0;
-  }
-  set spacing(val: number) {
-    this.setProperty("spacing", val);
-  }
-
-  get alignment(): string {
-    return this.properties.alignment || "center";
-  }
-  set alignment(val: string) {
-    this.setProperty("alignment", val);
-  }
-}
-
-export class HStack extends Node {
-  constructor(options?: { spacing?: number; alignment?: string; padding?: number; width?: number; height?: number; children?: Node[] }) {
-    super("hstack");
-    if (options) {
-      if (options.spacing !== undefined) this.setProperty("spacing", options.spacing);
-      if (options.alignment !== undefined) this.setProperty("alignment", options.alignment);
-      if (options.padding !== undefined) this.setProperty("padding", options.padding);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.children) {
-        for (let i = 0; i < options.children.length; i++) {
-          this.appendChild(options.children[i]);
-        }
-      }
-    }
-  }
-
-  get spacing(): number {
-    return this.properties.spacing || 0;
-  }
-  set spacing(val: number) {
-    this.setProperty("spacing", val);
-  }
-
-  get alignment(): string {
-    return this.properties.alignment || "center";
-  }
-  set alignment(val: string) {
-    this.setProperty("alignment", val);
-  }
-}
-
-export class Card extends Node {
-  private _inner: VStack | null = null;
-
-  constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
-    super("card");
-    if (options) {
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.child) {
-        this.appendChild(options.child);
-      } else if (options.children) {
-        for (let i = 0; i < options.children.length; i++) {
-          this.appendChild(options.children[i]);
-        }
-      }
-    }
-  }
-
-  override appendChild(child: Node): void {
-    if (!this._inner) {
-      this._inner = new VStack({ spacing: 6 });
-      super.appendChild(this._inner);
-    }
-    this._inner.appendChild(child);
-  }
-}
-
-export class Box extends Node {
-  constructor(options?: { style?: any; width?: number; height?: number; children?: Node[] } | Node[]) {
-    super("box");
-    if (Array.isArray(options)) {
-      for (let i = 0; i < options.length; i++) {
-        this.appendChild(options[i]);
-      }
-    } else if (options) {
-      if (options.style !== undefined) this.setProperty("style", options.style);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.children) {
-        for (let i = 0; i < options.children.length; i++) {
-          this.appendChild(options.children[i]);
-        }
-      }
-    }
-  }
-
-  get style(): any {
-    return this.properties.style;
-  }
-  set style(val: any) {
-    this.setProperty("style", val);
-  }
-}
-
-export class Grid extends Node {
-  constructor(options?: { columns?: string; rows?: string; gap?: number | string; style?: any; width?: number; height?: number; children?: Node[] } | Node[]) {
-    super("grid");
-    if (Array.isArray(options)) {
-      for (let i = 0; i < options.length; i++) {
-        this.appendChild(options[i]);
-      }
-    } else if (options) {
-      if (options.columns !== undefined) this.setProperty("columns", options.columns);
-      if (options.rows !== undefined) this.setProperty("rows", options.rows);
-      if (options.gap !== undefined) this.setProperty("gap", options.gap);
-      if (options.style !== undefined) this.setProperty("style", options.style);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.children) {
-        for (let i = 0; i < options.children.length; i++) {
-          this.appendChild(options.children[i]);
-        }
-      }
-    }
-  }
-
-  get columns(): string {
-    return this.properties.columns || "";
-  }
-  set columns(val: string) {
-    this.setProperty("columns", val);
-  }
-
-  get rows(): string {
-    return this.properties.rows || "";
-  }
-  set rows(val: string) {
-    this.setProperty("rows", val);
-  }
-
-  get gap(): any {
-    return this.properties.gap;
-  }
-  set gap(val: any) {
-    this.setProperty("gap", val);
-  }
-
-  get style(): any {
-    return this.properties.style;
-  }
-  set style(val: any) {
-    this.setProperty("style", val);
-  }
-}
-
-export class Divider extends Node {
-  constructor(options?: { width?: number }) {
-    super("divider");
-    if (options && options.width !== undefined) {
-      this.setProperty("width", options.width);
+  receive(event: string, a: number, b: number): void {
+    if (event === "close") {
+      if (!openWindows.has(this)) return;
+      openWindows.delete(this);
+      this.emit("close");
+      eventLoop.windowClosed();
+    } else if (event === "resize") {
+      this.adopt("width", a);
+      this.adopt("height", b);
+      this.emit("resize", a, b);
     }
   }
 }
 
+// ── Leaves ──
+
+export interface TextStyleProps {
+  /** `largeTitle`, `title`, `title2`, `title3`, `headline`, `body`, `callout`, `subheadline`, `footnote`, `caption`. */
+  variant?: MaybeAccessor<string>;
+  size?: MaybeAccessor<number>;
+  weight?: MaybeAccessor<"light" | "regular" | "medium" | "semibold" | "bold" | "heavy">;
+  monospace?: MaybeAccessor<boolean>;
+  /** A semantic color (`secondary`, `accent`, `red`, `success`…) or `#rrggbb`. */
+  color?: MaybeAccessor<string>;
+  align?: MaybeAccessor<"start" | "center" | "end" | "justify">;
+}
+
+const TEXT_STYLE = ["variant", "size", "weight", "monospace", "color"];
+
+/** Builds a text prop from children: strings, numbers and functions, concatenated. */
+function textOf(children: unknown, what: string): MaybeAccessor<string> {
+  const parts = flatten(children);
+  for (const p of parts) {
+    if (p instanceof Node || p instanceof JsxElement) throw new Error(`kiln:gui: only text can go inside ${what}`);
+  }
+  const dynamic = parts.some((p) => typeof p === "function");
+  const join = () => parts.map((p) => (typeof p === "function" ? str((p as Accessor<unknown>)()) : str(p))).join("");
+  return dynamic ? join : join();
+}
+
+function str(v: unknown): string {
+  return v === null || v === undefined || v === false || v === true ? "" : String(v);
+}
+
+/** A label. Wraps to its width; `lines={1}` truncates instead. */
 export class Text extends Node {
-  constructor(textOrOptions?: string | (() => string | Promise<string>) | { text?: string | (() => string | Promise<string>); variant?: string; color?: string | (() => string); size?: number; bold?: boolean; width?: number; height?: number }) {
-    super("text");
-    if (typeof textOrOptions === "string" || typeof textOrOptions === "function") {
-      this.text = textOrOptions;
-    } else if (textOrOptions) {
-      if (textOrOptions.text !== undefined) this.text = textOrOptions.text;
-      if (textOrOptions.variant !== undefined) this.setProperty("variant", textOrOptions.variant);
-      if (textOrOptions.color !== undefined) this.setProperty("color", textOrOptions.color);
-      if (textOrOptions.size !== undefined) this.setProperty("size", textOrOptions.size);
-      if (textOrOptions.bold !== undefined) this.setProperty("bold", textOrOptions.bold);
-      if (textOrOptions.width !== undefined) this.setProperty("width", textOrOptions.width);
-      if (textOrOptions.height !== undefined) this.setProperty("height", textOrOptions.height);
-    }
+  constructor(props?: (LayoutProps & TextStyleProps & { text?: MaybeAccessor<string | number>; lines?: MaybeAccessor<number>; selectable?: MaybeAccessor<boolean>; children?: unknown }) | MaybeAccessor<string>) {
+    super(typeof props === "object" && props !== null ? (props as Record<string, unknown>) : props !== undefined ? { text: props } : null);
   }
-
+  get kind(): string {
+    return "text";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["text", "lines", "selectable", "align", ...TEXT_STYLE];
+  }
+  append(children: unknown): this {
+    this.set("text", textOf(children, "<text>"));
+    return this;
+  }
+  protected sendProp(name: string, value: unknown): void {
+    super.sendProp(name, name === "text" ? str(value) : value);
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 1;
+    if (this.inRow()) s.minWidth = 0;
+  }
   get text(): string {
-    return this.properties.text || "";
+    return str(this.props.text);
   }
-  set text(val: string | (() => string | Promise<string>)) {
-    this.setProperty("text", val);
+  set text(value: MaybeAccessor<string>) {
+    this.set("text", value);
   }
+}
+
+export interface ButtonProps extends LayoutProps {
+  label?: MaybeAccessor<string>;
+  /** `primary` (the default button, Return), `secondary`, `destructive`, `plain` (borderless
+   * text), `link` (borderless, accent-colored). */
+  variant?: MaybeAccessor<"primary" | "secondary" | "destructive" | "plain" | "link">;
+  size?: MaybeAccessor<"sm" | "md" | "lg">;
+  /** An SF Symbol name or alias (`"plus"`, `"trash"`, `"gear"`). */
+  icon?: MaybeAccessor<string>;
+  onPress?: () => void;
+  children?: unknown;
 }
 
 export class Button extends Node {
-  constructor(labelOrOptions?: string | (() => string) | (ButtonOptions & { width?: number; height?: number; icon?: string; disabled?: boolean | (() => boolean) })) {
-    super("button");
-    if (typeof labelOrOptions === "string" || typeof labelOrOptions === "function") {
-      this.label = labelOrOptions;
-    } else if (labelOrOptions) {
-      if (labelOrOptions.label !== undefined) this.label = labelOrOptions.label;
-      if (labelOrOptions.variant !== undefined) this.variant = labelOrOptions.variant;
-      if (labelOrOptions.size !== undefined) this.size = labelOrOptions.size;
-      if (labelOrOptions.disabled !== undefined) this.disabled = labelOrOptions.disabled;
-      if (labelOrOptions.platform !== undefined) this.platform = labelOrOptions.platform;
-      if ((labelOrOptions as any).icon !== undefined) this.setProperty("icon", (labelOrOptions as any).icon);
-      if ((labelOrOptions as any).width !== undefined) this.setProperty("width", (labelOrOptions as any).width);
-      if ((labelOrOptions as any).height !== undefined) this.setProperty("height", (labelOrOptions as any).height);
-      if (labelOrOptions.onPress) this.onPress = labelOrOptions.onPress;
+  constructor(props?: ButtonProps | MaybeAccessor<string>, onPress?: () => void) {
+    super(typeof props === "object" && props !== null ? (props as Record<string, unknown>) : props !== undefined ? { label: props, onPress } : null);
+  }
+  get kind(): string {
+    return "button";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["label", "variant", "size", "icon"];
+  }
+  append(children: unknown): this {
+    this.set("label", textOf(children, "<button>"));
+    return this;
+  }
+  protected sendProp(name: string, value: unknown): void {
+    if (name === "size") super.sendProp("controlSize", value);
+    else super.sendProp(name, name === "label" ? str(value) : value);
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 0;
+    if (!this.inRow()) s.alignSelf = "start";
+  }
+  get label(): string {
+    return str(this.props.label);
+  }
+  set label(value: MaybeAccessor<string>) {
+    this.set("label", value);
+  }
+  /** Presses the button as a person would (ignored while disabled). */
+  press(): void {
+    fire(this, "press");
+  }
+  receive(event: string): void {
+    if (event === "press" && !this.props.disabled) this.emit("press");
+  }
+}
+
+export interface TextInputProps extends LayoutProps, TextStyleProps {
+  value?: MaybeAccessor<string>;
+  placeholder?: MaybeAccessor<string>;
+  /** Hides what is typed (a password field). Fixed at creation. */
+  secure?: boolean;
+  /** Every edit. */
+  onChange?: (value: string) => void;
+  /** Return pressed. */
+  onSubmit?: (value: string) => void;
+}
+
+/** A single-line text field. */
+export class TextInput extends Node {
+  constructor(props?: TextInputProps) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return this.props.secure ? "secureinput" : "textinput";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["value", "placeholder", "align", ...TEXT_STYLE];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.minWidth = 80;
+    if (this.inRow()) {
+      s.flexGrow = 1;
+      s.flexShrink = 1;
     }
   }
-
-  get label(): string {
-    return this.properties.label || "";
+  get value(): string {
+    return str(this.props.value);
   }
-  set label(val: string | (() => string)) {
-    this.setProperty("label", val);
+  set value(value: MaybeAccessor<string>) {
+    this.set("value", value);
   }
-
-  get variant(): ButtonVariant | undefined {
-    return this.properties.variant;
+  focus(): void {
+    if (this.handle) currentHost().call(this.handle, "focus");
   }
-  set variant(val: ButtonVariant | undefined) {
-    this.setProperty("variant", val);
-  }
-
-  get size(): ControlSize | undefined {
-    return this.properties.size;
-  }
-  set size(val: ControlSize | undefined) {
-    this.setProperty("size", val);
-  }
-
-  get disabled(): boolean {
-    return !!this.properties.disabled;
-  }
-  set disabled(val: boolean) {
-    this.setProperty("disabled", val);
-  }
-
-  get platform(): PlatformStyles | undefined {
-    return this.properties.platform;
-  }
-  set platform(val: PlatformStyles | undefined) {
-    this.setProperty("platform", val);
-  }
-
-  get onPress(): (() => void) | null {
-    return this.properties.onPress || null;
-  }
-  set onPress(handler: (() => void) | null) {
-    this.setProperty("onPress", handler);
-  }
-
-  click(): void {
-    if (!this.disabled) {
-      this.dispatchEvent("click");
+  receive(event: string, _a: number, _b: number, text: string): void {
+    if (event === "input" || event === "change") {
+      this.adopt("value", text);
+      this.emit("change", text);
+      this.reassert("value");
+    } else if (event === "submit") {
+      this.adopt("value", text);
+      this.emit("submit", text);
     }
   }
 }
 
-export class TextInput extends Node {
-  constructor(options?: { placeholder?: string; value?: string; width?: number; height?: number; onChange?: (val: string) => void; onInput?: (val: string) => void }) {
-    super("textinput");
-    if (options) {
-      if (options.placeholder !== undefined) this.setProperty("placeholder", options.placeholder);
-      if (options.value !== undefined) this.value = options.value;
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.onChange) this.setProperty("onChange", options.onChange);
-      if (options.onInput) this.setProperty("onInput", options.onInput);
+/** A multi-line, scrolling plain-text editor. */
+export class TextArea extends Node {
+  constructor(props?: LayoutProps & TextStyleProps & { value?: MaybeAccessor<string>; onChange?: (value: string) => void }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "textarea";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["value", ...TEXT_STYLE];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.minHeight = 80;
+    s.minWidth = 80;
+    s.flexGrow = 1;
+    s.flexShrink = 1;
+  }
+  get value(): string {
+    return str(this.props.value);
+  }
+  set value(value: MaybeAccessor<string>) {
+    this.set("value", value);
+  }
+  focus(): void {
+    if (this.handle) currentHost().call(this.handle, "focus");
+  }
+  receive(event: string, _a: number, _b: number, text: string): void {
+    if (event === "input" || event === "change") {
+      this.adopt("value", text);
+      this.emit("change", text);
+      this.reassert("value");
     }
   }
+}
 
-  get value(): string {
-    return this.properties.value || "";
-  }
-  set value(val: string) {
-    this.setProperty("value", val);
-  }
-
-  get placeholder(): string {
-    return this.properties.placeholder || "";
-  }
-  set placeholder(val: string) {
-    this.setProperty("placeholder", val);
-  }
+export interface RangeProps extends LayoutProps {
+  value?: MaybeAccessor<number>;
+  min?: MaybeAccessor<number>;
+  max?: MaybeAccessor<number>;
 }
 
 export class Slider extends Node {
-  constructor(options?: { min?: number | (() => number); max?: number | (() => number); value?: number | (() => number); width?: number; height?: number; onChange?: (val: number) => void; onInput?: (val: number) => void }) {
-    super("slider");
-    if (options) {
-      if (options.min !== undefined) this.setProperty("min", options.min);
-      if (options.max !== undefined) this.setProperty("max", options.max);
-      if (options.value !== undefined) this.value = options.value;
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.onChange) this.setProperty("onChange", options.onChange);
-      if (options.onInput) this.setProperty("onInput", options.onInput);
+  constructor(props?: RangeProps & { step?: MaybeAccessor<number>; onChange?: (value: number) => void }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "slider";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["min", "max", "value"];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.minWidth = 100;
+    if (this.inRow()) {
+      s.flexGrow = 1;
+      s.flexShrink = 1;
     }
   }
-
   get value(): number {
-    return this.properties.value !== undefined ? this.properties.value : 0;
+    return Number(this.props.value) || 0;
   }
-  set value(val: number | (() => number)) {
-    this.setProperty("value", val);
+  set value(value: MaybeAccessor<number>) {
+    this.set("value", value);
   }
-
-  get min(): number {
-    return this.properties.min !== undefined ? this.properties.min : 0;
-  }
-  set min(val: number | (() => number)) {
-    this.setProperty("min", val);
-  }
-
-  get max(): number {
-    return this.properties.max !== undefined ? this.properties.max : 100;
-  }
-  set max(val: number | (() => number)) {
-    this.setProperty("max", val);
-  }
-}
-
-export class Toggle extends Node {
-  constructor(options?: { checked?: boolean | (() => boolean); width?: number; height?: number; onToggle?: (checked: boolean) => void }) {
-    super("toggle");
-    if (options) {
-      if (options.checked !== undefined) this.checked = options.checked;
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.onToggle) this.setProperty("onToggle", options.onToggle);
-    }
-  }
-
-  get checked(): boolean {
-    return this.properties.checked === true || this.properties.checked === "true" || this.properties.checked === 1;
-  }
-  set checked(val: boolean | (() => boolean)) {
-    this.setProperty("checked", typeof val === "function" ? val : Boolean(val));
-  }
-}
-
-export class Spacer extends Node {
-  constructor(options?: { minWidth?: number; minHeight?: number }) {
-    super("spacer");
-    if (options) {
-      if (options.minWidth !== undefined) this.setProperty("width", options.minWidth);
-      if (options.minHeight !== undefined) this.setProperty("height", options.minHeight);
-    }
-  }
-}
-
-export class ScrollView extends Node {
-  constructor(options?: { width?: number; height?: number; child?: Node; children?: Node[] }) {
-    super("scroll");
-    if (options) {
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
-      if (options.child) {
-        this.appendChild(options.child);
-      } else if (options.children) {
-        const inner = new VStack({ spacing: 12, children: options.children });
-        this.appendChild(inner);
-      }
-    }
-  }
-}
-
-export class SegmentedControl extends Node {
-  constructor(options?: { items: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, label: string) => void }) {
-    super("segmented");
-    if (options) {
-      if (options.items) {
-        this.text = JSON.stringify(options.items);
-        this.setProperty("items", JSON.stringify(options.items));
-      }
-      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.onChange) {
-        this.on("change", (e: any) => {
-          const raw = typeof e === "string" ? e : (e?.value ?? "0");
-          const idx = parseInt(raw, 10);
-          const label = options.items[idx] ?? "";
-          options.onChange!(idx, label);
-        });
-      }
-    }
-  }
-
-  get selectedIndex(): number {
-    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
-  }
-  set selectedIndex(val: number) {
-    this.setProperty("selectedIndex", val);
+  receive(event: string, a: number): void {
+    if (event !== "change") return;
+    const step = Number(this.props.step) || 0;
+    const min = Number(this.props.min) || 0;
+    const value = step > 0 ? min + Math.round((a - min) / step) * step : a;
+    if (value === this.props.value) return;
+    this.adopt("value", value);
+    this.emit("change", value);
+    if (step > 0 && value !== a) this.propChanged("value", value, a);
+    this.reassert("value");
   }
 }
 
 export class ProgressBar extends Node {
-  constructor(options?: { value?: number | (() => number); max?: number | (() => number); min?: number | (() => number); indeterminate?: boolean | (() => boolean); width?: number; height?: number }) {
-    super("progressbar");
-    if (options) {
-      if (options.value !== undefined) this.value = options.value;
-      if (options.max !== undefined) this.max = options.max;
-      if (options.min !== undefined) this.setProperty("min", options.min);
-      if (options.indeterminate !== undefined) this.setProperty("indeterminate", options.indeterminate);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.height !== undefined) this.setProperty("height", options.height);
+  constructor(props?: RangeProps & { indeterminate?: MaybeAccessor<boolean> }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "progress";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["min", "max", "value", "indeterminate"];
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.minWidth = 60;
+    if (this.inRow()) {
+      s.flexGrow = 1;
+      s.flexShrink = 1;
     }
   }
-
   get value(): number {
-    return this.properties.value !== undefined ? this.properties.value : 0;
+    return Number(this.props.value) || 0;
   }
-  set value(val: number | (() => number)) {
-    this.setProperty("value", val);
-  }
-
-  setValue(val: number | (() => number)): void {
-    this.value = val;
-  }
-
-  get max(): number {
-    return this.properties.max !== undefined ? this.properties.max : 100;
-  }
-  set max(val: number | (() => number)) {
-    this.setProperty("max", val);
+  set value(value: MaybeAccessor<number>) {
+    this.set("value", value);
   }
 }
 
-export class Select extends Node {
-  constructor(options?: { options: string[]; selectedIndex?: number; width?: number; onChange?: (index: number, value: string) => void }) {
-    super("select");
-    if (options) {
-      if (options.options) {
-        this.text = JSON.stringify(options.options);
-        this.setProperty("options", JSON.stringify(options.options));
-      }
-      if (options.selectedIndex !== undefined) this.setProperty("selectedIndex", options.selectedIndex);
-      if (options.width !== undefined) this.setProperty("width", options.width);
-      if (options.onChange) {
-        this.on("change", (e: any) => {
-          const raw = typeof e === "string" ? e : (e?.value ?? "0:");
-          const colon = raw.indexOf(":");
-          let idx = 0;
-          let val = raw;
-          if (colon !== -1) {
-            idx = parseInt(raw.slice(0, colon), 10);
-            val = raw.slice(colon + 1);
-          }
-          options.onChange!(idx, val);
-        });
-      }
-    }
+/** A small spinning activity indicator. */
+export class Spinner extends Node {
+  constructor(props?: LayoutProps) {
+    super(props as Record<string, unknown>);
   }
-
-  get selectedIndex(): number {
-    return this.properties.selectedIndex !== undefined ? this.properties.selectedIndex : 0;
+  get kind(): string {
+    return "spinner";
   }
-  set selectedIndex(val: number) {
-    this.setProperty("selectedIndex", val);
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 0;
+    if (!this.inRow()) s.alignSelf = "start";
   }
 }
 
-export class Checkbox extends Node {
-  constructor(labelOrOptions?: string | (() => string) | { label?: string | (() => string); checked?: boolean | (() => boolean); width?: number; onToggle?: (checked: boolean) => void }) {
-    super("checkbox");
-    if (typeof labelOrOptions === "string" || typeof labelOrOptions === "function") {
-      this.text = labelOrOptions;
-    } else if (labelOrOptions) {
-      if (labelOrOptions.label !== undefined) this.text = labelOrOptions.label;
-      if (labelOrOptions.checked !== undefined) this.checked = labelOrOptions.checked;
-      if (labelOrOptions.width !== undefined) this.setProperty("width", labelOrOptions.width);
-      if (labelOrOptions.onToggle) {
-        this.on("toggle", (e: any) => {
-          const checked = typeof e === "boolean" ? e : (typeof e === "string" ? e === "true" : Boolean(e?.checked ?? e?.value === "true"));
-          labelOrOptions.onToggle!(checked);
-        });
-      }
-    }
+abstract class Checkable extends Node {
+  protected nativeProps(): readonly string[] {
+    return ["checked"];
   }
-
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 0;
+    if (!this.inRow()) s.alignSelf = "start";
+  }
+  protected sendProp(name: string, value: unknown): void {
+    super.sendProp(name, name === "checked" ? !!value : value);
+  }
   get checked(): boolean {
-    const val = this.properties.checked;
-    return val === true || val === "true" || val === 1;
+    return !!this.props.checked;
   }
-  set checked(val: boolean | (() => boolean)) {
-    this.setProperty("checked", typeof val === "function" ? val : Boolean(val));
+  set checked(value: MaybeAccessor<boolean>) {
+    this.set("checked", value);
   }
-}
-
-export class Icon extends Node {
-  constructor(nameOrOptions?: string | { name?: string; symbol?: string; width?: number; height?: number }) {
-    super("icon");
-    if (typeof nameOrOptions === "string") {
-      this.text = nameOrOptions;
-    } else if (nameOrOptions) {
-      const name = nameOrOptions.name || nameOrOptions.symbol || "";
-      if (name) this.text = name;
-      if (nameOrOptions.width !== undefined) this.setProperty("width", nameOrOptions.width);
-      if (nameOrOptions.height !== undefined) this.setProperty("height", nameOrOptions.height);
-    }
+  /** Flips the control as a person would. */
+  toggle(): void {
+    fire(this, "change", this.checked ? 0 : 1);
+  }
+  receive(event: string, a: number): void {
+    if (event !== "change" || this.props.disabled) return;
+    const checked = a !== 0;
+    this.adopt("checked", checked);
+    this.emit("change", checked);
+    this.reassert("checked");
   }
 }
 
-export const widgetConstructors: Record<string, new (...args: any[]) => Node> = {
+/** An on/off switch. */
+export class Toggle extends Checkable {
+  constructor(props?: LayoutProps & { checked?: MaybeAccessor<boolean>; onChange?: (checked: boolean) => void }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "toggle";
+  }
+}
+
+/** A checkbox with its label. */
+export class Checkbox extends Checkable {
+  constructor(props?: LayoutProps & { checked?: MaybeAccessor<boolean>; label?: MaybeAccessor<string>; onChange?: (checked: boolean) => void; children?: unknown }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "checkbox";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["checked", "label"];
+  }
+  append(children: unknown): this {
+    this.set("label", textOf(children, "<checkbox>"));
+    return this;
+  }
+}
+
+abstract class Choice extends Node {
+  protected nativeProps(): readonly string[] {
+    return ["options", "selected"];
+  }
+  protected sendProp(name: string, value: unknown): void {
+    if (name === "selected") super.sendProp("selectedIndex", Number(value) || 0);
+    else super.sendProp(name, value);
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 0;
+    if (!this.inRow()) s.alignSelf = "start";
+  }
+  get selected(): number {
+    return Number(this.props.selected) || 0;
+  }
+  set selected(value: MaybeAccessor<number>) {
+    this.set("selected", value);
+  }
+  /** Chooses option `index` as a person would. */
+  choose(index: number): void {
+    fire(this, "change", index);
+  }
+  receive(event: string, a: number): void {
+    if (event !== "change" || this.props.disabled) return;
+    const options = (this.props.options || []) as string[];
+    this.adopt("selected", a);
+    this.emit("change", a, options[a]);
+    this.reassert("selected");
+  }
+}
+
+export interface ChoiceProps extends LayoutProps {
+  options: MaybeAccessor<string[]>;
+  selected?: MaybeAccessor<number>;
+  onChange?: (index: number, option: string) => void;
+}
+
+/** A pop-up menu of options. */
+export class Select extends Choice {
+  constructor(props?: ChoiceProps) {
+    super(props as unknown as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "select";
+  }
+}
+
+/** A row of mutually exclusive segments. */
+export class SegmentedControl extends Choice {
+  constructor(props?: ChoiceProps) {
+    super(props as unknown as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "segmented";
+  }
+}
+
+/** An SF Symbol (`symbol`) or an image file (`src`). */
+export class Image extends Node {
+  constructor(props?: LayoutProps & { symbol?: MaybeAccessor<string>; src?: MaybeAccessor<string>; size?: MaybeAccessor<number>; color?: MaybeAccessor<string> }) {
+    super(props as Record<string, unknown>);
+  }
+  get kind(): string {
+    return "image";
+  }
+  protected nativeProps(): readonly string[] {
+    return ["symbol", "src", "size", "color"];
+  }
+  protected sendProp(name: string, value: unknown): void {
+    super.sendProp(name === "symbol" ? "src" : name, value);
+  }
+  protected layoutDefaults(s: Record<string, unknown>): void {
+    s.flexShrink = 0;
+    if (!this.inRow()) s.alignSelf = "start";
+  }
+}
+
+/** Delivers a user action to `node` exactly as the native host would. For tests and scripts. */
+export function fire(node: Node, event: "press" | "change" | "input" | "submit" | "close" | "resize", value?: number | string | boolean, extra?: number): void {
+  const text = typeof value === "string" ? value : "";
+  const a = typeof value === "number" ? value : typeof value === "boolean" ? (value ? 1 : 0) : 0;
+  batch(() => node.receive(event, a, extra || 0, text));
+}
+
+/** The node tree as indented text: tags and the props that matter. */
+export function inspect(node: Node, depth = 0): string {
+  if (!node.materializable) return "";
+  const skip = new Set(["style"]);
+  const props = Object.keys(node.props)
+    .filter((k) => !skip.has(k) && typeof node.props[k] !== "function")
+    .sort()
+    .map((k) => `${k}=${JSON.stringify(node.props[k])}`)
+    .join(" ");
+  const tag = node.constructor.name;
+  let out = `${"  ".repeat(depth)}<${tag}${props ? " " + props : ""}>`;
+  for (const c of node.children) {
+    const line = inspect(c, depth + 1);
+    if (line) out += "\n" + line;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 5. JSX
+//
+// `jsx()` returns a description, not a widget: components must run parent-first so that
+// context, ownership and conditional rendering work. Descriptions turn into widgets when
+// inserted (or when `h()` is used, which builds immediately).
+
+export type Component<P = any> = (props: P) => unknown;
+
+type WidgetClass = new (props?: any, children?: any) => Node;
+
+function isWidgetClass(f: unknown): f is WidgetClass {
+  return typeof f === "function" && !!(f as any).prototype && (f as any).prototype instanceof Node;
+}
+
+const INTRINSICS: Record<string, WidgetClass> = {
   window: Window,
   vstack: VStack,
   hstack: HStack,
-  card: Card,
   box: Box,
   grid: Grid,
-  divider: Divider,
-  separator: Divider,
-  button: Button,
+  card: Card,
+  scroll: ScrollView,
   text: Text,
-  textinput: TextInput,
+  button: Button,
+  input: TextInput,
+  textarea: TextArea,
   slider: Slider,
   toggle: Toggle,
-  spacer: Spacer,
-  scroll: ScrollView,
-  scrollview: ScrollView,
-  segmented: SegmentedControl,
-  progressbar: ProgressBar,
-  progress: ProgressBar,
-  select: Select,
-  dropdown: Select,
   checkbox: Checkbox,
-  icon: Icon,
-  image: Icon,
+  select: Select,
+  segmented: SegmentedControl,
+  progress: ProgressBar,
+  spinner: Spinner,
+  image: Image,
+  divider: Divider,
+  spacer: Spacer,
 };
 
-// Canonical 10-method host operation contract for SolidJS official 'solid-js/universal' createRenderer
-export const universalDriver = {
-  createElement: (tag: string): Node => {
-    const lower = tag.toLowerCase();
-    const Ctor = widgetConstructors[lower];
-    if (Ctor) {
-      return new Ctor();
-    }
-    return new Node(lower);
-  },
-  createTextNode: (value: string): Node => {
-    return new Text(value);
-  },
-  isTextNode: (node: Node): boolean => {
-    return node instanceof Text;
-  },
-  replaceText: (node: Node, value: string): void => {
-    if (node instanceof Text) {
-      node.text = value;
-    } else {
-      node.setProperty("text", value);
-    }
-  },
-  insertNode: (parent: Node, node: Node, anchor?: Node | null): void => {
-    parent.insertBefore(node, anchor || null);
-  },
-  removeNode: (parent: Node, node: Node): void => {
-    parent.removeChild(node);
-  },
-  setProperty: (node: Node, name: string, value: any): void => {
-    node.setProperty(name, value);
-  },
-  getParentNode: (node: Node): Node | null => {
-    return node.parent;
-  },
-  getFirstChild: (node: Node): Node | null => {
-    return node.firstChild;
-  },
-  getNextSibling: (node: Node): Node | null => {
-    return node.nextSibling;
-  },
-};
+export class JsxElement {
+  readonly type: string | Component | WidgetClass;
+  readonly props: Record<string, unknown>;
 
-// Universal Renderer implementation for SolidJS 2.0 (@solidjs/universal interface)
-export function createRenderer<T extends Node = Node>(config?: any): {
-  render: (code: () => T, container: T) => () => void;
-  createElement: (tag: string) => T;
-  createTextNode: (text: string) => T;
-  isTextNode: (node: T) => boolean;
-  replaceText: (node: T, value: string) => void;
-  insertNode: (parent: T, node: T, anchor?: T | null) => void;
-  removeNode: (parent: T, node: T) => void;
-  setProperty: (node: T, name: string, value: any) => void;
-  getParentNode: (node: T) => T | null;
-  getFirstChild: (node: T) => T | null;
-  getNextSibling: (node: T) => T | null;
-} {
-  const driver = config || universalDriver;
-  return {
-    ...driver,
-    render: (code: () => T, container: T): (() => void) => {
-      const root = code();
-      container.appendChild(root);
-      return () => {
-        container.removeChild(root);
-      };
-    },
-  };
-}
+  constructor(type: string | Component | WidgetClass, props: Record<string, unknown>) {
+    this.type = type;
+    this.props = props;
+  }
 
-const defaultRenderer = createRenderer();
-
-function appendChildRecursive(parent: Node, child: any): void {
-  if (child === null || child === undefined || child === false || child === true) return;
-  if (typeof child === "string" || typeof child === "number") {
-    parent.appendChild(new Text(String(child)));
-  } else if (typeof child === "function") {
-    parent.appendChild(new Text(child));
-  } else if (child instanceof Node) {
-    parent.appendChild(child);
-  } else if (Array.isArray(child)) {
-    for (let i = 0; i < child.length; i++) {
-      appendChildRecursive(parent, child[i]);
+  /** Builds this element: a widget for a tag or class, whatever a component returns. */
+  render(): unknown {
+    const { type, props } = this;
+    if (typeof type === "string") {
+      const Widget = INTRINSICS[type];
+      if (!Widget) throw new Error(`kiln:gui: unknown element <${type}> (known: ${Object.keys(INTRINSICS).join(", ")})`);
+      return new Widget(props);
     }
+    if (isWidgetClass(type)) return new type(props);
+    return untrack(() => (type as Component)(props));
   }
 }
 
-export function createElement(tag: any, props?: any, ...children: any[]): Node {
-  let node: Node;
-  const isClass = typeof tag === "function" && tag.prototype && (tag.prototype instanceof Node || tag.prototype.constructor === Node);
-
-  const allChildren = children.length > 0 ? children : (props && props.children ? (Array.isArray(props.children) ? props.children : [props.children]) : []);
-
-  if (isClass) {
-    node = new tag(props);
-  } else if (typeof tag === "function") {
-    const combinedProps = { ...(props || {}) };
-    if (allChildren.length > 0) combinedProps.children = allChildren.length === 1 ? allChildren[0] : allChildren;
-    return tag(combinedProps);
-  } else if (typeof tag === "string") {
-    node = defaultRenderer.createElement(tag);
-  } else {
-    node = new Node("unknown");
-  }
-
-  if (props) {
-    for (const key of Object.keys(props)) {
-      if (key !== "children" && key !== "key" && key !== "ref") {
-        node.setProperty(key, props[key]);
-      }
-    }
-    if (props.ref) {
-      if (typeof props.ref === "function") {
-        props.ref(node);
-      } else if (typeof props.ref === "object" && props.ref !== null) {
-        props.ref.current = node;
-      }
-    }
-  }
-
-  if (node instanceof Text && allChildren.length > 0) {
-    const first = allChildren[0];
-    if (typeof first === "string" || typeof first === "number" || typeof first === "function") {
-      node.text = first;
-      return node;
-    }
-  }
-
-  if (node instanceof Button && !node.label && allChildren.length > 0) {
-    const first = allChildren[0];
-    if (typeof first === "string" || typeof first === "function") {
-      node.label = first;
-      return node;
-    }
-  }
-
-  for (let i = 0; i < allChildren.length; i++) {
-    appendChildRecursive(node, allChildren[i]);
-  }
-
-  return node;
-}
-
-export const h = createElement;
-export const Fragment = (props: any) => props?.children;
-
-export function jsx(type: any, props: any, key?: any): any {
-  if (key !== undefined) {
-    props = { ...(props || {}), key };
-  }
-  return createElement(type, props);
+export function jsx(type: string | Component | WidgetClass, props: Record<string, unknown> | null, key?: unknown): JsxElement {
+  void key;
+  return new JsxElement(type, props || {});
 }
 
 export const jsxs = jsx;
 export const jsxDEV = jsx;
 
-
-// OS Utility Bridges (ADR 0074 §3)
-export interface FileFilter {
-  name: string;
-  extensions: string[];
+export function Fragment(props: { children?: unknown }): unknown {
+  return props.children;
 }
 
-export interface OpenFileOptions {
-  title?: string;
-  filters?: FileFilter[];
+/** Hyperscript: builds immediately and returns the widget (or whatever a component returns). */
+export function h(type: string | Component | WidgetClass, props?: Record<string, unknown> | null, ...children: unknown[]): any {
+  const all = Object.assign({}, props || {});
+  if (children.length > 0) all.children = children.length === 1 ? children[0] : children;
+  const built = new JsxElement(type, all).render();
+  return built;
 }
 
-export interface SaveFileOptions {
-  title?: string;
-  defaultPath?: string;
-  filters?: FileFilter[];
+function flatten(value: unknown, out: unknown[] = []): unknown[] {
+  if (Array.isArray(value)) for (const v of value) flatten(v, out);
+  else if (value !== undefined && value !== null && value !== false && value !== true && value !== "") out.push(value);
+  return out;
 }
 
-export interface PickFolderOptions {
-  title?: string;
-  defaultPath?: string;
+/**
+ * Renders elements (untracked, owned by the current owner) and flattens arrays, leaving
+ * functions in place. Control flow calls this where it decides what to show, so the widgets
+ * belong to that decision and survive anything else re-running.
+ */
+function renderChildren(value: unknown, out: (Node | Accessor<unknown>)[] = []): (Node | Accessor<unknown>)[] {
+  if (value === undefined || value === null || typeof value === "boolean") return out;
+  if (value instanceof Node) out.push(value);
+  else if (value instanceof JsxElement) renderChildren(untrack(() => value.render()), out);
+  else if (Array.isArray(value)) for (const v of value) renderChildren(v, out);
+  else if (typeof value === "function") out.push(value as Accessor<unknown>);
+  else out.push(new Text({ text: String(value) }));
+  return out;
 }
 
-export interface NotificationOptions {
-  title: string;
-  body?: string;
-  appName?: string;
+/** Renders and then calls every function (tracked), down to a flat list of nodes. */
+function toNodes(value: unknown, out: Node[] = []): Node[] {
+  for (const item of renderChildren(value)) {
+    if (typeof item === "function") toNodes(item(), out);
+    else out.push(item);
+  }
+  return out;
 }
 
-export interface MessageOptions {
-  title?: string;
-  message: string;
-  type?: "info" | "warning" | "error";
-}
-
-export class HostGuiBridge {
-  private initialized = false;
-  private lib: any = null;
-  private ffi: any = null;
-
-  init(): boolean {
-    if (this.initialized) return this.lib !== null;
-    this.initialized = true;
-    try {
-      this.ffi = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.ffi) || null;
-      if (!this.ffi) return false;
-
-      const fs = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.fs) || null;
-      const suffix = this.ffi.suffix || ".so";
-
-      const candidates: string[] = [];
-      if (typeof process !== "undefined" && process.env && process.env.KILN_HOST_GUI_LIB) {
-        candidates.push(process.env.KILN_HOST_GUI_LIB);
-      }
-      const cwd = typeof process !== "undefined" && typeof process.cwd === "function" ? process.cwd() : ".";
-      candidates.push(
-        cwd + "/target/release/libkiln_host_gui" + suffix,
-        cwd + "/target/debug/libkiln_host_gui" + suffix,
-        "./target/release/libkiln_host_gui" + suffix,
-        "./target/debug/libkiln_host_gui" + suffix
-      );
-
-      let targetLib: string | null = null;
-      if (fs && typeof fs.existsSync === "function") {
-        for (const candidate of candidates) {
-          try {
-            if (fs.existsSync(candidate)) {
-              targetLib = candidate;
-              break;
-            }
-          } catch (_) {}
-        }
-      }
-
-      if (!targetLib) return false;
-
-      this.lib = this.ffi.dlopen(targetLib, {
-        kiln_gui_dialog_open_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
-        kiln_gui_dialog_pick_folder: { arguments: ["pointer", "pointer", "pointer", "u64"], return: "i32" },
-        kiln_gui_dialog_save_file: { arguments: ["pointer", "pointer", "pointer", "pointer", "pointer", "u64"], return: "i32" },
-        kiln_gui_dialog_message: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
-        kiln_gui_clipboard_read: { arguments: ["pointer", "u64"], return: "i32" },
-        kiln_gui_clipboard_write: { arguments: ["pointer"], return: "i32" },
-        kiln_gui_clipboard_clear: { arguments: [], return: "i32" },
-        kiln_gui_get_theme: { arguments: [], return: "i32" },
-        kiln_gui_notification_show: { arguments: ["pointer", "pointer", "pointer"], return: "i32" },
-        kiln_gui_tray_create: { arguments: ["pointer"], return: "u32" },
-        kiln_gui_tray_set_tooltip: { arguments: ["u32", "pointer"], return: "i32" },
-        kiln_gui_tray_destroy: { arguments: ["u32"], return: "i32" },
-        kiln_gui_tray_clear: { arguments: [], return: "i32" },
-        kiln_gui_app_get_path: { arguments: ["pointer", "pointer", "u64"], return: "i32" },
-        kiln_gui_app_single_instance_lock: { arguments: ["pointer"], return: "i32" },
-        kiln_gui_hotkey_register: { arguments: ["pointer"], return: "u32" },
-        kiln_gui_hotkey_unregister: { arguments: ["u32"], return: "i32" },
-        kiln_gui_hotkey_poll: { arguments: [], return: "u32" },
-      });
-      return this.lib !== null;
-    } catch (_) {
-      return false;
-    }
+/**
+ * Inserts `value` into `parent` before `before`. Static values are inserted once; a function
+ * becomes a region that re-renders its part of the children whenever what it reads changes,
+ * leaving the rest of the parent alone.
+ */
+function insert(parent: Node, value: unknown, before: Node | null): void {
+  if (value === undefined || value === null || typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    for (const v of value) insert(parent, v, before);
+    return;
   }
-
-  openFile(options?: OpenFileOptions): string | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
-      let filterNamePtr = 0n;
-      let filterExtsPtr = 0n;
-      if (options?.filters && options.filters.length > 0) {
-        filterNamePtr = toCStr(this.ffi, options.filters[0].name);
-        filterExtsPtr = toCStr(this.ffi, options.filters[0].extensions.join(","));
-      }
-      const buf = new Uint8Array(4096);
-      const bufPtr = this.ffi.getRawPointer(buf.buffer);
-      const len = this.lib.kiln_gui_dialog_open_file(titlePtr, filterNamePtr, filterExtsPtr, bufPtr, BigInt(buf.length));
-      if (len > 0) {
-        return new TextDecoder().decode(buf.subarray(0, len));
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
+  if (value instanceof JsxElement) {
+    insert(parent, value.render(), before);
+    return;
   }
-
-  pickFolder(options?: PickFolderOptions): string | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
-      const defaultPathPtr = options?.defaultPath ? toCStr(this.ffi, options.defaultPath) : 0n;
-      const buf = new Uint8Array(4096);
-      const bufPtr = this.ffi.getRawPointer(buf.buffer);
-      const len = this.lib.kiln_gui_dialog_pick_folder(titlePtr, defaultPathPtr, bufPtr, BigInt(buf.length));
-      if (len > 0) {
-        return new TextDecoder().decode(buf.subarray(0, len));
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
+  if (value instanceof Node) {
+    parent.insertBefore(value, before);
+    return;
   }
-
-  saveFile(options?: SaveFileOptions): string | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const titlePtr = options?.title ? toCStr(this.ffi, options.title) : 0n;
-      const defaultPathPtr = options?.defaultPath ? toCStr(this.ffi, options.defaultPath) : 0n;
-      let filterNamePtr = 0n;
-      let filterExtsPtr = 0n;
-      if (options?.filters && options.filters.length > 0) {
-        filterNamePtr = toCStr(this.ffi, options.filters[0].name);
-        filterExtsPtr = toCStr(this.ffi, options.filters[0].extensions.join(","));
-      }
-      const buf = new Uint8Array(4096);
-      const bufPtr = this.ffi.getRawPointer(buf.buffer);
-      const len = this.lib.kiln_gui_dialog_save_file(titlePtr, defaultPathPtr, filterNamePtr, filterExtsPtr, bufPtr, BigInt(buf.length));
-      if (len > 0) {
-        return new TextDecoder().decode(buf.subarray(0, len));
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
+  if (typeof value !== "function") {
+    parent.insertBefore(new Text({ text: String(value) }), before);
+    return;
   }
-
-  showMessage(options: MessageOptions): void {
-    if (!this.init() || !this.lib) return;
-    try {
-      const titlePtr = options.title ? toCStr(this.ffi, options.title) : 0n;
-      const msgPtr = toCStr(this.ffi, options.message);
-      const kindPtr = options.kind ? toCStr(this.ffi, options.kind) : 0n;
-      this.lib.kiln_gui_dialog_message(titlePtr, msgPtr, kindPtr);
-    } catch (_) {}
-  }
-
-  clipboardRead(): string | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const buf = new Uint8Array(8192);
-      const bufPtr = this.ffi.getRawPointer(buf.buffer);
-      const len = this.lib.kiln_gui_clipboard_read(bufPtr, BigInt(buf.length));
-      if (len >= 0) {
-        return new TextDecoder().decode(buf.subarray(0, len));
-      }
-      return null;
-    } catch (_) {
-      return null;
+  const marker = new Marker();
+  parent.insertBefore(marker, before);
+  let current: Node[] = [];
+  let reusedText: Text | null = null;
+  onCleanup(() => {
+    for (const n of current) if (n.parent === parent) parent.removeChild(n);
+    if (reusedText) reusedText.dispose();
+    marker.dispose();
+  });
+  createEffect(() => {
+    const raw = (value as Accessor<unknown>)();
+    // A region that renders plain text keeps one Text widget and updates it.
+    if (typeof raw === "string" || typeof raw === "number") {
+      if (!reusedText) reusedText = runWithOwner(null, () => new Text());
+      reusedText.text = String(raw);
+      return reconcile(parent, marker, current, (current = [reusedText]));
     }
-  }
-
-  clipboardWrite(text: string): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      const textPtr = toCStr(this.ffi, text);
-      const res = this.lib.kiln_gui_clipboard_write(textPtr);
-      return res === 0;
-    } catch (_) {
-      return false;
+    const next = toNodes(raw);
+    if (reusedText && next.indexOf(reusedText) < 0) {
+      const old = reusedText;
+      reusedText = null;
+      if (old.parent === parent) parent.removeChild(old);
+      old.dispose();
     }
-  }
-
-  clipboardClear(): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      return this.lib.kiln_gui_clipboard_clear() === 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  getTheme(): "dark" | "light" | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const code = this.lib.kiln_gui_get_theme();
-      return code === 0 ? "dark" : "light";
-    } catch (_) {
-      return null;
-    }
-  }
-
-  showNotification(options: NotificationOptions): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      const titlePtr = toCStr(this.ffi, options.title);
-      const bodyPtr = options.body ? toCStr(this.ffi, options.body) : 0n;
-      const appNamePtr = options.appName ? toCStr(this.ffi, options.appName) : 0n;
-      return this.lib.kiln_gui_notification_show(titlePtr, bodyPtr, appNamePtr) === 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  createTray(tooltip: string): number | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const tipPtr = toCStr(this.ffi, tooltip);
-      const id = this.lib.kiln_gui_tray_create(tipPtr);
-      return id > 0 ? id : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  setTrayTooltip(id: number, tooltip: string): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      const tipPtr = toCStr(this.ffi, tooltip);
-      return this.lib.kiln_gui_tray_set_tooltip(id, tipPtr) === 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  destroyTray(id: number): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      return this.lib.kiln_gui_tray_destroy(id) === 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  clearTrays(): void {
-    if (!this.init() || !this.lib) return;
-    try {
-      this.lib.kiln_gui_tray_clear();
-    } catch (_) {}
-  }
-
-  appGetPath(name: string): string | null {
-    if (!this.init() || !this.lib) return null;
-    try {
-      const namePtr = toCStr(this.ffi, name);
-      const buf = new Uint8Array(4096);
-      const bufPtr = this.ffi.getRawPointer(buf.buffer);
-      const len = this.lib.kiln_gui_app_get_path(namePtr, bufPtr, BigInt(buf.length));
-      if (len > 0) {
-        return new TextDecoder().decode(buf.subarray(0, len));
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  appSingleInstanceLock(appId: string): boolean {
-    if (!this.init() || !this.lib) return true;
-    try {
-      const appIdPtr = toCStr(this.ffi, appId);
-      return this.lib.kiln_gui_app_single_instance_lock(appIdPtr) === 0;
-    } catch (_) {
-      return true;
-    }
-  }
-
-  hotkeyRegister(accelerator: string): number {
-    if (!this.init() || !this.lib) return 0;
-    try {
-      const accPtr = toCStr(this.ffi, accelerator);
-      return this.lib.kiln_gui_hotkey_register(accPtr);
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  hotkeyUnregister(id: number): boolean {
-    if (!this.init() || !this.lib) return false;
-    try {
-      return this.lib.kiln_gui_hotkey_unregister(id) === 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  hotkeyPoll(): number {
-    if (!this.init() || !this.lib) return 0;
-    try {
-      return this.lib.kiln_gui_hotkey_poll();
-    } catch (_) {
-      return 0;
-    }
-  }
-}
-
-export const hostGuiBridge = new HostGuiBridge();
-
-export const dialog = {
-  async openFile(options?: OpenFileOptions): Promise<string | null> {
-    if (typeof G.__kilnGuiOpenFile === "function") {
-      return G.__kilnGuiOpenFile(options);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.openFile === "function") {
-      return nativeMod.openFile(options);
-    }
-    const hostPath = hostGuiBridge.openFile(options);
-    if (hostPath !== null) return hostPath;
-    return null;
-  },
-  async openFiles(options?: OpenFileOptions): Promise<string[]> {
-    if (typeof G.__kilnGuiOpenFiles === "function") {
-      return G.__kilnGuiOpenFiles(options);
-    }
-    const single = await this.openFile(options);
-    return single ? [single] : [];
-  },
-  async pickFolder(options?: PickFolderOptions): Promise<string | null> {
-    if (typeof G.__kilnGuiPickFolder === "function") {
-      return G.__kilnGuiPickFolder(options);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.pickFolder === "function") {
-      return nativeMod.pickFolder(options);
-    }
-    const hostPath = hostGuiBridge.pickFolder(options);
-    if (hostPath !== null) return hostPath;
-    return null;
-  },
-  async saveFile(options?: SaveFileOptions): Promise<string | null> {
-    if (typeof G.__kilnGuiSaveFile === "function") {
-      return G.__kilnGuiSaveFile(options);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.saveFile === "function") {
-      return nativeMod.saveFile(options);
-    }
-    const hostPath = hostGuiBridge.saveFile(options);
-    if (hostPath !== null) return hostPath;
-    return null;
-  },
-  async message(options: MessageOptions): Promise<void> {
-    if (typeof G.__kilnGuiShowMessage === "function") {
-      return G.__kilnGuiShowMessage(options);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.showMessage === "function") {
-      return nativeMod.showMessage(options);
-    }
-    hostGuiBridge.showMessage(options);
-  },
-};
-
-let virtualClipboard = "";
-export const clipboard = {
-  async readText(): Promise<string> {
-    if (typeof G.__kilnGuiClipboardRead === "function") {
-      return G.__kilnGuiClipboardRead();
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.readText === "function") {
-      return nativeMod.readText();
-    }
-    const hostText = hostGuiBridge.clipboardRead();
-    if (hostText !== null) return hostText;
-    return virtualClipboard;
-  },
-  async writeText(text: string): Promise<void> {
-    if (typeof G.__kilnGuiClipboardWrite === "function") {
-      return G.__kilnGuiClipboardWrite(text);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.writeText === "function") {
-      return nativeMod.writeText(text);
-    }
-    if (!hostGuiBridge.clipboardWrite(text)) {
-      virtualClipboard = String(text);
-    }
-  },
-  async clear(): Promise<void> {
-    if (typeof G.__kilnGuiClipboardClear === "function") {
-      return G.__kilnGuiClipboardClear();
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.clear === "function") {
-      return nativeMod.clear();
-    }
-    hostGuiBridge.clipboardClear();
-    virtualClipboard = "";
-  },
-};
-
-let currentTheme: "dark" | "light" = "light";
-const themeListeners: ((theme: "dark" | "light") => void)[] = [];
-export const systemTheme = {
-  getTheme(): "dark" | "light" {
-    if (typeof G.__kilnGuiGetTheme === "function") {
-      return G.__kilnGuiGetTheme();
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.getTheme === "function") {
-      return nativeMod.getTheme();
-    }
-    const hostTheme = hostGuiBridge.getTheme();
-    if (hostTheme !== null) return hostTheme;
-    return currentTheme;
-  },
-  setTheme(theme: "dark" | "light"): void {
-    currentTheme = theme;
-    for (let i = 0; i < themeListeners.length; i++) {
-      themeListeners[i](theme);
-    }
-  },
-  onThemeChange(callback: (theme: "dark" | "light") => void): () => void {
-    themeListeners.push(callback);
-    return () => {
-      const idx = themeListeners.indexOf(callback);
-      if (idx >= 0) themeListeners.splice(idx, 1);
-    };
-  },
-};
-
-export const notification = {
-  async show(options: NotificationOptions): Promise<void> {
-    if (typeof G.__kilnGuiShowNotification === "function") {
-      return G.__kilnGuiShowNotification(options);
-    }
-    const nativeMod = (typeof process !== "undefined" && (process as any).__kilnNativeModules?.gui) || null;
-    if (typeof nativeMod?.showNotification === "function") {
-      return nativeMod.showNotification(options);
-    }
-    hostGuiBridge.showNotification(options);
-  },
-};
-
-export type AppPathName =
-  | "home"
-  | "appData"
-  | "userData"
-  | "cache"
-  | "temp"
-  | "desktop"
-  | "documents"
-  | "downloads"
-  | "config";
-
-export const app = {
-  name: "kiln-app",
-  version: "0.1.0",
-  getPath(name: AppPathName): string {
-    if (typeof G.__kilnGuiAppGetPath === "function") {
-      return G.__kilnGuiAppGetPath(name);
-    }
-    const hostPath = hostGuiBridge.appGetPath(name);
-    if (hostPath !== null) return hostPath;
-    if (name === "temp") {
-      return (typeof process !== "undefined" && (process.env?.TMPDIR || process.env?.TEMP || "/tmp")) || "/tmp";
-    }
-    if (name === "home") {
-      return (typeof process !== "undefined" && process.env?.HOME) || "/";
-    }
-    return (typeof process !== "undefined" && process.env?.HOME ? `${process.env.HOME}/.${name}` : `/${name}`);
-  },
-  quit(exitCode = 0): void {
-    if (typeof process !== "undefined" && typeof process.exit === "function") {
-      process.exit(exitCode);
-    }
-  },
-  requestSingleInstanceLock(appId = "kiln-app"): boolean {
-    if (typeof G.__kilnGuiAppSingleInstanceLock === "function") {
-      return G.__kilnGuiAppSingleInstanceLock(appId);
-    }
-    return hostGuiBridge.appSingleInstanceLock(appId);
-  },
-};
-
-const registeredHotkeys = new Map<string, number>();
-const hotkeyHandlers = new Map<number, () => void>();
-
-export const globalShortcut = {
-  register(accelerator: string, callback: () => void): boolean {
-    if (typeof G.__kilnGuiHotkeyRegister === "function") {
-      const id = G.__kilnGuiHotkeyRegister(accelerator);
-      if (id > 0) {
-        registeredHotkeys.set(accelerator, id);
-        hotkeyHandlers.set(id, callback);
-        return true;
-      }
-      return false;
-    }
-    const id = hostGuiBridge.hotkeyRegister(accelerator);
-    if (id > 0) {
-      registeredHotkeys.set(accelerator, id);
-      hotkeyHandlers.set(id, callback);
-      return true;
-    }
-    return false;
-  },
-  unregister(accelerator: string): void {
-    const id = registeredHotkeys.get(accelerator);
-    if (id !== undefined) {
-      hostGuiBridge.hotkeyUnregister(id);
-      registeredHotkeys.delete(accelerator);
-      hotkeyHandlers.delete(id);
-    }
-  },
-  unregisterAll(): void {
-    for (const id of registeredHotkeys.values()) {
-      hostGuiBridge.hotkeyUnregister(id);
-    }
-    registeredHotkeys.clear();
-    hotkeyHandlers.clear();
-  },
-  poll(): boolean {
-    const firedId = hostGuiBridge.hotkeyPoll();
-    if (firedId > 0) {
-      const handler = hotkeyHandlers.get(firedId);
-      if (handler) {
-        handler();
-        return true;
-      }
-    }
-    return false;
-  },
-};
-
-export const gtk = {
-  addCss(css: string): boolean {
-    const driver = getActiveDriver();
-    if (driver && typeof (driver as any).addGlobalCss === "function") {
-      return (driver as any).addGlobalCss(css);
-    }
-    return false;
-  },
-};
-
-export interface MenuItemOptions {
-  id?: string;
-  label: string;
-  enabled?: boolean;
-  checked?: boolean;
-  accelerator?: string;
-  onClick?: () => void;
-}
-
-export class MenuItem {
-  readonly id: string;
-  label: string;
-  enabled: boolean;
-  checked?: boolean;
-  accelerator?: string;
-  onClick?: () => void;
-
-  constructor(options: MenuItemOptions) {
-    this.id = options.id || String(nextNodeId++);
-    this.label = options.label;
-    this.enabled = options.enabled !== false;
-    this.checked = options.checked;
-    this.accelerator = options.accelerator;
-    this.onClick = options.onClick;
-  }
-}
-
-export class Menu {
-  readonly id: number = nextNodeId++;
-  private items: (MenuItem | Submenu | MenuSeparator)[] = [];
-
-  append(item: MenuItem | Submenu | MenuSeparator): void {
-    this.items.push(item);
-  }
-
-  appendSeparator(): void {
-    this.items.push(new MenuSeparator());
-  }
-
-  appendSubmenu(submenu: Submenu): void {
-    this.items.push(submenu);
-  }
-
-  getItems(): (MenuItem | Submenu | MenuSeparator)[] {
-    return [...this.items];
-  }
-}
-
-export class MenuSeparator extends MenuItem {
-  constructor() {
-    super({ label: "-" });
-  }
-}
-
-export class Submenu extends Menu {
-  label: string;
-
-  constructor(label: string) {
-    super();
-    this.label = label;
-  }
-}
-
-export interface TrayIconOptions {
-  tooltip?: string;
-  menu?: Menu;
-  onPress?: () => void;
-}
-
-export class TrayIcon {
-  readonly id: number;
-  private _tooltip: string;
-  private _menu: Menu | null;
-
-  constructor(options: TrayIconOptions = {}) {
-    this._tooltip = options.tooltip || "";
-    this._menu = options.menu || null;
-    const hostId = hostGuiBridge.createTray(this._tooltip);
-    this.id = hostId !== null ? hostId : nextNodeId++;
-  }
-
-  get tooltip(): string {
-    return this._tooltip;
-  }
-
-  set tooltip(value: string) {
-    this._tooltip = value;
-    hostGuiBridge.setTrayTooltip(this.id, value);
-  }
-
-  get menu(): Menu | null {
-    return this._menu;
-  }
-
-  set menu(value: Menu | null) {
-    this._menu = value;
-  }
-
-  dispose(): void {
-    hostGuiBridge.destroyTray(this.id);
-  }
-}
-
-// Turn Mailbox & Reentrancy-Safe Runloop Integration (ADR 0074 §4)
-interface MailboxTurn {
-  targetId: number;
-  event: string;
-  args: any[];
-}
-
-const mailboxQueue: MailboxTurn[] = [];
-let isExecutingTurn = false;
-
-export const turnMailbox = {
-  pumpEvents(waitMs = 0): boolean {
-    const driver = getActiveDriver();
-    const driverHad = driver ? driver.pumpEvents(waitMs) : false;
-    const shortcutHad = globalShortcut.poll();
-    return driverHad || shortcutHad;
-  },
-  post(targetId: number, event: string, ...args: any[]): void {
-    mailboxQueue.push({ targetId, event, args });
-    if (!isExecutingTurn) {
-      this.drain();
-    }
-  },
-  drain(): void {
-    if (isExecutingTurn) return; // Reentrancy Guard (ADR 0074 §4.3)
-    isExecutingTurn = true;
-    try {
-      this.pumpEvents();
-      while (mailboxQueue.length > 0) {
-        const item = mailboxQueue.shift()!;
-        const target = nodeRegistry.get(item.targetId);
-        if (target) {
-          target.dispatchEvent(item.event, ...item.args);
-        }
-      }
-      flush();
-    } finally {
-      isExecutingTurn = false;
-    }
-  },
-  get pendingCount(): number {
-    return mailboxQueue.length;
-  },
-};
-
-export function runLoop(win?: Window, intervalMs = 16): Promise<void> {
-  return new Promise((resolve) => {
-    let currentInterval = intervalMs;
-    let timerId: any = null;
-
-    const tick = () => {
-      const waitMs = currentInterval > intervalMs ? 20 : 0;
-      const hadEvents = turnMailbox.pumpEvents(waitMs);
-      flush();
-      if (win && !win.visible) {
-        if (timerId !== null) clearInterval(timerId);
-        resolve();
-        return;
-      }
-
-      // Adaptive idle regulation (ADR 0074 §4):
-      // If events occurred or turn queue was processed, keep fast 60fps pump (16ms).
-      // If idle, back off to 48ms (~20fps) to minimize CPU usage, ramping back up instantly upon interaction.
-      const targetInterval = hadEvents ? intervalMs : Math.min(intervalMs * 3, 50);
-      if (targetInterval !== currentInterval) {
-        currentInterval = targetInterval;
-        clearInterval(timerId);
-        timerId = setInterval(tick, currentInterval);
-      }
-    };
-
-    timerId = setInterval(tick, currentInterval);
+    reconcile(parent, marker, current, next);
+    current = next;
   });
 }
 
-export function runApp(root: Node | (() => Node)): Promise<void> {
-  const win = typeof root === "function" ? (root as any)() : root;
-  if (win && typeof (win as any).show === "function") {
-    (win as any).show();
+function reconcile(parent: Node, marker: Node, prev: Node[], next: Node[]): void {
+  const keep = new Set(next);
+  for (const n of prev) if (!keep.has(n) && n.parent === parent) parent.removeChild(n);
+  let anchor: Node = marker;
+  for (let i = next.length - 1; i >= 0; i--) {
+    const n = next[i];
+    if (n.parent !== parent || parent.children[parent.children.indexOf(anchor) - 1] !== n) parent.insertBefore(n, anchor);
+    anchor = n;
   }
-  if (typeof process !== "undefined" && process.env && process.env.KILN_SNAPSHOT && win && typeof (win as any).snapshot === "function") {
-    setTimeout(() => {
-      (win as any).snapshot(process.env.KILN_SNAPSHOT!);
-      process.exit(0);
-    }, 400);
-  }
-  return runLoop(win as any);
 }
 
-export default {
-  Node,
-  Window,
-  VStack,
-  HStack,
-  Card,
-  Box,
-  Grid,
-  Divider,
-  Spacer,
-  ScrollView,
-  SegmentedControl,
-  ProgressBar,
-  Select,
-  Checkbox,
-  Icon,
-  Text,
-  Button,
-  TextInput,
-  Slider,
-  Toggle,
-  TrayIcon,
-  Menu,
-  MenuItem,
-  MenuSeparator,
-  Submenu,
-  createRenderer,
-  createElement,
-  h,
-  Fragment,
-  jsx,
-  jsxs,
-  jsxDEV,
-  app,
-  globalShortcut,
-  gtk,
-  dialog,
-  clipboard,
-  systemTheme,
-  notification,
-  turnMailbox,
-  nodeRegistry,
-  createSignal,
-  createEffect,
-  createMemo,
-  batch,
-  untrack,
-  onCleanup,
-  isPending,
-  flush,
-  latest,
-  runApp,
-  runLoop,
-  getActiveDriver,
-  universalDriver,
+/** Renders `code` into `parent` inside a new root. Returns a function that disposes it all. */
+export function render(code: () => unknown, parent: Node): Cleanup {
+  return createRoot((dispose) => {
+    insert(parent, untrack(code), null);
+    return dispose;
+  });
+}
+
+/**
+ * Builds the app, shows its windows and resolves when the last one closes (or the person
+ * quits). A root that is not a window is placed in one.
+ */
+export function runApp(app: unknown | (() => unknown)): Promise<void> {
+  return new Promise((resolve) => {
+    createRoot((dispose) => {
+      const nodes = untrack(() => toNodes(typeof app === "function" && !isWidgetClass(app) ? (app as Accessor<unknown>)() : app));
+      const windows = nodes.map((n) => (n instanceof Window ? n : new Window({ title: "kiln" }, n)));
+      eventLoop.whenAllClosed(() => {
+        dispose();
+        resolve();
+      });
+      for (const w of windows) w.show();
+      const snapshot = env("KILN_GUI_SNAPSHOT");
+      if (snapshot && windows.length > 0) {
+        setTimeout(() => {
+          eventLoop.drainOnce();
+          windows[0].snapshot(snapshot);
+          app_.quit();
+        }, 500);
+      }
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 6. Event loop
+//
+// The OS delivers events to the main thread's run loop; the program's own work (timers, I/O)
+// runs on kiln's loop. While a window is open, each tick processes OS events for a bounded
+// slice, dispatches what arrived as one batch, then yields so kiln's loop runs its turns. The
+// slice is short (8 ms) while something is happening and long (50 ms) when idle: input is
+// handled at once in both, and timers and I/O are at most one slice late. A runtime hook that
+// lets the host wait on both loops at once would remove the slice (ADR 0074, follow-up).
+
+const ACTIVE_SLICE_MS = 8;
+const IDLE_SLICE_MS = 50;
+const ACTIVE_WINDOW_MS = 500;
+
+const eventLoop = {
+  running: false,
+  activeUntil: 0,
+  lastOperations: 0,
+  keepAlive: 0,
+  closedWaiters: [] as Cleanup[],
+
+  start(): void {
+    if (this.running || !currentHost().interactive) return;
+    this.running = true;
+    setTimeout(tick, 0);
+  },
+
+  /** Dispatches every queued host event as one batch. Returns how many there were. */
+  drainOnce(): number {
+    const host = currentHost();
+    let count = 0;
+    batch(() => {
+      for (let e = host.nextEvent(); e; e = host.nextEvent()) {
+        count++;
+        dispatch(e);
+      }
+    });
+    return count;
+  },
+
+  whenAllClosed(fn: Cleanup): void {
+    this.closedWaiters.push(fn);
+  },
+
+  windowClosed(): void {
+    if (openWindows.size > 0) return;
+    const waiters = this.closedWaiters.splice(0, this.closedWaiters.length);
+    for (const w of waiters) w();
+  },
 };
 
+/** Dispatches every event the host has queued, as one batch. The event loop calls this; tests
+ * and programs with their own loop can too. Returns how many events there were. */
+export function processEvents(): number {
+  return eventLoop.drainOnce();
+}
+
+function tick(): void {
+  const host = currentHost();
+  let events = eventLoop.drainOnce();
+  const busy = Date.now() < eventLoop.activeUntil;
+  host.wait(busy ? ACTIVE_SLICE_MS : IDLE_SLICE_MS);
+  events += eventLoop.drainOnce();
+  if (events > 0 || host.operations !== eventLoop.lastOperations) {
+    eventLoop.activeUntil = Date.now() + ACTIVE_WINDOW_MS;
+    eventLoop.lastOperations = host.operations;
+  }
+  if (openWindows.size > 0 || eventLoop.keepAlive > 0) {
+    // A non-zero delay: kiln's loop parks for it, which lets its I/O tasks run.
+    setTimeout(tick, 1);
+  } else {
+    eventLoop.running = false;
+  }
+}
+
+const menuHandlers = new Map<string, () => void>();
+const hotkeyHandlers = new Map<number, () => void>();
+const trayHandlers = new Map<number, () => void>();
+
+function dispatch(e: HostEvent): void {
+  if (e.handle === 0) {
+    if (e.kind === EVENT_MENU) {
+      const handler = menuHandlers.get(e.text);
+      if (handler) handler();
+    } else if (e.kind === EVENT_HOTKEY) {
+      const handler = hotkeyHandlers.get(e.a);
+      if (handler) handler();
+    } else if (e.kind === EVENT_TRAY) {
+      const handler = trayHandlers.get(e.a);
+      if (handler) handler();
+    } else if (e.kind === EVENT_QUIT) {
+      app_.quit();
+    }
+    return;
+  }
+  const node = mounted.get(e.handle);
+  const name = EVENT_NAMES[e.kind];
+  if (node && name) node.receive(name, e.a, e.b, e.text);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 7. OS services
+
+export interface OpenOptions {
+  title?: string;
+  defaultPath?: string;
+  filters?: FileFilter[];
+}
+
+export const dialog = {
+  /** One file, or null when cancelled. */
+  async openFile(options: OpenOptions = {}): Promise<string | null> {
+    return currentHost().services.dialog("open", { ...options }) as string | null;
+  },
+  async openFiles(options: OpenOptions = {}): Promise<string[]> {
+    return (currentHost().services.dialog("open", { ...options, multiple: true }) as string[] | null) || [];
+  },
+  async saveFile(options: OpenOptions & { fileName?: string } = {}): Promise<string | null> {
+    return currentHost().services.dialog("save", { ...options }) as string | null;
+  },
+  async pickFolder(options: OpenOptions = {}): Promise<string | null> {
+    return currentHost().services.dialog("folder", { ...options }) as string | null;
+  },
+  async message(message: string, options: { title?: string; detail?: string; kind?: "info" | "warning" | "error" } = {}): Promise<void> {
+    currentHost().services.dialog("message", { ...options, message });
+  },
+  /** OK/Cancel; true for OK. */
+  async confirm(message: string, options: { title?: string; detail?: string; kind?: "info" | "warning" | "error" } = {}): Promise<boolean> {
+    return currentHost().services.dialog("confirm", { ...options, message }) === true;
+  },
+};
+
+export const clipboard = {
+  async readText(): Promise<string> {
+    return currentHost().services.clipboardRead();
+  },
+  async writeText(text: string): Promise<void> {
+    currentHost().services.clipboardWrite(String(text));
+  },
+  async clear(): Promise<void> {
+    currentHost().services.clipboardClear();
+  },
+};
+
+/** The system appearance. `isDark()` asks the OS each time. */
+export const appearance = {
+  isDark(): boolean {
+    return currentHost().services.isDark();
+  },
+};
+
+export function notify(title: string, body = "", appName = app_.name): void {
+  currentHost().services.notify(title, body, appName);
+}
+
+export type AppPathName = "home" | "appData" | "userData" | "config" | "cache" | "temp" | "desktop" | "documents" | "downloads";
+
+export interface MenuItem {
+  id?: string;
+  label: string;
+  /** `"CmdOrCtrl+S"`, `"Shift+Cmd+Z"`. */
+  accelerator?: string;
+  enabled?: boolean;
+  checked?: boolean;
+  onClick?: () => void;
+  items?: (MenuItem | "separator")[];
+}
+
+export interface Menu {
+  label: string;
+  items: (MenuItem | "separator")[];
+}
+
+let nextMenuId = 1;
+
+/** Turns menus into the host's JSON shape, registering click handlers by id. */
+function menuSpec(items: (MenuItem | "separator")[], handlers: Map<string, () => void>): unknown[] {
+  return items.map((item) => {
+    if (item === "separator") return { separator: true };
+    const id = item.id || `menu-${nextMenuId++}`;
+    if (item.onClick) handlers.set(id, item.onClick);
+    const spec: Record<string, unknown> = { id, label: item.label };
+    if (item.accelerator) spec.accelerator = item.accelerator;
+    if (item.enabled === false) spec.enabled = false;
+    if (item.checked !== undefined) spec.checked = item.checked;
+    if (item.items) spec.items = menuSpec(item.items, handlers);
+    return spec;
+  });
+}
+
+const app_ = {
+  name: "kiln",
+
+  path(name: AppPathName): string {
+    return currentHost().services.appPath(name);
+  },
+
+  /** True when no other process holds `appId`; the lock lasts until this process exits. */
+  requestSingleInstance(appId: string): boolean {
+    return currentHost().services.singleInstance(appId);
+  },
+
+  /** Sets the menus between Edit and Window in the menu bar. The app, Edit and Window menus are always there. */
+  setMenu(menus: Menu[]): void {
+    for (const key of Array.from(menuHandlers.keys())) if (!key.startsWith("tray:")) menuHandlers.delete(key);
+    currentHost().services.setMenu(menus.map((m) => ({ label: m.label, items: menuSpec(m.items, menuHandlers) })));
+  },
+
+  /** Closes every window, which ends `runApp`. */
+  quit(): void {
+    for (const w of Array.from(openWindows)) w.close();
+  },
+};
+
+export { app_ as app };
+
+/** A menu-bar (status) item with a title and an optional menu. */
+export class Tray {
+  readonly id: number;
+  private disposed = false;
+
+  constructor(options: { title?: string; tooltip?: string; menu?: (MenuItem | "separator")[]; onClick?: () => void }) {
+    this.id = currentHost().services.trayCreate(this.spec(options));
+    if (options.onClick) trayHandlers.set(this.id, options.onClick);
+    eventLoop.keepAlive++;
+    eventLoop.start();
+    if (currentOwner) onCleanup(() => this.dispose());
+  }
+
+  private spec(options: { title?: string; tooltip?: string; menu?: (MenuItem | "separator")[] }): Record<string, unknown> {
+    const spec: Record<string, unknown> = {};
+    if (options.title !== undefined) spec.title = options.title;
+    if (options.tooltip !== undefined) spec.tooltip = options.tooltip;
+    if (options.menu) spec.menu = menuSpec(options.menu, menuHandlers);
+    return spec;
+  }
+
+  update(options: { title?: string; tooltip?: string; menu?: (MenuItem | "separator")[] }): void {
+    currentHost().services.trayUpdate(this.id, this.spec(options));
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    trayHandlers.delete(this.id);
+    currentHost().services.trayDestroy(this.id);
+    eventLoop.keepAlive--;
+  }
+}
+
+/** System-wide keyboard shortcuts, delivered even when the app is in the background. */
+export const shortcuts = {
+  /** Registers `accelerator` (`"Cmd+Shift+K"`); returns a function that unregisters it. */
+  register(accelerator: string, handler: () => void): Cleanup {
+    const id = currentHost().services.hotkeyRegister(accelerator);
+    hotkeyHandlers.set(id, handler);
+    eventLoop.keepAlive++;
+    eventLoop.start();
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      hotkeyHandlers.delete(id);
+      currentHost().services.hotkeyUnregister(id);
+      eventLoop.keepAlive--;
+    };
+  },
+};

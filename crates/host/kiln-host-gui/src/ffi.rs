@@ -1,560 +1,333 @@
+//! The C ABI the TypeScript library binds with `dlopen` (ADR 0074).
+//!
+//! Conventions, so the binding side needs no per-function knowledge:
+//!
+//! * Strings in are NUL-terminated UTF-8. Strings out are not returned directly: a call that
+//!   produces text stores it and returns its byte length, and `kiln_gui_result` copies it out.
+//! * A negative `i32` is a failure. `-1` means "nothing" (a cancelled dialog, an empty
+//!   clipboard); `-2` means an error whose message `kiln_gui_result` copies out.
+//! * Handles are `u32`, allocated here, never by the caller. `0` is "none".
+//! * Nothing here unwinds into the caller: a panic becomes a `-2` with its message.
+
 #![allow(clippy::missing_safety_doc)]
 
-use crate::{
-    FileFilter, MessageOptions, NotificationOptions, OpenFileOptions, PickFolderOptions,
-    SaveFileOptions, app, clipboard, dialog, hotkey, notification, single_instance, theme, tray,
-};
+use std::cell::RefCell;
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(f))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("start tokio runtime for host GUI");
-        rt.block_on(f)
+use serde_json::Value;
+
+use crate::events::{self, EventHeader};
+use crate::{
+    DialogOptions, app, clipboard, dialog, hotkey, notification, single_instance, theme, tray,
+};
+
+/// Bumped on any change a binding must know about; the TypeScript side refuses a mismatch.
+pub const ABI_VERSION: u32 = 2;
+
+thread_local! {
+    static RESULT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn stash(text: String) -> i32 {
+    let len = text.len().min(i32::MAX as usize) as i32;
+    RESULT.with(|r| *r.borrow_mut() = text);
+    len
+}
+
+fn fail(message: impl Into<String>) -> i32 {
+    stash(message.into());
+    -2
+}
+
+fn guard(f: impl FnOnce() -> Result<i32, String>) -> i32 {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(code)) => code,
+        Ok(Err(message)) => fail(message),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            fail(format!("kiln-host-gui panicked: {message}"))
+        }
     }
 }
 
-unsafe fn c_str_to_opt_string(ptr: *const c_char) -> Option<String> {
+unsafe fn arg(ptr: *const c_char) -> String {
     if ptr.is_null() {
-        None
+        String::new()
     } else {
         unsafe { CStr::from_ptr(ptr) }
-            .to_str()
-            .ok()
-            .map(|s| s.to_owned())
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
-unsafe fn copy_to_c_buf(s: &str, out_buf: *mut c_char, out_len: usize) -> i32 {
-    if out_buf.is_null() || out_len == 0 {
-        return -1;
+#[cfg(target_os = "macos")]
+use crate::appkit as backend;
+
+#[cfg(not(target_os = "macos"))]
+mod backend {
+    const NONE: &str = "kiln-host-gui has no widget backend for this platform yet";
+    pub fn init() -> Result<(), String> {
+        Err(NONE.into())
     }
-    let bytes = s.as_bytes();
-    let to_copy = bytes.len().min(out_len - 1);
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, to_copy);
-        *out_buf.add(to_copy) = 0;
+    pub fn create(_: &str) -> Result<u32, String> {
+        Err(NONE.into())
     }
-    to_copy as i32
+    pub fn set_text(_: u32, _: &str, _: &str) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn set_number(_: u32, _: &str, _: f64) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn insert(_: u32, _: u32, _: u32) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn remove(_: u32, _: u32) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn destroy(_: u32) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn call(_: u32, _: &str, _: &str) -> Result<i32, String> {
+        Err(NONE.into())
+    }
+    pub fn wait(_: f64) -> Result<bool, String> {
+        Err(NONE.into())
+    }
+    pub fn set_menu(_: &str) -> Result<(), String> {
+        Err(NONE.into())
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_dialog_open_file(
-    title: *const c_char,
-    filter_name: *const c_char,
-    filter_exts: *const c_char,
-    out_buf: *mut c_char,
-    out_len: usize,
+pub extern "C" fn kiln_gui_abi_version() -> u32 {
+    ABI_VERSION
+}
+
+/// Copies the text of the last result or error into `buf` and returns the bytes copied.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_result(buf: *mut u8, len: usize) -> i32 {
+    RESULT.with(|r| {
+        let r = r.borrow();
+        let n = r.len().min(len);
+        if n > 0 && !buf.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(r.as_ptr(), buf, n) };
+        }
+        n as i32
+    })
+}
+
+// --- Widgets ---------------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_init() -> i32 {
+    guard(|| backend::init().map(|()| 0))
+}
+
+/// Creates a widget of `kind` and returns its handle, or 0 with the error in the result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_create(kind: *const c_char) -> u32 {
+    let kind = unsafe { arg(kind) };
+    let mut handle = 0;
+    guard(|| {
+        handle = backend::create(&kind)?;
+        Ok(0)
+    });
+    handle
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_set_text(
+    handle: u32,
+    name: *const c_char,
+    value: *const c_char,
 ) -> i32 {
-    let title = unsafe { c_str_to_opt_string(title) };
-    let mut filters = None;
-    if let Some(fname) = unsafe { c_str_to_opt_string(filter_name) } {
-        let fexts = unsafe { c_str_to_opt_string(filter_exts) }.unwrap_or_default();
-        let exts: Vec<String> = fexts
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect();
-        filters = Some(vec![FileFilter {
-            name: fname,
-            extensions: exts,
-        }]);
-    }
-    let opts = OpenFileOptions { title, filters };
-    let res = block_on(dialog::open_file(Some(opts)));
-    match res {
-        Some(path) => unsafe { copy_to_c_buf(&path, out_buf, out_len) },
-        None => 0,
-    }
+    let (name, value) = unsafe { (arg(name), arg(value)) };
+    guard(|| backend::set_text(handle, &name, &value).map(|()| 0))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_dialog_save_file(
-    title: *const c_char,
-    default_path: *const c_char,
-    filter_name: *const c_char,
-    filter_exts: *const c_char,
-    out_buf: *mut c_char,
-    out_len: usize,
+pub unsafe extern "C" fn kiln_gui_set_number(handle: u32, name: *const c_char, value: f64) -> i32 {
+    let name = unsafe { arg(name) };
+    guard(|| backend::set_number(handle, &name, value).map(|()| 0))
+}
+
+/// Inserts `child` into `parent` before `before` (0: at the end). Moves an attached child.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_insert(parent: u32, child: u32, before: u32) -> i32 {
+    guard(|| backend::insert(parent, child, before).map(|()| 0))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_remove(parent: u32, child: u32) -> i32 {
+    guard(|| backend::remove(parent, child).map(|()| 0))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_destroy(handle: u32) -> i32 {
+    guard(|| backend::destroy(handle).map(|()| 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_call(
+    handle: u32,
+    command: *const c_char,
+    arg_text: *const c_char,
 ) -> i32 {
-    let title = unsafe { c_str_to_opt_string(title) };
-    let default_path = unsafe { c_str_to_opt_string(default_path) };
-    let mut filters = None;
-    if let Some(fname) = unsafe { c_str_to_opt_string(filter_name) } {
-        let fexts = unsafe { c_str_to_opt_string(filter_exts) }.unwrap_or_default();
-        let exts: Vec<String> = fexts
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect();
-        filters = Some(vec![FileFilter {
-            name: fname,
-            extensions: exts,
-        }]);
-    }
-    let opts = SaveFileOptions {
-        title,
-        default_path,
-        filters,
-    };
-    let res = block_on(dialog::save_file(Some(opts)));
-    match res {
-        Some(path) => unsafe { copy_to_c_buf(&path, out_buf, out_len) },
-        None => 0,
+    let (command, arg_text) = unsafe { (arg(command), arg(arg_text)) };
+    guard(|| backend::call(handle, &command, &arg_text))
+}
+
+// --- Events ----------------------------------------------------------------------------------
+
+/// Processes OS events for up to `timeout_ms` (returning early once any arrive). Returns 1 when
+/// the program has events to read.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_wait(timeout_ms: f64) -> i32 {
+    guard(|| {
+        let ready = backend::wait(timeout_ms)?;
+        crate::poll_services();
+        Ok(i32::from(ready || !events::is_empty()))
+    })
+}
+
+/// Writes the next event's header to `out` and returns 1, or returns 0 when there is none.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_next_event(out: *mut EventHeader) -> i32 {
+    crate::poll_services();
+    match events::next() {
+        Some(header) if !out.is_null() => {
+            unsafe { *out = header };
+            stash(events::current_text());
+            1
+        }
+        _ => 0,
     }
 }
 
+// --- Services --------------------------------------------------------------------------------
+
+/// `open`, `save`, `folder`, `message`, `confirm`. Returns the result's JSON length, or -1 when
+/// the person cancelled.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_dialog_message(
-    title: *const c_char,
-    message: *const c_char,
-    kind: *const c_char,
-) -> i32 {
-    let title = unsafe { c_str_to_opt_string(title) };
-    let message = unsafe { c_str_to_opt_string(message) }.unwrap_or_default();
-    let kind = unsafe { c_str_to_opt_string(kind) };
-    let opts = MessageOptions {
-        title,
-        message,
-        kind,
-    };
-    block_on(dialog::message(opts));
-    0
+pub unsafe extern "C" fn kiln_gui_dialog(kind: *const c_char, options: *const c_char) -> i32 {
+    let (kind, options) = unsafe { (arg(kind), arg(options)) };
+    guard(|| {
+        let options: DialogOptions = if options.is_empty() {
+            DialogOptions::default()
+        } else {
+            serde_json::from_str(&options).map_err(|e| format!("dialog options: {e}"))?
+        };
+        match dialog::run(&kind, &options)? {
+            Value::Null => Ok(-1),
+            value => Ok(stash(value.to_string())),
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_clipboard_read(out_buf: *mut c_char, out_len: usize) -> i32 {
-    match clipboard::read_text() {
-        Ok(text) => unsafe { copy_to_c_buf(&text, out_buf, out_len) },
-        Err(_) => -1,
-    }
+pub extern "C" fn kiln_gui_clipboard_read() -> i32 {
+    guard(|| clipboard::read_text().map(stash).or(Ok(-1)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_clipboard_write(text: *const c_char) -> i32 {
-    if text.is_null() {
-        return -1;
-    }
-    let s = match unsafe { CStr::from_ptr(text) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    match clipboard::write_text(s) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_get_theme() -> i32 {
-    match theme::get_theme() {
-        "dark" => 0,
-        _ => 1,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_tray_create(tooltip: *const c_char) -> u32 {
-    let tooltip = unsafe { c_str_to_opt_string(tooltip) }.unwrap_or_default();
-    tray::create_tray_icon(&tooltip).unwrap_or_default()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_dialog_pick_folder(
-    title: *const c_char,
-    default_path: *const c_char,
-    out_buf: *mut c_char,
-    out_len: usize,
-) -> i32 {
-    let title = unsafe { c_str_to_opt_string(title) };
-    let default_path = unsafe { c_str_to_opt_string(default_path) };
-    let opts = PickFolderOptions {
-        title,
-        default_path,
-    };
-    let res = block_on(dialog::pick_folder(Some(opts)));
-    match res {
-        Some(path) => unsafe { copy_to_c_buf(&path, out_buf, out_len) },
-        None => 0,
-    }
+    let text = unsafe { arg(text) };
+    guard(|| clipboard::write_text(&text).map(|()| 0))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_gui_clipboard_clear() -> i32 {
-    match clipboard::clear() {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
+    guard(|| clipboard::clear().map(|()| 0))
+}
+
+/// 1 when the system appearance is dark.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_is_dark() -> i32 {
+    guard(|| Ok(i32::from(theme::is_dark())))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_notification_show(
+pub unsafe extern "C" fn kiln_gui_notify(
     title: *const c_char,
     body: *const c_char,
     app_name: *const c_char,
 ) -> i32 {
-    let title = unsafe { c_str_to_opt_string(title) }.unwrap_or_default();
-    let body = unsafe { c_str_to_opt_string(body) };
-    let app_name = unsafe { c_str_to_opt_string(app_name) };
-    let opts = NotificationOptions {
-        title,
-        body,
-        app_name,
-    };
-    match block_on(notification::show(opts)) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
+    let (title, body, app_name) = unsafe { (arg(title), arg(body), arg(app_name)) };
+    guard(|| notification::show(&title, &body, &app_name).map(|()| 0))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_tray_set_tooltip(id: u32, tooltip: *const c_char) -> i32 {
-    let tooltip = unsafe { c_str_to_opt_string(tooltip) }.unwrap_or_default();
-    match tray::set_tooltip(id, &tooltip) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
+pub unsafe extern "C" fn kiln_gui_app_path(name: *const c_char) -> i32 {
+    let name = unsafe { arg(name) };
+    guard(|| {
+        let path = app::path(&name).ok_or_else(|| format!("no well-known path named `{name}`"))?;
+        Ok(stash(path.to_string_lossy().into_owned()))
+    })
+}
+
+/// 1 when this process now holds `app_id`, 0 when another process does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_single_instance(app_id: *const c_char) -> i32 {
+    let app_id = unsafe { arg(app_id) };
+    guard(|| Ok(i32::from(single_instance::acquire(&app_id))))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_set_menu(spec: *const c_char) -> i32 {
+    let spec = unsafe { arg(spec) };
+    guard(|| backend::set_menu(&spec).map(|()| 0))
+}
+
+fn parse(spec: &str) -> Result<Value, String> {
+    serde_json::from_str(spec).map_err(|e| format!("tray: {e}"))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_tray_create(spec: *const c_char) -> u32 {
+    let spec = unsafe { arg(spec) };
+    let mut id = 0;
+    guard(|| {
+        id = tray::create(&parse(&spec)?)?;
+        Ok(0)
+    });
+    id
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_gui_tray_update(id: u32, spec: *const c_char) -> i32 {
+    let spec = unsafe { arg(spec) };
+    guard(|| tray::update(id, &parse(&spec)?).map(|()| 0))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_gui_tray_destroy(id: u32) -> i32 {
-    tray::destroy_tray_icon(id);
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_tray_clear() -> i32 {
-    tray::clear_tray_icons();
-    0
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_app_get_path(
-    name: *const c_char,
-    out_buf: *mut c_char,
-    out_len: usize,
-) -> i32 {
-    let name_str = match unsafe { c_str_to_opt_string(name) } {
-        Some(s) => s,
-        None => return -1,
-    };
-    match app::get_path(&name_str) {
-        Some(p) => unsafe { copy_to_c_buf(&p.to_string_lossy(), out_buf, out_len) },
-        None => -1,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_app_single_instance_lock(app_id: *const c_char) -> i32 {
-    let app_id = unsafe { c_str_to_opt_string(app_id) }.unwrap_or_else(|| "default".to_string());
-    if single_instance::request_single_instance_lock(&app_id) {
-        0
-    } else {
-        -1
-    }
+    guard(|| {
+        tray::destroy(id);
+        Ok(0)
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_gui_hotkey_register(accelerator: *const c_char) -> u32 {
-    let acc = match unsafe { c_str_to_opt_string(accelerator) } {
-        Some(s) => s,
-        None => return 0,
-    };
-    hotkey::register(&acc).unwrap_or_default()
+    let accelerator = unsafe { arg(accelerator) };
+    let mut id = 0;
+    guard(|| {
+        id = hotkey::register(&accelerator)?;
+        Ok(0)
+    });
+    id
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_gui_hotkey_unregister(id: u32) -> i32 {
-    match hotkey::unregister(id) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_hotkey_poll() -> u32 {
-    hotkey::poll_event().unwrap_or(0)
-}
-
-macro_rules! ffi_guard {
-    ($body:expr) => {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
-            Ok(res) => res,
-            Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                eprintln!("💥 [kiln-host-gui FFI panic]: {msg}");
-                -1
-            }
-        }
-    };
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_init() -> i32 {
-    ffi_guard!({
-        if crate::appkit::ensure_initialized() {
-            0
-        } else {
-            -1
-        }
+    guard(|| {
+        hotkey::unregister(id);
+        Ok(0)
     })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_create(
-    id: u64,
-    title: *const c_char,
-    width: f64,
-    height: f64,
-) -> i32 {
-    ffi_guard!({
-        let title_str =
-            unsafe { c_str_to_opt_string(title) }.unwrap_or_else(|| "Kiln Window".to_string());
-        if crate::appkit::window_create(id, &title_str, width, height) {
-            0
-        } else {
-            -1
-        }
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_show(id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::window_show(id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_close(id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::window_close(id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_set_title(id: u64, title: *const c_char) -> i32 {
-    ffi_guard!({
-        if let Some(t) = unsafe { c_str_to_opt_string(title) } {
-            crate::appkit::window_set_title(id, &t);
-        }
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_set_content(win_id: u64, child_id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::window_set_content(win_id, child_id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_window_snapshot(id: u64, path: *const c_char) -> i32 {
-    ffi_guard!({
-        if let Some(p) = unsafe { c_str_to_opt_string(path) } {
-            if crate::appkit::window_snapshot(id, &p) {
-                return 0;
-            }
-        }
-        -1
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_widget_create(
-    id: u64,
-    tag: *const c_char,
-    text: *const c_char,
-) -> i32 {
-    ffi_guard!({
-        let tag_str = unsafe { c_str_to_opt_string(tag) }.unwrap_or_default();
-        let text_str = unsafe { c_str_to_opt_string(text) }.unwrap_or_default();
-        if crate::appkit::widget_create(id, &tag_str, &text_str) {
-            0
-        } else {
-            -1
-        }
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_widget_set_property(
-    id: u64,
-    name: *const c_char,
-    val_str: *const c_char,
-    val_num: f64,
-) -> i32 {
-    ffi_guard!({
-        let name_str = unsafe { c_str_to_opt_string(name) }.unwrap_or_default();
-        let str_val = unsafe { c_str_to_opt_string(val_str) }.unwrap_or_default();
-        crate::appkit::widget_set_property(id, &name_str, &str_val, val_num);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_widget_add_child(parent_id: u64, child_id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::widget_add_child(parent_id, child_id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_widget_remove_child(parent_id: u64, child_id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::widget_remove_child(parent_id, child_id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_widget_destroy(id: u64) -> i32 {
-    ffi_guard!({
-        crate::appkit::widget_destroy(id);
-        0
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_pump_events(wait_ms: f64) -> i32 {
-    ffi_guard!({
-        if crate::appkit::pump_events(wait_ms) {
-            1
-        } else {
-            0
-        }
-    })
-}
-
-#[cfg(target_os = "macos")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kiln_gui_appkit_poll_event(
-    out_id: *mut u64,
-    out_type_buf: *mut c_char,
-    out_type_len: usize,
-    out_val_buf: *mut c_char,
-    out_val_len: usize,
-) -> i32 {
-    ffi_guard!({
-        if let Some((id, event_type, val)) = crate::appkit::poll_event() {
-            if !out_id.is_null() {
-                unsafe { *out_id = id };
-            }
-            unsafe {
-                copy_to_c_buf(&event_type, out_type_buf, out_type_len);
-                if !out_val_buf.is_null() && out_val_len > 0 {
-                    copy_to_c_buf(&val, out_val_buf, out_val_len);
-                }
-            };
-            1
-        } else {
-            0
-        }
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_init() -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_create(_: u64, _: *const c_char, _: f64, _: f64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_show(_: u64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_close(_: u64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_set_title(_: u64, _: *const c_char) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_set_content(_: u64, _: u64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_window_snapshot(_: u64, _: *const c_char) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_widget_create(_: u64, _: *const c_char, _: *const c_char) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_widget_set_property(
-    _: u64,
-    _: *const c_char,
-    _: *const c_char,
-    _: f64,
-) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_widget_add_child(_: u64, _: u64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_widget_remove_child(_: u64, _: u64) -> i32 {
-    -1
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_pump_events(_: f64) -> i32 {
-    0
-}
-#[cfg(not(target_os = "macos"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kiln_gui_appkit_poll_event(
-    _: *mut u64,
-    _: *mut c_char,
-    _: usize,
-    _: *mut c_char,
-    _: usize,
-) -> i32 {
-    0
 }

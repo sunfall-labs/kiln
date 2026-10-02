@@ -174,12 +174,8 @@ impl NodeBuiltin {
             "kiln:actors/core" => Self::ActorsCore,
             "kiln:actors/worker" => Self::ActorsWorker,
             "kiln:gui" => Self::Gui,
-            "kiln:jsx-runtime"
-            | "kiln:jsx-dev-runtime"
-            | "kiln:gui/jsx-runtime"
-            | "kiln:gui/jsx-dev-runtime"
-            | "kiln/jsx-runtime"
-            | "kiln/jsx-dev-runtime" => Self::GuiJsxRuntime,
+            // What `"jsxImportSource": "kiln:gui"` compiles JSX to.
+            "kiln:gui/jsx-runtime" | "kiln:gui/jsx-dev-runtime" => Self::GuiJsxRuntime,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -232,7 +228,7 @@ impl NodeBuiltin {
             Self::ActorsCore => "kiln:actors/core",
             Self::ActorsWorker => "kiln:actors/worker",
             Self::Gui => "kiln:gui",
-            Self::GuiJsxRuntime => "kiln:jsx-runtime",
+            Self::GuiJsxRuntime => "kiln:gui/jsx-runtime",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -313,8 +309,11 @@ impl ResolvedModule {
         let file = components.next()?.as_os_str().to_str()?;
         let stem = file.strip_suffix(".builtin")?;
         let parent = components.next()?.as_os_str().to_str()?;
-        let name = if parent == "actors" && matches!(stem, "core" | "worker") {
-            format!("kiln:actors/{stem}")
+        // A kiln namespace's subpath (`kiln:actors/core`, `kiln:gui/jsx-runtime`) before a Node
+        // one (`fs/promises`): the two never share a name.
+        let kiln_subpath = format!("kiln:{parent}/{stem}");
+        let name = if parent != "builtins" && NodeBuiltin::parse(&kiln_subpath).is_some() {
+            kiln_subpath
         } else if parent == "builtins" {
             // Kiln namespaces use an unprefixed virtual path. Preserve their identity here
             // without making the same bare names or `node:` names aliases.
@@ -664,10 +663,8 @@ impl ModuleResolver {
                 | "kiln:actors/core"
                 | "kiln:actors/worker"
                 | "kiln:gui"
-                | "kiln:jsx-runtime"
                 | "kiln:gui/jsx-runtime"
-                | "kiln/jsx-runtime"
-                | "kiln/jsx-dev-runtime"
+                | "kiln:gui/jsx-dev-runtime"
         ) {
             let builtin = NodeBuiltin::parse(specifier).expect("Kiln builtin");
             return Ok(ResolvedModule::new(
@@ -1310,7 +1307,7 @@ impl PinnedPackageResolver {
                 ResolutionKind::Builtin,
             ));
         }
-        if (self.node_builtins || specifier.starts_with("kiln:") || specifier.starts_with("kiln/"))
+        if (self.node_builtins || specifier.starts_with("kiln:"))
             && let Some(builtin) = NodeBuiltin::parse(specifier)
         {
             return Ok(ResolvedModule::new(
@@ -1553,10 +1550,10 @@ fn resolve_in_root(
 fn classify_specifier(specifier: &str) -> Result<ResolutionKind, ResolveError> {
     let reason = if specifier.is_empty() {
         Some(InvalidSpecifierReason::Empty)
-    } else if specifier.starts_with('#') {
-        if specifier.len() == 1 {
+    } else if let Some(import_name) = specifier.strip_prefix('#') {
+        if import_name.is_empty() {
             Some(InvalidSpecifierReason::Empty)
-        } else if specifier[1..].contains(['?', '#']) {
+        } else if import_name.contains(['?', '#']) {
             Some(InvalidSpecifierReason::QueryOrFragment)
         } else {
             None
@@ -2569,10 +2566,24 @@ mod tests {
         assert_eq!(NodeBuiltin::parse("kiln:gui"), Some(NodeBuiltin::Gui));
         assert_eq!(NodeBuiltin::Gui.specifier(), "kiln:gui");
         assert_eq!(
-            NodeBuiltin::parse("kiln:jsx-runtime"),
+            NodeBuiltin::parse("kiln:gui/jsx-runtime"),
             Some(NodeBuiltin::GuiJsxRuntime)
         );
-        assert_eq!(NodeBuiltin::GuiJsxRuntime.specifier(), "kiln:jsx-runtime");
+        assert_eq!(
+            NodeBuiltin::GuiJsxRuntime.specifier(),
+            "kiln:gui/jsx-runtime"
+        );
+        assert_eq!(NodeBuiltin::parse("kiln:jsx-runtime"), None);
+        assert_eq!(NodeBuiltin::parse("kiln/jsx-runtime"), None);
+        let root = Path::new("/project");
+        for builtin in [
+            NodeBuiltin::GuiJsxRuntime,
+            NodeBuiltin::ActorsCore,
+            NodeBuiltin::FsPromises,
+        ] {
+            let module = ResolvedModule::new(builtin.virtual_path(root), ResolutionKind::Builtin);
+            assert_eq!(module.builtin(), Some(builtin));
+        }
         assert_eq!(NodeBuiltin::parse("shared"), None);
         assert_eq!(NodeBuiltin::parse("node:shared"), None);
         assert_eq!(NodeBuiltin::parse("node:kiln:shared"), None);

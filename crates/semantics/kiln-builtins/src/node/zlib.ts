@@ -438,7 +438,7 @@ export function unzipSync(input: any, _options?: any): any {
   return inflateSync(bytes);
 }
 
-export class ZlibTransform {
+class ZlibTransform {
   _transformFn: (data: Uint8Array) => any;
   _chunks: Uint8Array[];
   _output: any;

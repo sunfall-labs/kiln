@@ -259,13 +259,11 @@ pub const fn native_function_length(owner: &str, member: &str) -> Option<usize> 
     index = 0;
     while index < PROTOTYPE_SURFACE.len() {
         let row = PROTOTYPE_SURFACE[index];
-        if same(row.prototype.name(), owner) {
-            if same(row.key.property_key(), member) {
-                if let MemberKind::Method { length } = row.kind {
-                    return Some(length);
-                }
-                return None;
+        if same(row.prototype.name(), owner) && same(row.key.property_key(), member) {
+            if let MemberKind::Method { length } = row.kind {
+                return Some(length);
             }
+            return None;
         }
         index += 1;
     }

@@ -79,6 +79,14 @@ run = "./scripts/thirdparty.sh"
 description = "The Node HTTP close contract, across all four seams"
 run = "./scripts/check-http-close-contract.sh"
 
+[tasks.gui-smoke]
+description = "kiln:gui against the real window system: clicks, timers, resize, close (macOS)"
+run = "./scripts/gui-smoke.sh"
+
+[tasks.gui-types]
+description = "Check the published kiln:gui declarations match gui.ts and the examples type-check"
+run = "./scripts/gen-gui-types.sh --check"
+
 [tasks.silent-undefined]
 description = "The expensive class: a native member read answering undefined (several hundred compiles)"
 run = "./scripts/check-silent-undefined.sh"

@@ -1,2 +1,2 @@
-// Compatibility re-export. Kiln owns the native GUI runtime; this package provides ambient TypeScript declarations.
+// kiln owns the GUI runtime (kiln:gui); this package only carries its TypeScript declarations.
 export * from "kiln:gui";
