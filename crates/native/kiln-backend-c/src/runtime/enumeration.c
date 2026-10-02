@@ -116,10 +116,8 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (method.tag == KILN_VALUE_METHOD && method.bits == KILN_C99_METHOD_ARRAY_VALUES &&
-        source.tag == KILN_VALUE_STRING &&
-        kiln_c99_builtin_member_unmodified_n(KILN_C99_BUILTIN_STRING_PROTOTYPE,
-                                              "@@iterator", sizeof("@@iterator") - 1)) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_STRING) {
         /* The consumer already performed the observable iterator lookup. The private string
          * walk must not re-probe @@iterator, or a saved intrinsic delegated by a custom override
          * recurses through that override. */

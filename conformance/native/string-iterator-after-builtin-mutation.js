@@ -25,6 +25,11 @@ String.prototype[Symbol.iterator] = function () {
     },
   };
 };
+const savedIterator = originalIterator.call(text);
+let savedValues = "";
+for (let step = savedIterator.next(); !step.done; step = savedIterator.next()) {
+  savedValues += step.value;
+}
 const overridden = [..."ignored"].join(",");
 let overriddenLoop = "";
 for (const character of "ignored") overriddenLoop += character;
@@ -34,9 +39,10 @@ String.prototype[Symbol.iterator] = function () {
 const delegated = [...text].join("|");
 String.prototype[Symbol.iterator] = originalIterator;
 
-if (overridden !== "override" || overriddenLoop !== "override" || delegated !== "A|😀|B") {
+if (savedValues !== text || overridden !== "override" || overriddenLoop !== "override" ||
+  delegated !== "A|😀|B") {
   throw new Error(
-    `String iterator override/delegation was bypassed: ${overridden} / ${overriddenLoop} / ${delegated}`,
+    `String iterator override/delegation was bypassed: ${savedValues} / ${overridden} / ${overriddenLoop} / ${delegated}`,
   );
 }
 console.log("string iterator survives unrelated builtin mutations and respects overrides");
