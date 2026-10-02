@@ -789,8 +789,15 @@ mod tests {
 
     #[test]
     fn parallel_key_sort_uses_the_float64_kind_constant_for_its_scratch_keys() {
-        let emitted =
-            heap_sort_lowering("fixture", 2, crate::parallel::SortOrder::Ascending, 0, 1, 3);
+        let emitted = heap_sort_lowering(
+            &crate::direct::CallPlan::default(),
+            "fixture",
+            2,
+            crate::parallel::SortOrder::Ascending,
+            0,
+            1,
+            3,
+        );
         assert!(
             emitted.contains("kiln_parallel_sort(phsort_sorted, count0, KILN_TYPED_FLOAT64, 1)")
         );
