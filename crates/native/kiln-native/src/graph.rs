@@ -989,7 +989,8 @@ static NATIVE_BOOTSTRAPS: OnceLock<std::sync::Mutex<NativeBootstrapCache>> = Onc
 /// or without the `node:` prefix, returns the linked builtin's namespace; anything else
 /// returns `undefined`; a non-string id throws a TypeError like node's `validateString`.
 /// The filename handed to the create-require intrinsic is never used for relative resolution
-/// here -- only `node:` specifiers are ever required through it -- so it names this bootstrap.
+/// here -- only `node:` specifiers are ever required through it. Its reserved non-filesystem
+/// identity keeps it separate from importer-scoped tables owned by the runtime bootstrap.
 fn native_get_builtin_module_bootstrap() -> String {
     let mut names: Vec<&str> = kiln_builtins::ts_builtin_specifiers()
         .into_iter()
@@ -1016,7 +1017,7 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
         if (!__kilnBuiltinModuleNames.has(name)) return undefined;
         if (__kilnBuiltinRequire === undefined) {{
             __kilnBuiltinRequire =
-                __kilnBuiltinCreateRequire({builtin_loader_base});
+                __kilnBuiltinCreateRequire({builtin_loader_base:?});
         }}
         return __kilnBuiltinRequire("node:" + name);
     }};
