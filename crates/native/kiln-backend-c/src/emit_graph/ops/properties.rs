@@ -242,11 +242,10 @@ pub(super) fn emit_get_property(
     } else {
         String::new()
     };
-    // A read of `this`: the function's receiver-shape cache answers first, one indexed
-    // load and no compare, because the shape was matched once at entry. The boxed
-    // clone, whose slow path is the one that learns, fills the row afterwards.
-    // A read of `this`: the function's receiver-shape cache answers with one indexed
-    // load when the receiver's shape has a row, which was filled whole from the shape.
+    // A receiver row is valid only while `this` still has the shape it had at entry.
+    // Calls can delete or redefine properties, which materializes the object as a
+    // dictionary while leaving its old slots allocated. Keep the row fast path guarded
+    // by that original shape; otherwise fall through to the ordinary property site.
     let is_typed_entry = matches!(ctx.kind, EntryKind::Typed { .. });
     let (receiver_tier, receiver_learn) = match (this_site, self_index) {
         (Some(_), Some(_)) if ctx.this_copy.is_some() => {
@@ -259,12 +258,16 @@ pub(super) fn emit_get_property(
                     String::new()
                 };
                 (
-                    format!("if (recv_row != NULL) {{ d{v} = d{prev};{box_stmt} handled = 1; }} "),
+                    format!(
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ d{v} = d{prev};{box_stmt} handled = 1; }} "
+                    ),
                     String::new(),
                 )
             } else {
                 (
-                    format!("if (recv_row != NULL) {{ v{v} = v{prev}; handled = 1; }} "),
+                    format!(
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ v{v} = v{prev}; handled = 1; }} "
+                    ),
                     String::new(),
                 )
             }
@@ -272,26 +275,21 @@ pub(super) fn emit_get_property(
         (Some(i), Some(_)) => {
             let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
             if is_typed_entry && typed {
-                let box_stmt_inline = if need_box {
-                    format!(" v{v} = recv_obj->inline_slots[recv_row[{i}]];")
-                } else {
-                    String::new()
-                };
-                let box_stmt_heap = if need_box {
+                let box_stmt = if need_box {
                     format!(" v{v} = recv_obj->slots[recv_row[{i}]];")
                 } else {
                     String::new()
                 };
                 (
                     format!(
-                        "if (recv_row != NULL) {{ if (recv_row[{i}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{i}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt_heap} }} handled = 1; }} "
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt} handled = 1; }} "
                     ),
                     String::new(),
                 )
             } else {
                 (
                     format!(
-                        "if (recv_row != NULL) {{ v{v} = recv_row[{i}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{i}]] : recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
                     ),
                     String::new(),
                 )
@@ -315,32 +313,27 @@ pub(super) fn emit_get_property(
                     String::new()
                 };
                 if typed {
-                    writeln!(output, "    d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
+                    writeln!(output, "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
                 } else {
-                    writeln!(output, "    v{v} = v{prev_vid};{int_sync}").unwrap();
+                    writeln!(output, "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; v{v} = v{prev_vid};{int_sync}").unwrap();
                 }
             }
             (Some(col_idx), None) => {
                 if typed {
-                    let box_stmt_inline = if need_box {
-                        format!(" v{v} = recv_obj->inline_slots[recv_row[{col_idx}]];")
-                    } else {
-                        String::new()
-                    };
-                    let box_stmt_heap = if need_box {
+                    let box_stmt = if need_box {
                         format!(" v{v} = recv_obj->slots[recv_row[{col_idx}]];")
                     } else {
                         String::new()
                     };
                     writeln!(
                         output,
-                        "    if (recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_heap} }}{int_sync}"
+                        "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt}{int_sync}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    v{v} = recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{col_idx}]] : recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
+                        "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; v{v} = recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
                     )
                     .unwrap();
                 }

@@ -1151,9 +1151,12 @@ fn emit_block_sequence(
                     | GraphOp::LoadGlobal(_)
                     | GraphOp::MarkUninitialized(_)
                     | GraphOp::CheckTdz { .. }
-                    | GraphOp::GetProperty { .. }
                     | GraphOp::Phi { .. }
                     | GraphOp::MakeCell(_) => true,
+                    // Only a direct `this.x` row read can be reused. Other property reads
+                    // may invoke accessors that mutate `this`, and must invalidate the row
+                    // value cache even though they are represented by the same graph op.
+                    GraphOp::GetProperty { .. } => this_sites.contains_key(vid),
                     GraphOp::Unary { value, .. } => numbers.contains(value),
                     GraphOp::Binary { left, right, .. } => {
                         numbers.contains(left) && numbers.contains(right)
