@@ -56,7 +56,6 @@ int main(void) {
         !deleted || b->shape != NULL || b->count != 3 || a->count != 5) return 10;
     return 0;
 }
-
 "#;
     let run = run_with_main(&generated, wrapper, "final-builtin-layout");
     assert!(
@@ -99,7 +98,10 @@ int main(void) {
     }
     source_object = kiln_c99_object_of(source);
     readonly_object = kiln_c99_object_of(readonly);
-    if (source_object->count != 40 || source_object->dictionary_index != NULL) return 3;
+    kiln_c99_dictionary_index_reset(source_object);
+    kiln_c99_dictionary_index_reset(readonly_object);
+    if (source_object->count != 40 || source_object->dictionary_index != NULL ||
+        readonly_object->dictionary_index != NULL) return 3;
     slot = kiln_c99_own_index(source_object, NULL, "key39", 5);
     if (slot != 39 || source_object->dictionary_index == NULL) return 4;
     index = source_object->dictionary_index;
@@ -114,6 +116,8 @@ int main(void) {
 
     /* The object remains valid through collection, and its cache remains attached to the
      * owning object rather than becoming an untraced pointer edge. */
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
     heap.enabled = 1;
     kiln_c99_gc_collect(&heap, 1);
     heap.enabled = 0;
@@ -150,6 +154,7 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
 #[test]
 fn compact_property_records_trace_the_live_data_or_accessor_arm() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
