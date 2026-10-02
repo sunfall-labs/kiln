@@ -2038,8 +2038,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // Flushing mutates the request. Release its RefCell borrow before entering
                 // that path; an if-let scrutinee temporary otherwise survives into the body.
                 let assigned_socket = request_state.borrow().socket.clone();
-                let connected_socket = assigned_socket
-                    .filter(|socket| socket.borrow().resource.is_some());
+                let connected_socket =
+                    assigned_socket.filter(|socket| socket.borrow().resource.is_some());
                 if let Some(socket) = connected_socket {
                     self.flush_http_client_request(&request_state, &socket, instruction)?;
                 }
