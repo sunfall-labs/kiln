@@ -62,6 +62,59 @@ if (updateOnce(object, dynamicKey) !== 9 || keyCalls !== 1 || keyCoercions !== 2
     getterCalls !== 1 || setterCalls !== 1 || value !== 10) {
   throw new Error("computed member update effects must run once");
 }
+const updateOrder = [];
+const orderedUpdateKey = {
+  [Symbol.toPrimitive]() { updateOrder.push("coerce"); return "value"; },
+};
+const orderedUpdateObject = {};
+Object.defineProperty(orderedUpdateObject, "value", {
+  configurable: true,
+  get() { updateOrder.push("get"); return 1; },
+  set() { updateOrder.push("set"); },
+});
+const orderedUpdate = new Function("object", "key", "return object[key()]++;");
+if (orderedUpdate(orderedUpdateObject, () => {
+  updateOrder.push("key");
+  return orderedUpdateKey;
+}) !== 1 || updateOrder.join(",") !== "key,coerce,get,coerce,set") {
+  throw new Error("computed update must retain the raw key for both GetValue and PutValue");
+}
+const compoundOrder = [];
+const compoundKey = {
+  [Symbol.toPrimitive]() { compoundOrder.push("coerce"); return "value"; },
+};
+const compoundObject = {};
+Object.defineProperty(compoundObject, "value", {
+  configurable: true,
+  get() { compoundOrder.push("get"); return 1; },
+  set() { compoundOrder.push("set"); },
+});
+new Function("object", "key", "rhs", "object[key()] += rhs();")(
+  compoundObject,
+  () => { compoundOrder.push("key"); return compoundKey; },
+  () => { compoundOrder.push("rhs"); return 2; },
+);
+if (compoundOrder.join(",") !== "key,coerce,get,rhs,coerce,set") {
+  throw new Error("compound assignment must coerce at GetValue and PutValue");
+}
+const logicalOrder = [];
+const logicalKey = {
+  [Symbol.toPrimitive]() { logicalOrder.push("coerce"); return "value"; },
+};
+const logicalObject = {};
+Object.defineProperty(logicalObject, "value", {
+  configurable: true,
+  get() { logicalOrder.push("get"); return 0; },
+  set() { logicalOrder.push("set"); },
+});
+new Function("object", "key", "rhs", "object[key()] ||= rhs();")(
+  logicalObject,
+  () => { logicalOrder.push("key"); return logicalKey; },
+  () => { logicalOrder.push("rhs"); return 2; },
+);
+if (logicalOrder.join(",") !== "key,coerce,get,rhs,coerce,set") {
+  throw new Error("logical assignment must coerce at GetValue and PutValue");
+}
 const define = new Function("Ctor", "Ctor.prototype.run = function(value) { return value; }; return Ctor.prototype.run(17);");
 console.log(define(function Example() {}));
 const append = new Function("this.res += '!'; return this.res;");
