@@ -438,7 +438,7 @@ fn dce_release_graph(
         // import.meta reparse does, rather than relying on a generated local name surviving
         // the reparse. Otherwise a barrel can retain the export row while losing the import
         // that supplies its value, which leaves the slot uninitialized in release builds.
-        restore_reexport_imports(&node.program, &program);
+        let _ = restore_reexport_imports(&node.program, &mut program);
 
         let replacement_slots = export_slots_for_names(&program.exports, &demanded_names);
         let replacement_names = program
@@ -464,7 +464,11 @@ fn dce_release_graph(
     }
 }
 
-fn restore_reexport_imports(previous: &kiln_ir::Program, reparsed: &mut kiln_ir::Program) {
+fn restore_reexport_imports(
+    previous: &kiln_ir::Program,
+    reparsed: &mut kiln_ir::Program,
+) -> BTreeSet<(usize, usize)> {
+    let mut mapped_imports = BTreeSet::new();
     for export in &reparsed.exports {
         let Some(previous_export) = previous
             .exports
@@ -473,34 +477,40 @@ fn restore_reexport_imports(previous: &kiln_ir::Program, reparsed: &mut kiln_ir:
         else {
             continue;
         };
-        let Some(previous_import) = previous
+        let Some((previous_index, previous_import)) = previous
             .imports
             .iter()
-            .find(|import| import.local_slot == previous_export.local_slot)
+            .enumerate()
+            .find(|(_, import)| import.local_slot == previous_export.local_slot)
         else {
             continue;
         };
 
-        if let Some(import) = reparsed
+        let new_index = if let Some(index) = reparsed
             .imports
-            .iter_mut()
-            .find(|import| import.local_slot == export.local_slot)
+            .iter()
+            .position(|import| import.local_slot == export.local_slot)
         {
+            let import = &mut reparsed.imports[index];
             import.source.clone_from(&previous_import.source);
             import.imported.clone_from(&previous_import.imported);
+            index
         } else {
             reparsed.imports.push(kiln_ir::ImportBinding {
                 source: previous_import.source.clone(),
                 imported: previous_import.imported.clone(),
                 local: format!(
-                    "{}release-reexport-{}*",
+                    "{}reparsed-reexport-{}*",
                     kiln_ir::REEXPORT_LOCAL_PREFIX,
                     reparsed.imports.len()
                 ),
                 local_slot: export.local_slot,
             });
-        }
+            reparsed.imports.len() - 1
+        };
+        mapped_imports.insert((previous_index, new_index));
     }
+    mapped_imports
 }
 
 /// Re-parse modules with native `import.meta` (Node SEA semantics), preserving their
@@ -576,6 +586,7 @@ fn native_import_meta_reparse(
             }
             imports.push(import);
         }
+        program.imports = imports;
 
         // DCE may lower an imported local export as a fresh local binding, while the previous
         // graph represented it as an indirect export backed by a synthetic import slot. Preserve
@@ -583,50 +594,8 @@ fn native_import_meta_reparse(
         // insufficient because the synthetic `*reexportN*` names are renumbered when exports are
         // removed. Without this edge, relinking silently turns the export into an uninitialized
         // local in the barrel and imports resolve to that slot instead of the original provider.
-        for export in &program.exports {
-            let Some(previous_export) = node
-                .program
-                .exports
-                .iter()
-                .find(|previous| previous.exported == export.exported)
-            else {
-                continue;
-            };
-            let Some((previous_index, previous_import)) = node
-                .program
-                .imports
-                .iter()
-                .enumerate()
-                .find(|(_, import)| import.local_slot == previous_export.local_slot)
-            else {
-                continue;
-            };
-
-            let new_index = if let Some(index) = imports
-                .iter()
-                .position(|import| import.local_slot == export.local_slot)
-            {
-                index
-            } else {
-                let local = format!(
-                    "{}native-import-meta-{}*",
-                    kiln_ir::REEXPORT_LOCAL_PREFIX,
-                    imports.len()
-                );
-                imports.push(kiln_ir::ImportBinding {
-                    source: previous_import.source.clone(),
-                    imported: previous_import.imported.clone(),
-                    local,
-                    local_slot: export.local_slot,
-                });
-                imports.len() - 1
-            };
-            imports[new_index]
-                .source
-                .clone_from(&previous_import.source);
-            imports[new_index]
-                .imported
-                .clone_from(&previous_import.imported);
+        let reexport_imports = restore_reexport_imports(&node.program, &mut program);
+        for (previous_index, new_index) in reexport_imports {
             if demand
                 .live_imports
                 .contains(&(node.path.clone(), previous_index))
@@ -634,7 +603,6 @@ fn native_import_meta_reparse(
                 remapped_imports.insert((node.path.clone(), new_index));
             }
         }
-        program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
         let demanded_names = demand
             .slots
