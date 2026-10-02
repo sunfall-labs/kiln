@@ -1496,7 +1496,7 @@ fn duplicate_simple_parameters_are_allowed_only_in_sloppy_functions() {
     let mut defaulted_function = (**base).clone();
     defaulted_function.parameters[1].pattern = Pattern::WithDefault {
         inner: Box::new(Pattern::Identifier("a".to_owned())),
-        value: number(0.0),
+        default: Box::new(number(0.0)),
     };
     let defaulted = statement(StatementKind::Function(Box::new(defaulted_function)));
     let messages = errors(vec![defaulted]);
