@@ -1091,6 +1091,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified_mask(uint64_t 
 #define KILN_C99_TYPED_RELIES_CHECK(guard)
 #endif
 #define kiln_c99_builtin_member_unmodified(id, member)                                             \
+static KILN_ALWAYS_INLINE inline int kiln_c99_builtin_member_unmodified_n(uint32_t id,
 #ifdef KILN_SEPARATE_PRELUDE
 extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
 #else
@@ -1344,6 +1345,9 @@ typedef struct kiln_date {
 typedef struct kiln_date_parts {
 typedef struct kiln_entry {
 typedef struct kiln_collection {
+static inline int kiln_c99_collection_intrinsic_method_allowed(const kiln_collection *collection,
+static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
+static inline int kiln_c99_collection_cached_method_allowed(const kiln_collection *collection,
 typedef struct kiln_reaction {
 typedef struct kiln_promise {
 #define KILN_C99_REJECTION_NONE 0
@@ -2528,6 +2532,7 @@ static const kiln_string *kiln_c99_shared_key_probe(const kiln_string *string, u
 static int kiln_c99_key_is_shared(const kiln_string *ikey) {
 static void kiln_c99_shared_key_place(kiln_shared_key_table *table, const kiln_string *string,
 static const kiln_string *kiln_c99_shared_key_insert(kiln_shared_state *process,
+const kiln_string *kiln_c99_interned_key_with_hash_in(kiln_gc_heap *heap,
 const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
 const kiln_string *kiln_c99_interned_key(const kiln_string *string) {
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
@@ -2840,10 +2845,13 @@ static int kiln_c99_same_key_view(const kiln_property *property, const kiln_stri
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
 static kiln_dictionary_index *kiln_c99_dictionary_index_for(kiln_object *object) {
 static void kiln_c99_dictionary_index_appended(kiln_object *object) {
-static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
+static size_t kiln_c99_own_index_key_with_hash(const kiln_object *object,
 checked:
+static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
+static int kiln_c99_property_read_own_with_hash(const kiln_object *object,
 static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
 static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
+static int kiln_c99_property_read_own_value_with_hash(kiln_value owner,
 static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
 static int kiln_c99_function_owns_prototype(const kiln_closure *closure) {
 static int kiln_c99_function_prototype_writable(const kiln_closure *closure) {

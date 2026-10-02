@@ -1135,7 +1135,11 @@ fn runtime_prelude_size() {
     // each section is emitted once. The inspected total is 79,165 lines.
     // Reviewed shared closure-receiver normalization and guarded iterator selection:
     // 79,165 -> 79,182 lines, with each runtime section emitted once.
-    const CEILING_LINES: usize = 79_200;
+    // Shared collection-method cache eligibility and hash-aware dictionary lookup add 133 net
+    // runtime/header lines (79,182 -> 79,315). The ABI additions are private helpers and existing
+    // runtime sections remain emitted once; no built-in implementation was added. Keep 85 lines
+    // of headroom for the next small edit.
+    const CEILING_LINES: usize = 79_400;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
