@@ -3346,9 +3346,10 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
     };
     assert_eq!(cyclic.stdout, "42\n");
 
-    // A cycle whose back edge *does* carry a binding is the one the launcher cannot express, and
-    // it is refused by name rather than compiled into a read of an export array that has not
-    // been filled in yet.
+    // A cycle whose back edge *does* carry a binding now runs with the ordinary live-binding
+    // semantics: the dependency reads `seed` before the entry reaches its initializer, so the
+    // program reports the runtime TDZ ReferenceError. It must not be rejected as an unsupported
+    // cycle during graph construction.
     client
         .request(&Request::SetSource {
             source_view: SourceView(0),
@@ -3372,12 +3373,16 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         })
         .expect("set forward cycle");
     let response = client.request(&request).expect("forward cycle response");
-    let Response::Error { message } = response else {
-        panic!("expected a native refusal, got {response:?}");
+    let Response::NativeRan(forward_cycle) = response else {
+        panic!("expected the native graph to execute the forward cycle, got {response:?}");
     };
+    assert_eq!(forward_cycle.exit_code, Some(1));
+    assert_eq!(forward_cycle.stdout, "");
     assert!(
-        message.contains("across a module cycle"),
-        "the refusal has to name what it refused: {message}"
+        forward_cycle.stderr.contains("ReferenceError")
+            && forward_cycle.stderr.contains("before its declaration"),
+        "the runtime error must report the uninitialized live binding: {}",
+        forward_cycle.stderr
     );
 
     stop.shutdown();
