@@ -1133,7 +1133,9 @@ fn runtime_prelude_size() {
     // Reviewed realm-private dictionary index: 104 runtime/header lines for ordinal hashing,
     // malloc ownership, mutation invalidation and profile accounting. No built-in is added;
     // each section is emitted once. The inspected total is 79,165 lines.
-    const CEILING_LINES: usize = 79_180;
+    // Reviewed shared closure-receiver normalization and guarded iterator selection:
+    // 79,165 -> 79,182 lines, with each runtime section emitted once.
+    const CEILING_LINES: usize = 79_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

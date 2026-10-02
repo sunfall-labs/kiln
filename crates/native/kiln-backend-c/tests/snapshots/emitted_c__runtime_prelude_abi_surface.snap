@@ -4171,6 +4171,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
 #endif
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
 static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure) {
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
