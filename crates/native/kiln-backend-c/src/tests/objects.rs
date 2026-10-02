@@ -5737,15 +5737,13 @@ int main(void) {
     );
 }
 
-// Red since the day it was written: it fails at 9d90372a (its own commit) on this macOS arm64
-// box and at every commit since -- bisected on 2026-10-02 with no passing endpoint -- and at HEAD
-// returns code 10: a consumer refusal of the validated manifest neither reports
-// KILN_C99_GRAPH_OUTGOING_UNPROVEN nor restores the sender escrow and request id. A test that has
-// never passed where the pre-push loop runs is not a check, so it is ignored by name until the
-// capsule owner either fixes the refusal path or decides the expectation. Run it with
-// `mbx test -p kiln-backend-c -- --ignored executable_actor_graph_capsule_certificate`.
+// Exit code 10 asserts that a consumer refusal of the validated manifest returns
+// KILN_C99_GRAPH_OUTGOING_UNPROVEN, that the accept hook ran, and that the sender escrow entry
+// and request id were restored. The runtime did that correctly; the fixture reached the scan
+// with the dead frame of make_closed_request still on the stack, whose stale slots the
+// conservative machine-stack proof read as a sender alias (MACHINE_ALIAS, 7) before the manifest
+// was ever offered. `scrub_dead_stack` gives the proof the clean stack a real safepoint has.
 #[test]
-#[ignore = "actor capsule consumer refusal does not restore escrow (code 10); failing since 9d90372a, bisected 2026-10-02"]
 fn executable_actor_graph_capsule_certificate_retains_only_escrow() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -5789,6 +5787,16 @@ __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap
     return request;
 }
 
+/* make_closed_request's frame held the candidate string; once it returns, that dead stack is
+ * what the next call's frame inherits uninitialized. The incoming proof scans the live stack
+ * conservatively, so a stale slot in the scan's own frame reads as a sender alias (code 7).
+ * Overwrite the dead region the way a real safepoint arrives on a clean stack. */
+__attribute__((noinline)) static void scrub_dead_stack(void) {
+    volatile char pad[16384];
+    size_t i;
+    for (i = 0; i < sizeof pad; ++i) pad[i] = 0;
+}
+
 static int reject_validated_manifest(void *context, const kiln_gc_heap *heap,
     kiln_nursery_chunk **chunks, size_t count, kiln_value root,
     const kiln_c99_graph_side_set *proof) {
@@ -5817,6 +5825,7 @@ static int actor_certificate_entry(void *context) {
     heap->enabled = 1;
     request = make_closed_request(heap);
     if (request == 0) return 2;
+    scrub_dead_stack();
     /* A consumer refusal must return the manifest to the proof and restore sender escrow. */
     if (kiln_c99_graph_incoming_request_scan_with_manifest(heap, request, 1,
             reject_validated_manifest, &rejected) != KILN_C99_GRAPH_OUTGOING_UNPROVEN ||
