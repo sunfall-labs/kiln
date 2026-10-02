@@ -12,7 +12,7 @@ const inputs = [
 const options = [
   { compress: {}, mangle: false },
   { compress: {}, mangle: { toplevel: true } },
-  { compress: { defaults: true }, mangle: { toplevel: true }, output: { beautify: false } },
+  { compress: { toplevel: true }, mangle: { toplevel: true }, output: { beautify: false } },
 ];
 
 let hash = 2166136261;
