@@ -1032,7 +1032,13 @@ fn numbering_system_for_zero(zero: char) -> &'static str {
 fn resolve_offset(zone: &TimeZoneChoice, epoch_milliseconds: f64) -> Option<UtcOffset> {
     match zone {
         TimeZoneChoice::Offset(seconds) => UtcOffset::try_from_seconds(*seconds).ok(),
-        TimeZoneChoice::Named(name, _) => {
+        TimeZoneChoice::Named(name, icu_zone) => {
+            // ICU marks UTC/GMT and Etc/GMT fixed-offset identifiers directly on the zone value.
+            // They need no transition table, so keep these offsets available in builds that omit
+            // the optional timezone database. `name` remains intact for resolvedOptions.
+            if let Some(offset) = icu_zone.with_offset(None).offset() {
+                return Some(offset);
+            }
             #[cfg(feature = "timezone_database")]
             {
                 static TZDB: OnceLock<CompiledTzdbProvider> = OnceLock::new();
@@ -1047,7 +1053,7 @@ fn resolve_offset(zone: &TimeZoneChoice, epoch_milliseconds: f64) -> Option<UtcO
             }
             #[cfg(not(feature = "timezone_database"))]
             {
-                let _ = (name, epoch_milliseconds);
+                let _ = (name, epoch_milliseconds, icu_zone);
                 None
             }
         }
@@ -1791,7 +1797,7 @@ mod tests {
         let formatter = DateTimeFormat::new(
             &["de".to_owned()],
             Options {
-                time_zone: Some(TimeZoneChoice::Offset(0)),
+                time_zone: utc(),
                 ..Options::default()
             },
         )
