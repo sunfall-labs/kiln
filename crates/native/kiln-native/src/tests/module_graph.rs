@@ -2055,6 +2055,142 @@ fn native_module_addressed_actor_calls_and_transfers() {
 }
 
 #[test]
+fn native_actor_links_absolute_names_and_refuses_computed_ones_by_name() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-actor-names");
+    let root = project.path.canonicalize().expect("canonical project");
+    let counter = "import { Actor } from 'kiln:actors'; export class Counter extends Actor { increment() { return 1; } }";
+    for name in ["absolute", "url", "computed"] {
+        fs::write(root.join(format!("{name}.mjs")), counter).expect("write actor module");
+    }
+    let absolute = root.join("absolute.mjs");
+    let url = Url::from_file_path(root.join("url.mjs")).expect("file URL");
+    let computed = root.join("computed.mjs");
+    let entry = root.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ spawnActor }} from 'kiln:actors';\n\
+             for (const owner of [await spawnActor({{ module: {absolute:?}, export: 'Counter' }}), await spawnActor({{ module: {url:?}, export: 'Counter' }})]) {{ console.log(await owner.ref.call('increment', [])); await owner.stop(); }}\n\
+             const computed = [{computed:?}][process.argv.length > 100 ? 1 : 0];\n\
+             try {{ await spawnActor({{ module: computed, export: 'Counter' }}); }} catch (error) {{ console.log(error.name, error.message); }}\n",
+            url = url.as_str(),
+        ),
+    )
+    .expect("write actor entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build actor graph");
+    assert!(
+        graph.module(&absolute).is_some(),
+        "absolute path literal was not linked"
+    );
+    assert!(
+        graph.module(root.join("url.mjs")).is_some(),
+        "file URL literal was not linked"
+    );
+    assert!(
+        graph.module(&computed).is_none(),
+        "computed name was linked"
+    );
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(root.join("program"), NativeProfile::Dev).with_node(true),
+        )
+        .expect("build native actor graph");
+    let output = Command::new(&built.output)
+        .output_when_launchable()
+        .expect("run native actor graph");
+    assert!(
+        output.status.success(),
+        "actor process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        format!(
+            "1\n1\nTypeError actor module `{}` was not linked into this build: a native build links only the actor modules a spawnActor call names at compile time (a string literal, new URL(literal, import.meta.url), or a const holding one); this name was computed at run time\n",
+            computed.display()
+        )
+    );
+}
+
+#[test]
+fn native_worker_refuses_an_unlinked_target_by_name_then_exits() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-worker-unlinked");
+    let root = project.path.canonicalize().expect("canonical project");
+    fs::write(
+        root.join("linked.mjs"),
+        "import { parentPort } from 'node:worker_threads'; parentPort.postMessage('linked ran');",
+    )
+    .expect("write linked worker");
+    fs::write(
+        root.join("computed.mjs"),
+        "import { parentPort } from 'node:worker_threads'; parentPort.postMessage('computed ran');",
+    )
+    .expect("write computed worker");
+    let entry = root.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { Worker as Thread } from 'node:worker_threads';\n\
+         const run = (worker) => new Promise((resolve) => { worker.on('message', (m) => console.log(m)); worker.on('error', (e) => console.log(e.name, e.message)); worker.on('exit', (code) => { console.log('exit', code); resolve(); }); });\n\
+         await run(new Thread(new URL('./linked.mjs', import.meta.url)));\n\
+         const name = ['comp', 'uted.mjs'].join('');\n\
+         await run(new Thread(new URL('./' + name, import.meta.url)));\n",
+    )
+    .expect("write worker entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build worker graph");
+    assert!(
+        graph.module(root.join("linked.mjs")).is_some(),
+        "renamed Worker target was not linked"
+    );
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(root.join("program"), NativeProfile::Dev).with_node(true),
+        )
+        .expect("build native worker graph");
+    let output = Command::new(&built.output)
+        .output_when_launchable()
+        .expect("run native worker graph");
+    assert!(
+        output.status.success(),
+        "worker process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "linked ran\nexit 0\nError Cannot find module '{}' was not linked into this build: a native build links only the worker modules a new Worker call names at compile time (a string literal, new URL(literal, import.meta.url), path.join(__dirname, literal) or __filename); this name was computed at run time\nexit 1\n",
+            root.join("computed.mjs").display()
+        )
+    );
+}
+
+#[test]
 fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths() {
     use kiln_module_resolver::{NodeBuiltin, NodeRuntimeResolver};
 

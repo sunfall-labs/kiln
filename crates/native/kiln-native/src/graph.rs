@@ -2806,6 +2806,7 @@ import_attributes_valid:
             .unwrap();
         }
     }
+    write_actor_module_not_linked(output, modules);
     output.push_str(
         r#"    {
         kiln_value err = kiln_c99_undefined();
@@ -2815,6 +2816,37 @@ import_attributes_valid:
 }
 "#,
     );
+}
+
+/// The actor worker's answer for a module this build did not link (ADR 0072).
+///
+/// The worker reaches every linked module by absolute path or file URL (above), so a name that
+/// falls through to here is one `spawnActor` was given at run time that the compiler could not
+/// see. Say so, naming the module and why, rather than the generic dynamic-import refusal: the
+/// spawn rejects with this `TypeError`.
+fn write_actor_module_not_linked(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) {
+    let Some(actor_worker) = modules.iter().position(|(candidate, _)| {
+        candidate.source == ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker)
+    }) else {
+        return;
+    };
+    const PREFIX: &str = "actor module `";
+    const SUFFIX: &str = "` was not linked into this build: a native build links only the actor \
+        modules a spawnActor call names at compile time (a string literal, new URL(literal, \
+        import.meta.url), or a const holding one); this name was computed at run time";
+    writeln!(
+        output,
+        "    if (importer != NULL && strcmp(importer, {importer}) == 0) {{\n        kiln_value message = kiln_c99_concat(kiln_c99_concat(kiln_c99_copy_text({prefix}, (size_t){prefix_len}), specifier), kiln_c99_copy_text({suffix}, (size_t){suffix_len}));\n        kiln_value err = kiln_c99_undefined();\n        (void)kiln_c99_new_type_error(&err, \"actor module was not linked into this build\");\n        (void)kiln_c99_put(host, err, \"message\", 7, message, depth, thrown);\n        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n    }}",
+        importer = native_c_string(&modules[actor_worker].1.symbol),
+        prefix = native_c_string(PREFIX),
+        prefix_len = PREFIX.len(),
+        suffix = native_c_string(SUFFIX),
+        suffix_len = SUFFIX.len(),
+    )
+    .unwrap();
 }
 
 pub(super) fn write_shared_wrapper_dynamic_import(
@@ -5363,12 +5395,22 @@ typedef struct kiln_cli_worker_session {
 
 /* A worker made from source text needs a compiler at run time, which a native program does not
  * carry. Report an invalid entry on the parent's error channel while the worker context is live. */
-static void kiln_cli_worker_bad_entry(int32_t eval) {
+static void kiln_cli_worker_bad_entry(int32_t eval, const uint8_t *entry, uint64_t entry_len) {
     static const char no_eval[] = "kiln: a worker made from source text ({ eval: true }) needs a compiler at run time, which a natively built program does not have: put the worker's code in a module of the program";
-    static const char missing[] = "Cannot find module: the worker's script is not a module of this program";
+    /* Name the module and why: a target the compiler could not see named (ADR 0072's rule for
+     * actor modules, which workers share). The worker then exits 1 after this 'error'. */
+    static const char missing_suffix[] = "' was not linked into this build: a native build links only the worker modules a new Worker call names at compile time (a string literal, new URL(literal, import.meta.url), path.join(__dirname, literal) or __filename); this name was computed at run time";
     static const char error_name[] = "Error";
-    const char *text = eval ? no_eval : missing;
-    size_t length = eval ? sizeof no_eval - 1 : sizeof missing - 1;
+    char missing[1024 + sizeof missing_suffix];
+    const char *text = no_eval;
+    size_t length = sizeof no_eval - 1;
+    if (!eval) {
+        int shown = entry_len > 1024 ? 1024 : (int)entry_len;
+        int written = snprintf(missing, sizeof missing, "Cannot find module '%.*s%s", shown,
+                               entry != NULL ? (const char *)entry : "", missing_suffix);
+        text = missing;
+        length = written < 0 ? 0 : (size_t)written < sizeof missing ? (size_t)written : sizeof missing - 1;
+    }
     kiln_worker_token tokens[6];
     memset(tokens, 0, sizeof tokens);
     tokens[0].kind = 3; tokens[0].number = 0;
@@ -5388,7 +5430,7 @@ static void *kiln_cli_worker_begin(const uint8_t *entry, uint64_t entry_len, int
     long index = eval ? -1 : kiln_graph_module_index(entry, entry_len);
     if (session == NULL) return NULL;
     if (index < 0) {
-        kiln_cli_worker_bad_entry(eval);
+        kiln_cli_worker_bad_entry(eval, entry, entry_len);
         session->failed_begin = 1;
         return session;
     }

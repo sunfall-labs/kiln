@@ -1005,11 +1005,27 @@ fn discover_node_runtime_requests_from_semantic(
     // import.meta.url)`, `path.join(__dirname, "w.js")`, `fileURLToPath(...)` of either -- and a
     // literal path, which node resolves against the working directory and the graph against
     // the module's (the two agree when a program is run from its own directory).
+    //
+    // The constructor is found by its `node:worker_threads` binding (a renamed import, a
+    // namespace, a destructured `require`) as well as by the spelling `Worker`, which also
+    // covers a bundler's aliased module object.
+    let (worker_symbols, worker_namespaces) = imported_bindings(
+        program,
+        semantic,
+        &["node:worker_threads", "worker_threads"],
+        "Worker",
+    );
     for node in semantic.nodes() {
         let AstKind::NewExpression(new) = node.kind() else {
             continue;
         };
-        let names_worker = match &new.callee {
+        let names_worker = callee_reads_binding(
+            &new.callee,
+            scoping,
+            "Worker",
+            &worker_symbols,
+            &worker_namespaces,
+        ) || match &new.callee {
             Expression::Identifier(identifier) => identifier.name == "Worker",
             Expression::StaticMemberExpression(member) => member.property.name == "Worker",
             _ => false,
@@ -1047,45 +1063,13 @@ fn discover_node_runtime_requests_from_semantic(
     }
     // An actor names code in its destination realm with `{ module: "..." }`, rather than
     // handing a constructor across. Retain statically named targets as lazy graph nodes, just
-    // as for `new Worker(path)`. Runtime still refuses a computed module absent from the graph.
-    for node in semantic.nodes() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        let names_spawn = match &call.callee {
-            Expression::Identifier(name) => name.name == "spawnActor",
-            Expression::StaticMemberExpression(member) => member.property.name == "spawnActor",
-            _ => false,
-        };
-        if !names_spawn {
-            continue;
-        }
-        let Some(Expression::ObjectExpression(options)) =
-            call.arguments.first().and_then(Argument::as_expression)
-        else {
-            continue;
-        };
-        for entry in &options.properties {
-            let ObjectPropertyKind::ObjectProperty(property) = entry else {
-                continue;
-            };
-            if property
-                .key
-                .static_name()
-                .is_none_or(|name| name != "module")
-            {
-                continue;
-            }
-            let mut specifiers = Vec::new();
-            worker_script_specifiers(&property.value, semantic, 0, &mut specifiers);
-            for specifier in specifiers {
-                requests.push(NodeRuntimeRequest {
-                    specifier,
-                    importer: path.to_owned(),
-                    resolve_only: false,
-                });
-            }
-        }
+    // as for `new Worker(path)`. Native still refuses a computed module absent from the graph.
+    for specifier in actor_module_requests(program, semantic) {
+        requests.push(NodeRuntimeRequest {
+            specifier,
+            importer: path.to_owned(),
+            resolve_only: false,
+        });
     }
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
@@ -1279,6 +1263,399 @@ fn worker_script_specifiers(
                 out.push(specifier);
             }
         }
+    }
+}
+
+/// The modules this file's `spawnActor` calls name, when the name is fixed at compile time
+/// (ADR 0072): relative to this file (`./x.mjs`) or absolute.
+///
+/// The call is found by its binding, not its spelling: `spawnActor` imported from
+/// `kiln:actors` (or the `@kiln/concurrency` re-export) under any local name, a namespace or
+/// CommonJS module object's `.spawnActor`, and a destructured `require`. A call spelled
+/// `spawnActor` that resolves to none of those is still read, as before: a program's own wrapper
+/// that forwards to the engine is common, and reading one that does not only links a module
+/// the program never spawns. The options may be an object literal or an unreassigned binding
+/// initialised with one (spreads included), and the module a string literal, a
+/// `new URL(literal, import.meta.url)` (bare, `.href`, `.pathname` or `.toString()`), a
+/// `fileURLToPath` of one, `import.meta.resolve(literal)` or `path.join(__dirname, ...)`.
+fn actor_module_requests(
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<String> {
+    let scoping = semantic.scoping();
+    let (spawn_symbols, namespace_symbols) = imported_bindings(
+        program,
+        semantic,
+        &["kiln:actors", "@kiln/concurrency"],
+        "spawnActor",
+    );
+    let mut out = Vec::new();
+    for node in semantic.nodes() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        // The spelling is kept beside the bindings: see the comment above.
+        let names_spawn = callee_reads_binding(
+            &call.callee,
+            scoping,
+            "spawnActor",
+            &spawn_symbols,
+            &namespace_symbols,
+        ) || match call.callee.without_parentheses() {
+            Expression::Identifier(name) => name.name == "spawnActor",
+            Expression::StaticMemberExpression(member) => member.property.name == "spawnActor",
+            _ => false,
+        };
+        if !names_spawn {
+            continue;
+        }
+        if let Some(options) = call.arguments.first().and_then(Argument::as_expression) {
+            actor_option_specifiers(options, semantic, 0, &mut out);
+        }
+    }
+    out
+}
+
+/// The local bindings of export `name` from any of `sources`, and of the module objects that
+/// hold it: ES imports under any local name, namespace and default imports, and CommonJS
+/// `require(source)` / `await import(source)` bound whole or destructured. A shadowing local
+/// of the same spelling is a different symbol and is not in either set.
+fn imported_bindings(
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    sources: &[&str],
+    name: &str,
+) -> (HashSet<SymbolId>, HashSet<SymbolId>) {
+    let scoping = semantic.scoping();
+    let mut direct = HashSet::<SymbolId>::new();
+    let mut namespaces = HashSet::<SymbolId>::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if !sources.contains(&import.source.value.as_str()) {
+            continue;
+        }
+        for specifier in import.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    if specifier.imported.name() == name
+                        && let Some(symbol) = specifier.local.symbol_id.get()
+                    {
+                        direct.insert(symbol);
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        namespaces.insert(symbol);
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        namespaces.insert(symbol);
+                    }
+                }
+            }
+        }
+    }
+    let loads_source = |expression: &Expression<'_>| -> bool {
+        let expression = match expression.without_parentheses() {
+            Expression::AwaitExpression(awaited) => awaited.argument.without_parentheses(),
+            other => other,
+        };
+        let source = match expression {
+            Expression::CallExpression(call) => match &call.callee {
+                Expression::Identifier(callee)
+                    if callee.name == "require" && callee.is_global_reference(scoping) =>
+                {
+                    call.arguments.first().and_then(Argument::as_expression)
+                }
+                _ => None,
+            },
+            Expression::ImportExpression(import) => Some(&import.source),
+            _ => None,
+        };
+        matches!(source, Some(Expression::StringLiteral(literal))
+            if sources.contains(&literal.value.as_str()))
+    };
+    for node in semantic.nodes().iter() {
+        let AstKind::VariableDeclarator(declarator) = node.kind() else {
+            continue;
+        };
+        if !declarator.init.as_ref().is_some_and(&loads_source) {
+            continue;
+        }
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(identifier) => {
+                if let Some(symbol) = identifier.symbol_id.get() {
+                    namespaces.insert(symbol);
+                }
+            }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if property.key.static_name().is_none_or(|key| key != name) {
+                        continue;
+                    }
+                    if let BindingPattern::BindingIdentifier(identifier) = &property.value
+                        && let Some(symbol) = identifier.symbol_id.get()
+                    {
+                        direct.insert(symbol);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (direct, namespaces)
+}
+
+/// Whether `callee` reads export `name` through one of the bindings [`imported_bindings`]
+/// found: the direct binding, `namespace.name` or `namespace["name"]`.
+fn callee_reads_binding(
+    callee: &Expression<'_>,
+    scoping: &oxc_semantic::Scoping,
+    name: &str,
+    direct: &HashSet<SymbolId>,
+    namespaces: &HashSet<SymbolId>,
+) -> bool {
+    let symbol_of = |identifier: &oxc_ast::ast::IdentifierReference<'_>| {
+        identifier
+            .reference_id
+            .get()
+            .and_then(|reference| scoping.get_reference(reference).symbol_id())
+    };
+    let in_namespace = |object: &Expression<'_>| {
+        matches!(object.without_parentheses(), Expression::Identifier(object)
+            if symbol_of(object).is_some_and(|symbol| namespaces.contains(&symbol)))
+    };
+    match callee.without_parentheses() {
+        Expression::Identifier(identifier) => {
+            symbol_of(identifier).is_some_and(|symbol| direct.contains(&symbol))
+        }
+        Expression::StaticMemberExpression(member) => {
+            member.property.name == name && in_namespace(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.expression, Expression::StringLiteral(key) if key.value == name)
+                && in_namespace(&member.object)
+        }
+        _ => false,
+    }
+}
+
+/// The module names an actor options expression can hold: see [`actor_module_requests`].
+fn actor_option_specifiers(
+    options: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match options {
+        Expression::ParenthesizedExpression(inner) => {
+            actor_option_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            actor_option_specifiers(&logical.left, semantic, depth + 1, out);
+            actor_option_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            actor_option_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            actor_option_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            if let Some(init) = unreassigned_initializer(identifier, semantic) {
+                actor_option_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        Expression::ObjectExpression(object) => {
+            for property in &object.properties {
+                match property {
+                    ObjectPropertyKind::ObjectProperty(property) => {
+                        if !property.computed
+                            && property
+                                .key
+                                .static_name()
+                                .is_some_and(|name| name == "module")
+                        {
+                            actor_module_specifiers(&property.value, semantic, depth + 1, out);
+                        }
+                    }
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        actor_option_specifiers(&spread.argument, semantic, depth + 1, out);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The initializer of the binding `identifier` reads, when that binding is never reassigned.
+fn unreassigned_initializer<'a>(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    semantic: &'a oxc_semantic::Semantic<'_>,
+) -> Option<&'a Expression<'a>> {
+    let scoping = semantic.scoping();
+    let symbol = identifier
+        .reference_id
+        .get()
+        .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+    if scoping.symbol_is_mutated(symbol) {
+        return None;
+    }
+    let declaration = semantic
+        .nodes()
+        .get_node(scoping.symbol_declaration(symbol));
+    let AstKind::VariableDeclarator(declarator) = declaration.kind() else {
+        return None;
+    };
+    declarator.init.as_ref()
+}
+
+/// The module one actor `module:` value names, as a request relative to this file or an
+/// absolute path. A relative *string* is not one: `spawnActor` refuses it at run time.
+fn actor_module_specifiers(
+    value: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    fn text(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .map(|cooked| cooked.to_string()),
+            _ => None,
+        }
+    }
+    /// An absolute name: a file URL's path, or an absolute path as written.
+    fn absolute(name: &str) -> Option<String> {
+        if name.starts_with("file:") {
+            let path = url::Url::parse(name).ok()?.to_file_path().ok()?;
+            return path.to_str().map(str::to_owned);
+        }
+        Path::new(name).is_absolute().then(|| name.to_owned())
+    }
+    fn is_import_meta_url(expression: &Expression<'_>) -> bool {
+        matches!(expression.without_parentheses(), Expression::StaticMemberExpression(member)
+            if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+    }
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Expression::ParenthesizedExpression(inner) => {
+            actor_module_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            actor_module_specifiers(&logical.left, semantic, depth + 1, out);
+            actor_module_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            actor_module_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            actor_module_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            if let Some(init) = unreassigned_initializer(identifier, semantic) {
+                actor_module_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            if let Some(path) = text(value).as_deref().and_then(absolute) {
+                out.push(path);
+            }
+        }
+        // `new URL(name, import.meta.url)` and `new URL("file:///...")`.
+        Expression::NewExpression(url) => {
+            if !matches!(&url.callee, Expression::Identifier(callee) if callee.name == "URL") {
+                return;
+            }
+            let Some(name) = url
+                .arguments
+                .first()
+                .and_then(Argument::as_expression)
+                .and_then(text)
+            else {
+                return;
+            };
+            if let Some(path) = absolute(&name) {
+                out.push(path);
+                return;
+            }
+            let based_here = url
+                .arguments
+                .get(1)
+                .and_then(Argument::as_expression)
+                .is_some_and(is_import_meta_url);
+            if based_here && !name.contains(':') {
+                out.push(if name.starts_with("./") || name.starts_with("../") {
+                    name
+                } else {
+                    format!("./{name}")
+                });
+            }
+        }
+        // `url.href`, `url.pathname`: the same file as the URL.
+        Expression::StaticMemberExpression(member)
+            if matches!(member.property.name.as_str(), "href" | "pathname") =>
+        {
+            actor_module_specifiers(&member.object, semantic, depth + 1, out)
+        }
+        Expression::CallExpression(call) => {
+            let argument = call.arguments.first().and_then(Argument::as_expression);
+            match call.callee.without_parentheses() {
+                // `url.toString()`.
+                Expression::StaticMemberExpression(member)
+                    if member.property.name == "toString" && call.arguments.is_empty() =>
+                {
+                    actor_module_specifiers(&member.object, semantic, depth + 1, out)
+                }
+                // `import.meta.resolve("./x.mjs")`.
+                Expression::StaticMemberExpression(member)
+                    if member.property.name == "resolve"
+                        && matches!(member.object, Expression::ImportMeta(_)) =>
+                {
+                    if let Some(name) = argument.and_then(text)
+                        && (name.starts_with("./") || name.starts_with("../"))
+                    {
+                        out.push(name);
+                    } else if let Some(path) = argument.and_then(text).as_deref().and_then(absolute)
+                    {
+                        out.push(path);
+                    }
+                }
+                callee => {
+                    let name = match callee {
+                        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                        Expression::StaticMemberExpression(member) => {
+                            Some(member.property.name.as_str())
+                        }
+                        _ => None,
+                    };
+                    match name {
+                        Some("fileURLToPath" | "pathToFileURL" | "String") => {
+                            if let Some(argument) = argument {
+                                actor_module_specifiers(argument, semantic, depth + 1, out);
+                            }
+                        }
+                        _ => {
+                            if let Some(specifier) =
+                                worker_script_specifier(value, semantic.scoping())
+                            {
+                                out.push(specifier);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -5708,6 +6085,102 @@ mod tests {
         assert!(requests.iter().any(|request| {
             request.specifier == "./counter.mjs" && request.importer == "app/main.mjs"
         }));
+    }
+
+    #[test]
+    fn actor_modules_are_found_through_bindings_not_spelling() {
+        let source = r#"
+            import { spawnActor as spawn } from "kiln:actors";
+            import * as actors from "kiln:actors";
+            import { fileURLToPath } from "node:url";
+            spawn({ module: new URL("./renamed.mjs", import.meta.url), export: "A" });
+            actors.spawnActor({ module: new URL("./namespace.mjs", import.meta.url), export: "A" });
+            actors["spawnActor"]({ module: new URL("computed-key.mjs", import.meta.url), export: "A" });
+            const options = { module: new URL("./options.mjs", import.meta.url), export: "A" };
+            spawn(options);
+            const base = { module: new URL("./spread.mjs", import.meta.url).href };
+            spawn({ ...base, export: "A" });
+            spawn({ module: new URL("./pathname.mjs", import.meta.url).pathname, export: "A" });
+            const file = fileURLToPath(new URL("./file-path.mjs", import.meta.url));
+            spawn({ module: file, export: "A" });
+            spawn({ module: "/abs/literal.mjs", export: "A" });
+            spawn({ module: "file:///abs/url%20literal.mjs", export: "A" });
+            spawn({ module: new URL("file:///abs/url-object.mjs"), export: "A" });
+            spawn({ module: "./relative-string-is-refused.mjs", export: "A" });
+            let reassigned = { module: new URL("./reassigned.mjs", import.meta.url) };
+            reassigned = {};
+            spawn(reassigned);
+            function shadow(spawn) {
+                spawn({ module: new URL("./shadowed.mjs", import.meta.url), export: "A" });
+            }
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        let mut expected = vec![
+            "./computed-key.mjs",
+            "./file-path.mjs",
+            "./namespace.mjs",
+            "./options.mjs",
+            "./pathname.mjs",
+            "./renamed.mjs",
+            "./spread.mjs",
+            "/abs/literal.mjs",
+            "/abs/url literal.mjs",
+            "/abs/url-object.mjs",
+        ];
+        if cfg!(windows) {
+            expected.retain(|specifier| !specifier.starts_with('/'));
+        }
+        assert_eq!(specifiers, expected);
+    }
+
+    #[test]
+    fn worker_targets_are_found_through_bindings() {
+        let source = r#"
+            import { Worker as Thread } from "node:worker_threads";
+            import * as threads from "node:worker_threads";
+            const { Worker: Required } = require("worker_threads");
+            new Thread(new URL("./renamed.mjs", import.meta.url));
+            new threads.Worker(new URL("./namespace.mjs", import.meta.url));
+            new threads["Worker"](new URL("./computed-key.mjs", import.meta.url));
+            new Required("./required.js");
+            function shadow(Thread) {
+                new Thread(new URL("./shadowed.mjs", import.meta.url));
+            }
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        assert_eq!(
+            specifiers,
+            [
+                "./computed-key.mjs",
+                "./namespace.mjs",
+                "./renamed.mjs",
+                "./required.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn actor_modules_follow_commonjs_bindings() {
+        let source = r#"
+            const { spawnActor: start } = require("kiln:actors");
+            const concurrency = require("@kiln/concurrency");
+            start({ module: new URL("./destructured.mjs", import.meta.url), export: "A" });
+            concurrency.spawnActor({ module: new URL("./module-object.mjs", import.meta.url), export: "A" });
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        assert_eq!(specifiers, ["./destructured.mjs", "./module-object.mjs"]);
     }
 
     #[test]

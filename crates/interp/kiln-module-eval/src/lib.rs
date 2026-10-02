@@ -132,7 +132,9 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
                 .virtual_path(self.graph.project_root());
             return self.graph.module(entry).is_some();
         }
-        self.graph.module(path).is_some()
+        // A worker script the compiler did not see named is loaded from disk like any module
+        // (the interpreter answers what node would; a native build refuses it by name).
+        self.graph.module(path).is_some() || Path::new(path).is_file()
     }
 
     fn run(&self, worker: Arc<kiln_runtime::workers::WorkerContext>) -> i32 {
@@ -146,7 +148,8 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
                 } else {
                     PathBuf::from(path)
                 })
-                .ok_or_else(|| format!("Cannot find module '{path}'")),
+                .map(Ok)
+                .unwrap_or_else(|| disk_graph(self.graph.project_root(), Path::new(path))),
             WorkerEntry::Eval(source) => eval_graph(source),
         };
         let graph = match graph {
@@ -217,22 +220,42 @@ fn worker_failure(message: String) -> Vec<kiln_runtime::workers::Token> {
 /// The graph a worker made from source text runs (`new Worker(code, { eval: true })`): the
 /// text is a module of its own at `[worker eval]` in the working directory, whose requests
 /// resolve from there, as node's do. CommonJS, as node runs it, unless it has module syntax.
-fn eval_graph(source: &str) -> Result<ModuleGraph, String> {
-    struct NodeFrontend;
-    impl kiln_module_graph::Frontend for NodeFrontend {
-        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
-            kiln_frontend_oxc::parse_with_goal(path, source, kiln_hir::SourceGoal::Module)
-        }
+/// The frontend a graph built while the program runs uses: node's grammar goals, the same
+/// lowering every other graph gets.
+struct NodeFrontend;
 
-        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_module_graph::CommonJsParse {
-            let (module, static_requires) =
-                kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
-            kiln_module_graph::CommonJsParse {
-                module,
-                static_requires,
-            }
+impl kiln_module_graph::Frontend for NodeFrontend {
+    fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+        kiln_frontend_oxc::parse_with_goal(path, source, kiln_hir::SourceGoal::Module)
+    }
+
+    fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_module_graph::CommonJsParse {
+        let (module, static_requires) =
+            kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
+        kiln_module_graph::CommonJsParse {
+            module,
+            static_requires,
         }
     }
+}
+
+/// The graph of a worker script the program's graph does not hold, built from disk the way
+/// node would load it.
+fn disk_graph(project_root: &Path, path: &Path) -> Result<ModuleGraph, String> {
+    let entry = std::fs::canonicalize(path)
+        .map_err(|_| format!("Cannot find module '{}'", path.display()))?;
+    let resolver = kiln_module_resolver::NodeRuntimeResolver::new(project_root)
+        .map_err(|error| error.to_string())?;
+    ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| std::fs::read_to_string(path),
+        NodeFrontend,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn eval_graph(source: &str) -> Result<ModuleGraph, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let build = |name: &str| {
         let resolver = kiln_module_resolver::NodeRuntimeResolver::new(&cwd).map_err(|error| {
@@ -330,13 +353,122 @@ fn export_epilogue(program: &Program, slots: Vec<u32>) -> Program {
 /// Requests carry their importer, so nested dynamic imports resolve against the module that
 /// issued them. The service owns the graph through `Arc`; no thread-local or process-global
 /// resolver state is involved.
+///
+/// One kind of request reaches past that snapshot: the module an actor realm is asked to run
+/// (`spawnActor({ module })`, ADR 0072). Its name is a run-time value -- an absolute path or a
+/// file URL -- so the compiler may not have seen it, and the interpreter answers it the way it
+/// answers any module: it resolves the name with node's resolver and builds that module's graph
+/// from disk. Graphs built that way are kept, so the module's own dynamic imports resolve from
+/// it like any other importer's. Every other request stays within the snapshot.
 pub struct GraphModuleLoader {
     graph: Arc<ModuleGraph>,
+    /// Graphs rooted at actor modules the snapshot did not contain, by entry path.
+    actor_graphs: std::sync::Mutex<HashMap<PathBuf, Arc<ModuleGraph>>>,
 }
 
 impl GraphModuleLoader {
     pub fn new(graph: Arc<ModuleGraph>) -> Self {
-        Self { graph }
+        Self {
+            graph,
+            actor_graphs: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The graph that holds `importer`: the snapshot, or a graph built for an actor module.
+    fn graph_holding(&self, importer: &Path) -> Option<Arc<ModuleGraph>> {
+        if self.graph.module(importer).is_some() {
+            return Some(Arc::clone(&self.graph));
+        }
+        let graphs = self.actor_graphs.lock().ok()?;
+        graphs
+            .values()
+            .find(|graph| graph.module(importer).is_some())
+            .cloned()
+    }
+
+    /// The actor module `specifier` names, loaded from disk when the snapshot lacks it.
+    ///
+    /// Only the actor worker entry asks this, and only for the absolute names `spawnActor`
+    /// admits; the referrer for resolution is the named file itself, never the worker entry's
+    /// virtual path under `.kiln/builtins`. `None` leaves the request to the snapshot's answer.
+    fn load_actor_module(
+        &self,
+        graph: &ModuleGraph,
+        importer: &Path,
+        request: &ModuleLoadRequest,
+    ) -> Option<Result<ModulePlan, ModuleLoadError>> {
+        let node = graph.module(importer)?;
+        if node.source != ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker) {
+            return None;
+        }
+        let path = if request.specifier.starts_with("file:") {
+            url::Url::parse(&request.specifier)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())?
+        } else {
+            let path = PathBuf::from(&request.specifier);
+            if !path.is_absolute() {
+                return None;
+            }
+            path
+        };
+        Some(
+            self.actor_graph(graph.project_root(), &path)
+                .and_then(|built| {
+                    built
+                        .import_plan_for_request(built.entry(), request.attributes.as_ref())
+                        .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
+                }),
+        )
+    }
+
+    fn actor_graph(
+        &self,
+        project_root: &Path,
+        path: &Path,
+    ) -> Result<Arc<ModuleGraph>, ModuleLoadError> {
+        if let Some(graph) = self
+            .actor_graphs
+            .lock()
+            .ok()
+            .and_then(|graphs| graphs.get(path).cloned())
+        {
+            return Ok(graph);
+        }
+        let not_found = |message: String| {
+            ModuleLoadError::NotFound(format!(
+                "could not resolve actor module `{}`: {message}",
+                path.display()
+            ))
+        };
+        let resolver = kiln_module_resolver::NodeRuntimeResolver::new(project_root)
+            .map_err(|error| not_found(error.to_string()))?;
+        // An absolute ESM name is the file itself, as node's loader treats it: no extension
+        // or directory probing.
+        let entry = std::fs::canonicalize(path).map_err(|error| not_found(error.to_string()))?;
+        let built = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| std::fs::read_to_string(path),
+            NodeFrontend,
+        )
+        .map_err(|error| match &error {
+            ModuleGraphError::Resolve { .. }
+            | ModuleGraphError::Entry { .. }
+            | ModuleGraphError::NonAbsoluteEntry { .. } => not_found(error.to_string()),
+            ModuleGraphError::MissingExport { .. }
+            | ModuleGraphError::AmbiguousExport { .. }
+            | ModuleGraphError::DuplicateExport { .. }
+            | ModuleGraphError::UnresolvedImport { .. } => {
+                ModuleLoadError::Syntax(error.to_string())
+            }
+            _ => ModuleLoadError::Unsupported(error.to_string()),
+        })?;
+        let built = Arc::new(built);
+        if let Ok(mut graphs) = self.actor_graphs.lock() {
+            graphs.insert(path.to_path_buf(), Arc::clone(&built));
+        }
+        Ok(built)
     }
 }
 
@@ -347,17 +479,20 @@ impl ModuleLoaderService for GraphModuleLoader {
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| self.graph.entry().to_path_buf());
-        let node = self.graph.module(&importer).ok_or_else(|| {
+        let graph = self.graph_holding(&importer).ok_or_else(|| {
             ModuleLoadError::NotFound(format!(
                 "importer `{}` is not in the module graph",
                 importer.display()
             ))
         })?;
-        if let Some(message) = self.graph.dynamic_failure(&importer, &request.specifier) {
+        let graph = graph.as_ref();
+        let node = graph
+            .module(&importer)
+            .expect("graph_holding found the importer");
+        if let Some(message) = graph.dynamic_failure(&importer, &request.specifier) {
             return Err(ModuleLoadError::Unsupported(message.to_owned()));
         }
-        let dependency = self
-            .graph
+        let dependency = graph
             .dynamic_dependencies(&importer)
             .iter()
             .find(|dependency| dependency.specifier == request.specifier)
@@ -368,13 +503,10 @@ impl ModuleLoaderService for GraphModuleLoader {
             });
         let target = dependency
             .map(|dependency| dependency.target.clone())
-            .or_else(|| {
-                self.graph
-                    .declared_target_for_runtime_specifier(&request.specifier)
-            })
+            .or_else(|| graph.declared_target_for_runtime_specifier(&request.specifier))
             .or_else(|| {
                 if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
-                    self.graph.module_map().iter().find_map(|(path, node)| {
+                    graph.module_map().iter().find_map(|(path, node)| {
                         (node.source == ModuleSource::NodeBuiltin(builtin)).then(|| path.clone())
                     })
                 } else {
@@ -386,34 +518,37 @@ impl ModuleLoaderService for GraphModuleLoader {
                     return url::Url::parse(&request.specifier)
                         .ok()
                         .and_then(|url| url.to_file_path().ok())
-                        .filter(|path| self.graph.module_map().contains_key(path));
+                        .filter(|path| graph.module_map().contains_key(path));
                 }
                 let direct = PathBuf::from(&request.specifier);
-                if self.graph.module_map().contains_key(&direct) {
+                if graph.module_map().contains_key(&direct) {
                     return Some(direct);
                 }
                 if let Some(parent) = importer.parent() {
                     let relative = parent.join(&request.specifier);
-                    if self.graph.module_map().contains_key(&relative) {
+                    if graph.module_map().contains_key(&relative) {
                         return Some(relative);
                     }
                     for ext in &[".ts", ".js", ".json", "/index.ts", "/index.js"] {
                         let candidate = parent.join(format!("{}{ext}", request.specifier));
-                        if self.graph.module_map().contains_key(&candidate) {
+                        if graph.module_map().contains_key(&candidate) {
                             return Some(candidate);
                         }
                     }
                 }
                 None
-            })
-            .ok_or_else(|| {
-                ModuleLoadError::NotFound(format!(
-                    "could not resolve module `{}` from `{}`",
-                    request.specifier,
-                    importer.display()
-                ))
-            })?;
-        self.graph
+            });
+        let Some(target) = target else {
+            if let Some(answer) = self.load_actor_module(graph, &importer, &request) {
+                return answer;
+            }
+            return Err(ModuleLoadError::NotFound(format!(
+                "could not resolve module `{}` from `{}`",
+                request.specifier,
+                importer.display()
+            )));
+        };
+        graph
             .import_plan_for_request(&target, request.attributes.as_ref())
             .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
     }

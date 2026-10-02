@@ -93,6 +93,19 @@ The interpreter applies its ordinary module resolver. No source text, function, 
 object crosses the boundary. Constructor arguments use the same message rules as calls, including
 the explicit transfer forms below.
 
+**2026-10-02 resolution amendment.** "Statically named" means found through the binding, not
+the spelling: `spawnActor` imported from `kiln:actors` or `@kiln/concurrency` under any local
+name, through a namespace or CommonJS module object, with options written inline, in an
+unreassigned binding (spreads included), and a module written as an absolute path or file URL
+literal, `new URL(literal, import.meta.url)` (bare, `.href`, `.pathname`, `.toString()`),
+`fileURLToPath` of one, or `import.meta.resolve(literal)`. A name computed at run time is not
+linked; the native spawn rejects with a `TypeError` naming the module and saying it was not
+linked into this build. The interpreter loads any module the absolute name reaches: the actor
+worker's request is resolved against the named file itself, never against the worker entry's
+virtual path, and the module's graph is built from disk when the program's graph lacks it.
+`node:worker_threads` targets follow the same discovery and the same rule; an unlinked native
+worker emits an `error` naming the module, then exits 1.
+
 An `ActorRef<T>` has `address` and `call(method, args, options?)`. A call is always asynchronous,
 including when the caller and actor happen to run on the same scheduler thread. Its type permits
 only public callable string keys of `T`, with the corresponding argument tuple and awaited result
