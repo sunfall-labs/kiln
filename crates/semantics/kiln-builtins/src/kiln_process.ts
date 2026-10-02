@@ -38,7 +38,24 @@ function frame(command: string, args: string[], input: any): Uint8Array {
   return result;
 }
 
-export async function run(command: string, args: string[] = [], options: any = {}): Promise<any> {
+export interface RunOptions {
+  /** Bytes (or UTF-8 text) written to the child's standard input, which is then closed. */
+  input?: string | Uint8Array;
+  /** Aborting kills the child and rejects with the signal's reason. */
+  signal?: AbortSignal | null;
+}
+
+export interface RunResult {
+  stdout: Uint8Array;
+  stderr: Uint8Array;
+  /** The exit status, or `null` when a signal ended the child. */
+  exitCode: number | null;
+  /** The signal number that ended the child, or `null` when it exited. */
+  signal: number | null;
+}
+
+/** Run `command` with `args` (no shell), collecting its output. */
+export async function run(command: string, args: string[] = [], options: RunOptions = {}): Promise<RunResult> {
   if (typeof command !== "string") throw new TypeError("process.run command must be a string");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new TypeError("process.run args must be an array of strings");
   if (options === null || typeof options !== "object") throw new TypeError("process.run options must be an object");

@@ -226,6 +226,29 @@ static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kil
     return status;
 }
 
+/* A platform exception, as node raises one: an `Error` named `name` whose prototype is the
+ * realm's `DOMException.prototype`, so `instanceof DOMException` and its `code` hold. A realm
+ * without `DOMException` gets the named `Error` alone. */
+static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *message,
+                                  size_t message_len, const char *name, size_t name_len,
+                                  int depth, kiln_value *thrown) {
+    kiln_value constructor = kiln_c99_undefined();
+    kiln_value prototype = kiln_c99_undefined();
+    int found = 0;
+    int status = kiln_c99_new_error(out, KILN_C99_BUILTIN_ERROR,
+                                    kiln_c99_copy_text(message, message_len));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*out, "name", 4, kiln_c99_copy_text(name, name_len));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_global_binding(host, &constructor, "DOMException", 12, &found, depth,
+                                         thrown);
+    if (status != KILN_C99_OK || !found || constructor.tag == KILN_VALUE_UNDEFINED) return status;
+    status = kiln_c99_get(host, constructor, "prototype", 9, &prototype, depth, thrown);
+    if (status == KILN_C99_OK && prototype.tag == KILN_VALUE_OBJECT)
+        status = kiln_c99_set_prototype(*out, prototype);
+    return status;
+}
+
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
                           kiln_value *thrown) {
     kiln_value aborted;
@@ -238,11 +261,8 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     status = kiln_c99_get(host, signal, "aborted", 7, &aborted, depth, thrown);
     if (status != KILN_C99_OK || kiln_c99_truthy(aborted)) return status;
     if (reason.tag == KILN_VALUE_UNDEFINED) {
-        status = kiln_c99_new_error(&reason, KILN_C99_BUILTIN_ERROR,
-                                    kiln_c99_copy_text("This operation was aborted", 26));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, reason, "name", 4,
-                                  kiln_c99_copy_text("AbortError", 10), 0, NULL);
+        status = kiln_c99_dom_exception(host, &reason, "This operation was aborted", 26,
+                                        "AbortError", 10, depth, thrown);
         if (status != KILN_C99_OK) return status;
     }
     status = kiln_c99_put(NULL, signal, "aborted", 7, kiln_c99_boolean(1), 0, NULL);

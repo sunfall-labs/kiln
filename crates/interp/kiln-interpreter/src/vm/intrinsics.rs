@@ -678,18 +678,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::AbortSignalTimeout => {
                 let signal = abort_signal();
                 let milliseconds = self.as_number_argument(arguments.first(), instruction)?;
-                let reason = self.construct_error(
-                    ErrorKind::Error,
-                    &[Value::String(
-                        "The operation was aborted due to timeout".to_owned().into(),
-                    )],
-                );
-                if let Value::Object(object) = &reason {
-                    object.borrow_mut().set_non_enumerable(
-                        "name",
-                        Value::String("TimeoutError".to_owned().into()),
-                    );
-                }
+                let reason = self.dom_exception(
+                    "The operation was aborted due to timeout",
+                    "TimeoutError",
+                    instruction,
+                )?;
                 let timer = Timer {
                     callback: Value::Bound(Rc::new(BoundFunction {
                         target: Value::Native(Native::AbortSignalSettle, RealmId::PRIMARY),

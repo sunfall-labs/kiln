@@ -114,7 +114,16 @@ declare_ts_builtins! {
         sample_source_check: "export async function spawnActor",
         presence_test: actors_builtin_source_is_present,
         compilation_test: actors_builtin_compiles_cleanly,
-        exports: ["Actor", "spawnActor", "connectActor", "isolate", "prepareTransfer", "transfer"],
+        exports: [
+            "ActorClosedError",
+            "ActorRemoteError",
+            "Actor",
+            "spawnActor",
+            "connectActor",
+            "isolate",
+            "prepareTransfer",
+            "transfer",
+        ],
     },
     ActorsCore {
         variant: ActorsCore,

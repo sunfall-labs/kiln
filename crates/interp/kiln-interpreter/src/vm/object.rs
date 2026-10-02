@@ -2275,6 +2275,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
+    /// A platform exception, as node raises one: an `Error` named `name` whose prototype is the
+    /// realm's `DOMException.prototype`, so `instanceof DOMException` and its `code` hold. A
+    /// realm without `DOMException` gets the named `Error` alone.
+    pub(crate) fn dom_exception(
+        &mut self,
+        message: &str,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let error = self.construct_error(
+            ErrorKind::Error,
+            &[Value::String(message.to_owned().into())],
+        );
+        let global = self.global_object_in(self.current_realm);
+        let constructor = self.read_property(&global, "DOMException", instruction)?;
+        let prototype = match constructor {
+            Value::Undefined => Value::Undefined,
+            constructor => self.read_property(&constructor, "prototype", instruction)?,
+        };
+        if let Value::Object(object) = &error {
+            let mut object = object.borrow_mut();
+            object.set_non_enumerable("name", Value::String(name.to_owned().into()));
+            if matches!(prototype, Value::Object(_)) {
+                object.set_prototype(prototype);
+            }
+        }
+        Ok(error)
+    }
+
     /// The abort algorithm: settle the signal once, then tell everyone who asked.
     ///
     /// Idempotent, which is what makes `controller.abort()` safe to call from a `finally` and
@@ -2300,20 +2329,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // to tell "the caller cancelled this" from "this failed".
         let reason = match reason {
             Some(reason) if !matches!(reason, Value::Undefined) => reason,
-            _ => {
-                let error = self.construct_error(
-                    ErrorKind::Error,
-                    &[Value::String(
-                        "This operation was aborted".to_owned().into(),
-                    )],
-                );
-                if let Value::Object(error) = &error {
-                    error
-                        .borrow_mut()
-                        .set_non_enumerable("name", Value::String("AbortError".to_owned().into()));
-                }
-                error
-            }
+            _ => self.dom_exception("This operation was aborted", "AbortError", instruction)?,
         };
         let listeners = {
             let mut held = object.borrow_mut();

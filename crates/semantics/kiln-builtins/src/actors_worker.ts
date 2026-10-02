@@ -31,7 +31,9 @@ let running = new Set<Reservation>();
 let closing = false;
 let force = false;
 let completed = false;
+let actorClass: any;
 let instance: any;
+let constructed = false;
 
 function remoteError(error: any): any {
   let cause: any = undefined;
@@ -212,6 +214,18 @@ function serve(): void {
       let method: any;
       try {
         if (force) throw new Error("actor was stopped");
+        if (payload.construct === true) {
+          // The owner's first call, before it hands out the address; never a second time.
+          if (constructed) throw new TypeError("actor is already constructed");
+          constructed = true;
+          instance = new actorClass(...payload.args);
+          answer(request, "resolve", undefined);
+          running.delete(request);
+          active--;
+          stopped();
+          continue;
+        }
+        if (!constructed) throw new TypeError("actor is not constructed");
         if (typeof payload.method !== "string" || payload.method === "constructor") {
           throw new TypeError("actor method is not public");
         }
@@ -337,8 +351,8 @@ function serve(): void {
       if (typeof ctor !== "function" || !ctor.prototype || !(Symbol.for("kiln.actor.base") in ctor.prototype)) {
         throw new TypeError("actor export must be a class extending Actor");
       }
-      instance = new ctor(...init.args);
-      control.postMessage({ kind: "ready" });
+      actorClass = ctor;
+      control.postMessage({ kind: "loaded" });
     } catch (error) {
       control.postMessage({ kind: "spawnError", value: remoteError(error) });
       inbox.close();

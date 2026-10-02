@@ -50,10 +50,8 @@ declare const transferBrand: unique symbol;
 export type Isolated<T> = { readonly [isolatedBrand]: T };
 export type TransferTicket<T> = { readonly [transferBrand]: T };
 
-function dataCloneError(message: string): Error {
-  const error = new Error(message);
-  error.name = "DataCloneError";
-  return error;
+function dataCloneError(message: string): DOMException {
+  return new ((globalThis as any).DOMException)(message, "DataCloneError");
 }
 
 function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {

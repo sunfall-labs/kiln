@@ -1026,7 +1026,12 @@ pub fn build_function_graph(
         block_ranges.push((start, end));
     }
 
-    let mut handler_stack = Vec::new();
+    // Each block's innermost handler, from the handler stack its control flow reaches it with.
+    // A scan in code order is wrong: `continue` inside a `try` compiles to `PopHandler; Jump`
+    // back to the loop head, and the code that follows it in the `try` body is still protected,
+    // so the stack has to travel along edges. A handler block itself is entered with the stack
+    // as it was at its push. Structured code reaches each block with one stack; the first one
+    // to arrive is kept.
     let mut block_handlers = vec![None; num_blocks];
     let handler_targets: HashSet<BlockId> = code
         .iter()
@@ -1035,20 +1040,90 @@ pub fn build_function_graph(
             _ => None,
         })
         .collect();
-    for (i, &(start, end)) in block_ranges.iter().enumerate() {
-        let b_idx = i + block_offset;
-        for inst in &code[start..end] {
-            match inst {
-                Instruction::PushHandler(target) => {
-                    handler_stack.push(*pc_to_block.get(&(*target as usize)).unwrap());
-                }
-                Instruction::PopHandler => {
-                    handler_stack.pop();
-                }
-                _ => {}
+    {
+        let mut entry_stacks: Vec<Option<Vec<BlockId>>> = vec![None; num_blocks];
+        let first = BlockId(block_offset as u32);
+        entry_stacks[first.0 as usize] = Some(Vec::new());
+        let mut pending = vec![first];
+        fn arrive(
+            entry_stacks: &mut [Option<Vec<BlockId>>],
+            block: BlockId,
+            stack: &[BlockId],
+            pending: &mut Vec<BlockId>,
+        ) {
+            let slot = &mut entry_stacks[block.0 as usize];
+            if slot.is_none() {
+                *slot = Some(stack.to_vec());
+                pending.push(block);
             }
         }
-        block_handlers[b_idx] = handler_stack.last().copied();
+        while let Some(block) = pending.pop() {
+            let b_idx = block.0 as usize;
+            let Some(i) = b_idx.checked_sub(block_offset) else {
+                continue;
+            };
+            let (start, end) = block_ranges[i];
+            let mut stack = entry_stacks[b_idx].clone().unwrap_or_default();
+            for inst in &code[start..end] {
+                match inst {
+                    Instruction::PushHandler(target) => {
+                        let handler = *pc_to_block.get(&(*target as usize)).unwrap();
+                        arrive(&mut entry_stacks, handler, &stack, &mut pending);
+                        stack.push(handler);
+                    }
+                    Instruction::PopHandler => {
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+            }
+            block_handlers[b_idx] = stack.last().copied();
+            let next = (i + 1 < block_ranges.len()).then(|| BlockId((b_idx + 1) as u32));
+            let mut succs: Vec<BlockId> = Vec::new();
+            match if end > start { code.get(end - 1) } else { None } {
+                Some(Instruction::Jump(target)) => {
+                    succs.push(pc_to_containing_block(*target as usize))
+                }
+                Some(
+                    Instruction::JumpIfFalse(target)
+                    | Instruction::JumpIfTruthy(target)
+                    | Instruction::JumpIfNotNullish(target)
+                    | Instruction::JumpIfReturnSignal(target),
+                ) => {
+                    succs.push(pc_to_containing_block(*target as usize));
+                    succs.extend(next);
+                }
+                Some(Instruction::Return | Instruction::Throw) => {}
+                Some(Instruction::YieldStar(target)) => {
+                    succs.push(pc_to_containing_block(end));
+                    succs.push(pc_to_containing_block(*target as usize));
+                }
+                _ => succs.extend(next),
+            }
+            for succ in succs {
+                arrive(&mut entry_stacks, succ, &stack, &mut pending);
+            }
+        }
+        // A block no edge reaches (dead code after a `throw`) keeps the code-order answer, which
+        // is all it ever had and is never executed.
+        let mut linear = Vec::new();
+        for (i, &(start, end)) in block_ranges.iter().enumerate() {
+            let b_idx = i + block_offset;
+            for inst in &code[start..end] {
+                match inst {
+                    Instruction::PushHandler(target) => {
+                        linear.push(*pc_to_block.get(&(*target as usize)).unwrap());
+                    }
+                    Instruction::PopHandler => {
+                        linear.pop();
+                    }
+                    _ => {}
+                }
+            }
+            if entry_stacks[b_idx].is_none() {
+                block_handlers[b_idx] = linear.last().copied();
+            }
+        }
     }
 
     // Phase 3: Abstract Interpretation across basic blocks

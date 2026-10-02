@@ -2845,12 +2845,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             uint64_t id = 0;
             status = kiln_c99_new_abort_signal(result);
             if (status == KILN_C99_OK)
-                status = kiln_c99_new_error(&reason, KILN_C99_BUILTIN_ERROR,
-                                            kiln_c99_copy_text(
-                                                "The operation was aborted due to timeout", 40));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_put(NULL, reason, "name", 4,
-                                      kiln_c99_copy_text("TimeoutError", 12), 0, NULL);
+                status = kiln_c99_dom_exception(host, &reason,
+                                                "The operation was aborted due to timeout", 40,
+                                                "TimeoutError", 12, depth, thrown);
             if (status == KILN_C99_OK)
                 status = kiln_c99_bind(&callback,
                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
