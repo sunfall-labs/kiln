@@ -263,7 +263,7 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
-static kiln_value kiln_test_value_slots[5];
+static kiln_value kiln_test_value_slots[13];
 static kiln_gc_visit_roots_fn kiln_test_registered_visitors[32];
 static void *kiln_test_registered_contexts[32];
 static size_t kiln_test_registered_count = 0;
@@ -551,7 +551,7 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     return KILN_C99_OK;
 }
 int kiln_realm_value_slot(uint32_t key, void **out_slot) {
-    if (!kiln_test_realm_active || key == 0 || key > 5 || out_slot == NULL)
+    if (!kiln_test_realm_active || key == 0 || key > 13 || out_slot == NULL)
         return KILN_C99_INVALID_ARGUMENT;
     *out_slot = &kiln_test_value_slots[key - 1];
     return KILN_C99_OK;
@@ -781,7 +781,7 @@ int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit, 
     size_t index;
     (void)heap;
     if (!kiln_test_realm_active || visit == NULL) return KILN_C99_INVALID_ARGUMENT;
-    for (index = 0; index < 5; ++index)
+    for (index = 0; index < 13; ++index)
         if (visit(context, &kiln_test_value_slots[index], KILN_GC_VISIT_VALUE) != 0)
             return KILN_C99_HOST_ERROR;
     for (index = 0; index < kiln_test_callable_store_count; ++index)
