@@ -4558,7 +4558,15 @@ impl Lowerer<'_> {
                 )
                 .ok_or("class method without a body")?;
             match method.kind {
-                MethodDefinitionKind::Constructor => constructor = Some(lowered),
+                MethodDefinitionKind::Constructor => {
+                    let mut lowered = lowered;
+                    self.assign_parameter_properties(
+                        &method.value.params,
+                        class.heritage.is_some(),
+                        &mut lowered,
+                    );
+                    constructor = Some(lowered);
+                }
                 kind @ (MethodDefinitionKind::Method
                 | MethodDefinitionKind::Get
                 | MethodDefinitionKind::Set) => {
@@ -4593,6 +4601,66 @@ impl Lowerer<'_> {
             initialisers,
             span: statement_span,
         })
+    }
+
+    /// TypeScript parameter properties: `constructor(public x, private readonly y)` declares and
+    /// assigns `this.x` and `this.y`. They are lowered as TypeScript emits them, an assignment
+    /// per parameter at the start of the body, or straight after the top-level `super(...)`
+    /// call in a derived class, since `this` does not exist before it.
+    fn assign_parameter_properties(
+        &mut self,
+        parameters: &FormalParameters<'_>,
+        derived: bool,
+        constructor: &mut HirFunction,
+    ) {
+        let assignments: Vec<HirStatement> = parameters
+            .items
+            .iter()
+            .filter(|p| p.accessibility.is_some() || p.readonly || p.r#override)
+            .filter_map(|p| {
+                let name = p.pattern.get_identifier_name()?.to_string();
+                let at = span(p.span);
+                Some(HirStatement {
+                    kind: HirStatementKind::Expression(HirExpression {
+                        kind: HirExpressionKind::MemberAssignment {
+                            operator: kiln_hir::AssignmentOperator::Assign,
+                            object: Box::new(HirExpression {
+                                kind: HirExpressionKind::This,
+                                span: at,
+                            }),
+                            property: name.clone(),
+                            value: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier(name),
+                                span: at,
+                            }),
+                        },
+                        span: at,
+                    }),
+                    span: at,
+                })
+            })
+            .collect();
+        if assignments.is_empty() {
+            return;
+        }
+        let insert_at = if derived {
+            constructor
+                .body
+                .iter()
+                .position(|statement| {
+                    matches!(
+                        &statement.kind,
+                        HirStatementKind::Expression(HirExpression {
+                            kind: HirExpressionKind::SuperCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        constructor.body.splice(insert_at..insert_at, assignments);
     }
 
     /// Lower a parameter list, including defaults and a rest parameter.
