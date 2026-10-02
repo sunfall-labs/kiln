@@ -50,6 +50,31 @@ behave differently from Node.**
    (`.scratch/deploy-with-kiln/`) run with extensions installed and must stay identical to Node. A
    regression an extension causes fails the gate like any other divergence.
 
+### 2026-10-02 amendment: one name per module, Node's modules exactly Node's
+
+**Names.** Every module kiln adds is `kiln:<library>` (and `kiln:<library>/<subpath>`), as Node's
+are `node:<name>` (ADR 0074 §1 gives the reasons). No package re-exports one under a second name;
+`@kiln/concurrency` (a second name for `kiln:actors`) and `@kiln/effect` were removed for that.
+Editors get every `kiln:` module's types, and the parallel collection methods', from one package,
+`@kiln/types`, generated from the engine's sources by `scripts/gen-kiln-types.sh`, the way
+`@types/node` describes `node:*`.
+
+**A `node:` module is Node's and nothing else.** `node:process` (and bare `process`) is the global
+`process`: its default export is that object and its named exports are its own enumerable
+members, so `import { on } from "node:process"` fails at link time exactly as in Node. kiln's
+process API (`run`) is `kiln:process`, never a member of `process` or a name in Node's namespace.
+`process.cwd`, `exit`, `kill`, `nextTick`, `hrtime` and `getBuiltinModule` are enumerable own
+properties and the emitter methods inherited, as in Node; host hooks are not enumerable.
+
+**One virtual path per module.** A builtin's virtual path carries its scheme --
+`.kiln/builtins/<scheme>/<name>.builtin`, so `.kiln/builtins/node/process.builtin` and
+`.kiln/builtins/kiln/process.builtin` -- and the path names exactly one specifier
+(`ModuleSpecifier::virtual_path` and its inverse, `builtin`). Before, `node:process` and
+`kiln:process` shared a path.
+
+**Internal modules.** A `kiln:` module that exists only to share code between other builtins
+(`kiln:actors/core`, `kiln:actors/worker`) is not importable from a program.
+
 ## Consequences
 
 - kiln can grow built-ins that make it more capable than Node without becoming less compatible.

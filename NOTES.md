@@ -55,3 +55,37 @@ printed nothing until it was killed. Protocol 38 adds `stream_output`: the daemo
 CLI writes and flushes them as they arrive. A corpus run captures in-process and cannot see the
 difference; the `kiln-cli` one-shot test `a_servers_listening_line_reaches_the_client_before_the_server_exits`
 is the one that fails without streaming.
+
+---
+
+## kiln's own modules, audited: actors, shared, parallel, process (2026-10-02)
+
+An audit of `kiln:actors`, `kiln:shared`, the parallel family and the packages around them found
+more in the engines than in the modules. What landed, and what is worth knowing next time:
+
+- **`continue` inside `try` unprotected the rest of the body, natively.** `kiln-graph` computed a
+  block's exception handler by scanning code in order, so the `PopHandler` a `continue` jumps past
+  ended the protected region for everything after it; the next throw escaped every `catch`. It
+  surfaced as an actor realm dying on a method's first throw. Handler stacks now travel along CFG
+  edges (`conformance/native/try-early-exit-handlers.mjs`).
+- **A worker's ports outlived it.** A port that went to a worker in a message stayed open after
+  the worker died, so its partner never saw `close`, and every actor call in flight when an actor
+  crashed waited forever. Endpoints now record the worker realm holding them and close with it.
+- **The interpreter evaluated modules once per import plan, not once per realm.** `import()` of a
+  module the static graph already ran gave a second instance, which is why `kiln:actors` used a
+  forgeable `Symbol.for` brand. One module map per realm now (`module_map.rs`).
+- **A native realm asleep on a timer ignores port and worker wakes**, and a worker beside a
+  pending timer may not run at all until it fires. In flight on `work/audit-tla` at the time of
+  writing; every existing worker probe spawns itself, which is why none caught it.
+- **Native workers from `{ eval: true }` cannot run** (no run-time compiler) -- a probe that
+  swallows the worker's `error` reads as any other failure. Spawn `new URL(import.meta.url)`.
+- **The daemon wedges behind a program that never ends.** A hung `kiln run` holds the daemon,
+  and every later client blocks in the handshake. Use `--one-shot` for anything that might hang,
+  and `kiln daemon stop` when a run stops printing.
+- **kiln has no unreferenced timers**: `setTimeout().unref()` and `AbortSignal.timeout` keep a
+  program alive where node exits. Not fixed; a probe that relies on node exiting early diverges.
+
+Packages: `@kiln/concurrency` and `@kiln/effect` are gone; `@kiln/types` declares every `kiln:`
+module (ADR 0068's 2026-10-02 amendment). With several agents building at once the disk hit 100%
+twice and mbx's auto-gc evicted live targets: build once at the end, and clear your own
+`.kiln/bin` after every corpus run.
