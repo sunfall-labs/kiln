@@ -209,6 +209,13 @@ min_delta_ms = float(min_delta_str)
 passes = max(1, int(passes_str))
 warmup = max(0, int(warmup_str))
 node_platform = set(node_platform_str.split())
+production_profiles = {"native-release", "native-release-size", "native-size", "native-profile"}
+profile_env = os.environ.copy()
+profile_env["TZ"] = "UTC"
+if profile in production_profiles:
+    # Keep the Node oracle, compiler's .env selection, and the generated runtime's
+    # KILN_NODE_ENV_PRODUCTION value aligned, as in conformance/npm-compat/runner.py.
+    profile_env["NODE_ENV"] = "production"
 
 DEFAULT_BASELINE_BUNDLES = [
     "postcss", "zod", "acorn", "chalk", "datefns", "dayjs", "immer",
@@ -380,7 +387,7 @@ def build_one(name):
     bin_path = os.path.join(work_dir, f"{name}.bin")
     adapter = ["--node"] if name in node_platform else []
     build_cmd = [kiln, "--one-shot", *adapter, "build", bundle_path, "--profile", profile, "--output", bin_path]
-    built = subprocess.run(build_cmd, capture_output=True, text=True)
+    built = subprocess.run(build_cmd, capture_output=True, text=True, env=profile_env)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if built.returncode != 0 or not os.path.exists(bin_path):
         err_snippet = built.stderr.strip().splitlines()
@@ -436,7 +443,7 @@ for index, name in enumerate(bundle_names, 1):
 
     # Validate the exact profile being timed, independently of the dev-profile parity lane.
     # A release build that computes different bytes is not a performance measurement.
-    oracle_env = os.environ.copy()
+    oracle_env = profile_env.copy()
     oracle_env["TZ"] = "UTC"
     bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
     oracle = subprocess.run(["node", bundle_path], capture_output=True, env=oracle_env)

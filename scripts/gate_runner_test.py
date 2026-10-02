@@ -110,18 +110,22 @@ sys.exit(8 if mismatch == 'status' else 7)
 
     def benchmark_fixture(self, root, bundle_names, baseline_path, *, build_fail=False,
                           runtime_exit=0, node_exit=0, runtime_stdout="oracle\n", runtime_stderr="",
-                          runtime_sleep=0, update=False, create_bundles=True):
+                          runtime_sleep=0, update=False, create_bundles=True,
+                          profile="native-release", node_env=None, echo_profile_env=False,
+                          bundle_source=None):
         (root / "probes").mkdir(exist_ok=True)
         if create_bundles:
             for name in bundle_names:
                 node_exit_statement = f"process.exitCode = {node_exit};\n" if node_exit else ""
                 (root / f"{name}.bundle.js").write_text(
-                    "process.stdout.write('oracle\\n');\n" + node_exit_statement
+                    (bundle_source or "process.stdout.write('oracle\\n');\n") + node_exit_statement
                 )
         kiln = root / "kiln"
         kiln.write_text("""#!/usr/bin/env python3
 import os, pathlib, sys
 if 'build' in sys.argv:
+    pathlib.Path(os.environ['FIXTURE_BUILD_ENV_LOG']).write_text(
+        __import__('json').dumps({'node_env': os.environ.get('NODE_ENV'), 'tz': os.environ.get('TZ')}))
     if os.environ.get('FIXTURE_BUILD_FAIL') == '1':
         print('intentional build failure', file=sys.stderr)
         sys.exit(3)
@@ -130,7 +134,10 @@ if 'build' in sys.argv:
 import os, sys
 import time
 time.sleep(float(os.environ.get('FIXTURE_BINARY_SLEEP', '0')))
-sys.stdout.write(os.environ.get('FIXTURE_BINARY_STDOUT', ''))
+if os.environ.get('FIXTURE_ECHO_PROFILE_ENV') == '1':
+    sys.stdout.write(str(os.environ.get('NODE_ENV')) + '|' + str(os.environ.get('TZ')))
+else:
+    sys.stdout.write(os.environ.get('FIXTURE_BINARY_STDOUT', ''))
 sys.stderr.write(os.environ.get('FIXTURE_BINARY_STDERR', ''))
 sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
 ''')
@@ -142,6 +149,7 @@ sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
             KILN_BIN=str(kiln),
             KILN_THIRDPARTY_DIR=str(root),
             KILN_THIRDPARTY_NATIVE="0",
+            KILN_THIRDPARTY_PROFILE=profile,
             KILN_JOBS="1",
             KILN_THIRDPARTY_BUILD_JOBS="1",
             FIXTURE_BUILD_FAIL="1" if build_fail else "0",
@@ -149,7 +157,12 @@ sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
             FIXTURE_BINARY_STDOUT=runtime_stdout,
             FIXTURE_BINARY_STDERR=runtime_stderr,
             FIXTURE_BINARY_SLEEP=str(runtime_sleep),
+            FIXTURE_ECHO_PROFILE_ENV="1" if echo_profile_env else "0",
+            FIXTURE_BUILD_ENV_LOG=str(root / "build-env.json"),
         )
+        environment.pop("NODE_ENV", None)
+        if node_env is not None:
+            environment["NODE_ENV"] = node_env
         command = [
             str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
             "--bundles", ",".join(bundle_names), "--passes", "1", "--warmup", "0",
@@ -387,6 +400,26 @@ output.chmod(0o755)
             refreshed = json.loads(baseline_path.read_text())
             _, refreshed_record = next(iter(refreshed["platforms"].items()))
             self.assertGreater(refreshed_record["bundles"]["fixture"]["median_ms"], 0.01)
+
+    def test_profile_environment_matches_build_oracle_and_every_native_run(self):
+        bundle_source = "process.stdout.write(String(process.env.NODE_ENV)+'|'+String(process.env.TZ));\n"
+        for profile, inherited_node_env, expected_node_env in (
+            ("native-release", None, "production"),
+            ("native-release", "development", "production"),
+            ("native-dev", "development", "development"),
+        ):
+            with self.subTest(profile=profile, inherited_node_env=inherited_node_env):
+                with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-profile-env-") as directory:
+                    root = Path(directory)
+                    result = self.benchmark_fixture(
+                        root, ["fixture"], root / "baseline.json", update=True,
+                        profile=profile, node_env=inherited_node_env,
+                        echo_profile_env=True, bundle_source=bundle_source,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    build_environment = json.loads((root / "build-env.json").read_text())
+                    self.assertEqual(build_environment,
+                                     {"node_env": expected_node_env, "tz": "UTC"})
 
 
 if __name__ == "__main__":
