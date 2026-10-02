@@ -900,6 +900,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         runtime: &mut RealmRuntime,
     ) -> Result<(), ExecutionError> {
+        let result = self.run_event_loop_turns(runtime);
+        // The run is over: a partial line `stdout.write` left pending is written as it is.
+        self.flush_stdio();
+        result
+    }
+
+    fn run_event_loop_turns(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks(runtime)?;
             // Before asking for a timer, because settling a wait queues reactions and those are

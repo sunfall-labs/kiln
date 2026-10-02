@@ -1460,8 +1460,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 if let Some(warning) = warning {
                     let text = Value::String(warning.trim_end_matches('\n').to_owned().into());
-                    self.host
-                        .call(HostOp::WriteStderr, &[HostValue::from(text)])
+                    self.host_line(true, vec![HostValue::from(text)])
                         .map_err(|error| ExecutionError::Host {
                             instruction,
                             message: error.to_string(),
@@ -1933,6 +1932,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Some(v) => v.as_number() as i32,
                     None => 0,
                 };
+                self.flush_stdio();
                 return Err(ExecutionError::ProcessExited(code));
             }
             Native::ProcessStdinSetRawMode => {

@@ -442,17 +442,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     let args_start = self.stack.len() - argc;
                     let mut args = self.stack.drain(args_start..).collect::<Vec<_>>();
-                    if matches!(op, HostOp::WriteStdout | HostOp::WriteStderr) {
+                    let line = matches!(op, HostOp::WriteStdout | HostOp::WriteStderr);
+                    if line {
                         args = self.console_arguments(args, current)?;
                     }
                     let args = args.into_iter().map(HostValue::from).collect::<Vec<_>>();
-                    let result =
-                        self.host
-                            .call(*op, &args)
-                            .map_err(|error| ExecutionError::Host {
-                                instruction: current,
-                                message: error.to_string(),
-                            })?;
+                    let result = if line {
+                        self.host_line(*op == HostOp::WriteStderr, args)
+                    } else {
+                        self.host.call(*op, &args)
+                    }
+                    .map_err(|error| ExecutionError::Host {
+                        instruction: current,
+                        message: error.to_string(),
+                    })?;
                     self.stack.push(result.into());
                 }
                 Instruction::MakeFunction(index) => {

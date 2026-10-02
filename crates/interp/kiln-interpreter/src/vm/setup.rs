@@ -51,6 +51,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             global_objects: vec![None],
             regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
             process_object: None,
+            pending_stdio: [String::new(), String::new()],
             intrinsics: Rc::new(Intrinsics::default()),
             native_depth: 0,
             frames: Vec::new(),

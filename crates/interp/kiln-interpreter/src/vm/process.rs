@@ -148,18 +148,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             data.set("isTTY", Value::Boolean(stderr_is_tty));
         }
         process.set("stderr", stderr);
-        process.set_non_enumerable(
+        // Node's process functions are ordinary enumerable own properties: `Object.keys(process)`
+        // lists them there, so it lists them here.
+        process.set(
             "hrtime",
             Value::Native(Native::ProcessHrtime, RealmId::PRIMARY),
         );
-        process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
-        process.set_non_enumerable("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
-        process.set_non_enumerable("exit", Value::Native(Native::ProcessExit, RealmId::PRIMARY));
-        process.set_non_enumerable(
+        process.set("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
+        process.set("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
+        process.set("exit", Value::Native(Native::ProcessExit, RealmId::PRIMARY));
+        process.set(
             "nextTick",
             Value::Native(Native::ProcessNextTick, RealmId::PRIMARY),
         );
-        process.set_non_enumerable(
+        process.set(
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule, RealmId::PRIMARY),
         );

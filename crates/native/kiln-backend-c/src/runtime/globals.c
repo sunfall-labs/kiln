@@ -117,8 +117,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     status = kiln_c99_new_object(process);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnFsDescriptor", 18,
-                              kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW), 0, NULL);
+        status = kiln_c99_define_method(*process, "__kilnFsDescriptor", 18,
+                              kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW));
     /* Runtime capabilities live on this non-enumerable process table, never as global names.
      * The TypeScript Node facades capture and remove the bootstrap-only members before user code
      * runs, while the CommonJS decorator remains available to the graph runtime. */
@@ -411,26 +411,28 @@ static int kiln_c99_process_object(kiln_value *out) {
             status = kiln_c99_put(NULL, *process, "stderr", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "nextTick", 8,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK));
+        /* Node's process functions are enumerable own properties (`Object.keys(process)` lists
+         * them); the private hooks above and below are not. */
+        status = kiln_c99_put(NULL, *process, "nextTick", 8,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "hrtime", 6,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
+        status = kiln_c99_put(NULL, *process, "hrtime", 6,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "cwd", 3,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
+        status = kiln_c99_put(NULL, *process, "cwd", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "kill", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL));
+        status = kiln_c99_put(NULL, *process, "kill", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "exit", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT));
+        status = kiln_c99_put(NULL, *process, "exit", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnHostProcessStart", 22,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW), 0, NULL);
+        status = kiln_c99_define_method(*process, "__kilnHostProcessStart", 22,
+                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW));
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnHostProcessCancel", 23,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW), 0, NULL);
+        status = kiln_c99_define_method(*process, "__kilnHostProcessCancel", 23,
+                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW));
 #if KILN_RETAIN_GROUP_NODE_NET
     /* The public node:net module is a TypeScript facade. Its per-socket pause/resume/read and
      * cork methods reach these private kernels through process.__kilnNativeModules.net; keeping

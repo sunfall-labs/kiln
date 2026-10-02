@@ -110,11 +110,13 @@ pub enum NodeBuiltin {
     V8,
     Vm,
     GuiJsxRuntime,
+    NodeProcess,
 }
 
 impl NodeBuiltin {
     pub const ALL: &[Self] = &[
         Self::Process,
+        Self::NodeProcess,
         Self::Shared,
         Self::Actors,
         Self::ActorsCore,
@@ -168,7 +170,10 @@ impl NodeBuiltin {
             return None;
         }
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
-            "process" | "kiln:process" => Self::Process,
+            // Node's `process` module is the global `process` object; kiln's own process API
+            // (`run`) is a separate extension module and never part of Node's namespace.
+            "process" => Self::NodeProcess,
+            "kiln:process" => Self::Process,
             "kiln:shared" => Self::Shared,
             "kiln:actors" => Self::Actors,
             "kiln:actors/core" => Self::ActorsCore,
@@ -223,6 +228,7 @@ impl NodeBuiltin {
     pub const fn specifier(self) -> &'static str {
         match self {
             Self::Process => "kiln:process",
+            Self::NodeProcess => "node:process",
             Self::Shared => "kiln:shared",
             Self::Actors => "kiln:actors",
             Self::ActorsCore => "kiln:actors/core",
@@ -272,16 +278,20 @@ impl NodeBuiltin {
         }
     }
 
+    /// Where the module graph records this builtin: `.kiln/builtins/<scheme>/<name>.builtin`.
+    /// The scheme is part of the path because `node:process` and `kiln:process` are different
+    /// modules and must not share a node in the graph.
     pub fn virtual_path(self, project_root: &Path) -> PathBuf {
-        project_root
-            .join(".kiln")
-            .join("builtins")
-            .join(
-                self.specifier()
-                    .trim_start_matches("node:")
-                    .trim_start_matches("kiln:"),
-            )
-            .with_extension("builtin")
+        let (scheme, name) = self
+            .specifier()
+            .split_once(':')
+            .expect("every builtin specifier has a scheme");
+        let mut path = project_root.join(".kiln").join("builtins").join(scheme);
+        for segment in name.split('/') {
+            path.push(segment);
+        }
+        path.set_extension("builtin");
+        path
     }
 }
 
@@ -305,28 +315,23 @@ impl ResolvedModule {
         if self.kind != ResolutionKind::Builtin {
             return None;
         }
-        let mut components = self.path.components().rev();
-        let file = components.next()?.as_os_str().to_str()?;
-        let stem = file.strip_suffix(".builtin")?;
-        let parent = components.next()?.as_os_str().to_str()?;
-        // A kiln namespace's subpath (`kiln:actors/core`, `kiln:gui/jsx-runtime`) before a Node
-        // one (`fs/promises`): the two never share a name.
-        let kiln_subpath = format!("kiln:{parent}/{stem}");
-        let name = if parent != "builtins" && NodeBuiltin::parse(&kiln_subpath).is_some() {
-            kiln_subpath
-        } else if parent == "builtins" {
-            // Kiln namespaces use an unprefixed virtual path. Preserve their identity here
-            // without making the same bare names or `node:` names aliases.
-            let candidate = format!("kiln:{stem}");
-            if NodeBuiltin::parse(&candidate).is_some() {
-                candidate
-            } else {
-                stem.to_owned()
-            }
-        } else {
-            format!("{parent}/{stem}")
-        };
-        NodeBuiltin::parse(&name)
+        // `.kiln/builtins/<scheme>/<name...>.builtin`, the inverse of `virtual_path`.
+        let components: Vec<&str> = self
+            .path
+            .components()
+            .map(|component| component.as_os_str().to_str())
+            .collect::<Option<_>>()?;
+        let builtins = components
+            .iter()
+            .rposition(|component| *component == "builtins")?;
+        let (scheme, rest) = components[builtins + 1..].split_first()?;
+        let mut name = rest.join("/");
+        name.truncate(name.strip_suffix(".builtin")?.len());
+        let specifier = format!("{scheme}:{name}");
+        let builtin = NodeBuiltin::parse(&specifier)?;
+        // A spelling must round-trip: `node:fs` and `fs` parse alike, but only the canonical
+        // path names a builtin.
+        (builtin.specifier() == specifier).then_some(builtin)
     }
 }
 
@@ -2564,6 +2569,26 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_virtual_path_names_exactly_that_builtin() {
+        let root = Path::new("/project");
+        let mut seen = std::collections::BTreeSet::new();
+        for &builtin in NodeBuiltin::ALL {
+            let path = builtin.virtual_path(root);
+            assert!(seen.insert(path.clone()), "{builtin:?} shares {path:?}");
+            let module = ResolvedModule::new(path, ResolutionKind::Builtin);
+            assert_eq!(module.builtin(), Some(builtin));
+        }
+        assert_eq!(
+            NodeBuiltin::NodeProcess.virtual_path(root),
+            Path::new("/project/.kiln/builtins/node/process.builtin")
+        );
+        assert_eq!(
+            NodeBuiltin::Process.virtual_path(root),
+            Path::new("/project/.kiln/builtins/kiln/process.builtin")
+        );
+    }
+
+    #[test]
     fn bounded_node_builtin_parse_and_specifier_round_trip() {
         assert_eq!(NodeBuiltin::parse("kiln:shared"), Some(NodeBuiltin::Shared));
         assert_eq!(NodeBuiltin::parse("kiln:gui"), Some(NodeBuiltin::Gui));
@@ -2604,6 +2629,14 @@ mod tests {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));
             if builtin == NodeBuiltin::Process {
                 assert_eq!(NodeBuiltin::parse("kiln:process"), Some(builtin));
+                assert_eq!(
+                    NodeBuiltin::parse("process"),
+                    Some(NodeBuiltin::NodeProcess)
+                );
+                assert_eq!(
+                    NodeBuiltin::parse("node:process"),
+                    Some(NodeBuiltin::NodeProcess)
+                );
             } else {
                 assert_eq!(
                     NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),

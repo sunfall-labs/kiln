@@ -1803,11 +1803,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     {
                         let fd = fd_bits as i32;
                         if fd == 1 || fd == 2 {
-                            let op = if fd == 1 {
-                                HostOp::WriteStdout
-                            } else {
-                                HostOp::WriteStderr
-                            };
                             let text = match &chunk {
                                 Value::String(s) => s.to_lossy_string(),
                                 Value::TypedArray(view) => {
@@ -1818,23 +1813,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 }
                                 _ => String::new(),
                             };
-                            if !text.is_empty() {
-                                let trimmed = text
-                                    .strip_suffix("\r\n")
-                                    .or_else(|| text.strip_suffix('\n'))
-                                    .unwrap_or(&text);
-                                self.host
-                                    .call(
-                                        op,
-                                        &[HostValue::from(Value::String(
-                                            trimmed.to_owned().into(),
-                                        ))],
-                                    )
-                                    .map_err(|error| ExecutionError::Host {
-                                        instruction,
-                                        message: error.to_string(),
-                                    })?;
-                            }
+                            // Exactly what was written: no newline added, none removed.
+                            self.write_stdio(fd == 2, &text).map_err(|error| {
+                                ExecutionError::Host {
+                                    instruction,
+                                    message: error.to_string(),
+                                }
+                            })?;
                         }
                     }
                     if let Some(callback) = callback {
@@ -6122,6 +6107,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     }
 
     pub(crate) fn run_node_event_loop_inner(
+        &mut self,
+        runtime: &mut RealmRuntime,
+        until_module: bool,
+    ) -> Result<(), ExecutionError> {
+        let result = self.run_node_event_loop_turns(runtime, until_module);
+        if !until_module || result.is_err() {
+            // The run is over: a partial line `stdout.write` left pending is written as it is.
+            self.flush_stdio();
+        }
+        result
+    }
+
+    fn run_node_event_loop_turns(
         &mut self,
         runtime: &mut RealmRuntime,
         until_module: bool,

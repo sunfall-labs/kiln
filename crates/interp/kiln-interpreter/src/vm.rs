@@ -224,6 +224,11 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// production answer), and enough identity to log. It is deliberately not node's `process`
     /// and has no way to exit, spawn, or reach a file system.
     pub(super) process_object: Option<Value>,
+    /// The unterminated tail of what `process.stdout.write` / `process.stderr.write` wrote.
+    /// Host output operations write whole lines, so a partial line waits here: the next write
+    /// completes it, the next `console.log` on the stream continues it, and the end of the run
+    /// flushes it (see `Vm::write_stdio`).
+    pub(super) pending_stdio: [String; 2],
     /// The built-ins a program has mutated, and how.
     ///
     /// A realm root like `global_object` and `error_prototypes`: `Math.max.name` and

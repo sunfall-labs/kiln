@@ -1,6 +1,70 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// Writes one console line to standard output (`stderr` false) or standard error. A partial
+    /// line `write` left pending continues on it, as on a terminal.
+    pub(super) fn host_line(
+        &mut self,
+        stderr: bool,
+        mut arguments: Vec<HostValue>,
+    ) -> Result<HostValue, kiln_host_abi::HostError> {
+        let pending = std::mem::take(&mut self.pending_stdio[usize::from(stderr)]);
+        if !pending.is_empty() {
+            match arguments.first_mut() {
+                Some(first) => {
+                    *first = HostValue::String((pending + &first.to_console_string()).into());
+                }
+                None => arguments.push(HostValue::String(pending.into())),
+            }
+        }
+        let op = if stderr {
+            HostOp::WriteStderr
+        } else {
+            HostOp::WriteStdout
+        };
+        self.host.call(op, &arguments)
+    }
+
+    /// `stream.write(text)` on standard output or error: emits every completed line and keeps
+    /// the unterminated rest pending, so `write("a")` prints `a` and no newline.
+    pub(super) fn write_stdio(
+        &mut self,
+        stderr: bool,
+        text: &str,
+    ) -> Result<(), kiln_host_abi::HostError> {
+        let op = if stderr {
+            HostOp::WriteStderr
+        } else {
+            HostOp::WriteStdout
+        };
+        let index = usize::from(stderr);
+        self.pending_stdio[index].push_str(text);
+        while let Some(end) = self.pending_stdio[index].find('\n') {
+            let line: String = self.pending_stdio[index].drain(..=end).collect();
+            let line = line
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_owned();
+            self.host.call(op, &[HostValue::String(line.into())])?;
+        }
+        Ok(())
+    }
+
+    /// Emits whatever partial lines are still pending (the run is ending or exiting).
+    pub(crate) fn flush_stdio(&mut self) {
+        for stderr in [false, true] {
+            let pending = std::mem::take(&mut self.pending_stdio[usize::from(stderr)]);
+            if !pending.is_empty() {
+                let op = if stderr {
+                    HostOp::WriteStderr
+                } else {
+                    HostOp::WriteStdout
+                };
+                let _ = self.host.call(op, &[HostValue::String(pending.into())]);
+            }
+        }
+    }
+
     /// `new Console(stdout, [stderr])` or `new Console({ stdout, stderr, ... })`.
     pub(super) fn construct_console(
         &mut self,
@@ -197,13 +261,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .into_iter()
             .map(HostValue::from)
             .collect::<Vec<_>>();
-        let operation = if is_stderr {
-            HostOp::WriteStderr
-        } else {
-            HostOp::WriteStdout
-        };
-        self.host
-            .call(operation, &host_args)
+        self.host_line(is_stderr, host_args)
             .map_err(|error| ExecutionError::Host {
                 instruction,
                 message: error.to_string(),

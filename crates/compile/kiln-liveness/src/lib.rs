@@ -959,6 +959,9 @@ pub fn retained_method_groups(
     fn builtin_groups(builtin: &NodeBuiltin) -> Option<u32> {
         use NodeBuiltin::*;
         Some(match builtin {
+            // `node:process` exports the global object's members, emitter methods and streams
+            // among them, read when the module loads.
+            NodeProcess => groups::NODE_EVENT | groups::NODE_STREAM,
             Http | Https | Http2 => {
                 groups::URL
                     | groups::NODE_HTTP

@@ -2297,6 +2297,9 @@ pub(super) const ASYNC_DISPOSABLE_STACK_MEMBERS: intrinsic_members::NamedMembers
     intrinsic_members::NamedMembers::new(&["use", "adopt", "defer", "move", "disposeAsync"]);
 pub(super) const FINALIZATION_REGISTRY_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["register", "unregister"]);
+// Every name `events::prototype_property` answers: a name that reads but is missing here is
+// invisible to `in`, `hasOwnProperty` and `getOwnPropertyNames` while still callable. The order
+// is the native backend's (`kiln_c99_install_event_emitter_methods`), which enumeration exposes.
 pub(super) const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "on",
@@ -2304,9 +2307,12 @@ pub(super) const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
         "once",
         "emit",
         "listeners",
-        "eventNames",
+        "listenerCount",
+        "removeListener",
+        "off",
         "removeAllListeners",
         "setMaxListeners",
+        "eventNames",
     ]);
 pub(super) const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
