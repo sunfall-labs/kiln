@@ -208,9 +208,15 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
     let entry = project.join("main.mjs");
     fs::write(
         &entry,
-        "import { publicName } from './barrel.mjs'; console.log(publicName());",
+        "import { publicName } from './facade.mjs'; console.log(publicName());",
     )
     .expect("write entry");
+    let facade = project.join("facade.mjs");
+    fs::write(
+        &facade,
+        "export { publicName } from './barrel.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write facade");
     let barrel = project.join("barrel.mjs");
     fs::write(
         &barrel,
@@ -250,6 +256,10 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
         Some(&previous),
         "release DCE must keep the public export wired to its original provider"
     );
+    assert!(matches!(
+        specialized.resolved_export(&facade, "publicName"),
+        Some(ResolvedExport::Local { module, .. }) if module == &provider
+    ));
     let specialized_barrel = specialized.module(&barrel).expect("specialized barrel");
     let export = specialized_barrel
         .program
