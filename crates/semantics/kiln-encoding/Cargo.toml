@@ -1,0 +1,12 @@
+[package]
+name = "kiln-encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `TextDecoder`'s label resolution and decoding over `encoding_rs`: one implementation beneath
+# the interpreter and the native provider (ADR 0060, ADR 0063 rule 4), for the reason `kiln-url`
+# and `kiln-node-path` sit there.
+[dependencies]
+encoding_rs = { workspace = true }

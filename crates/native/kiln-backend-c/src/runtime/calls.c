@@ -601,7 +601,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
         return kiln_c99_new_text_encoder(result);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_DECODER) {
-        return kiln_c99_new_text_decoder(result, args, argc, thrown);
+        return kiln_c99_new_text_decoder(host, result, args, argc, depth, thrown);
     }
     if (callee.tag == KILN_VALUE_BOUND) {
         /* `[[Construct]]` on a bound function prepends the bound arguments and forwards to the

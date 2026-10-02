@@ -69,6 +69,8 @@ crates/host/kiln-shared-graph/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/main.rs
 crates/native/kiln-native/Cargo.toml
+crates/semantics/kiln-encoding/Cargo.toml
+crates/semantics/kiln-encoding/src/lib.rs
 crates/semantics/kiln-url/Cargo.toml
 crates/semantics/kiln-url/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/number.rs

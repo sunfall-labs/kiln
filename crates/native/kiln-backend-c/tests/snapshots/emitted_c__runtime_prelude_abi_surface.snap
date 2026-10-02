@@ -1,6 +1,5 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 813
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1477,6 +1476,8 @@ int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len, c
 int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_url_parse(const uint8_t *input, uint64_t input_len, const uint8_t *base, uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_url_set(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_text_decoder_label(const uint8_t *label, uint64_t label_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_text_decode(const uint8_t *name, uint64_t name_len, const uint8_t *bytes, uint64_t bytes_len, uint32_t flags, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_string_case(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const kiln_string *key, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, kiln_string *out_key);
@@ -1703,7 +1704,8 @@ static int kiln_c99_install_writable_methods(kiln_value target);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
 static int kiln_c99_new_text_encoder(kiln_value *out);
-static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
+static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
@@ -2764,7 +2766,11 @@ static int kiln_c99_new_abort_signal(kiln_value *out) {
 static int kiln_c99_new_abort_controller(kiln_value *out) {
 static int kiln_c99_new_text_encoder(kiln_value *out) {
 static int kiln_c99_ascii_iequals(const char *a, const char *b, size_t len) {
-static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_text_decoder_provider(kiln_value *out, int decode, const uint8_t *name,
+static int kiln_c99_text_decoder_utf8(kiln_value value, uint8_t **owned, size_t *len) {
+static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int depth,
+static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
+static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
 static int kiln_c99_buffer_encoding_is(const char *name, size_t length, const char *wanted) {

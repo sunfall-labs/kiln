@@ -18,6 +18,7 @@ kiln-temporal = { workspace = true }
 kiln-json = { workspace = true }
 kiln-intl = { workspace = true, features = ["timezone_database"] }
 kiln-url = { workspace = true }
+kiln-encoding = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-key-core = { workspace = true }

@@ -48,6 +48,7 @@ kiln-intl = { path = "crates/semantics/kiln-intl" }
 kiln-native-toolchain = { path = "crates/native/kiln-native-toolchain" }
 kiln-node-path = { path = "crates/semantics/kiln-node-path" }
 kiln-url = { path = "crates/semantics/kiln-url" }
+kiln-encoding = { path = "crates/semantics/kiln-encoding" }
 kiln-conformance = { path = "crates/tools/kiln-conformance" }
 kiln-proto = { path = "crates/foundation/kiln-proto" }
 kiln-daemon = { path = "crates/tools/kiln-daemon" }

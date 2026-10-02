@@ -302,8 +302,11 @@ static int kiln_c99_install_writable_methods(kiln_value target);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
 static int kiln_c99_new_text_encoder(kiln_value *out);
-static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, size_t argc,
-                                     kiln_value *thrown);
+static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
+                                     size_t argc, int depth, kiln_value *thrown);
+static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
+                                        const uint8_t *bytes, size_t bytes_len, int depth,
+                                        kiln_value *thrown);
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
                           kiln_value *thrown);
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length);

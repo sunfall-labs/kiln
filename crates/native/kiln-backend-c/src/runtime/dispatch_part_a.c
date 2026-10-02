@@ -2933,35 +2933,32 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_TEXT_DECODER_DECODE: {
-            if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED) {
-                *result = kiln_c99_from_units(NULL, 0);
-                return KILN_C99_OK;
-            }
-            if (args[0].tag == KILN_VALUE_TYPED_ARRAY) {
+            const uint8_t *bytes = NULL;
+            size_t byte_len = 0;
+            if (argc != 0 && args[0].tag == KILN_VALUE_TYPED_ARRAY) {
                 kiln_typed_array *ta = kiln_c99_typed_array_of(args[0]);
-                if (ta == NULL || ta->buffer == NULL || ta->buffer->bytes == NULL) {
-                    *result = kiln_c99_from_units(NULL, 0);
-                    return KILN_C99_OK;
+                if (ta != NULL && ta->buffer != NULL && ta->buffer->bytes != NULL) {
+                    byte_len = ta->length * kiln_c99_typed_width(ta->kind);
+                    if (ta->byte_offset + byte_len > ta->buffer->byte_length) {
+                        byte_len = ta->buffer->byte_length > ta->byte_offset
+                                       ? ta->buffer->byte_length - ta->byte_offset : 0;
+                    }
+                    bytes = ta->buffer->bytes + ta->byte_offset;
                 }
-                size_t byte_len = ta->length * kiln_c99_typed_width(ta->kind);
-                if (ta->byte_offset + byte_len > ta->buffer->byte_length) {
-                    byte_len = ta->buffer->byte_length > ta->byte_offset ? ta->buffer->byte_length - ta->byte_offset : 0;
-                }
-                const char *bytes = (const char *)(ta->buffer->bytes + ta->byte_offset);
-                *result = kiln_c99_copy_text(bytes, byte_len);
-                return KILN_C99_OK;
-            }
-            if (args[0].tag == KILN_VALUE_ARRAY_BUFFER) {
+            } else if (argc != 0 && args[0].tag == KILN_VALUE_ARRAY_BUFFER) {
                 kiln_typed_buffer *buf = (kiln_typed_buffer *)(uintptr_t)args[0].bits;
-                if (buf == NULL || buf->bytes == NULL) {
-                    *result = kiln_c99_from_units(NULL, 0);
-                    return KILN_C99_OK;
+                if (buf != NULL && buf->bytes != NULL) {
+                    bytes = buf->bytes;
+                    byte_len = buf->byte_length;
                 }
-                *result = kiln_c99_copy_text((const char *)buf->bytes, buf->byte_length);
-                return KILN_C99_OK;
+            } else if (argc != 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "The provided value is not of type ArrayBuffer or ArrayBufferView");
             }
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                        "The provided value is not of type ArrayBuffer or ArrayBufferView");
+            /* The decoding itself -- label, BOM, `fatal` -- is `kiln-encoding`'s, through the
+             * provider (ADR 0060); an absent or detached buffer decodes as no bytes. */
+            return kiln_c99_text_decoder_decode(host, result, receiver, bytes, byte_len, depth,
+                                                thrown);
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL:

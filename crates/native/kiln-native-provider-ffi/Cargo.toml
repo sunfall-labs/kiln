@@ -57,6 +57,7 @@ kiln-regexp = { workspace = true }
 kiln-shared-graph = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-url = { workspace = true }
+kiln-encoding = { workspace = true }
 # Path-only (not workspace-inherited): Cargo forbids `default-features` on an inherited
 # edge, and this edge must default off so the slim `--no-default-features` build does
 # not unify `kiln-runtime/http` back on through the dependency's own defaults. Every

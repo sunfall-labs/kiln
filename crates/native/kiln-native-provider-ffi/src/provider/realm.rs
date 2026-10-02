@@ -2638,6 +2638,87 @@ pub unsafe extern "C" fn kiln_url_set(
     })
 }
 
+/// `TextDecoder`'s label check, answered by `kiln-encoding` -- the owner the interpreter calls
+/// directly (ADR 0060). `label` is the constructor's argument as UTF-8; the answer is the
+/// canonical lowercase name the `encoding` attribute reports. A label naming no encoding
+/// answers `TEXT_LABEL_INVALID` -- the `RangeError` -- and spills the message to throw.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_label(
+    label: *const u8,
+    label_len: u64,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let Some(label) = (unsafe { borrowed_str(label, label_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        match kiln_encoding::canonical_name(label) {
+            Ok(name) => unsafe { spill(name.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_LABEL_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// `TextDecoder.prototype.decode`: `bytes` decoded as the encoding `name` (the decoder's
+/// `encoding` attribute) into UTF-8. `flags` carries `kiln_encoding::FLAG_FATAL` and
+/// `FLAG_IGNORE_BOM`. A `fatal` decoder given bytes that are not valid answers
+/// `TEXT_DATA_INVALID` -- the `TypeError` -- and spills the message to throw.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decode(
+    name: *const u8,
+    name_len: u64,
+    bytes: *const u8,
+    bytes_len: u64,
+    flags: u32,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let Some(name) = (unsafe { borrowed_str(name, name_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(bytes_len) = usize::try_from(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        let bytes = if bytes.is_null() {
+            if bytes_len != 0 {
+                return INVALID_ARGUMENT;
+            }
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
+        };
+        let fatal = flags & kiln_encoding::FLAG_FATAL != 0;
+        let ignore_bom = flags & kiln_encoding::FLAG_IGNORE_BOM != 0;
+        match kiln_encoding::decode(name, bytes, fatal, ignore_bom) {
+            Ok(text) => unsafe { spill(text.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_DATA_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// The status a `TextDecoder` export answers for a label that names no encoding (`RangeError`).
+pub const TEXT_LABEL_INVALID: i32 = 3;
+/// The status `kiln_text_decode` answers for invalid input under `fatal` (`TypeError`).
+pub const TEXT_DATA_INVALID: i32 = 4;
+
 /// `String.prototype.toUpperCase` / `toLowerCase` beyond ASCII: the full Unicode mapping,
 /// which is Rust's own (`char::to_uppercase`, including the one-to-many cases -- `ß` to
 /// `SS`), over UTF-16 in and out. A lone surrogate passes through unchanged. Spilled the way
@@ -6712,6 +6793,12 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_url_set, url_set) => {
             const _: unsafe extern "C" fn(*const u8, u64, u32, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_url_set;
+        };
+        (realm, kiln_text_decoder_label, text_decoder_label) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_label;
+        };
+        (realm, kiln_text_decode, text_decode) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, u32, *mut u8, u64, *mut u64) -> i32 = kiln_text_decode;
         };
         (realm, kiln_string_case, string_case) => {
             const _: unsafe extern "C" fn(*const u16, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_string_case;

@@ -552,12 +552,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let label = arguments
                     .first()
                     .filter(|value| !matches!(value, Value::Undefined))
-                    .map_or_else(|| "utf-8".to_owned(), Value::to_display_string);
-                let encoding = encoding_rs::Encoding::for_label(label.trim().as_bytes())
-                    .ok_or_else(|| ExecutionError::RangeErrorMessage {
-                        message: format!("The encoding label provided ('{label}') is invalid"),
-                    })?;
-                let encoding_name = encoding.name().to_ascii_lowercase();
+                    .map_or_else(
+                        || kiln_encoding::DEFAULT_LABEL.to_owned(),
+                        Value::to_display_string,
+                    );
+                // Label resolution is `kiln-encoding`'s, which the native provider calls too.
+                let encoding_name = kiln_encoding::canonical_name(&label).map_err(|error| {
+                    ExecutionError::RangeErrorMessage {
+                        message: error.message(),
+                    }
+                })?;
                 let fatal = arguments
                     .get(1)
                     .and_then(|options| own_data_property(options, "fatal"))
@@ -599,20 +603,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
                 let ignore_bom =
                     own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
-                let encoding =
-                    encoding_rs::Encoding::for_label(encoding_label.to_lossy_string().as_bytes())
-                        .unwrap_or(encoding_rs::UTF_8);
-                let (decoded, had_errors) = if ignore_bom {
-                    encoding.decode_without_bom_handling(&bytes)
-                } else {
-                    encoding.decode_with_bom_removal(&bytes)
-                };
-                if fatal && had_errors {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The encoded data was not valid for encoding".to_owned(),
-                    });
-                }
-                return Ok(Value::String(decoded.into_owned().into()));
+                let decoded = kiln_encoding::decode(
+                    &encoding_label.to_lossy_string(),
+                    &bytes,
+                    fatal,
+                    ignore_bom,
+                )
+                .map_err(|error| ExecutionError::TypeErrorMessage {
+                    message: error.message(),
+                })?;
+                return Ok(Value::String(decoded.into()));
             }
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {

@@ -2267,6 +2267,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-encoding"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "kiln-frontend-oxc"
 version = "0.1.0"
 dependencies = [
@@ -2349,6 +2356,7 @@ dependencies = [
  "kiln-builtin-surface",
  "kiln-builtins",
  "kiln-date-core",
+ "kiln-encoding",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",
@@ -2524,6 +2532,7 @@ version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
  "kiln-date-core",
+ "kiln-encoding",
  "kiln-host-abi",
  "kiln-host-gui",
  "kiln-intl",
