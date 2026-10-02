@@ -61,7 +61,7 @@ def source_fingerprint(root: Path, workload: Path) -> dict[str, object]:
             "workload_sha256": sha256(workload), "package_lock_sha256": sha256(CORPUS / "package-lock.json")}
 
 
-def run(argv: list[str], timeout: float, cwd: Path) -> tuple[bytes, bytes, float, int]:
+def run(argv: list[str], timeout: float, cwd: Path, timeout_prefix: Path | None = None) -> tuple[bytes, bytes, float, int]:
     start = time.perf_counter()
     process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
@@ -70,16 +70,35 @@ def run(argv: list[str], timeout: float, cwd: Path) -> tuple[bytes, bytes, float
     except subprocess.TimeoutExpired as error:
         out = error.output or b""
         err = error.stderr or b""
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError:
-                pass
-            try:
-                out, err = process.communicate(timeout=0.5)
-                break
-            except subprocess.TimeoutExpired as partial:
-                out, err = partial.output or out, partial.stderr or err
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired as grace:
+            out = grace.output or out
+            err = grace.stderr or err
+        # Always kill the group after the grace period: the leader may have
+        # exited while a child still holds either inherited pipe open.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            out, err = process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired as final:
+            out = final.output or out
+            err = final.stderr or err
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=1.0)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+        if timeout_prefix is not None:
+            timeout_prefix.with_suffix(".stdout.log").write_bytes(out)
+            timeout_prefix.with_suffix(".stderr.log").write_bytes(err)
         raise RuntimeError(f"timeout after {timeout:g}s: {' '.join(argv)}\n"
                            f"stdout={out[-2000:]!r}\nstderr={err[-2000:]!r}")
     return out, err, time.perf_counter() - start, process.returncode
@@ -100,10 +119,10 @@ def parse(label: str, out: bytes, err: bytes, code: int, expected_name: str) -> 
         raise RuntimeError(f"{label} has no checksum: {value!r}")
     for field in ("warm_median", "warm_best"):
         number = value.get(field)
-        if not isinstance(number, (int, float)) or not math.isfinite(number) or number <= 0:
+        if type(number) not in (int, float) or not math.isfinite(number) or number <= 0:
             raise RuntimeError(f"{label} has no positive finite {field}: {value!r}")
-    if not isinstance(value.get("batch"), int) or value["batch"] <= 0 or \
-            not isinstance(value.get("samples"), int) or value["samples"] <= 0:
+    if type(value.get("batch")) is not int or value["batch"] <= 0 or \
+            type(value.get("samples")) is not int or value["samples"] <= 0:
         raise RuntimeError(f"{label} has invalid sample metadata: {value!r}")
     return value
 
@@ -168,70 +187,110 @@ def main() -> int:
         source = source_fingerprint(args.candidate_source, workload)
         source["comparison_scope"] = "candidate-vs-Node; no optimization control or gain claim"
 
-    result_dir = args.results.resolve().parent / (args.results.stem + "-logs")
+    result_path = args.results.resolve()
+    result_dir = result_path.parent / (result_path.stem + "-logs")
     result_dir.mkdir(parents=True, exist_ok=True)
     binaries = {label: {"path": str(path), "sha256": sha256(path)} for label, path in candidates.items()}
-    node_out, node_err, node_wall, node_code = run(["node", str(workload)], args.timeout, CORPUS)
-    reference = parse("Node", node_out, node_err, node_code, expected_name)
-    save_log(result_dir, "node", 0, node_out, node_err)
-    expected_checksum = reference["checksum"]
-    bcrypt_oracle = None
-    if args.workload == "bcryptjs":
-        # This one small oracle call records the deterministic package-level hash and API results.
-        oracle_code = ('const b=require("bcryptjs"); const p="kiln-npm-compat-benchmark", '
-                       's="$2a$08$N9qo8uLOickgx2ZMRZoMye"; const h=b.hashSync(p,s); '
-                       'console.log(JSON.stringify({hash:h,match:b.compareSync(p,h),'
-                       'reject:b.compareSync("wrong password",h)===false,rounds:b.getRounds(h)}))')
-        oracle_out, oracle_err, _, oracle_status = run(["node", "-e", oracle_code], 15, CORPUS)
-        bcrypt_oracle = json.loads(oracle_out) if not oracle_status else None
-        if oracle_status or bcrypt_oracle != {
-                "hash": "$2a$08$N9qo8uLOickgx2ZMRZoMyeoxUxJ05MRWm4bW3Giar6lxjRF5NYzvS",
-                "match": True, "reject": True, "rounds": 8}:
-            raise RuntimeError(f"bcrypt deterministic Node oracle failed: {oracle_out!r} {oracle_err!r}")
-
     evidence: dict[str, object] = {
-        "workload": args.workload, "timing_kind": "in-process warm_median seconds per workload call",
+        "status": "running", "workload": args.workload,
+        "timing_kind": "in-process warm_median milliseconds per workload call",
         "source": source, "binaries": binaries,
         "environment": {"host": platform.platform(), "python": platform.python_version(),
                         "node": subprocess.check_output(["node", "--version"], text=True).strip()},
-        "node_reference": {"wall_seconds_including_harness": node_wall, **reference},
-        "bcrypt_node_hash_oracle": bcrypt_oracle,
-        "runs": {label: [] for label in candidates}, "raw_logs": str(result_dir),
+        "runs": {label: [] for label in candidates},
+        "warmup_runs": {label: [] for label in candidates},
+        "raw_logs": str(result_dir), "active_stage": "Node reference",
     }
 
-    def execute(label: str, phase_index: int) -> dict[str, object]:
-        out, err, wall, code = run([str(candidates[label])], args.timeout, CORPUS)
-        save_log(result_dir, label, phase_index, out, err)
-        result = parse(label, out, err, code, expected_name)
-        if result["checksum"] != expected_checksum:
-            raise RuntimeError(f"{label} checksum {result['checksum']} differs from Node {expected_checksum}")
-        result["process_wall_seconds"] = wall
-        return result
+    def persist() -> None:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = result_path.with_suffix(result_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+        temporary.replace(result_path)
 
-    labels = list(candidates)
-    for idx in range(args.warmups):
-        order = labels if idx % 2 == 0 else list(reversed(labels))
-        for label in order:
-            execute(label, -(idx + 1))
-    for pair in range(args.rounds // 2):
-        order = labels if pair % 2 == 0 else list(reversed(labels))
-        for label in order:
-            run_index = len(evidence["runs"][label]) + 1
-            evidence["runs"][label].append(execute(label, run_index))
-    medians = {label: statistics.median(row["warm_median"] for row in evidence["runs"][label])
-               for label in labels}
-    summary: dict[str, object] = {"warm_median_seconds_per_call": medians}
-    if "control" in medians:
-        summary["control_over_candidate_speedup"] = medians["control"] / medians["candidate"]
-    else:
-        summary["gain_claim"] = "none; candidate correctness and warmed runtime measured against Node only"
-    evidence["summary"] = summary
-    args.results.resolve().parent.mkdir(parents=True, exist_ok=True)
-    args.results.resolve().write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    print(f"evidence: {args.results.resolve()}")
-    print(f"raw logs: {result_dir}")
-    return 0
+    def invoke(label: str, index: int, argv: list[str], timeout: float) -> tuple[bytes, bytes, float, int]:
+        evidence["active_stage"] = f"{label} launch {index}"
+        prefix = result_dir / f"{label}-{index:02d}"
+        evidence["active_log_prefix"] = str(prefix)
+        persist()
+        out, err, wall, code = run(argv, timeout, CORPUS, prefix)
+        save_log(result_dir, label, index, out, err)
+        evidence.setdefault("completed_raw_logs", []).append({
+            "label": label, "index": index,
+            "stdout": str(prefix.with_suffix(".stdout.log")),
+            "stderr": str(prefix.with_suffix(".stderr.log")),
+        })
+        persist()
+        return out, err, wall, code
+
+    persist()
+    try:
+        node_out, node_err, node_wall, node_code = invoke("node", 0, ["node", str(workload)], args.timeout)
+        reference = parse("Node", node_out, node_err, node_code, expected_name)
+        expected_checksum = reference["checksum"]
+        evidence["node_reference"] = {"wall_seconds_including_harness": node_wall, **reference}
+        persist()
+
+        bcrypt_oracle = None
+        if args.workload == "bcryptjs":
+            evidence["active_stage"] = "bcrypt deterministic Node oracle"
+            persist()
+            oracle_code = ('const b=require("bcryptjs"); const p="kiln-npm-compat-benchmark", '
+                           's="$2a$08$N9qo8uLOickgx2ZMRZoMye"; const h=b.hashSync(p,s); '
+                           'console.log(JSON.stringify({hash:h,match:b.compareSync(p,h),'
+                           'reject:b.compareSync("wrong password",h)===false,rounds:b.getRounds(h)}))')
+            oracle_out, oracle_err, _, oracle_status = invoke(
+                "bcrypt-node-oracle", 0, ["node", "-e", oracle_code], 15)
+            bcrypt_oracle = json.loads(oracle_out) if not oracle_status else None
+            if oracle_status or bcrypt_oracle != {
+                    "hash": "$2a$08$N9qo8uLOickgx2ZMRZoMyeoxUxJ05MRWm4bW3Giar6lxjRF5NYzvS",
+                    "match": True, "reject": True, "rounds": 8}:
+                raise RuntimeError(f"bcrypt deterministic Node oracle failed: {oracle_out!r} {oracle_err!r}")
+            evidence["bcrypt_node_hash_oracle"] = bcrypt_oracle
+            persist()
+
+        def execute(label: str, phase_index: int, phase: str) -> dict[str, object]:
+            out, err, wall, code = invoke(label, phase_index, [str(candidates[label])], args.timeout)
+            result = parse(f"{label} {phase}", out, err, code, expected_name)
+            if result["checksum"] != expected_checksum:
+                raise RuntimeError(f"{label} checksum {result['checksum']} differs from Node {expected_checksum}")
+            result["process_wall_seconds"] = wall
+            return result
+
+        labels = list(candidates)
+        for idx in range(args.warmups):
+            order = labels if idx % 2 == 0 else list(reversed(labels))
+            for label in order:
+                warm = execute(label, -(idx + 1), "warmup")
+                evidence["warmup_runs"][label].append(warm)
+                persist()
+        for pair in range(args.rounds // 2):
+            order = labels if pair % 2 == 0 else list(reversed(labels))
+            for label in order:
+                run_index = len(evidence["runs"][label]) + 1
+                row = execute(label, run_index, "timed")
+                evidence["runs"][label].append(row)
+                persist()
+        medians = {label: statistics.median(row["warm_median"] for row in evidence["runs"][label])
+                   for label in labels}
+        summary: dict[str, object] = {"warm_median_ms_per_call": medians}
+        if "control" in medians:
+            summary["control_over_candidate_speedup"] = medians["control"] / medians["candidate"]
+        else:
+            summary["gain_claim"] = "none; candidate correctness and warmed runtime measured against Node only"
+        evidence["summary"] = summary
+        evidence["status"] = "complete"
+        evidence.pop("active_stage", None)
+        persist()
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(f"evidence: {result_path}")
+        print(f"raw logs: {result_dir}")
+        return 0
+    except BaseException as error:
+        evidence["status"] = "failed"
+        evidence["failure"] = f"{type(error).__name__}: {error}"
+        persist()
+        raise
 
 
 if __name__ == "__main__":

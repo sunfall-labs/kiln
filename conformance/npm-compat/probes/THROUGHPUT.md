@@ -1,7 +1,7 @@
 # Warm npm throughput probes
 
 These probes run the same workload repeatedly inside Node's and kiln's own process. The reported
-`warm_median` is seconds per workload call; process startup is outside that number. The comparator
+`warm_median` is milliseconds per workload call; process startup is outside that number. The comparator
 requires `mode: "in-process"`, validates every checksum against Node, and retains full stdout and
 stderr for each launch.
 
