@@ -79,6 +79,7 @@ crates/native/kiln-native-provider-ffi/src/provider/bigint.rs
 crates/native/kiln-native-provider-ffi/src/provider/bigint_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/date.rs
 crates/native/kiln-native-provider-ffi/src/provider/keys.rs
+crates/native/kiln-native-provider-ffi/src/provider/key_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/ffi_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/heap.rs
 crates/native/kiln-native-provider-ffi/src/provider/intl.rs
