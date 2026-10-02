@@ -902,6 +902,17 @@ pub(super) fn emit_graph_op(
             } else {
                 format!("((kiln_closure *)KILN_VAL_PTR(v{}))->upvalues", callee.0)
             };
+            // The boxed fallback takes the generic closure ABI even when this is a typed
+            // self-call. A captureless proto's generic body has no upvalue table to read, so
+            // pass NULL instead of naming the typed entry's optional `upvalues` parameter.
+            // When the proto does capture, its typed body already carries that table as a
+            // parameter (the captured reads/closure creation require it) and the self-call
+            // fallback must pass the same table.
+            let boxed_upvalues = if own_call && target_proto.upvalues.is_empty() {
+                "NULL".to_owned()
+            } else {
+                upvalues.clone()
+            };
             // An arrow has no `this` of its own: it always runs with the closure it is,
             // `captured_this`, exactly as `plain->arrow ? plain->captured_this : ..` decides it
             // for the runtime's `kiln_c99_invoke_closure` path -- this is where the direct path
@@ -1034,8 +1045,9 @@ pub(super) fn emit_graph_op(
                             String::new()
                         };
                         format!(
-                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
                             n = argc.max(1),
+                            boxed_upvalues = boxed_upvalues,
                             fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
                                 "_f"
                             } else {
