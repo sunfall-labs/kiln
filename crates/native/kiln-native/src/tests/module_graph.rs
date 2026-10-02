@@ -4009,7 +4009,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .expect("compile wrapper source");
     objects.push(wrapper_object);
     let target = target_identity(toolchain.identity());
-    let (provider, _, _) = builder
+    let (provider, _, _, _) = builder
         .cached_number_provider(&target)
         .expect("load Realm provider");
     let provider_archive = root.path.join("realm-provider.a");

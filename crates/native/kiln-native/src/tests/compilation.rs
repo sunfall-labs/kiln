@@ -1886,6 +1886,33 @@ fn provider_capability_demand_is_typed_and_conservative() {
         ) == ProviderCapabilities::REALM.with(ProviderCapability::Json),
         "JSON is independently demandable"
     );
+    // The host GUI bridge is demanded by importing `kiln:gui`, and only then: `full` stops short
+    // of it, so the conservative CommonJS answer has to add it back when the graph imports it
+    // (ADR 0074).
+    let gui = selection(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import { systemTheme } from 'kiln:gui';\nconsole.log(typeof systemTheme);\n",
+        )],
+    );
+    assert!(gui.contains(ProviderCapability::Gui), "{:?}", gui.names());
+    assert_eq!(
+        ProviderVariant::smallest_covering(gui),
+        Some(ProviderVariant::FullGui),
+        "a GUI program's engines are covered by the full-gui package"
+    );
+    assert_eq!(
+        selection(
+            "main.cjs",
+            &[(
+                "main.cjs",
+                "const gui = require('kiln:gui');\nconsole.log(typeof gui);\n",
+            )],
+        ),
+        ProviderCapabilities::FULL.with(ProviderCapability::Gui),
+        "a CommonJS GUI program conservatively demands every capability, the bridge included"
+    );
     for (source, capability) in [
         ("console.log(/a/.test('a'));\n", ProviderCapability::RegExp),
         ("console.log(1n + 2n);\n", ProviderCapability::BigInt),

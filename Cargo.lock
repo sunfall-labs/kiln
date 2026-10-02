@@ -2218,6 +2218,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "kiln-date-core",
  "kiln-host-abi",
+ "kiln-host-gui",
  "kiln-intl",
  "kiln-json",
  "kiln-key-core",

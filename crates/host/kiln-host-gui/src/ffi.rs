@@ -341,3 +341,84 @@ pub extern "C" fn kiln_gui_hotkey_unregister(id: u32) -> i32 {
         Ok(0)
     })
 }
+
+/// Every `kiln_gui_*` operation this crate exports, by its C name, with its code pointer.
+///
+/// The native provider answers `kiln_ffi_open("kiln:host-gui")` from this table instead of
+/// `dlopen`ing a file, so the bridge is linked into the program and cannot go missing at run time
+/// (ADR 0074). Taking each function's address here is also what keeps it alive through the
+/// provider archive's whole-archive LTO: an upstream `#[no_mangle]` that nothing references is
+/// dropped from a staticlib, measured, with every framework it would have pulled in.
+///
+/// The list is held to the definitions above by `exports_match_the_definitions` below, and to the
+/// contract's `GUI_EXPORTS` by the contract crate's own test over this same source file.
+pub fn exports() -> Vec<(&'static str, *const core::ffi::c_void)> {
+    macro_rules! table {
+        ($($name:ident),* $(,)?) => {
+            vec![$((stringify!($name), $name as *const () as *const core::ffi::c_void)),*]
+        };
+    }
+    table![
+        kiln_gui_abi_version,
+        kiln_gui_result,
+        kiln_gui_init,
+        kiln_gui_create,
+        kiln_gui_set_text,
+        kiln_gui_set_number,
+        kiln_gui_insert,
+        kiln_gui_remove,
+        kiln_gui_destroy,
+        kiln_gui_call,
+        kiln_gui_wait,
+        kiln_gui_next_event,
+        kiln_gui_dialog,
+        kiln_gui_clipboard_read,
+        kiln_gui_clipboard_write,
+        kiln_gui_clipboard_clear,
+        kiln_gui_is_dark,
+        kiln_gui_notify,
+        kiln_gui_app_path,
+        kiln_gui_single_instance,
+        kiln_gui_set_menu,
+        kiln_gui_tray_create,
+        kiln_gui_tray_update,
+        kiln_gui_tray_destroy,
+        kiln_gui_hotkey_register,
+        kiln_gui_hotkey_unregister,
+        kiln_gui_describe,
+    ]
+}
+
+#[cfg(test)]
+mod export_table_tests {
+    #[test]
+    fn exports_match_the_definitions() {
+        let source = include_str!("ffi.rs");
+        let mut defined = Vec::new();
+        for line in source.lines() {
+            let line = line.trim_start();
+            let Some(rest) = line
+                .strip_prefix("pub unsafe extern \"C\" fn ")
+                .or_else(|| line.strip_prefix("pub extern \"C\" fn "))
+            else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name.starts_with("kiln_gui_") && !defined.contains(&name) {
+                defined.push(name);
+            }
+        }
+        defined.sort();
+        let exports = super::exports();
+        let mut listed: Vec<String> = exports.iter().map(|(name, _)| (*name).to_owned()).collect();
+        listed.sort();
+        assert_eq!(
+            listed, defined,
+            "exports() must name every kiln_gui_* definition once"
+        );
+        assert!(exports.iter().all(|(_, pointer)| !pointer.is_null()));
+    }
+}

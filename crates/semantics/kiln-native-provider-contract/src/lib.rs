@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod gui;
 pub mod number;
 
 use std::path::Path;
@@ -7,14 +8,17 @@ use kiln_digest::Digest;
 use serde::{Deserialize, Serialize};
 
 pub const SOURCE_LIST: &str = include_str!("../provider-sources.txt");
-// Schema 4 adds independently packaged Realm-plus-one-engine variants. Old compilers know only
-// common/full and must reject a manifest whose package name they cannot select safely.
-pub const SCHEMA_VERSION: u16 = 4;
+// Schema 4 added independently packaged Realm-plus-one-engine variants. Schema 5 adds the
+// `link_arguments` an archive needs at link time (the host GUI bridge brings OS frameworks with
+// it) and takes `gui` out of `full`: a headless program must not pay for AppKit. Old compilers
+// know neither and must reject a manifest whose package they cannot select or link safely.
+pub const SCHEMA_VERSION: u16 = 5;
 pub const PROVIDER_NAME: &str = "kiln-native-provider-ffi";
 pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
     "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 pub const FULL_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi";
+pub const FULL_GUI_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi,gui";
 pub const SLIM_FEATURES: &str = "realm,regexp,bigint,json";
 pub const FULL_ARCHIVE: &str = "libkiln_native_provider_ffi.a";
 pub const SLIM_ARCHIVE: &str = "libkiln_native_provider_ffi.slim.a";
@@ -90,9 +94,11 @@ impl ProviderCapabilities {
             | ProviderCapability::Intl.bit()
             | ProviderCapability::Parallel.bit()
             | ProviderCapability::Http.bit()
-            | ProviderCapability::Ffi.bit()
-            | ProviderCapability::Gui.bit(),
+            | ProviderCapability::Ffi.bit(),
     );
+    /// Everything, the host GUI bridge included. Not `FULL`: the bridge links the platform's UI
+    /// frameworks and a headless program must never carry them (ADR 0074).
+    pub const FULL_GUI: Self = Self(Self::FULL.0 | ProviderCapability::Gui.bit());
 
     pub const fn with(self, capability: ProviderCapability) -> Self {
         Self(self.0 | capability.bit())
@@ -143,10 +149,11 @@ pub enum ProviderVariant {
     Gui,
     Common,
     Full,
+    FullGui,
 }
 
 impl ProviderVariant {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Realm,
         Self::RegExp,
         Self::BigInt,
@@ -159,6 +166,7 @@ impl ProviderVariant {
         Self::Gui,
         Self::Common,
         Self::Full,
+        Self::FullGui,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -173,9 +181,13 @@ impl ProviderVariant {
             Self::Parallel => ProviderCapabilities::REALM.with(ProviderCapability::Parallel),
             Self::Http => ProviderCapabilities::REALM.with(ProviderCapability::Http),
             Self::Ffi => ProviderCapabilities::REALM.with(ProviderCapability::Ffi),
-            Self::Gui => ProviderCapabilities::REALM.with(ProviderCapability::Gui),
+            // The bridge is reached through the dynamic-call engine, so a GUI package carries it.
+            Self::Gui => ProviderCapabilities::REALM
+                .with(ProviderCapability::Ffi)
+                .with(ProviderCapability::Gui),
             Self::Common => ProviderCapabilities::COMMON,
             Self::Full => ProviderCapabilities::FULL,
+            Self::FullGui => ProviderCapabilities::FULL_GUI,
         }
     }
 
@@ -193,6 +205,7 @@ impl ProviderVariant {
             Self::Gui => "gui",
             Self::Common => "common",
             Self::Full => "full",
+            Self::FullGui => "full-gui",
         }
     }
 
@@ -214,6 +227,7 @@ impl ProviderVariant {
             Self::Gui => "realm,gui",
             Self::Common => SLIM_FEATURES,
             Self::Full => FULL_FEATURES,
+            Self::FullGui => FULL_GUI_FEATURES,
         }
     }
 
@@ -239,6 +253,15 @@ impl ProviderVariant {
             .find(|variant| variant.as_str() == value)
     }
 
+    /// The archive must define exactly these names, in this order, for its manifest to be valid.
+    pub fn exports(self) -> Vec<&'static str> {
+        let mut exports = exports();
+        if self.capabilities().contains(ProviderCapability::Gui) {
+            exports.extend_from_slice(gui::GUI_EXPORTS);
+        }
+        exports
+    }
+
     pub fn smallest_covering(required: ProviderCapabilities) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -256,6 +279,7 @@ pub struct Contract {
     pub profile: &'static str,
     pub rustflags: &'static str,
     pub full_features: &'static str,
+    pub full_gui_features: &'static str,
     pub slim_features: &'static str,
     pub full_archive: &'static str,
     pub slim_archive: &'static str,
@@ -265,6 +289,10 @@ pub struct Contract {
     pub common_capabilities: Vec<ProviderCapability>,
     pub variants: Vec<ProviderPackage>,
     pub exports: Vec<&'static str>,
+    /// The bridge's exports, appended to `exports` in every variant that declares `gui`.
+    pub gui_exports: Vec<&'static str>,
+    /// What a program `dlopen`s to reach the linked-in bridge.
+    pub gui_library: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +302,8 @@ pub struct ProviderPackage {
     pub archive: String,
     pub manifest: String,
     pub capabilities: Vec<ProviderCapability>,
+    /// The exact export list this package's archive must define.
+    pub exports: Vec<&'static str>,
 }
 
 pub fn package(variant: ProviderVariant) -> ProviderPackage {
@@ -283,6 +313,7 @@ pub fn package(variant: ProviderVariant) -> ProviderPackage {
         archive: variant.archive(),
         manifest: variant.manifest(),
         capabilities: variant.capabilities().iter().collect(),
+        exports: variant.exports(),
     }
 }
 
@@ -308,6 +339,12 @@ pub struct ProviderManifest {
     pub exports: Vec<String>,
     pub variant: ProviderVariant,
     pub capabilities: Vec<ProviderCapability>,
+    /// Linker arguments the archive needs beyond the C runtime's own: rustc's
+    /// `--print native-static-libs` for the archive, kept only for packages whose engines bring
+    /// platform libraries with them (the GUI bridge's frameworks). Empty for every other package.
+    /// Not part of the producer identity: it is a function of the target, variant and source that
+    /// are, so enumerating identities without building never has to know it.
+    pub link_arguments: Vec<String>,
 }
 
 impl ProviderManifest {
@@ -363,6 +400,7 @@ pub fn manifest(
     deployment: String,
     libc: String,
     variant: ProviderVariant,
+    link_arguments: Vec<String>,
 ) -> ProviderManifest {
     let c = contract();
     ProviderManifest {
@@ -382,9 +420,10 @@ pub fn manifest(
         cpu_features: "generic".to_owned(),
         deployment,
         libc_baseline: libc,
-        exports: c.exports.into_iter().map(str::to_owned).collect(),
+        exports: variant.exports().into_iter().map(str::to_owned).collect(),
         variant,
         capabilities: variant.capabilities().iter().collect(),
+        link_arguments,
     }
 }
 
@@ -406,6 +445,7 @@ pub fn contract() -> Contract {
         profile: PROFILE,
         rustflags: RUSTFLAGS,
         full_features: FULL_FEATURES,
+        full_gui_features: FULL_GUI_FEATURES,
         slim_features: SLIM_FEATURES,
         full_archive: FULL_ARCHIVE,
         slim_archive: SLIM_ARCHIVE,
@@ -415,6 +455,8 @@ pub fn contract() -> Contract {
         common_capabilities: ProviderCapabilities::COMMON.iter().collect(),
         variants: ProviderVariant::ALL.into_iter().map(package).collect(),
         exports: exports(),
+        gui_exports: gui::GUI_EXPORTS.to_vec(),
+        gui_library: gui::LIBRARY_SPECIFIER,
     }
 }
 
@@ -482,6 +524,7 @@ mod tests {
         let mut pending = vec![
             root.join("crates/foundation/kiln-number-core/src"),
             root.join("crates/host/kiln-runtime/src"),
+            root.join("crates/host/kiln-host-gui/src"),
             root.join("crates/native/kiln-native-provider-ffi/src"),
         ];
         while let Some(dir) = pending.pop() {
@@ -534,6 +577,28 @@ mod tests {
         assert!(ProviderCapabilities::FULL.contains_all(ProviderCapabilities::COMMON));
         assert!(!ProviderCapabilities::COMMON.contains(ProviderCapability::Http));
         assert!(ProviderCapabilities::FULL.contains(ProviderCapability::Http));
+        // A headless program never links the GUI bridge: `full` stops short of `gui`, and the
+        // two packages that carry it both carry the dynamic-call engine it is reached through.
+        assert!(!ProviderCapabilities::FULL.contains(ProviderCapability::Gui));
+        assert!(ProviderCapabilities::FULL_GUI.contains_all(ProviderCapabilities::FULL));
+        assert_eq!(
+            ProviderVariant::smallest_covering(
+                ProviderCapabilities::REALM.with(ProviderCapability::Gui)
+            ),
+            Some(ProviderVariant::Gui)
+        );
+        assert_eq!(
+            ProviderVariant::smallest_covering(
+                ProviderCapabilities::COMMON.with(ProviderCapability::Gui)
+            ),
+            Some(ProviderVariant::FullGui)
+        );
+        for variant in [ProviderVariant::Gui, ProviderVariant::FullGui] {
+            assert!(variant.capabilities().contains(ProviderCapability::Ffi));
+            assert!(variant.features().contains("gui"));
+            assert!(variant.exports().ends_with(gui::GUI_EXPORTS));
+        }
+        assert_eq!(ProviderVariant::Full.exports(), exports());
         assert_eq!(
             ProviderVariant::smallest_covering(ProviderCapabilities::COMMON),
             Some(ProviderVariant::Common)
@@ -565,6 +630,7 @@ mod tests {
             "deployment".into(),
             "libc".into(),
             ProviderVariant::Full,
+            Vec::new(),
         );
         let base = m.identity();
         m.profile.push('x');
@@ -581,5 +647,11 @@ mod tests {
         m.exports.pop();
         m.archive.push('x');
         assert_eq!(base, m.identity());
+        m.link_arguments.push("-framework".into());
+        assert_eq!(
+            base,
+            m.identity(),
+            "link arguments derive from identity fields"
+        );
     }
 }

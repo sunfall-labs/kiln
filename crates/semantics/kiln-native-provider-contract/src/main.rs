@@ -31,6 +31,17 @@ fn main() {
             "{}",
             kiln_native_provider_contract::contract().exports.join(" ")
         ),
+        Some("gui-link-arguments") => {
+            let values: Vec<_> = args.collect();
+            let Some(target) = values.first().filter(|_| values.len() == 1) else {
+                eprintln!("gui-link-arguments requires one Rust target triple");
+                std::process::exit(2);
+            };
+            println!(
+                "{}",
+                kiln_native_provider_contract::gui::link_arguments(target).join(" ")
+            );
+        }
         Some("variant") => {
             let values: Vec<_> = args.collect();
             let Some(variant) = values
@@ -48,8 +59,10 @@ fn main() {
         }
         Some("manifest") => {
             let values: Vec<_> = args.collect();
-            if values.len() != 7 {
-                eprintln!("manifest requires 7 arguments");
+            if values.len() != 8 {
+                eprintln!(
+                    "manifest requires 8 arguments: target rustc source archive deployment libc variant link-arguments"
+                );
                 std::process::exit(2);
             }
             let variant = kiln_native_provider_contract::ProviderVariant::parse(&values[6])
@@ -70,12 +83,13 @@ fn main() {
                 values[4].clone(),
                 values[5].clone(),
                 variant,
+                values[7].split_whitespace().map(str::to_owned).collect(),
             );
             println!("{}", serde_json::to_string_pretty(&m).unwrap());
         }
         _ => {
             eprintln!(
-                "usage: kiln-native-provider-contract <contract|variant NAME|abi|exports|source-digest ROOT>"
+                "usage: kiln-native-provider-contract <contract|variant NAME|abi|exports|gui-link-arguments TARGET|manifest ...|source-digest ROOT>"
             );
             std::process::exit(2);
         }

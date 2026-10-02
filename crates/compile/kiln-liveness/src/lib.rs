@@ -1530,6 +1530,21 @@ pub fn retained_provider_capabilities(
         _ => None,
     };
 
+    // `full` stops short of the host GUI bridge (ADR 0074): a headless program must never link
+    // AppKit. So the conservative answer below still has to say whether `kiln:gui` is in the
+    // live graph, or a CommonJS GUI program would get an archive its `dlopen` then refuses.
+    let conservative = if graph.modules().any(|node| {
+        demand.live.contains(&node.path)
+            && matches!(
+                node.source,
+                ModuleSource::NodeBuiltin(NodeBuiltin::Gui | NodeBuiltin::GuiJsxRuntime)
+            )
+    }) {
+        ProviderCapabilities::FULL.with(ProviderCapability::Gui)
+    } else {
+        ProviderCapabilities::FULL
+    };
+
     for node in graph.modules() {
         if !demand.live.contains(&node.path) {
             continue;
@@ -1539,7 +1554,7 @@ pub fn retained_provider_capabilities(
             || !node.program.link_facts.dynamic_imports.is_empty()
             || node.program.program.has_dynamic_import()
         {
-            return ProviderCapabilities::FULL;
+            return conservative;
         }
         if matches!(node.source, ModuleSource::Json) {
             required = required.with(ProviderCapability::Json);

@@ -972,7 +972,7 @@ const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(PROVIDER_SCHEMA_VERSION == 4);
+    assert!(PROVIDER_SCHEMA_VERSION == 5);
 };
 
 mod options;
@@ -1172,18 +1172,19 @@ impl NativeBuilder {
     fn cached_number_provider(
         &self,
         target: &str,
-    ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
-        let (archive, digest, hit, _) =
+    ) -> Result<(Arc<[u8]>, Digest, bool, Vec<String>), NativeError> {
+        let (archive, digest, hit, _, link_arguments) =
             self.cached_number_provider_for(target, ProviderCapabilities::FULL)?;
-        Ok((archive, digest, hit))
+        Ok((archive, digest, hit, link_arguments))
     }
 
-    /// Resolve and cache the smallest provider variant covering `required`.
+    /// Resolve and cache the smallest provider variant covering `required`. The last element is
+    /// what the archive needs on the link line beyond the C runtime's own libraries.
     fn cached_number_provider_for(
         &self,
         target: &str,
         required: ProviderCapabilities,
-    ) -> Result<(Arc<[u8]>, Digest, bool, ProviderCapabilities), NativeError> {
+    ) -> Result<(Arc<[u8]>, Digest, bool, ProviderCapabilities, Vec<String>), NativeError> {
         let variant = ProviderVariant::smallest_covering(required).unwrap_or(ProviderVariant::Full);
         let provider = self.number_provider_variant(variant)?;
         let provider_key = NativeArtifactFamily::NumberProvider.key(
@@ -1202,10 +1203,17 @@ impl NativeBuilder {
             [provider.archive_digest],
         );
         let capabilities = provider.capabilities;
+        let link_arguments = provider.link_arguments.clone();
         match self.lookup_digest(&provider_key)? {
             Some((digest, _size)) => {
                 debug_assert_eq!(digest, provider.archive_digest);
-                Ok((Arc::clone(&provider.archive), digest, true, capabilities))
+                Ok((
+                    Arc::clone(&provider.archive),
+                    digest,
+                    true,
+                    capabilities,
+                    link_arguments,
+                ))
             }
             None => {
                 let stored = self.cache.put(&provider_key, &provider.archive)?;
@@ -1214,6 +1222,7 @@ impl NativeBuilder {
                     stored.digest,
                     false,
                     capabilities,
+                    link_arguments,
                 ))
             }
         }
@@ -1301,8 +1310,13 @@ impl NativeBuilder {
         // The single-module API sees only bytecode, not the import table, so a static
         // `node:http` use is invisible here: stay on the full archive.
         let required_provider_capabilities = ProviderCapabilities::FULL;
-        let (number_provider, number_provider_digest, _, provider_capabilities) =
-            self.cached_number_provider_for(&target, required_provider_capabilities)?;
+        let (
+            number_provider,
+            number_provider_digest,
+            _,
+            provider_capabilities,
+            provider_link_arguments,
+        ) = self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         let module_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
@@ -1574,6 +1588,9 @@ impl NativeBuilder {
                     link_options
                         .runtime_libraries
                         .push(paths.number_provider_a.clone());
+                    link_options
+                        .extra_args
+                        .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                     let report = self.toolchain.link_executable(
                         &[
                             paths.module_o.clone(),
@@ -1692,7 +1709,8 @@ impl NativeBuilder {
         let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let (number_provider, number_provider_digest, _, provider_link_arguments) =
+            self.cached_number_provider(&target)?;
         // Keep the plain generated unit on the same cache identity as executable builds.  The
         // shared-only adapter is cached as a second generated-C artifact, so building a DSO does
         // not poison the reusable non-PIC module source cache.
@@ -1907,6 +1925,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
@@ -2155,7 +2176,8 @@ impl NativeBuilder {
         let profile = options.profile;
         let embedding_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let (number_provider, number_provider_digest, _, provider_link_arguments) =
+            self.cached_number_provider(&target)?;
         let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.source_key(
             &target,
             Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
@@ -2490,6 +2512,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
@@ -2839,8 +2864,13 @@ impl NativeBuilder {
         let required_provider_capabilities =
             kiln_liveness::retained_provider_capabilities(graph, &demand, &members)
                 .union(bootstrap_capabilities);
-        let (number_provider, number_provider_digest, _, provider_capabilities) =
-            self.cached_number_provider_for(&target, required_provider_capabilities)?;
+        let (
+            number_provider,
+            number_provider_digest,
+            _,
+            provider_capabilities,
+            provider_link_arguments,
+        ) = self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         for (_, unit) in &bootstrap_units {
             let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
@@ -3217,6 +3247,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 let report =
                     self.toolchain
                         .link_executable(&objects, &paths.executable, &link_options)?;

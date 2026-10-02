@@ -79,8 +79,15 @@ text out goes through one result buffer, `-1` is "nothing", `-2` is an error who
 caller reads and throws, handles are `u32` allocated by the library, and nothing unwinds across
 it. `kiln_gui_abi_version` lets the binding refuse a mismatched library by name.
 
-The library is found through `KILN_GUI_LIB`, next to the executable (`./`, `../lib`,
-`../Frameworks`), or in the working tree's `target/` for development.
+The library is not found at run time; it is linked. `kiln-host-gui` is a feature (`gui`) of the
+one provider archive, `kiln-native-provider-ffi`, carried by the `gui` and `full-gui` variants
+(`full` deliberately stops short of it, so a headless program never links AppKit), and the native
+`node:ffi` engine answers `dlopen("kiln:host-gui")` from the table the archive carries
+(`kiln_host_gui::ffi::exports`). That table is also what keeps the bridge alive through
+whole-archive LTO. The frameworks a `gui` archive adds to the link line are listed in the
+contract (`gui::link_arguments`) and proven at packaging time by linking a probe that references
+every export. `KILN_GUI_LIB` still points a program at a shared library instead, as a developer
+override for iterating on the Rust side.
 
 Today it has one widget backend, AppKit (`src/appkit.rs`). On other platforms `kiln_gui_init`
 reports that there is none.
@@ -168,8 +175,6 @@ run time, the native build does not yet link it: shipping a GUI binary means shi
 * **Linux and Windows backends** behind the same ABI (GTK4, Win32/WinUI), with the same Taffy
   layout. The earlier TypeScript GTK driver drove `libgtk-4` directly, had its own layout
   semantics and was removed rather than kept as a second, untested model.
-* **Linking the library into the binary** as a planned provider staticlib, so a GUI program is
-  one file.
 * Drag and drop, images from memory, tables, custom focus order beyond layout order.
 
 ## Rejected alternatives

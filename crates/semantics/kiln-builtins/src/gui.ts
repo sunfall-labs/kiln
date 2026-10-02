@@ -893,6 +893,8 @@ function fallbackPath(name: string): string {
 }
 
 const ABI_VERSION = 3;
+/** The `node:ffi` specifier of the bridge linked into the provider archive. Not a path. */
+const HOST_GUI_LIBRARY = "kiln:host-gui";
 
 const NATIVE_FUNCTIONS: Record<string, { arguments: string[]; return: string }> = {
   kiln_gui_abi_version: { arguments: [], return: "u32" },
@@ -1050,26 +1052,19 @@ class NativeHost implements Host {
   };
 }
 
-function dirname(path: string): string {
-  const at = path.lastIndexOf("/");
-  return at > 0 ? path.slice(0, at) : ".";
-}
-
 /** Finds and binds the native library, or says why it could not. */
 function openNative(): NativeHost | string {
   const modules = typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
   const ffi = modules && modules.ffi;
   if (!ffi) return "this engine has no FFI (the interpreter); run natively with `kiln run --native` or `kiln build`";
-  const fs = modules.fs;
-  const file = "libkiln_host_gui" + (ffi.suffix || ".dylib");
-  const exe = typeof process.execPath === "string" ? dirname(process.execPath) : ".";
-  const cwd = typeof process.cwd === "function" ? process.cwd() : ".";
+  // The bridge is linked into the program's provider archive, and the native `node:ffi` engine
+  // answers `dlopen("kiln:host-gui")` from the table it carries (ADR 0074), so a compiled GUI
+  // binary needs no file beside it and nothing is searched for. `KILN_GUI_LIB` names a shared
+  // library instead, for iterating on the Rust side without relinking every program; it is a
+  // developer override, not a search path. A provider packaged without the bridge refuses the
+  // specifier by name, and that message is the one reported below.
   const explicit = env("KILN_GUI_LIB");
-  const candidates = explicit
-    ? [explicit]
-    : [exe + "/" + file, exe + "/../lib/" + file, exe + "/../Frameworks/" + file, cwd + "/target/release/" + file, cwd + "/target/debug/" + file];
-  const path = candidates.find((p) => !fs || fs.existsSync(p));
-  if (!path) return `${file} not found (looked in ${candidates.join(", ")}); set KILN_GUI_LIB to its path`;
+  const path = explicit && explicit.length > 0 ? explicit : HOST_GUI_LIBRARY;
   let lib: any;
   try {
     lib = ffi.dlopen(path, NATIVE_FUNCTIONS);

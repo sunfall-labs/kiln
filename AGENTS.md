@@ -361,6 +361,39 @@ The packager now verifies the archive's symbol table against `PROVIDER_EXPORTS` 
 missing symbols, so this fails at packaging time with the fix in the message. If you are chasing
 undefined symbols anyway, run `scripts/check-native-number-ffi.sh`.
 
+## The host GUI bridge is linked in, not found next to the program
+
+A compiled GUI program used to `dlopen` `target/release/libkiln_host_gui.dylib` from the current
+directory at run time, so it worked only inside a checkout that had built the cdylib and died
+elsewhere three frames from the cause. The bridge (`kiln-host-gui`, the `kiln_gui_*` operations)
+is now part of the provider archive of every variant that declares the `gui` capability -- `gui`
+and `full-gui` -- and the native `node:ffi` engine answers `dlopen("kiln:host-gui")` from a table
+the archive carries (`kiln_host_gui::ffi::exports`). The specifier is not a path; nothing is
+searched for.
+
+Three consequences worth knowing before you touch it:
+
+* **`full` does not include `gui`.** A headless program must never link AppKit, so `full` stops
+  short of the bridge and `full-gui` is the variant above it. `kiln build` picks `full-gui` only
+  when the live graph imports `kiln:gui`, including through the conservative CommonJS answer.
+  `provider has ... gui` in the build report is how you tell.
+* **The frameworks come from the contract, and the packager proves them.** `gui::link_arguments`
+  in `kiln-native-provider-contract` lists what a `gui` archive adds to the link line
+  (`-framework Cocoa ...` on macOS, nothing on Linux). rustc's `--print native-static-libs` is
+  the authoritative source but is printed only by a compiler that actually ran, which a cached or
+  fresh rebuild is not; so the packager diffs the note against the list when it appears and, always,
+  links a probe that takes the address of every bridge export against the archive. A new
+  framework dependency fails packaging with the symbol named, not some program's link.
+* **The table is what keeps the bridge alive.** An upstream `#[no_mangle]` that nothing references
+  is dropped from a staticlib by whole-archive LTO -- measured: zero `kiln_gui_*` symbols and no
+  frameworks in the note. `exports()` takes every function's address; the contract's `GUI_EXPORTS`
+  and the crate's own test hold the table to the source file, so a new operation that is not in
+  both does not land.
+
+`KILN_GUI_LIB=/path/to/libkiln_host_gui.dylib` still points a program at a shared library
+instead, for iterating on the Rust side without the provider's fat-LTO rebuild (about 110 s per
+edit to a listed provider source). It is a developer override, not a search path.
+
 ## When the disk fills
 
 The volume is shared with unrelated data and has hit 100% more than once; a link then fails with
