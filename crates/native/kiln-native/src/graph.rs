@@ -1016,11 +1016,10 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
     )
 }
 
-/// `import.meta` for native binaries, written in TypeScript over the already-exposed
-/// `process.execPath` (ADR 0005: builtins are TypeScript, not C). Follows Node's
-/// single-executable-application semantics for the entry. Bundled dependencies retain their
-/// captured source identities so relative loader requests select the same base as graph planning.
-/// The frontend supplies both entry status and the captured filename.
+/// `import.meta` for native graph modules, written in TypeScript over the captured source
+/// identity. The entry's URL must be the source URL used during graph planning: relative dynamic
+/// imports and `new URL(..., import.meta.url)` resolve from that module, not from the generated
+/// executable's location. `process.execPath` remains the executable path independently.
 fn native_import_meta_bootstrap() -> String {
     r#"
 if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
@@ -1034,20 +1033,13 @@ if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
         const pathEncoded = __kilnApply(__kilnReplace, encoded, [__kilnPathEscapePattern, escape => __kilnPathEscapes[escape]]);
         return "file://" + pathEncoded;
     }
-    const __kilnProcess = globalThis.process;
-    const __kilnExecPath = (typeof __kilnProcess !== "undefined" && typeof __kilnProcess.execPath === "string" && __kilnProcess.execPath.length > 0)
-        ? __kilnProcess.execPath
-        : null;
-    // Encode the raw filesystem path before assembling its URL. URL construction from
-    // `file://` + path treats `#` and `?` as URL syntax instead of path characters.
-    const __kilnExecUrl = __kilnExecPath ? __kilnPathToFileURL(__kilnExecPath) : null;
-    const __kilnExecDir = __kilnExecPath ? __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/")) : null;
     globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
-        const useExec = isEntry && __kilnExecPath !== null;
         return {
-            url: useExec ? __kilnExecUrl : __kilnPathToFileURL(sourceFilename),
-            filename: useExec ? __kilnExecPath : sourceFilename,
-            dirname: useExec ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
+            // Encode the raw filesystem path before assembling its URL. URL construction from
+            // `file://` + path treats `#` and `?` as URL syntax instead of path characters.
+            url: __kilnPathToFileURL(sourceFilename),
+            filename: sourceFilename,
+            dirname: sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,
         };
     };
