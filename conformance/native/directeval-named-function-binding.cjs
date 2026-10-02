@@ -2,6 +2,16 @@
 // strict writes throw, and either binding shadows an outer variable with the same name.
 function factory(source) { return eval(source); }
 let shadow = 'outer';
+const staticSloppy = function staticName() { staticName = 3; return staticName; };
+console.log(staticSloppy() === staticSloppy);
+if (staticSloppy() !== staticSloppy) throw new Error('sloppy static function-name write changed binding');
+let strictStaticWriteThrew = false;
+try {
+  (function strictName() { 'use strict'; strictName = 4; })();
+} catch (error) {
+  strictStaticWriteThrew = error instanceof TypeError;
+}
+if (!strictStaticWriteThrew) throw new Error('strict static function-name write did not throw');
 const sloppy = factory('(function shadow() { shadow = 3; return shadow; })');
 console.log(sloppy() === sloppy, shadow);
 if (sloppy() !== sloppy || shadow !== 'outer') throw new Error('sloppy function-name write changed binding');
