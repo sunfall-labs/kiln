@@ -1966,6 +1966,21 @@ fn render_functions(
             break;
         }
     }
+    // A typed recursive call normally reaches its typed entry. When that entry can fall back
+    // because one of its guarded built-ins was changed earlier in the call, the fallback calls
+    // the generic body using this closure's upvalue table. That table can be needed by the
+    // generic body even when the typed fast path itself emitted no upvalue read, so carry it in
+    // the typed signature whenever the guarded self-call can take that edge.
+    for index in 0..typed_callees.len() {
+        if needs[index].runtime
+            && typed_callees[index].contains(&index)
+            && !relies[index].is_empty()
+            && !program.functions[index].upvalues.is_empty()
+        {
+            needs[index].upvalues = true;
+        }
+    }
+    direct.set_typed_needs(&needs);
     let guards: Vec<String> = relies
         .iter()
         .map(|terms| terms.iter().cloned().collect::<Vec<_>>().join(" && "))
