@@ -1296,7 +1296,7 @@ exports.annotations = function (ast, values) { return values; };
         let _cleanup = TempProject(root.clone());
         fs::write(
             root.join("package.json"),
-            r#"{"type":"module","sideEffects":false}"#,
+            r#"{"type":"module"}"#,
         )
         .expect("write package metadata");
         fs::write(
