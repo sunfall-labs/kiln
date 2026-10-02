@@ -1791,7 +1791,7 @@ mod tests {
         let formatter = DateTimeFormat::new(
             &["de".to_owned()],
             Options {
-                time_zone: utc(),
+                time_zone: Some(TimeZoneChoice::Offset(0)),
                 ..Options::default()
             },
         )
