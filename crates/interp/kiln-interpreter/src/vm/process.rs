@@ -169,6 +169,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // must not fall back to a second legacy namespace with different identity.
         let native_modules = ordinary_object([
             (
+                "__kilnHostModuleCreateRequire".to_owned(),
+                Value::Native(Native::NodeModuleCreateRequire, RealmId::PRIMARY),
+            ),
+            (
                 "async_hooks".to_owned(),
                 Value::Native(Native::NodeAsyncHooks, RealmId::PRIMARY),
             ),
@@ -183,6 +187,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("http".to_owned(), crate::http::native_capabilities()),
             ("net".to_owned(), crate::net::native_capabilities()),
         ]);
+        if self.async_host.is_some() {
+            if let Value::Object(modules) = &native_modules {
+                let mut modules = modules.borrow_mut();
+                modules.set(
+                    "__kilnCryptoKeyImport",
+                    Value::Native(Native::NodeCryptoKeyImport, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyPublic",
+                    Value::Native(Native::NodeCryptoKeyPublic, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyInfo",
+                    Value::Native(Native::NodeCryptoKeyInfo, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyExport",
+                    Value::Native(Native::NodeCryptoKeyExport, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyFree",
+                    Value::Native(Native::NodeCryptoKeyFree, RealmId::PRIMARY),
+                );
+            }
+        }
         process.set_non_enumerable("__kilnNativeModules", native_modules);
         let value = Value::Object(Rc::new(RefCell::new(process)));
         self.process_object = Some(value.clone());

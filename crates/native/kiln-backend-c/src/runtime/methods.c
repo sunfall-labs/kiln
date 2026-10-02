@@ -159,11 +159,23 @@ int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
     kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
     if (resolve != NULL) {
+        kiln_value process;
+        kiln_value native_modules;
         kiln_value decorator;
         kiln_value decorated;
-        int found = 0;
-        int status = kiln_c99_global_binding(NULL, &decorator,
-            "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1, &found, 0, NULL);
+        int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
+        if (status == KILN_C99_OK && process.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_get(NULL, process, "__kilnNativeModules", 19,
+                                  &native_modules, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_get(NULL, native_modules, "__kilnDecorateCommonJsRequire", 29,
+                                      &decorator, 0, NULL);
+            kiln_c99_gc_keep_alive(&process);
+            kiln_c99_gc_keep_alive(&native_modules);
+        } else if (status == KILN_C99_OK) {
+            decorator = kiln_c99_undefined();
+        }
+        int found = status == KILN_C99_OK && decorator.tag != KILN_VALUE_UNDEFINED;
         if (status == KILN_C99_OK && found) {
             status = kiln_c99_call(NULL, &decorated, decorator, kiln_c99_undefined(), out, 1, 0, NULL);
             kiln_c99_gc_keep_alive(out);

@@ -532,10 +532,6 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
  * are non-enumerable, which is what node does and what stops `Object.keys(globalThis)` from being
  * a list of the realm's furniture -- a program's own additions are enumerable, which is the
  * distinction that makes the question worth asking. */
-#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
-#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
-#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
-#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 /* The prototype every `node:http` request object links to. A realm slot rather than a static,
  * because a realm owns it and the runtime archive already enumerates these slots as GC roots
  * (ADR 0041) -- and because one identity across translation units is what a prototype is for. */

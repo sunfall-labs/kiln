@@ -347,16 +347,19 @@ export class Hash {
   }
 }
 
-const cryptoKeyImportBridge = (globalThis as any).__kilnCryptoKeyImport;
-const cryptoKeyPublicBridge = (globalThis as any).__kilnCryptoKeyPublic;
-const cryptoKeyInfoBridge = (globalThis as any).__kilnCryptoKeyInfo;
-const cryptoKeyExportBridge = (globalThis as any).__kilnCryptoKeyExport;
-const cryptoKeyFreeBridge = (globalThis as any).__kilnCryptoKeyFree;
-delete (globalThis as any).__kilnCryptoKeyImport;
-delete (globalThis as any).__kilnCryptoKeyPublic;
-delete (globalThis as any).__kilnCryptoKeyInfo;
-delete (globalThis as any).__kilnCryptoKeyExport;
-delete (globalThis as any).__kilnCryptoKeyFree;
+const cryptoNativeModules = (globalThis as any).process?.__kilnNativeModules;
+const cryptoKeyImportBridge = cryptoNativeModules?.__kilnCryptoKeyImport;
+const cryptoKeyPublicBridge = cryptoNativeModules?.__kilnCryptoKeyPublic;
+const cryptoKeyInfoBridge = cryptoNativeModules?.__kilnCryptoKeyInfo;
+const cryptoKeyExportBridge = cryptoNativeModules?.__kilnCryptoKeyExport;
+const cryptoKeyFreeBridge = cryptoNativeModules?.__kilnCryptoKeyFree;
+if (cryptoNativeModules !== undefined) {
+  delete cryptoNativeModules.__kilnCryptoKeyImport;
+  delete cryptoNativeModules.__kilnCryptoKeyPublic;
+  delete cryptoNativeModules.__kilnCryptoKeyInfo;
+  delete cryptoNativeModules.__kilnCryptoKeyExport;
+  delete cryptoNativeModules.__kilnCryptoKeyFree;
+}
 
 const asymmetricKeyFinalizer: FinalizationRegistry<any> | undefined =
   typeof FinalizationRegistry === 'function' && typeof cryptoKeyFreeBridge === 'function'

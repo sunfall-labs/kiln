@@ -833,11 +833,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ProcessCancelRaw, realm),
         );
         globals.set_non_enumerable(
-            "__kilnHostModuleCreateRequire",
-            Value::Native(Native::NodeModuleCreateRequire, realm),
-        );
-
-        globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
         );
@@ -878,26 +873,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             globals.set_non_enumerable(
                 "__kilnBufferToString",
                 Value::Native(Native::NodeBufferToString, realm),
-            );
-            globals.set_non_enumerable(
-                "__kilnCryptoKeyImport",
-                Value::Native(Native::NodeCryptoKeyImport, realm),
-            );
-            globals.set_non_enumerable(
-                "__kilnCryptoKeyPublic",
-                Value::Native(Native::NodeCryptoKeyPublic, realm),
-            );
-            globals.set_non_enumerable(
-                "__kilnCryptoKeyInfo",
-                Value::Native(Native::NodeCryptoKeyInfo, realm),
-            );
-            globals.set_non_enumerable(
-                "__kilnCryptoKeyExport",
-                Value::Native(Native::NodeCryptoKeyExport, realm),
-            );
-            globals.set_non_enumerable(
-                "__kilnCryptoKeyFree",
-                Value::Native(Native::NodeCryptoKeyFree, realm),
             );
         }
         // Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's

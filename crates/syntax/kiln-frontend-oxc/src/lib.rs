@@ -2264,7 +2264,7 @@ fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> Hash
 fn inline_eval_syntax(expression: &HirExpression) -> bool {
     use HirExpressionKind as K;
     match &expression.kind {
-        K::Literal(_) | K::This => true,
+        K::Literal(_) | K::This | K::GlobalObject => true,
         K::Identifier(name) => !matches!(name.as_str(), "eval" | "await" | "yield"),
         K::StaticMember {
             object,
@@ -3857,9 +3857,28 @@ impl Lowerer<'_> {
                 if let Some(is_entry) = self.native_import_meta {
                     HirExpressionKind::Call {
                         callee: Box::new(HirExpression {
-                            kind: HirExpressionKind::Identifier(
-                                "__kilnNativeImportMeta".to_string(),
-                            ),
+                            kind: HirExpressionKind::StaticMember {
+                                object: Box::new(HirExpression {
+                                    kind: HirExpressionKind::StaticMember {
+                                        object: Box::new(HirExpression {
+                                            kind: HirExpressionKind::StaticMember {
+                                                object: Box::new(HirExpression {
+                                                    kind: HirExpressionKind::GlobalObject,
+                                                    span: expression_span,
+                                                }),
+                                                property: "process".to_string(),
+                                                optional: false,
+                                            },
+                                            span: expression_span,
+                                        }),
+                                        property: "__kilnNativeModules".to_string(),
+                                        optional: false,
+                                    },
+                                    span: expression_span,
+                                }),
+                                property: "__kilnNativeImportMeta".to_string(),
+                                optional: false,
+                            },
                             span: expression_span,
                         }),
                         arguments: vec![

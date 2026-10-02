@@ -1,3 +1,9 @@
+/* Realm-owned slots shared by runtime parts which precede the builtin constructors. */
+#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
+#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
+#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
+
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
                                                                kiln_val value);

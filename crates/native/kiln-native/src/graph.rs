@@ -201,8 +201,9 @@ pub(super) fn native_builtin_supports_export(
 }
 
 pub(super) const NATIVE_BUILTIN_BOOTSTRAP_SOURCE: &str = r#"
-const __kilnModuleRequireResolve = globalThis.__kilnHostModuleRequireResolve;
-delete globalThis.__kilnHostModuleRequireResolve;
+const __kilnRuntimeModules = globalThis.process.__kilnNativeModules;
+const __kilnModuleRequireResolve = __kilnRuntimeModules.__kilnHostModuleRequireResolve;
+delete __kilnRuntimeModules.__kilnHostModuleRequireResolve;
 
 function __kilnDecorateCommonJsRequire(require) {
     const resolve = function resolve(specifier, options) {
@@ -219,7 +220,10 @@ function __kilnDecorateCommonJsRequire(require) {
     });
     return require;
 }
-globalThis.__kilnDecorateCommonJsRequire = __kilnDecorateCommonJsRequire;
+Object.defineProperty(__kilnRuntimeModules, "__kilnDecorateCommonJsRequire", {
+    value: __kilnDecorateCommonJsRequire,
+    configurable: true
+});
 
 const __kilnSegmentBoundaries = globalThis.__kilnIntlSegment;
 delete globalThis.__kilnIntlSegment;
@@ -1007,7 +1011,8 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
         if (!__kilnBuiltinModuleNames.has(name)) return undefined;
         if (__kilnBuiltinRequire === undefined) {{
             __kilnBuiltinRequire =
-                globalThis.__kilnHostModuleCreateRequire("/kiln/runtime-bootstrap.ts");
+                globalThis.process.__kilnNativeModules.__kilnHostModuleCreateRequire(
+                    "/kiln/runtime-bootstrap.ts");
         }}
         return __kilnBuiltinRequire("node:" + name);
     }};
@@ -1022,7 +1027,8 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
 /// executable's location. `process.execPath` remains the executable path independently.
 fn native_import_meta_bootstrap() -> String {
     r#"
-if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
+const __kilnImportMetaModules = globalThis.process.__kilnNativeModules;
+if (typeof __kilnImportMetaModules.__kilnNativeImportMeta === "undefined") {
     const __kilnEncodeURIComponent = encodeURIComponent;
     const __kilnApply = Reflect.apply;
     const __kilnReplace = String.prototype.replace;
@@ -1033,7 +1039,7 @@ if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
         const pathEncoded = __kilnApply(__kilnReplace, encoded, [__kilnPathEscapePattern, escape => __kilnPathEscapes[escape]]);
         return "file://" + pathEncoded;
     }
-    globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
+    __kilnImportMetaModules.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
         return {
             // Encode the raw filesystem path before assembling its URL. URL construction from
             // `file://` + path treats `#` and `?` as URL syntax instead of path characters.

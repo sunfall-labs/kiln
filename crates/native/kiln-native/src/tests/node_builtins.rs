@@ -184,6 +184,7 @@ function factory() {
 }
 const { load, require } = factory();
 console.log(import.meta.url);
+console.log(((process, globalThis) => import.meta.url)(null, null) === import.meta.url);
 console.log(`before:${globalThis.__loads || 0}`);
 const first = load();
 const second = load();
@@ -288,7 +289,7 @@ module.exports = { loads: globalThis.__loads };"#,
         .expect("special-character importer becomes a file URL")
         .to_string();
     let expected_tail =
-        format!("before:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|2|3\n");
+        format!("true\nbefore:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|2|3\n");
     let expected_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
         String::from_utf8(run.stdout).expect("dev stdout is UTF-8"),

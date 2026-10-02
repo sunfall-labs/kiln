@@ -799,6 +799,10 @@ pub enum ExpressionKind {
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.
     This,
+    /// The realm's global object, loaded as an intrinsic rather than resolving an identifier.
+    /// Frontend-generated references (such as the native `import.meta` bridge) must not be
+    /// captured by a user binding named `globalThis` or `process`.
+    GlobalObject,
     /// A class expression.
     Class(Box<Class>),
     /// A function expression or arrow function used as a value.

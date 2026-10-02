@@ -583,11 +583,29 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         | groups::NODE_UTIL
         | groups::NODE_DIAGNOSTICS
         | groups::NODE_STREAM
-        | groups::NODE_PATH;
+        | groups::NODE_PATH
+        | groups::NODE_CRYPTO;
     assert_eq!(
         fs_mask & node_groups,
         groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
         "node:fs keeps stream/event and the Buffer methods its reads can return: {fs_mask:#x}"
+    );
+    let crypto_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import { createHash } from 'node:crypto';\nconsole.log(typeof createHash);\n",
+        )],
+    );
+    assert_ne!(
+        crypto_mask & groups::NODE_CRYPTO,
+        0,
+        "node:crypto keeps its private raw bridge capability"
+    );
+    assert_eq!(
+        CORE_METHOD_GROUPS & groups::NODE_CRYPTO,
+        0,
+        "crypto bridge is not part of the always-retained core"
     );
     let dynamic_mask = mask_for(
         "main.mjs",

@@ -2017,8 +2017,19 @@ fn every_surface_member_is_named_for_its_key() {
         wrong.join("\n")
     );
 
+    assert_eq!(
+        vm.read_property(&globals, "__kilnHostModuleCreateRequire", 0),
+        Ok(Value::Undefined),
+        "the private createRequire capability must not leak onto globalThis"
+    );
+    let process = vm
+        .read_property(&globals, "process", 0)
+        .expect("the realm process object is published");
+    let native_modules = vm
+        .read_property(&process, "__kilnNativeModules", 0)
+        .expect("the private native capability table is published");
     let host_create_require = vm
-        .read_property(&globals, "__kilnHostModuleCreateRequire", 0)
+        .read_property(&native_modules, "__kilnHostModuleCreateRequire", 0)
         .expect("the private createRequire host hook is published");
     assert_eq!(
         vm.read_property(&host_create_require, "name", 0),

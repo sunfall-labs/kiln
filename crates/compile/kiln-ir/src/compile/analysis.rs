@@ -569,6 +569,7 @@ pub(super) fn expression_contains_direct_eval(expression: &Expression) -> bool {
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -874,6 +875,7 @@ pub(super) fn expression_contains_new_function(expression: &Expression) -> bool 
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -1285,6 +1287,7 @@ pub(super) fn collect_dynamic_imports_from_expression(
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -1771,6 +1774,7 @@ pub(super) fn collect_identifiers(
         }
         ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::Unsupported { .. } => {}

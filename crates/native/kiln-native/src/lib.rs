@@ -907,7 +907,7 @@ fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32
 /// yields no flags, so fully retained builds compile exactly today's prelude.
 fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
     use kiln_graph::method_groups as groups;
-    const FLAGS: [(u32, &str); 18] = [
+    const FLAGS: [(u32, &str); 19] = [
         (groups::URL, "KILN_RETAIN_GROUP_URL"),
         (groups::TEMPORAL, "KILN_RETAIN_GROUP_TEMPORAL"),
         (groups::TEMPORAL_FROM, "KILN_RETAIN_GROUP_TEMPORAL_FROM"),
@@ -935,6 +935,7 @@ fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
         ),
         (groups::NODE_STREAM, "KILN_RETAIN_GROUP_NODE_STREAM"),
         (groups::NODE_PATH, "KILN_RETAIN_GROUP_NODE_PATH"),
+        (groups::NODE_CRYPTO, "KILN_RETAIN_GROUP_NODE_CRYPTO"),
     ];
     FLAGS
         .iter()

@@ -177,6 +177,8 @@ pub mod method_groups {
     /// runtime bootstrap. Close to a megabyte of `idna` tables, so a program that names
     /// neither -- and imports nothing that does -- links none of it (ADR 0063 rule 4).
     pub const URL: u32 = 2097152;
+    /// Raw provider bridges used only by the `node:crypto` TypeScript facade.
+    pub const NODE_CRYPTO: u32 = 4194304;
 }
 
 /// Dispatch machinery required by every program regardless of the globals it reaches.
@@ -203,11 +205,12 @@ pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::URL
     | method_groups::TEMPORAL_NOW_READ
     | method_groups::TEMPORAL_OP
     | method_groups::DATE_SETTER
-    | method_groups::MATH_NUMBER;
+    | method_groups::MATH_NUMBER
+    | method_groups::NODE_CRYPTO;
 
 /// Human names for a group mask, in canonical dispatch order.
 pub fn method_group_names(mask: u32) -> Vec<&'static str> {
-    const ALL: [(u32, &str); 21] = [
+    const ALL: [(u32, &str); 22] = [
         (method_groups::DIRECT, "Direct"),
         (method_groups::ARRAY_LOOKUP, "ArrayLookup"),
         (method_groups::STRING_DISPATCH, "StringDispatch"),
@@ -229,6 +232,7 @@ pub fn method_group_names(mask: u32) -> Vec<&'static str> {
         (method_groups::NODE_STREAM, "NodeStream"),
         (method_groups::NODE_PATH, "NodePath"),
         (method_groups::MATH_NUMBER, "MathNumber"),
+        (method_groups::NODE_CRYPTO, "NodeCrypto"),
     ];
     ALL.into_iter()
         .filter(|(bit, _)| mask & bit != 0)

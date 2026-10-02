@@ -19,6 +19,21 @@
 const names = Object.getOwnPropertyNames(globalThis)
   .filter((name: string) => !name.startsWith("$262"))
   .sort();
+for (const privateHook of [
+  "__kilnCryptoKeyExport",
+  "__kilnCryptoKeyFree",
+  "__kilnCryptoKeyImport",
+  "__kilnCryptoKeyInfo",
+  "__kilnCryptoKeyPublic",
+  "__kilnDecorateCommonJsRequire",
+  "__kilnHostModuleCreateRequire",
+  "__kilnHostModuleRequireResolve",
+  "__kilnNativeImportMeta",
+]) {
+  if (Object.prototype.hasOwnProperty.call(globalThis, privateHook)) {
+    throw new Error(`runtime hook ${privateHook} leaked onto globalThis`);
+  }
+}
 const globals = globalThis as Record<string, unknown>;
 let callables = 0;
 for (const name of names) {

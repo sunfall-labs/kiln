@@ -3043,6 +3043,9 @@ macro_rules! header_prefix {
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
+#ifndef KILN_RETAIN_GROUP_NODE_CRYPTO
+#define KILN_RETAIN_GROUP_NODE_CRYPTO 1
+#endif
 #ifndef KILN_RETAIN_GROUP_URL
 #define KILN_RETAIN_GROUP_URL 1
 #endif

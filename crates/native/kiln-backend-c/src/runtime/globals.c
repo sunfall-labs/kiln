@@ -105,8 +105,8 @@ static int kiln_c99_process_object(kiln_value *out) {
     kiln_value exec_argv;
     kiln_value versions;
     kiln_value stream;
-#if KILN_RETAIN_GROUP_NODE_NET
     kiln_value native_modules = kiln_c99_undefined();
+#if KILN_RETAIN_GROUP_NODE_NET
     kiln_value net_module = kiln_c99_undefined();
 #endif
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
@@ -119,6 +119,50 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "__kilnFsDescriptor", 18,
                               kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW), 0, NULL);
+    /* Runtime capabilities live on this non-enumerable process table, never as global names.
+     * The TypeScript Node facades capture and remove the bootstrap-only members before user code
+     * runs, while the CommonJS decorator remains available to the graph runtime. */
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&native_modules);
+    if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&native_modules);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*process, "__kilnNativeModules", 19,
+                                          native_modules, 0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleRequireResolve", 30,
+                                          kiln_c99_method(KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleCreateRequire", 29,
+                                          kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
+                                          0, 1, 1);
+#if KILN_RETAIN_GROUP_NODE_CRYPTO
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyImport", 21,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyPublic", 21,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyInfo", 19,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyExport", 21,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyFree", 20,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW),
+                                          0, 1, 1);
+#endif
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnDecorateCommonJsRequire", 29,
+                                          kiln_c99_undefined(), 0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnNativeImportMeta", 22,
+                                          kiln_c99_undefined(), 0, 1, 1);
     /* Demand-driven prelude: `process` is an emitter only in builds that
      * retain the event group (see `retained_method_groups`). Reaching this
      * initializer requires the `process` global, which retains the group,
@@ -392,10 +436,6 @@ static int kiln_c99_process_object(kiln_value *out) {
      * cork methods reach these private kernels through process.__kilnNativeModules.net; keeping
      * that adapter separate from the public export object lets the facade own the public API. */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_new_object(&native_modules);
-        if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&native_modules);
-    }
-    if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&net_module);
         if (status == KILN_C99_OK) {
             kiln_c99_gc_keep_alive(&native_modules);
@@ -428,9 +468,6 @@ static int kiln_c99_process_object(kiln_value *out) {
                                         kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL));
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, native_modules, "net", 3, net_module, 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnNativeModules", 19,
-                              native_modules, 0, NULL);
     kiln_c99_gc_keep_alive(&native_modules);
     kiln_c99_gc_keep_alive(&net_module);
 #endif
@@ -532,9 +569,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"decodeURI", KILN_C99_METHOD_DECODE_URI},
                      {"decodeURIComponent", KILN_C99_METHOD_DECODE_URI_COMPONENT},
                      {"__kilnHostProcessStart", KILN_C99_METHOD_PROCESS_START_RAW},
-                     {"__kilnHostModuleRequireResolve", KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE},
                      {"__kilnHostProcessCancel", KILN_C99_METHOD_PROCESS_CANCEL_RAW},
-                     {"__kilnHostModuleCreateRequire", KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE},
                      {"queueMicrotask", KILN_C99_METHOD_QUEUE_MICROTASK},
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},
@@ -546,11 +581,6 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW},
                      {"__kilnHostStringLocaleCase", KILN_C99_METHOD_STRING_LOCALE_CASE_RAW},
                      {"__kilnIntlDateTimeFormat", KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW},
-                     {"__kilnCryptoKeyImport", KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW},
-                     {"__kilnCryptoKeyPublic", KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW},
-                     {"__kilnCryptoKeyInfo", KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW},
-                     {"__kilnCryptoKeyExport", KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW},
-                     {"__kilnCryptoKeyFree", KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW},
                      {"__kilnUint8ToHex", KILN_C99_METHOD_UINT8_TO_HEX_RAW},
                      {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW},
                      {"__kilnUrlParse", KILN_C99_METHOD_URL_PARSE_RAW},
