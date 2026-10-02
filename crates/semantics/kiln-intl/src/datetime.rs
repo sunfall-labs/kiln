@@ -36,6 +36,8 @@ use icu_datetime::fieldsets::enums::CompositeFieldSet;
 use icu_datetime::options::{Alignment, Length, SubsecondDigits, TimePrecision, YearStyle};
 use icu_datetime::provider::fields::components;
 use icu_datetime::range::DateRangeFormatter;
+use icu_decimal::DecimalFormatter;
+use icu_decimal::options::DecimalFormatterOptions;
 use icu_locale_core::preferences::extensions::unicode::keywords::{
     CalendarAlgorithm, HourCycle, NumberingSystem,
 };
@@ -340,6 +342,10 @@ pub struct DateTimeFormat {
     resolution: Resolution,
     calendar: String,
     numbering_system: String,
+    /// The zero glyph used by the resolved numbering system. ICU's column alignment is global
+    /// across date and time fields; keeping this lets the language-level widths be restored per
+    /// field when that global option padded a field requested as `numeric`.
+    zero_digit: String,
     zone: TimeZoneChoice,
     date_style: Option<String>,
     time_style: Option<String>,
@@ -445,6 +451,16 @@ impl DateTimeFormat {
             None => resolution.value("hc").and_then(spelled_hour_cycle),
         };
         preferences.hour_cycle = hour_cycle;
+        let zero_digit = DecimalFormatter::try_new(
+            preferences.clone().into(),
+            DecimalFormatterOptions::default(),
+        )
+        .map(|formatter| {
+            formatter
+                .format(&fixed_decimal::Decimal::from(0))
+                .to_string()
+        })
+        .unwrap_or_else(|_| "0".to_owned());
 
         let zone = options
             .time_zone
@@ -473,6 +489,7 @@ impl DateTimeFormat {
             resolution,
             calendar,
             numbering_system,
+            zero_digit,
             zone,
             date_style: options.date_style.clone(),
             time_style: options.time_style.clone(),
@@ -482,7 +499,8 @@ impl DateTimeFormat {
         // The pattern is what the formatter actually resolved to, so the components come out of
         // it rather than out of the request: a build that could not honour `month: "narrow"` says
         // so here instead of claiming it did.
-        let (components, cycle) = built.resolved_components();
+        let (mut components, cycle) = built.resolved_components();
+        built.restore_requested_numeric_widths(&mut components);
         built.components = components;
         built.hour_cycle = cycle;
         Ok(built)
@@ -578,6 +596,7 @@ impl DateTimeFormat {
         let built = std::rc::Rc::new(Shaped {
             formatter,
             ranges,
+            options: restricted,
             shows_time,
         });
         self.shaped.borrow_mut().push((shape, built.clone()));
@@ -599,9 +618,16 @@ impl DateTimeFormat {
 
     /// `format(temporalValue)`, with the value already placed on the timeline.
     pub fn format_shape(&self, shape: Shape, epoch_milliseconds: f64) -> Result<String, Error> {
+        use writeable::Writeable;
         let shaped = self.shaped(shape)?;
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
-        Ok(shaped.formatter.format(&at.0).to_string())
+        let mut sink = PartCollector::default();
+        let _ = shaped.formatter.format(&at.0).write_to_parts(&mut sink);
+        Ok(join_parts(adjust_numeric_widths(
+            sink.finish(),
+            &shaped.options,
+            &self.zero_digit,
+        )))
     }
 
     /// `formatToParts(temporalValue)`.
@@ -615,7 +641,11 @@ impl DateTimeFormat {
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
         let mut sink = PartCollector::default();
         let _ = shaped.formatter.format(&at.0).write_to_parts(&mut sink);
-        Ok(sink.finish())
+        Ok(adjust_numeric_widths(
+            sink.finish(),
+            &shaped.options,
+            &self.zero_digit,
+        ))
     }
 
     /// Both ends of a shaped range, with the time of day dropped when the pattern has no time in
@@ -641,9 +671,19 @@ impl DateTimeFormat {
 
     /// `formatRange(temporalValue, temporalValue)`.
     pub fn format_shape_range(&self, shape: Shape, start: f64, end: f64) -> Result<String, Error> {
+        use writeable::Writeable;
         let shaped = self.shaped(shape)?;
         let (first, second) = self.shaped_range_ends(shape, &shaped, start, end)?;
-        Ok(shaped.ranges.format(&first.0, &second.0).to_string())
+        let mut sink = PartCollector::default();
+        let _ = shaped
+            .ranges
+            .format(&first.0, &second.0)
+            .write_to_parts(&mut sink);
+        Ok(join_parts(adjust_numeric_widths(
+            sink.finish(),
+            &shaped.options,
+            &self.zero_digit,
+        )))
     }
 
     /// `formatRangeToParts(temporalValue, temporalValue)`.
@@ -661,13 +701,14 @@ impl DateTimeFormat {
             .ranges
             .format(&first.0, &second.0)
             .write_to_parts(&mut sink);
-        Ok(attribute_sources(sink.finish()))
+        let parts = adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit);
+        Ok(attribute_sources(parts))
     }
 
     /// `format(date)`.
     pub fn format(&self, epoch_milliseconds: f64) -> Result<String, Error> {
-        let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
-        Ok(self.formatter.format(&at.0).to_string())
+        self.format_to_parts(epoch_milliseconds)
+            .map(|parts| join_parts(parts.into_iter().map(|(_, text)| text)))
     }
 
     /// `formatToParts(date)`.
@@ -679,7 +720,11 @@ impl DateTimeFormat {
         let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
         let mut sink = PartCollector::default();
         let _ = self.formatter.format(&at.0).write_to_parts(&mut sink);
-        Ok(sink.finish())
+        Ok(adjust_numeric_widths(
+            sink.finish(),
+            &self.options,
+            &self.zero_digit,
+        ))
     }
 
     /// Whether the resolved pattern shows a time at all.
@@ -707,8 +752,8 @@ impl DateTimeFormat {
 
     /// `formatRange(start, end)`.
     pub fn format_range(&self, start: f64, end: f64) -> Result<String, Error> {
-        let (from, to) = self.range_ends(start, end)?;
-        Ok(self.ranges.format(&from.0, &to.0).to_string())
+        self.format_range_to_parts(start, end)
+            .map(|parts| join_parts(parts.into_iter().map(|(_, _, text)| text)))
     }
 
     /// `formatRangeToParts(start, end)`: each run, with the side of the range it came from.
@@ -732,7 +777,7 @@ impl DateTimeFormat {
             .ranges
             .format(&start_at.0, &end_at.0)
             .write_to_parts(&mut sink);
-        let parts = sink.finish();
+        let parts = adjust_numeric_widths(sink.finish(), &self.options, &self.zero_digit);
         Ok(attribute_sources(parts))
     }
 
@@ -869,6 +914,23 @@ impl DateTimeFormat {
             _ => "h12",
         });
         (out, cycle)
+    }
+
+    /// ICU's `Alignment::Column` changes every one-digit month, day and hour in a composite
+    /// pattern, even when only one of them was requested as `2-digit`. ECMA-402 resolves those
+    /// widths independently, so restore the explicit request for fields present in the pattern.
+    fn restore_requested_numeric_widths(&self, components: &mut [(&'static str, Setting)]) {
+        for (name, setting) in components {
+            let requested = match *name {
+                "month" => self.options.month.as_deref(),
+                "day" => self.options.day.as_deref(),
+                "hour" => self.options.hour.as_deref(),
+                _ => None,
+            };
+            if let Some(width @ ("numeric" | "2-digit")) = requested {
+                *setting = Setting::string(width);
+            }
+        }
     }
 }
 
@@ -1025,6 +1087,7 @@ fn with_defaults(options: &Options) -> Options {
 struct Shaped {
     formatter: DateTimeFormatter<CompositeFieldSet>,
     ranges: DateRangeFormatter<CompositeFieldSet>,
+    options: Options,
     /// Whether the resolved pattern shows a time, which decides whether a range compares two
     /// instants or two days.
     shows_time: bool,
@@ -1419,6 +1482,36 @@ impl writeable::PartsWrite for PartCollector {
         self.stack.pop();
         result
     }
+}
+
+/// Undo padding that ICU's whole-pattern column alignment applied to a field whose
+/// `Intl.DateTimeFormat` width is independently `numeric`.
+fn adjust_numeric_widths(
+    mut parts: Vec<(&'static str, String)>,
+    options: &Options,
+    zero_digit: &str,
+) -> Vec<(&'static str, String)> {
+    for (kind, text) in &mut parts {
+        let requested = match *kind {
+            "month" => options.month.as_deref(),
+            "day" => options.day.as_deref(),
+            "hour" => options.hour.as_deref(),
+            _ => None,
+        };
+        if requested != Some("numeric") {
+            continue;
+        }
+        if let Some(unpadded) = text.strip_prefix(zero_digit)
+            && unpadded.chars().count() == 1
+        {
+            *text = unpadded.to_owned();
+        }
+    }
+    parts
+}
+
+fn join_parts(parts: impl IntoIterator<Item = String>) -> String {
+    parts.into_iter().collect()
 }
 
 /// Give each run of a formatted range the side of the range it came from.
