@@ -153,4 +153,4 @@ function StudioApp() {
   );
 }
 
-runApp(<StudioApp />);
+await runApp(<StudioApp />);
