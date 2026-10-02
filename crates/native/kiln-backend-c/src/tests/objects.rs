@@ -119,13 +119,16 @@ int main(void) {
     kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
     kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
     heap.enabled = 1;
-    kiln_c99_gc_collect(&heap, 1);
+    kiln_c99_gc_collect_mid_turn(&heap);
     heap.enabled = 0;
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
     source_object = kiln_c99_object_of(source);
     readonly_object = kiln_c99_object_of(readonly);
-    if (source_object == NULL || source_object->dictionary_index != index ||
-        kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK ||
-        kiln_c99_as_number(value) != 39.0) return 7;
+    if (source_object == NULL) return 71;
+    if (source_object->dictionary_index != index) return 72;
+    if (kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK) return 73;
+    if (kiln_c99_as_number(value) != 39.0) return 74;
 
     /* A prepared cross-region clone owns fresh object storage and never aliases the source
      * cache; arena discard frees its own side storage without relying on object finalizers. */
