@@ -118,3 +118,7 @@ rust = "1.97.1"
 [tasks.issues-index]
 description = "Regenerate docs/issues/README.md, the per-feature open/closed index of the issue tracker"
 run = "python3 scripts/issues-index.py"
+
+[tasks.release-package]
+description = "Build and smoke-test the release archive for this host into dist/ (scripts/package-release.sh)"
+run = "scripts/package-release.sh dist"

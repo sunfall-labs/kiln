@@ -104,9 +104,20 @@ where
         .collect()
 }
 
+/// `KILN_BUILD_COMMIT` and `KILN_BUILD_TARGET` are set by `scripts/package-release.sh` when it
+/// builds a release binary, so `kiln --version` names exactly what was shipped. A developer build
+/// has neither and prints the bare version.
 fn version() -> String {
+    let build = match (
+        option_env!("KILN_BUILD_COMMIT"),
+        option_env!("KILN_BUILD_TARGET"),
+    ) {
+        (Some(commit), Some(target)) => format!(" ({commit} {target})"),
+        (Some(commit), None) => format!(" ({commit})"),
+        _ => String::new(),
+    };
     format!(
-        "kiln {}\nprotocol {}\n",
+        "kiln {}{build}\nprotocol {}\n",
         env!("CARGO_PKG_VERSION"),
         kiln_proto::PROTOCOL_VERSION
     )
@@ -210,7 +221,6 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
 fn dispatch(invocation: Invocation) -> Result<i32> {
     let target = target_for_command(&invocation.command);
     let root = find_project_root(target)?;
-    let socket = client::socket_path(invocation.socket, &root)?;
     let one_shot = invocation.one_shot;
 
     let is_test = matches!(invocation.command, Command::Test { .. });
@@ -219,6 +229,14 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     // engines read it once per process. A resident daemon was started with its own environment,
     // so a command that asks for the switch is served in this process instead, where it applies.
     let one_shot = one_shot || !kiln_builtin_surface::kiln_extensions_installed();
+    // Only a command that reaches the daemon needs its socket. Deriving it eagerly made every
+    // `--one-shot` command fail when the path would exceed the platform's unix-socket limit -- a
+    // long `TMPDIR` is enough -- although a one-shot run never opens a socket at all.
+    let socket = if one_shot && !matches!(invocation.command, Command::Daemon(_)) {
+        PathBuf::new()
+    } else {
+        client::socket_path(invocation.socket, &root)?
+    };
 
     let auto_node = |explicit: bool| -> bool {
         explicit

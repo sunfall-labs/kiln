@@ -61,3 +61,6 @@ conformance/npm-compat/node_modules/
 conformance/npm-compat/results/raw/
 conformance/npm-compat/tmp/
 conformance/npm-compat/expected/
+
+# Release archives written by scripts/package-release.sh.
+/dist/

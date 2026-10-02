@@ -135,7 +135,10 @@ impl fmt::Display for NumberProviderError {
             ),
             Self::SourceUnavailable { root } => write!(
                 formatter,
-                "no shipped number provider was found and source fallback is unavailable at {}",
+                "no installed number provider covers this program, and this kiln has no source \
+                 tree to build one from (looked for {}). A release install carries every provider \
+                 variant in `lib/kiln/` beside its `bin/`; reinstall from a release archive, or set \
+                 KILN_NATIVE_PROVIDER_MANIFEST to a packaged provider manifest",
                 root.display()
             ),
         }
@@ -265,15 +268,24 @@ pub(crate) fn discover_for(
     build_from_source(identity, required)
 }
 
+/// The running `kiln`, with symlinks resolved. An install commonly links `bin/kiln` into a
+/// directory already on `PATH` (`~/.local/bin`, Homebrew's `bin/`), and on macOS `current_exe`
+/// answers with the link's own path rather than its target -- so `bin/../lib/kiln` would be looked
+/// for beside the link and every installed provider would be missed.
+fn installed_executable() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?;
+    Some(fs::canonicalize(&executable).unwrap_or(executable))
+}
+
 fn installed_manifest_candidates() -> Vec<PathBuf> {
-    let Ok(executable) = env::current_exe() else {
+    let Some(executable) = installed_executable() else {
         return Vec::new();
     };
     installed_manifest_candidates_for(&executable)
 }
 
 fn installed_variant_manifest_candidates(variant: ProviderVariant) -> Vec<PathBuf> {
-    let Ok(executable) = env::current_exe() else {
+    let Some(executable) = installed_executable() else {
         return Vec::new();
     };
     installed_manifest_candidates_for(&executable)

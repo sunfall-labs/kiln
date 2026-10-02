@@ -151,7 +151,32 @@ kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN
 epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 `crates/host/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
 
-## Using it
+## Installing
+
+Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64 and arm64:
+
+```sh
+curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
+```
+
+That unpacks the release into `~/.kiln/<version>/` and links `kiln` into `~/.local/bin`.
+`KILN_VERSION`, `KILN_INSTALL_DIR` and `KILN_BIN_DIR` override the defaults, and `GITHUB_TOKEN` is
+needed while the repository is private. A release carries the binary and every native provider
+archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc or Zig -- and no
+Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
+`SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
+the binary finds its providers at `bin/../lib/kiln`, through a symlink if you make one.
+
+Not built: Intel macOS and Windows. Linux releases carry no `kiln:gui` provider (the bridge is
+AppKit today, ADR 0074), so a Linux program that imports it is refused by name. In
+`KILN_WORKERS_MODE=thread` one crashing realm takes the others with it; process mode, the
+default, restarts a crashed worker.
+
+`scripts/package-release.sh dist` builds the same archive for the host from a clean checkout and
+smoke-tests it with no Rust toolchain on `PATH`; `.github/workflows/release.yml` runs it for every
+target on a `v*` tag and publishes the result.
+
+## Building from source
 
 Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
 
