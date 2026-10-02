@@ -1,30 +1,131 @@
 
-/* Append everything `source` yields to `target`, which is what array spread, `for...of` and
- * destructuring all reduce to. Every non-nullish value goes through @@iterator: collection and
- * indexed-value shortcuts would skip observable user overrides such as a Map subclass's
- * Symbol.iterator. */
+/* Append everything source yields to target, which is what array spread, for...of and
+ * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
+ * the observable @@iterator lookup proves that the canonical method is still selected. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
+    kiln_value method;
+    size_t index;
     int status;
-    /* Nullish is answered here rather than by the `@@iterator` lookup below, because the two
-     * faults are reported differently: reading a property off null is "Cannot read properties of
-     * null", but *iterating* it is "null is not iterable", and `[...null]` is the second one. */
+    /* Nullish has a distinct not-iterable failure from the property-read error the lookup
+     * would produce. */
     if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
         return kiln_c99_throw_not_iterable(thrown, source);
     }
-    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
-    {
-        kiln_value method;
-        status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
+    status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (!kiln_c99_is_callable(method)) {
+        return kiln_c99_throw_not_iterable(thrown, source);
+    }
+
+    /* Exact method identity handles own and subclass overrides; the realm guard protects the
+     * iterator machinery (including its next method) from builtin mutation. The property lookup
+     * above still runs first, so an accessor override keeps its specified side effects. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_ARRAY &&
+        source.bits != target.bits) {
+        kiln_array *array = kiln_c99_array_of(source);
+        size_t length = array->count;
+        int dense = array->properties.tag == KILN_VALUE_UNDEFINED;
+        for (index = 0; dense && index < length; ++index) {
+            dense = array->elements[index] != KILN_VAL_HOLE;
+        }
+        /* A hole observes inherited indexed properties under the iterator protocol. Keep that
+         * case on the generic path; dense arrays have no such lookup to perform. */
+        if (dense) {
+            for (index = 0; index < length && index < array->count; ++index) {
+                status = kiln_c99_array_push(target,
+                                             kiln_val_to_boundary(array->elements[index]));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            return KILN_C99_OK;
+        }
+    }
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES &&
+        source.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(source);
+        /* Read each element at the moment it is visited: a view is live over its shared buffer. */
+        for (index = 0; index < view->length; ++index) {
+            kiln_value element;
+            status = kiln_c99_typed_element(view, index, &element);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(target, element);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_COLLECTION_SELF &&
+        source.tag == KILN_VALUE_COLLECTION) {
+        /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
+         * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
+        kiln_collection *collection = kiln_c99_collection_of(source);
+        size_t length = collection->count;
+        for (index = 0; index < length && index < collection->count; ++index) {
+            kiln_value produced;
+            if (collection->entries[index].dead) {
+                continue;
+            }
+            produced = collection->entries[index].value;
+            if (collection->is_map) {
+                status = kiln_c99_new_array(&produced);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_array_push(produced, collection->entries[index].key);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_array_push(produced, collection->entries[index].value);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            status = kiln_c99_array_push(target, produced);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_STRING) {
+        /* A string iterates as its *characters*, not its code units: an astral character is one
+         * step, which is the difference between iterating a string and indexing it. */
+        uint16_t *units = NULL;
+        size_t count = 0;
+        status = kiln_c99_to_units(source, &units, &count);
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* No `@@iterator` at all is the ordinary case -- `for (const x of 5)` -- and the
-         * language reports a catchable TypeError. */
-        if (!kiln_c99_is_callable(method)) {
-            return kiln_c99_throw_not_iterable(thrown, source);
+        for (index = 0; index < count; ++index) {
+            size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                            index + 1 < count && units[index + 1] >= 0xDC00 &&
+                            units[index + 1] <= 0xDFFF)
+                               ? 2
+                               : 1;
+            status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
+            if (status != KILN_C99_OK) {
+                free(units);
+                return status;
+            }
+            index += width - 1;
         }
+        free(units);
+        return KILN_C99_OK;
+    }
+    /* A generator's intrinsic @@iterator just returns itself; replaced methods still use the
+     * ordinary call path. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_GENERATOR_SELF &&
+        source.tag == KILN_VALUE_GENERATOR) {
+        iterator = source;
+    } else {
         status = kiln_c99_call(host, &iterator, method, source, NULL, 0, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
