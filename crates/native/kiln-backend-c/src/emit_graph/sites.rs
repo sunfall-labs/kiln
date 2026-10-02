@@ -228,6 +228,7 @@ pub(super) fn typed_row_claimer(
     index: usize,
     columns: &[u32],
     double_mask: u32,
+    typed_row_safe: bool,
     linkage: &str,
 ) -> String {
     let keys: Vec<String> = columns
@@ -235,6 +236,11 @@ pub(super) fn typed_row_claimer(
         .map(|name| format!("{symbol}_key_{name}"))
         .collect();
     let count = columns.len();
+    if !typed_row_safe {
+        return format!(
+            "{linkage}const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj) {{ (void)recv_obj; return NULL; }}\n"
+        );
+    }
     format!(
         "{linkage}const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj) {{ const uint32_t *recv_row = kiln_c99_recv_row({symbol}_fn_{index}_typed_recv_shape, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({symbol}_fn_{index}_typed_recv_refused, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({symbol}_fn_{index}_typed_recv_shape, {symbol}_fn_{index}_typed_recv_refused, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} return recv_row; }}\n",
         keys.join(", ")

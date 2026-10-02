@@ -300,6 +300,10 @@ pub(super) fn emit_get_property(
     if is_typed_entry && this_site.is_some() {
         let prev = ctx.this_copy.map(|c| c.0);
         let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let slow_read = format!(
+            "{{ static kiln_c99_site fallback_site = {{0}}; int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &fallback_site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            o = object.0,
+        );
         let int_sync = if typed_int {
             format!(" i{v} = (int64_t)d{v};")
         } else {
@@ -307,15 +311,15 @@ pub(super) fn emit_get_property(
         };
         match (this_site, prev) {
             (Some(_), Some(prev_vid)) => {
-                let box_stmt = if need_box {
-                    format!(" v{v} = v{prev_vid};")
-                } else {
-                    String::new()
-                };
                 if typed {
+                    let box_stmt = if need_box {
+                        format!(" v{v} = v{prev_vid};")
+                    } else {
+                        String::new()
+                    };
                     writeln!(output, "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
                 } else {
-                    writeln!(output, "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; v{v} = v{prev_vid};{int_sync}").unwrap();
+                    writeln!(output, "    if (recv_obj->shape == recv_shape) v{v} = v{prev_vid}; else {slow_read}").unwrap();
                 }
             }
             (Some(col_idx), None) => {
@@ -333,7 +337,7 @@ pub(super) fn emit_get_property(
                 } else {
                     writeln!(
                         output,
-                        "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; v{v} = recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
+                        "    if (recv_obj->shape == recv_shape) v{v} = recv_obj->slots[recv_row[{col_idx}]]; else {slow_read}"
                     )
                     .unwrap();
                 }

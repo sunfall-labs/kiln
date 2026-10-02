@@ -4,8 +4,8 @@ use super::sites::{self, receiver_prologue, share_sites, this_columns, typed_row
 use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
-    BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
-    Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
+    BasicBlock, BlockId, Effects, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable,
+    Proven, Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
     candidate_number_parameters_with_profile, find_induction_variables,
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
@@ -447,6 +447,7 @@ pub fn emit_function_from_graph_with_profile(
                     index,
                     &this_col_names,
                     typed_double_mask(&this_col_map, plan),
+                    typed_receiver_row_safe(graph, &this_col_map, plan),
                     linkage,
                 ));
             }
@@ -3896,6 +3897,109 @@ fn typed_double_mask(this_col_map: &HashMap<ValueId, usize>, plan: &CallPlan) ->
         }
     }
     mask
+}
+
+/// A typed receiver row carries the numeric representation captured at method entry. Admit
+/// that entry only when no path can execute an effectful operation before a typed `this.x`
+/// read; otherwise the boxed entry must run from the start, before any user effects can occur.
+fn typed_receiver_row_safe(
+    graph: &FunctionGraph,
+    this_col_map: &HashMap<ValueId, usize>,
+    plan: &CallPlan,
+) -> bool {
+    let typed_reads: HashSet<ValueId> = this_col_map
+        .iter()
+        .filter_map(|(vid, column)| (plan.numbers.contains(vid) && *column < 32).then_some(*vid))
+        .collect();
+    if typed_reads.is_empty() {
+        return true;
+    }
+
+    let block_indices: HashMap<BlockId, usize> = graph
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect();
+    let Some(&entry_index) = block_indices.get(&graph.entry_block) else {
+        return false;
+    };
+    let mut reachable = vec![false; graph.blocks.len()];
+    let mut incoming = vec![Vec::new(); graph.blocks.len()];
+    let mut outgoing = vec![Vec::new(); graph.blocks.len()];
+    for (index, block) in graph.blocks.iter().enumerate() {
+        for target in block
+            .successors
+            .iter()
+            .chain(block.exception_handler.iter())
+        {
+            if let Some(&successor) = block_indices.get(target) {
+                incoming[successor].push(index);
+                outgoing[index].push(successor);
+            }
+        }
+    }
+    let mut pending = std::collections::VecDeque::from([entry_index]);
+    reachable[entry_index] = true;
+    while let Some(index) = pending.pop_front() {
+        for &next in &outgoing[index] {
+            if !reachable[next] {
+                reachable[next] = true;
+                pending.push_back(next);
+            }
+        }
+    }
+
+    let invalidates_row = |vid: ValueId, op: &GraphOp| {
+        if matches!(op, GraphOp::GetProperty { .. }) && this_col_map.contains_key(&vid) {
+            // This row-backed read is guaranteed to name an own data slot by the row claimer.
+            false
+        } else {
+            op.effects()
+                .intersects(Effects::CALLS_USER_CODE | Effects::WRITES_HEAP)
+        }
+    };
+    let mut dirty_out = vec![false; graph.blocks.len()];
+    loop {
+        let mut changed = false;
+        for (index, block) in graph.blocks.iter().enumerate() {
+            if !reachable[index] {
+                continue;
+            }
+            let mut dirty = incoming[index]
+                .iter()
+                .any(|&predecessor| dirty_out[predecessor]);
+            for (vid, op) in &block.operations {
+                dirty |= invalidates_row(*vid, op);
+            }
+            if matches!(block.terminator, Terminator::Suspend { .. }) {
+                dirty = true;
+            }
+            if dirty && !dirty_out[index] {
+                dirty_out[index] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (index, block) in graph.blocks.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        let mut dirty = incoming[index]
+            .iter()
+            .any(|&predecessor| dirty_out[predecessor]);
+        for (vid, op) in &block.operations {
+            if typed_reads.contains(vid) && dirty {
+                return false;
+            }
+            dirty |= invalidates_row(*vid, op);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
