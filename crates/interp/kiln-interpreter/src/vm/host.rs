@@ -1965,6 +1965,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     object: None,
                     ended: false,
                     started: false,
+                    end_sent: false,
                     request_id,
                 }));
                 let request_object = node_http_client_request_object(&state);
@@ -4764,7 +4765,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 message: "HTTP client request is not connected".into(),
             })?
         };
-        let (request, body, ended, already_started, request_id) = {
+        let (request, body, ended, already_started, end_sent, request_id) = {
             let mut state = state.borrow_mut();
             let mut headers = state.headers.clone();
             if !headers
@@ -4779,10 +4780,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 headers,
             };
             let body = std::mem::take(&mut state.body);
-            (request, body, state.ended, state.started, state.request_id)
+            (
+                request,
+                body,
+                state.ended,
+                state.started,
+                state.end_sent,
+                state.request_id,
+            )
         };
         if already_started {
-            if ended {
+            if ended && !end_sent {
                 let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:http client requires the realm HTTP runtime".into(),
@@ -4794,6 +4802,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     instruction,
                     message: "Hyper lost the HTTP client request body".into(),
                 })?;
+                state.borrow_mut().end_sent = true;
             }
             return Ok(());
         }
@@ -4859,6 +4868,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 instruction,
                 message: "Hyper lost the HTTP client request body".into(),
             })?;
+            state.borrow_mut().end_sent = true;
         } else if !body.is_empty() {
             unsafe {
                 ActiveHttpRuntime::write_client_request(&mut *runtime, resource, request_id, body)

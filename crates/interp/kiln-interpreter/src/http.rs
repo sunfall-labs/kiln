@@ -22,6 +22,9 @@ pub(crate) struct HttpClientRequestState {
     pub(crate) object: Option<Rc<RefCell<ObjectData>>>,
     pub(crate) ended: bool,
     pub(crate) started: bool,
+    /// The ended body has been handed to the host request slot. Socket/read events may
+    /// revisit `flush_http_client_request`; `ended` alone is not an instruction to end twice.
+    pub(crate) end_sent: bool,
     pub(crate) request_id: u64,
 }
 
