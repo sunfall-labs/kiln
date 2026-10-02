@@ -137,7 +137,11 @@ fn lazy_node_builtin_extension_links_facade_without_making_it_startup_reachable(
     let project = TempProject::new();
     let entry = project.write("main.js", "console.log('hello');");
     let graph = project.graph(&entry).expect("build ordinary graph");
-    let http_path = kiln_module_resolver::NodeBuiltin::Http.virtual_path(&project.root);
+    // The graph keys every module, builtins included, under the canonical project root. On macOS
+    // `temp_dir()` exposes `/var` while `canonicalize` returns `/private/var`, so deriving the
+    // virtual path from the raw fixture root names a module the graph never contains.
+    let canonical_root = fs::canonicalize(&project.root).expect("canonical project root");
+    let http_path = kiln_module_resolver::NodeBuiltin::Http.virtual_path(&canonical_root);
 
     assert!(!graph.module_map().contains_key(&http_path));
     let extended = graph
