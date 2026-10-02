@@ -1221,6 +1221,10 @@ pub(super) fn is_constructor(value: &Value) -> bool {
 /// The same question for a built-in.
 pub(super) fn native_is_constructor(native: Native) -> bool {
     match native {
+        // Byte text conversions are built-in methods, not function constructors. They have no
+        // [[Construct]] slot even though their observable properties are projected from a native
+        // marker in the interpreter.
+        Native::Uint8Text(_) => false,
         // `Proxy` is the one constructor with no `prototype` of its own -- a proxy inherits the
         // target's chain -- so the rule below cannot see it.
         Native::ProxyConstructor

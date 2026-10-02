@@ -68,8 +68,8 @@ delete (globalThis as any).__kilnTypedArraySort;
     }
   }
 
-  Object.defineProperty(Uint8Array, "fromBase64", {
-    value: function fromBase64(input: any, options?: any): Uint8Array {
+  const fromBase64Method = {
+    fromBase64(input: any, options: any = undefined): Uint8Array {
       if (typeof input !== "string") {
         throw new TypeError("Uint8Array.fromBase64 requires a string argument");
       }
@@ -77,12 +77,18 @@ delete (globalThis as any).__kilnTypedArraySort;
         throw new TypeError("options must be an object");
       }
       const alphabetOption = options === undefined ? undefined : options.alphabet;
-      const alphabet = alphabetOption === undefined ? "base64" : String(alphabetOption);
+      const alphabet = alphabetOption === undefined ? "base64" : alphabetOption;
+      if (typeof alphabet !== "string") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
       if (alphabet !== "base64" && alphabet !== "base64url") {
         throw new TypeError('alphabet must be "base64" or "base64url"');
       }
       const handlingOption = options === undefined ? undefined : options.lastChunkHandling;
-      const handling = handlingOption === undefined ? "loose" : String(handlingOption);
+      const handling = handlingOption === undefined ? "loose" : handlingOption;
+      if (typeof handling !== "string") {
+        throw new TypeError('lastChunkHandling must be "loose", "strict", or "stop-before-partial"');
+      }
       if (handling !== "loose" && handling !== "strict" && handling !== "stop-before-partial") {
         throw new TypeError('lastChunkHandling must be "loose", "strict", or "stop-before-partial"');
       }
@@ -116,14 +122,20 @@ delete (globalThis as any).__kilnTypedArraySort;
         if (value < 0) throw new SyntaxError("invalid Base64 string");
         values.push(value);
       }
-      const remainder = values.length % 4;
+      let remainder = values.length % 4;
+      if (handling === "stop-before-partial" && padded && padding === 1 && remainder === 2) {
+        values.length -= remainder;
+        remainder = 0;
+        padded = false;
+      }
       if (padded && (sourceLength % 4 !== 0 ||
           (padding === 1 && remainder !== 3) || (padding === 2 && remainder !== 2))) {
         throw new SyntaxError("invalid Base64 string");
       }
       if (handling === "stop-before-partial" && !padded) {
         values.length -= remainder;
-      } else if (handling === "strict" && (remainder !== 0 || !padded && values.length % 4 !== 0)) {
+        remainder = 0;
+      } else if (handling === "strict" && !padded && remainder !== 0) {
         throw new SyntaxError("invalid Base64 string");
       } else if (remainder === 1) {
         throw new SyntaxError("invalid Base64 string");
@@ -146,12 +158,16 @@ delete (globalThis as any).__kilnTypedArraySort;
       }
       return bytes;
     },
+  }.fromBase64;
+
+  Object.defineProperty(Uint8Array, "fromBase64", {
+    value: fromBase64Method,
     writable: true,
     configurable: true,
   });
 
-  Object.defineProperty(Uint8Array, "fromHex", {
-    value: function fromHex(input: any): Uint8Array {
+  const fromHexMethod = {
+    fromHex(input: any): Uint8Array {
       if (typeof input !== "string") {
         throw new TypeError("Uint8Array.fromHex requires a string argument");
       }
@@ -173,27 +189,34 @@ delete (globalThis as any).__kilnTypedArraySort;
       }
       return bytes;
     },
+  }.fromHex;
+
+  Object.defineProperty(Uint8Array, "fromHex", {
+    value: fromHexMethod,
     writable: true,
     configurable: true,
   });
 
-  Object.defineProperty(Uint8Array.prototype, "toBase64", {
-    value: function toBase64(this: any, options?: any): string {
+  const toBase64Method = {
+    toBase64(this: any, options: any = undefined): string {
       requireTypedArray(this, "toBase64");
       if (this instanceof DataView || !(this instanceof Uint8Array)) {
         throw new TypeError("Uint8Array.prototype.toBase64 called on an incompatible receiver");
       }
-      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
       if (options !== undefined && (options === null || typeof options !== "object")) {
         throw new TypeError("options must be an object");
       }
       const alphabetOption = options === undefined ? undefined : options.alphabet;
-      const alphabet = alphabetOption === undefined ? "base64" : String(alphabetOption);
+      const alphabet = alphabetOption === undefined ? "base64" : alphabetOption;
+      if (typeof alphabet !== "string") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
       if (alphabet !== "base64" && alphabet !== "base64url") {
         throw new TypeError('alphabet must be "base64" or "base64url"');
       }
       const omitPaddingOption = options === undefined ? undefined : options.omitPadding;
       const omitPadding = Boolean(omitPaddingOption);
+      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
       const chars = alphabet === "base64"
         ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -212,15 +235,20 @@ delete (globalThis as any).__kilnTypedArraySort;
       }
       return result;
     },
+  }.toBase64;
+
+  Object.defineProperty(Uint8Array.prototype, "toBase64", {
+    value: toBase64Method,
     writable: true,
     configurable: true,
   });
 
-  Object.defineProperty(Uint8Array.prototype, "toHex", {
-    value: function toHex(this: any): string {
+  const toHexMethod = {
+    toHex(this: any): string {
       if (!(this instanceof Uint8Array)) {
         throw new TypeError("Uint8Array.prototype.toHex called on an incompatible receiver");
       }
+      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
       let output = "";
       for (let index = 0; index < this.length; index++) {
         const byte = this[index];
@@ -228,6 +256,10 @@ delete (globalThis as any).__kilnTypedArraySort;
       }
       return output;
     },
+  }.toHex;
+
+  Object.defineProperty(Uint8Array.prototype, "toHex", {
+    value: toHexMethod,
     writable: true,
     configurable: true,
   });
