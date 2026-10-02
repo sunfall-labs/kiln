@@ -1,4 +1,6 @@
 // kiln-native: profile=native-release
+import pathBuiltinStatic from 'node:path';
+
 const moduleUrl = import.meta.url;
 const getBuiltinModule = process.getBuiltinModule;
 
@@ -10,7 +12,7 @@ const pathViaGetBuiltin = getBuiltinModule('node:path');
 const nodeModule = await import('node:module');
 const nodeCrypto = await import('node:crypto');
 const require = nodeModule.createRequire(moduleUrl);
-const path = require('node:path');
+const pathViaRequire = require('node:path');
 const digest = nodeCrypto.createHash('sha256').update('capability').digest('hex');
 let invalidKeyRejectedByCrypto = false;
 try {
@@ -20,7 +22,9 @@ try {
 }
 
 if (!moduleUrl.endsWith('private-capabilities-survive-process-replacement.mjs') ||
-    typeof path.basename !== 'function' || typeof pathViaGetBuiltin.basename !== 'function' ||
+    typeof pathViaRequire.basename !== 'function' ||
+    pathViaGetBuiltin !== pathBuiltinStatic ||
+    pathViaRequire !== pathBuiltinStatic ||
     digest.length !== 64 || !invalidKeyRejectedByCrypto) {
   throw new Error('private realm capabilities followed the mutable process global');
 }
