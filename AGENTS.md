@@ -410,6 +410,15 @@ Reclaim **in this order**:
 worktrees. **Never delete build outputs you do not own.** An agent did that and destroyed two other
 worktrees' builds.
 
+mbx also collects **on its own**. `gc.auto` is on, and its default `gc.min_free_size` is 10% of
+the disk -- 50 GiB on this machine -- so once free space falls below that, every build evicts
+other workspaces' managed targets to chase the floor, and nobody ran anything. On 2026-10-02 that
+deleted three worktrees' `target/` directories mid-gate within an hour (`mbx stats` showed
+57.7 GiB "automatically pruned"), which read as gates failing on vanished binaries. The floor is
+now set to 8 GiB (`mbx settings set gc.min_free_size 8GiB`; `mbx doctor` shows the budget). If a
+build directory disappears under you, check `df` and `mbx stats` before suspecting a colleague,
+and reclaim with `kiln cache gc` first: one worktree's `.kiln/cache` had reached 30 GiB.
+
 ## Profiling a native binary
 
 `scripts/profile-native.sh <binary> [top-n]` records an Instruments CPU profile of a built
