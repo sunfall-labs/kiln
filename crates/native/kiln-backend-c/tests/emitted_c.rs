@@ -1139,7 +1139,13 @@ fn runtime_prelude_size() {
     // runtime/header lines (79,182 -> 79,315). The ABI additions are private helpers and existing
     // runtime sections remain emitted once; no built-in implementation was added. Keep 85 lines
     // of headroom for the next small edit.
-    const CEILING_LINES: usize = 79_400;
+    // Widened on 2026-10-02 after the final native compatibility gate measured 79,432 lines.
+    // The 117-line net increase since 79,315 comes from reviewed runtime changes: WeakMap/WeakSet
+    // symbol-key handling, the nonrecursive canonical String iterator, DataView private state,
+    // Object.prototype.toString tags, realm-private host capability storage, and boxed-primitive
+    // accessor receiver preservation. The ABI snapshot records the crypto retention macro and
+    // relocation of the base realm-slot definitions; no runtime section is duplicated.
+    const CEILING_LINES: usize = 79_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

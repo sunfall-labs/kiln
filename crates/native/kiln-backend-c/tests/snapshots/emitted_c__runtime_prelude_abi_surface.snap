@@ -71,6 +71,9 @@ expression: abi_surface(prelude)
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
+#ifndef KILN_RETAIN_GROUP_NODE_CRYPTO
+#define KILN_RETAIN_GROUP_NODE_CRYPTO 1
+#endif
 #ifndef KILN_RETAIN_GROUP_URL
 #define KILN_RETAIN_GROUP_URL 1
 #endif
@@ -1545,6 +1548,10 @@ int kiln_ffi_unregister_callback(uint64_t pointer);
 int kiln_ffi_last_error(const uint8_t **out_bytes, uint64_t *out_len);
 static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code) {
 static uint32_t kiln_c99_method_declared_length(uint64_t code) {
+#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
+#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
+#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -2982,10 +2989,6 @@ static _Thread_local int kiln_c99_frame_mapped_arguments;
 static _Thread_local kiln_value kiln_c99_frame_callee;
 static int kiln_c99_build_arguments_object(kiln_value *out) {
 static int kiln_c99_visible_arguments(kiln_value *out) {
-#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
-#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
-#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
-#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 #define KILN_C99_REALM_SLOT_INCOMING_MESSAGE UINT32_C(5)
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/ioctl.h>
@@ -3005,6 +3008,8 @@ static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
 static int kiln_c99_process_object(kiln_value *out) {
 #if KILN_RETAIN_GROUP_NODE_NET
+#endif
+#if KILN_RETAIN_GROUP_NODE_CRYPTO
 #endif
 #if KILN_RETAIN_GROUP_NODE_EVENT
 #endif
