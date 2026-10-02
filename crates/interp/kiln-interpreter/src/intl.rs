@@ -1171,15 +1171,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 
         let length = self.read_property(value, "length", instruction)?;
         let length = self.as_number_argument(Some(&length), instruction)?;
-        if !length.is_finite() || length < 0.0 {
-            return Ok(seen);
-        }
+        let length = Self::to_length(length);
         // Read and validate each entry before touching the next one. A malformed locale at index
         // zero must throw before a getter at index one runs. HasProperty also distinguishes a
         // sparse hole (which is skipped) from a present `undefined` (which is an invalid locale).
-        for index in 0..(length as u64) {
+        for index in 0..length {
             let key = Value::String(StringUnits::from(index.to_string()));
-            if !crate::object_helpers::has_property_checked(&self.intrinsics, value, &key)? {
+            if !self.has(value, &key, instruction)? {
                 continue;
             }
             let key = index.to_string();
@@ -1203,10 +1201,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Value::String(text) => text
                 .to_scalar_string()
                 .map_err(|_| range("locale contains a lone surrogate"))?,
-            Value::Object(_) | Value::Array(_) => {
-                let primitive = self.as_primitive(&element, PrimitiveHint::String, instruction)?;
-                primitive.to_display_string()
-            }
+            object if crate::object_helpers::is_object_type(object) => self
+                .as_text_units(object, instruction)?
+                .to_scalar_string()
+                .map_err(|_| range("locale contains a lone surrogate"))?,
             _ => {
                 return Err(type_error(
                     "a locale list element is not a string or object",
