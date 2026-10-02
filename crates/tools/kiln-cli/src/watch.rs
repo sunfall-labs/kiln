@@ -955,12 +955,13 @@ fn launch_native_with_args(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().map_err(|source| {
-        Error::io(
-            format!("cannot execute native refresh {}", path.display()),
-            source,
-        )
-    })?;
+    let mut child =
+        kiln_native_runtime::spawn_built_executable(&mut command).map_err(|source| {
+            Error::io(
+                format!("cannot execute native refresh {}", path.display()),
+                source,
+            )
+        })?;
     let stdout = child
         .stdout
         .take()
