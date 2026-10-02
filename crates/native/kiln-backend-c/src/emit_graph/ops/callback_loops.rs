@@ -70,7 +70,7 @@ pub(super) fn closure_call(
 fn receiver(closure: &str, recv: &str, this_arg: &str) -> String {
     format!(
         "kiln_val {recv} = {closure}->arrow ? {closure}->captured_this : {this_arg}; \
-         ku_normalize_closure_receiver(&{recv}, {closure});"
+         kiln_c99_normalize_closure_receiver(&{recv}, {closure});"
     )
 }
 

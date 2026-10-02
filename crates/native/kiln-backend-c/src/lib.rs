@@ -4754,20 +4754,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc\n");
         output.push_str("#define KU_EPILOGUE() kiln_unwind:; return KILN_C99_THROWN; kiln_refusal:; *result = kiln_val_from_boundary(kiln_c99_control_diagnostic()); return KILN_C99_CONTROL_ERROR;\n");
     }
-    if has_call || has_call_method {
-        output.push_str("static __attribute__((unused)) inline void ku_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *plain) {\n\
-    if (!plain->arrow && !plain->strict && (*receiver == KILN_VAL_UNDEFINED || *receiver == KILN_VAL_NULL)) {\n\
-        (void)kiln_c99_global_object_val(receiver);\n\
-    }\n\
-}\n");
-    }
     if has_call {
         output.push_str("static __attribute__((unused)) inline int ku_call_fast(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, const char *site, size_t pc, const char *op, kiln_val *dst) {\n\
     if (KILN_LIKELY(KILN_VAL_IS_CLOSURE(callee))) {\n\
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);\n\
         if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;\n\
-            ku_normalize_closure_receiver(&recv, plain);\n\
+            kiln_c99_normalize_closure_receiver(&recv, plain);\n\
             kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
             kiln_val res = KILN_VAL_UNDEFINED;\n\
             kiln_js_frame call_frame;\n\
@@ -4824,7 +4817,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn);\n\
                 if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
                     kiln_val vreceiver = plain->arrow ? plain->captured_this : ku_recv;\n\
-                    ku_normalize_closure_receiver(&vreceiver, plain);\n\
+                    kiln_c99_normalize_closure_receiver(&vreceiver, plain);\n\
                     kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
                     kiln_val res = KILN_VAL_UNDEFINED;\n\
                     kiln_js_frame call_frame;\n\
