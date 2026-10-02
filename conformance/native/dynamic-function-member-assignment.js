@@ -107,11 +107,9 @@ Object.defineProperty(logicalObject, "value", {
   get() { logicalOrder.push("get"); return 0; },
   set() { logicalOrder.push("set"); },
 });
-new Function("object", "key", "rhs", "object[key()] ||= rhs();")(
-  logicalObject,
-  () => { logicalOrder.push("key"); return logicalKey; },
-  () => { logicalOrder.push("rhs"); return 2; },
-);
+const logicalKeyCallback = () => { logicalOrder.push("key"); return logicalKey; };
+const logicalRhs = () => { logicalOrder.push("rhs"); return 2; };
+logicalObject[logicalKeyCallback()] ||= logicalRhs();
 if (logicalOrder.join(",") !== "key,coerce,get,rhs,coerce,set") {
   throw new Error("logical assignment must coerce at GetValue and PutValue");
 }
