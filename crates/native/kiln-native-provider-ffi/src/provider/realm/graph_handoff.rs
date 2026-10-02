@@ -304,13 +304,19 @@ mod tests {
 
     static SEQUENCE: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// The reservation these tests' handoffs carry. Every graph command names its handoff's
+    /// reservation, and the control hook is process-wide and never removed, so another test's
+    /// graph traffic reaches `fake_control` too; it records only commands about this one.
+    const RESERVATION: u64 = 0x6b69_6c6e_5f74_6573;
 
-    unsafe extern "C" fn fake_control(kind: u32, _: u64, _: u64, _: u64) -> i32 {
-        SEQUENCE
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .unwrap()
-            .push(kind);
+    unsafe extern "C" fn fake_control(kind: u32, a: u64, b: u64, c: u64) -> i32 {
+        if [a, b, c].contains(&RESERVATION) {
+            SEQUENCE
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap()
+                .push(kind);
+        }
         0
     }
 
@@ -395,8 +401,8 @@ mod tests {
             .unwrap()
             .clear();
         let owners = Owners::new(PausedTurnResult::Ready);
-        let handoff =
-            Registration::new(owners.realms[0], owners.realms[1], 7, 11).expect("register handoff");
+        let handoff = Registration::new(owners.realms[0], owners.realms[1], 7, RESERVATION)
+            .expect("register handoff");
         owners.start(0, handoff.id());
         owners.start(1, handoff.id());
         let ready = handoff.handoff.wait_ready(Duration::from_secs(10));
@@ -424,7 +430,7 @@ mod tests {
                 .unwrap()
                 .clear();
             let owners = Owners::new(PausedTurnResult::Unavailable);
-            let handoff = Registration::new(owners.realms[0], owners.realms[1], 7, 11)
+            let handoff = Registration::new(owners.realms[0], owners.realms[1], 7, RESERVATION)
                 .expect("register handoff");
             for side in 0..entered {
                 owners.start(side, handoff.id());
