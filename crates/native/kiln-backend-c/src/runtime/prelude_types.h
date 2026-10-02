@@ -1220,6 +1220,14 @@ enum {
     KILN_C99_WRAPPER_BIGINT = 5
 };
 
+/* A realm-private lookup accelerator. Buckets contain ordered-vector ordinals only;
+ * keys and values remain owned and traced exclusively through the property records. */
+typedef struct kiln_dictionary_index {
+    size_t capacity;
+    size_t count;
+    size_t buckets[];
+} kiln_dictionary_index;
+
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
@@ -1305,6 +1313,7 @@ typedef struct kiln_object {
      * prototype methods and ToPrimitive inspect this slot. */
     uint8_t primitive_wrapper_kind;
     kiln_value boxed_primitive;
+    kiln_dictionary_index *dictionary_index;
 } kiln_object;
 
 typedef struct kiln_c99_candidate_object_properties {
@@ -1349,7 +1358,13 @@ static inline int kiln_c99_object_properties_in_block(const kiln_object *object)
     return object->properties == (const kiln_property *)(object + 1);
 }
 
+static inline void kiln_c99_dictionary_index_reset(kiln_object *object) {
+    free(object->dictionary_index);
+    object->dictionary_index = NULL;
+}
+
 static inline void kiln_c99_object_properties_free(kiln_object *object) {
+    kiln_c99_dictionary_index_reset(object);
     if (!kiln_c99_object_properties_in_block(object))
         free(object->candidate_properties ? (void *)kiln_c99_object_candidate_header(object)
                                           : (void *)object->properties);

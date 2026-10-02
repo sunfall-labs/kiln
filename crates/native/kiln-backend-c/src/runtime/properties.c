@@ -107,6 +107,66 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
     return kiln_c99_same_key_view(property, &view);
 }
 
+/* Large mutable dictionaries retain the ordered records for enumeration but probe by hash
+ * for membership. Building the optional index must not allocate a language value or collect:
+ * callers of own_index_key hold borrowed object/key pointers. Allocation failure keeps the
+ * linear answer. Read-only workers and unpublished candidates never mutate this cache. */
+static kiln_dictionary_index *kiln_c99_dictionary_index_for(kiln_object *object) {
+    kiln_gc_heap *heap;
+    kiln_dictionary_index *lookup;
+    size_t capacity;
+    size_t ordinal;
+    if (object->count < 32 || kiln_c99_no_write() || object->candidate_properties ||
+        object->candidate_slots || object->candidate_elements ||
+        kiln_c99_object_properties_in_block(object)) return NULL;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL || heap->parallel_paused || heap->actor_candidate_id != 0)
+        return NULL;
+    lookup = object->dictionary_index;
+    if (lookup != NULL && lookup->count == object->count) return lookup;
+    kiln_c99_dictionary_index_reset(object);
+    /* Arena chunks can be discarded without object finalizers. Only the owning heap may
+     * attach a malloc sidecar. Candidate/in-block dictionaries retain their byte-wise lookup. */
+    if (kiln_c99_gc_lookup(heap, object) == NULL) return NULL;
+    if (object->count > SIZE_MAX / 2) return NULL;
+    capacity = 64;
+    while (capacity < object->count * 2) {
+        if (capacity > SIZE_MAX / 2) return NULL;
+        capacity *= 2;
+    }
+    if (capacity > (SIZE_MAX - sizeof *lookup) / sizeof(size_t)) return NULL;
+    lookup = calloc(1, sizeof *lookup + capacity * sizeof(size_t));
+    if (lookup == NULL) return NULL;
+    lookup->capacity = capacity;
+    lookup->count = object->count;
+    for (ordinal = 0; ordinal < object->count; ++ordinal) {
+        size_t bucket = (size_t)kiln_c99_key_hash(object->properties[ordinal].key) &
+                        (capacity - 1);
+        while (lookup->buckets[bucket] != 0) bucket = (bucket + 1) & (capacity - 1);
+        lookup->buckets[bucket] = ordinal + 1;
+    }
+    object->dictionary_index = lookup;
+    return lookup;
+}
+
+static void kiln_c99_dictionary_index_appended(kiln_object *object) {
+    kiln_dictionary_index *lookup = object->dictionary_index;
+    size_t bucket;
+    size_t ordinal;
+    if (lookup == NULL) return;
+    if (lookup->count + 1 != object->count || object->count > lookup->capacity / 2) {
+        kiln_c99_dictionary_index_reset(object);
+        return;
+    }
+    ordinal = object->count - 1;
+    bucket = (size_t)kiln_c99_key_hash(object->properties[ordinal].key) &
+             (lookup->capacity - 1);
+    while (lookup->buckets[bucket] != 0)
+        bucket = (bucket + 1) & (lookup->capacity - 1);
+    lookup->buckets[bucket] = ordinal + 1;
+    lookup->count = object->count;
+}
+
 /* The slot on `object` holding `ikey`, or `object->count` when there is none. Ordinary writes
  * intern keys; a prepared dictionary carries its own key bytes across realms and cannot keep
  * the sender's canonical pointer. Compare bytes after the fast pointer check for that case.
@@ -122,6 +182,24 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
         }
     }
     found = object->count;
+    {
+        kiln_dictionary_index *lookup =
+            kiln_c99_dictionary_index_for((kiln_object *)object);
+        if (lookup != NULL) {
+            size_t bucket = (size_t)kiln_c99_key_hash(key != NULL ? key : ikey) &
+                            (lookup->capacity - 1);
+            while (lookup->buckets[bucket] != 0) {
+                index = lookup->buckets[bucket] - 1;
+                if ((ikey != NULL && object->properties[index].key == ikey) ||
+                    kiln_c99_same_key_view(&object->properties[index], key)) {
+                    found = index;
+                    break;
+                }
+                bucket = (bucket + 1) & (lookup->capacity - 1);
+            }
+            goto checked;
+        }
+    }
     if (ikey != NULL) {
         for (index = 0; index < object->count; ++index) {
             if (object->properties[index].key == ikey ||
@@ -138,6 +216,7 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
             }
         }
     }
+checked:
     if (kiln_c99_keys_checked()) {
         size_t by_bytes = object->count;
         for (index = 0; index < object->count; ++index) {
@@ -1137,6 +1216,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
             }
             position = index;
         }
+        if (position != object->count) kiln_c99_dictionary_index_reset(object);
         for (index = object->count; index > position; --index) {
             kiln_c99_heap_store_property(object, &object->properties[index], object->properties[index - 1]);
         }
@@ -1153,6 +1233,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         *out = &object->properties[position];
     }
     object->count += 1;
+    kiln_c99_dictionary_index_appended(object);
     object->shape = NULL;
     return KILN_C99_OK;
 }
@@ -1251,6 +1332,7 @@ static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_stri
         *answer = 0;
         return KILN_C99_OK;
     }
+    kiln_c99_dictionary_index_reset(object);
     if (object->properties[index].accessor) object->accessor_count -= 1;
     for (; index + 1 < object->count; ++index)
         kiln_c99_heap_store_property(object, &object->properties[index], object->properties[index + 1]);
