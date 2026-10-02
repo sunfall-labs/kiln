@@ -69,7 +69,10 @@ unsafe fn arg(ptr: *const c_char) -> String {
 #[cfg(target_os = "macos")]
 use crate::appkit as backend;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(target_os = "linux", feature = "gtk"))]
+use crate::gtk as backend;
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "gtk"))))]
 mod backend {
     const NONE: &str = "kiln-host-gui has no widget backend for this platform yet";
     pub fn init() -> Result<(), String> {

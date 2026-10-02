@@ -64,8 +64,9 @@ a centred row with a gap; a `Button` in a column does not stretch; a `TextInput`
 grows), then the `style` object and individual props (`grow`, `padding`, `align`, `columns`…)
 refine them, and the host receives one `layout` object. The native library parses it into a
 Taffy style; the platform only measures leaves (a label's wrapped height, a button's natural
-size). A window's root view re-runs the layout from AppKit's `layout` pass, so live resizing
-re-flows without a round trip through JavaScript.
+size). A window's root view re-runs the layout from the toolkit's own layout pass (AppKit's
+`layout`, GTK's `size_allocate`), so live resizing re-flows without a round trip through
+JavaScript.
 
 This replaced a mix of `NSStackView` autolayout for stacks and Taffy for boxes, where widths
 were added as constraints on every write and accumulated.
@@ -89,15 +90,32 @@ contract (`gui::link_arguments`) and proven at packaging time by linking a probe
 every export. `KILN_GUI_LIB` still points a program at a shared library instead, as a developer
 override for iterating on the Rust side.
 
-Today it has one widget backend, AppKit (`src/appkit.rs`). On other platforms `kiln_gui_init`
-reports that there is none.
+It has two widget backends behind the same contract (the functions of the stub `backend` module
+in `ffi.rs`):
+
+* **AppKit** (`src/appkit.rs`) on macOS.
+* **GTK 4** (`src/gtk.rs`) on Linux, through gtk4-rs, behind the crate's default `gtk` feature.
+  It needs GTK 4.10 or newer, and its development files to build (`libgtk-4-dev`); with
+  `--no-default-features` the library builds without it and reports that there is no backend.
+  Every container — window root, stack, card, scroll document — is one custom widget
+  (`KilnBox`) whose `size_allocate` places its children at the frames Taffy computed, and
+  leaves are measured with `gtk_widget_measure`, so GTK's own layout containers (`GtkBox`,
+  `GtkGrid`) are never used. Semantic colors resolve against the GNOME palette and reach text
+  and symbols as generated CSS classes; SF Symbol names map to freedesktop icon names
+  (`trash` → `user-trash-symbolic`) and otherwise pass through. GTK has no application-wide
+  menu bar outside a `GtkApplication`, so the program's menus are a menu bar at the top of each
+  window, with their accelerators as window shortcuts (`CmdOrCtrl` is Control). `wait` iterates
+  the default GLib main context; `wake` (any thread) interrupts it.
+
+On other platforms `kiln_gui_init` reports that there is none.
 
 ### 4. Main-thread ownership without locks
 
-AppKit is a main-thread toolkit. The backend keeps every piece of state in `thread_local!`
-storage and refuses to initialise anywhere but the main thread, so a realm on another thread
-gets an error naming the cause instead of a crash or a mutex. Handles are allocated by the
-library, never derived from JavaScript ids, so realms side by side (ADR 0071) cannot collide.
+AppKit and GTK are main-thread toolkits. Each backend keeps every piece of state in
+`thread_local!` storage and refuses to initialise anywhere but the main thread, so a realm on
+another thread gets an error naming the cause instead of a crash or a mutex. Handles are
+allocated by the library, never derived from JavaScript ids, so realms side by side (ADR 0071)
+cannot collide.
 
 ### 5. Events: queued natively, dispatched in batches, never re-entrant
 
@@ -167,17 +185,31 @@ run time, the native build does not yet link it: shipping a GUI binary means shi
 * `conformance/native/gui-reactivity.ts`, `conformance/native/gui-widgets.ts` — the core and the
   widget layer on the headless host, in both engines (`scripts/native.sh`).
 * `scripts/gui-smoke.sh` — builds `conformance/gui/native-smoke.tsx` and runs it against the real
-  window system: AppKit clicks reach handlers, timers run beside the UI loop, resize and close
-  events arrive. macOS only, so not in the gate.
+  window system: toolkit clicks reach handlers, timers run beside the UI loop, resize and close
+  events arrive. It needs a display, so it is not in the gate. On macOS it needs a logged-in
+  session. On Linux it needs `DISPLAY` or `WAYLAND_DISPLAY` and the GTK 4 development files;
+  headless, run it under Xvfb: `xvfb-run -a scripts/gui-smoke.sh`. Without a display it skips.
+  A minimal image also wants `librsvg2-common`: without the SVG pixbuf loader, symbolic icons
+  at sizes other than 16 px draw as "missing image".
+  `KILN_GUI_SNAPSHOT=out.png ./program` writes the first window of a `runApp` program to a PNG
+  half a second after it is shown, on either backend.
 * `cargo test -p kiln-host-gui` — style parsing, layout, the event queue.
 * `scripts/gen-gui-types.sh --check` — the published declarations match the implementation and
   the examples type-check against them.
 
 ## Not done yet
 
-* **Linux and Windows backends** behind the same ABI (GTK4, Win32/WinUI), with the same Taffy
-  layout. The earlier TypeScript GTK driver drove `libgtk-4` directly, had its own layout
-  semantics and was removed rather than kept as a second, untested model.
+* **A Windows backend** behind the same ABI (Win32/WinUI), with the same Taffy layout.
+* **On GTK:** `controlSize` is approximated with CSS; `material` is ignored; window `center` is
+  a no-op (GTK 4 leaves placement to the window manager); checked menu items show no check
+  mark; a `primary` button is styled but is not the window's Return-key default; text areas
+  take `monospace` but not the type ramp; `describe` reports the label and hint the backend
+  handed GTK, which has no getters for them. A pressable container's button role can only be
+  set before assistive technology realises the widget.
+* **Native binaries on Linux arm64:** the native backend's value boxing keeps 47 address bits,
+  and arm64 Linux places the `brk` heap above 2^47. On Ubuntu 24.04 arm64 every native
+  program, `examples/hello.ts` included, segfaults at a pointer with bit 47 cleared, so the GTK
+  backend has been verified on x86_64 only (Ubuntu 24.04, GTK 4.14, Xvfb).
 * Drag and drop, images from memory, tables, custom focus order beyond layout order.
 
 ## Rejected alternatives

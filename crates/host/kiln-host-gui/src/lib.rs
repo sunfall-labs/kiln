@@ -2,8 +2,9 @@
 //!
 //! * [`ffi`] is the ABI the TypeScript library binds with `dlopen` (`kiln_gui_*`, version
 //!   [`ffi::ABI_VERSION`]).
-//! * [`appkit`] is the macOS widget backend. Other platforms report that they have none, and the
-//!   TypeScript side falls back with that reason rather than pretending.
+//! * `appkit` is the macOS widget backend and `gtk` the Linux one (GTK 4, behind the default
+//!   `gtk` feature). Other platforms report that they have none, and the TypeScript side falls
+//!   back with that reason rather than pretending.
 //! * [`layout`] parses the style objects the TypeScript side sends and keeps the Taffy tree.
 //! * [`events`] is the queue between toolkit callbacks and the program.
 //! * The modules below are OS services that do not need a widget backend: dialogs, clipboard,
@@ -16,6 +17,8 @@ use serde_json::{Value, json};
 pub mod appkit;
 pub mod events;
 pub mod ffi;
+#[cfg(all(target_os = "linux", feature = "gtk"))]
+pub mod gtk;
 pub mod layout;
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -59,6 +59,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
@@ -70,6 +72,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       # Invoked through bash rather than by its executable bit, so a checkout that lost the
       # mode still runs.
       - run: bash scripts/ci-test.sh
