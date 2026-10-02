@@ -33,6 +33,60 @@ delete (globalThis as any).__kilnTypedArrayCopy;
 const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
 delete (globalThis as any).__kilnTypedArraySort;
 
+// DataView's half-precision accessors share the existing Float16Array element conversion. They
+// live in this bootstrap family because the backend already retains it whenever DataView or a
+// typed-array constructor is observable.
+(function installDataViewFloat16() {
+  const Float16 = (globalThis as any).Float16Array;
+  const Uint16 = (globalThis as any).Uint16Array;
+  if (typeof DataView === "undefined" || typeof Float16 !== "function" ||
+      typeof Uint16 !== "function") return;
+
+  const getUint16 = DataView.prototype.getUint16;
+  const setUint16 = DataView.prototype.setUint16;
+  const floatScratch = new Float16(1);
+  const bitsScratch = new Uint16(floatScratch.buffer);
+  const maxSafeInteger = 9007199254740991;
+
+  function toIndex(value: any): number {
+    let integer = +value;
+    if (integer !== integer || integer === 0) return 0;
+    if (integer === Infinity || integer === -Infinity) throw new RangeError("Index out of range");
+    integer = integer < 0 ? Math.ceil(integer) : Math.floor(integer);
+    if (integer < 0 || integer > maxSafeInteger) throw new RangeError("Index out of range");
+    return integer;
+  }
+
+  const methods = {
+    getFloat16(this: any, byteOffset: any): number {
+      const offset = toIndex(byteOffset);
+      const littleEndian = !!arguments[1];
+      bitsScratch[0] = getUint16.call(this, offset, littleEndian);
+      return floatScratch[0];
+    },
+    setFloat16(this: any, byteOffset: any, value: any): void {
+      const offset = toIndex(byteOffset);
+      floatScratch[0] = +value;
+      const bits = bitsScratch[0];
+      const littleEndian = !!arguments[2];
+      setUint16.call(this, offset, bits, littleEndian);
+    },
+  };
+
+  Object.defineProperty(DataView.prototype, "getFloat16", {
+    value: methods.getFloat16,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(DataView.prototype, "setFloat16", {
+    value: methods.setFloat16,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+})();
+
 (function installTypedArrayPrototype() {
   if (typeof Uint8Array === "undefined" || !Uint8Array.prototype) {
     return;

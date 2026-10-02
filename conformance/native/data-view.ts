@@ -179,3 +179,17 @@ for (const attempt of [
   try { attempt(); console.log("no throw"); }
   catch (error: any) { console.log(error.constructor.name); }
 }
+
+// Float16 accessors are the DataView counterpart to the existing Float16Array conversion.
+const half = new DataView(new ArrayBuffer(8));
+for (const value of [1.5, -0, 65504, 1e-8, NaN, Infinity]) {
+  (half as any).setFloat16(0, value, true);
+  const read = (half as any).getFloat16(0, true);
+  console.log(Number.isNaN(read) ? "NaN" : Object.is(read, -0) ? "-0" : read);
+}
+console.log(DataView.prototype.getFloat16.name, DataView.prototype.getFloat16.length,
+  DataView.prototype.setFloat16.name, DataView.prototype.setFloat16.length);
+for (const accessor of [DataView.prototype.getFloat16, DataView.prototype.setFloat16]) {
+  try { new (accessor as any)(); console.log("constructible"); }
+  catch (error: any) { console.log(error.constructor.name); }
+}
