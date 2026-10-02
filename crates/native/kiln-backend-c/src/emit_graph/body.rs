@@ -3751,7 +3751,16 @@ fn emit_phi_assignments(
     if moves.is_empty() {
         return;
     }
-    if indexed_values && moves.len() >= 4 {
+    // The indexed-values path batches the boxed `v[]` parallel move below. Values in the
+    // number/integer/boolean side tables also have scalar registers (`dN`, `iN`, `bN`),
+    // however, and omitting those updates leaves loop-carried values stale. In particular,
+    // a numeric loop index can remain at zero forever even while its boxed mirror advances.
+    // Keep the bulk copy only when every destination is represented solely by `v[]`.
+    let has_scalar_destination = moves.iter().any(|(to, _)| {
+        let value = ValueId(*to);
+        numbers.contains(&value) || ints.contains(&value) || booleans.contains(&value)
+    });
+    if indexed_values && moves.len() >= 4 && !has_scalar_destination {
         // Merge phis are allocated together, so their destination IDs are normally one
         // contiguous run. Large bundled module initializers can have hundreds of locals and a
         // branch for every `x ||= value`; spelling both ID arrays at every edge made those tiny
