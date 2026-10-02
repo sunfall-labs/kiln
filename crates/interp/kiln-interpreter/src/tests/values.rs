@@ -741,3 +741,122 @@ fn numeric_unary_dispatch_preserves_ieee_edges_and_step_accounting() {
         assert_eq!(result.steps, 3);
     }
 }
+
+/// Position-taking string methods read a code unit in place: each call is O(1) rather than a copy of
+/// the whole string, so a loop over a long string is linear (it was quadratic; NOTES.md, 2026-09-18).
+mod unit_reads {
+    use super::*;
+
+    fn read(native: Native, text: &StringUnits, index: f64) -> Value {
+        call_native(
+            &Intrinsics::default(),
+            native,
+            &Value::String(text.clone()),
+            &[Value::Number(index)],
+        )
+        .expect("a position-taking string method answers")
+    }
+
+    fn unit(value: Value) -> Option<Vec<u16>> {
+        match value {
+            Value::String(text) => Some(text.to_units().to_vec()),
+            Value::Undefined => None,
+            other => panic!("expected a string or undefined, got {other:?}"),
+        }
+    }
+
+    fn number(value: Value) -> f64 {
+        match value {
+            Value::Number(number) => number,
+            other => panic!("expected a number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ascii_string_reads_each_unit() {
+        let text = StringUnits::from("a<b>&");
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 0.0)), 97.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 4.0)), 38.0);
+        assert!(number(read(Native::StringCharCodeAt, &text, 5.0)).is_nan());
+        assert!(number(read(Native::StringCharCodeAt, &text, -1.0)).is_nan());
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 1.0)),
+            Some(vec![0x3c])
+        );
+        assert_eq!(unit(read(Native::StringCharAt, &text, 5.0)), Some(vec![]));
+        assert_eq!(unit(read(Native::StringAt, &text, -1.0)), Some(vec![0x26]));
+        assert_eq!(unit(read(Native::StringAt, &text, 5.0)), None);
+        assert_eq!(number(read(Native::StringCodePointAt, &text, 2.0)), 98.0);
+        assert_eq!(
+            read(Native::StringCodePointAt, &text, 5.0),
+            Value::Undefined
+        );
+    }
+
+    #[test]
+    fn mixed_bmp_string_reads_each_unit() {
+        // "a", U+00E9 (Latin1 range), U+20AC, U+4E2D: forces UTF-16 storage.
+        let text = StringUnits::from("a\u{e9}\u{20ac}\u{4e2d}");
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 1.0)), 233.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 2.0)), 8364.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 3.0)), 20013.0);
+        assert!(number(read(Native::StringCharCodeAt, &text, 4.0)).is_nan());
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 3.0)),
+            Some(vec![0x4e2d])
+        );
+        assert_eq!(
+            unit(read(Native::StringAt, &text, -2.0)),
+            Some(vec![0x20ac])
+        );
+        assert_eq!(number(read(Native::StringCodePointAt, &text, 2.0)), 8364.0);
+    }
+
+    #[test]
+    fn surrogate_pairs_count_as_two_units() {
+        // "x", U+1F600 (D83D DE00), "y", then a lone high surrogate.
+        let text = StringUnits::from_units(&[0x78, 0xd83d, 0xde00, 0x79, 0xd800]);
+        assert_eq!(
+            number(read(Native::StringCharCodeAt, &text, 1.0)),
+            f64::from(0xd83d)
+        );
+        assert_eq!(
+            number(read(Native::StringCharCodeAt, &text, 2.0)),
+            f64::from(0xde00)
+        );
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 3.0)), 121.0);
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 2.0)),
+            Some(vec![0xde00])
+        );
+        assert_eq!(
+            unit(read(Native::StringAt, &text, -1.0)),
+            Some(vec![0xd800])
+        );
+        // The whole code point from the lead, the trail on its own, a lone lead as itself.
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 1.0)),
+            f64::from(0x1f600)
+        );
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 2.0)),
+            f64::from(0xde00)
+        );
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 4.0)),
+            f64::from(0xd800)
+        );
+    }
+
+    #[test]
+    fn long_string_loop_is_not_quadratic() {
+        // 400k calls over a 400k-unit string: ~1.6e11 unit copies if each call copied the string,
+        // so this finishes only if each read is O(1).
+        let text = StringUnits::from("ab<c>&\"".repeat(400_000 / 7 + 1).as_str());
+        let mut sum = 0.0;
+        for index in 0..text.unit_len() {
+            sum += number(read(Native::StringCharCodeAt, &text, index as f64));
+        }
+        assert!(sum > 0.0);
+    }
+}

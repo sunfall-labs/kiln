@@ -488,7 +488,7 @@ pub(super) fn string_exotic_key(target: &Value, key: PropertyKeyRef<'_>) -> Opti
         return None;
     };
     if key.matches_ascii("length") {
-        return Some(Value::Number(text.encode_utf16().count() as f64));
+        return Some(Value::Number(text.unit_len() as f64));
     }
     let index = array_index_key(key)?;
     text.unit_at(index)

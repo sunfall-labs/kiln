@@ -1268,11 +1268,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::String(text) = target
             && let Some(index) = array_index_key(key)
         {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            return match units.get(index) {
+            // Read in place rather than copying every unit out first, which made each `s[i]`
+            // O(length) and a loop over the string quadratic.
+            return match text.unit_at(index) {
                 // One unit, not one character: indexing a surrogate pair gives half of it, which
                 // is the language's answer and the reason `for-of` over a string differs.
-                Some(unit) => Value::String(StringUnits::from_units(&[*unit])),
+                Some(unit) => Value::String(StringUnits::from_units(&[unit])),
                 None => Value::Undefined,
             };
         }

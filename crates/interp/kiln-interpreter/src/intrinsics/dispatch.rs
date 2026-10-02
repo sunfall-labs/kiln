@@ -5,6 +5,21 @@ fn is_frozen_array(value: &Value) -> bool {
         || matches!(value, Value::Shared(facade) if facade.is_array())
 }
 
+/// The code unit at an already-integral position, or `None` when it is outside the string.
+///
+/// Reads the stored representation in place, so it is O(1) for Latin1 and UTF-16 strings alike.
+/// The position-taking string methods used to copy every unit into a fresh vector first, which
+/// made `for (i < s.length) s.charCodeAt(i)` quadratic in the string's length.
+fn unit_in_range(text: &StringUnits, index: f64) -> Option<u16> {
+    if index >= 0.0 && index < text.unit_len() as f64 {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let at = index as usize;
+        text.unit_at(at)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn call_native(
     intrinsics: &Intrinsics,
     native: Native,
@@ -2145,51 +2160,48 @@ pub(crate) fn call_native(
                     // Code units, like `charAt` and `[i]` and `length`: three spellings of "the
                     // character there" that differ only at the edges, and a fourth unit would
                     // make them differ in the middle as well.
-                    let units: Vec<u16> = text.units().collect();
+                    //
+                    // Read in place: copying the units out made every call O(length), and a
+                    // loop over the string quadratic (NOTES.md, 2026-09-18).
+                    let length = text.unit_len();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     let index = if index < 0.0 {
-                        units.len() as f64 + index
+                        length as f64 + index
                     } else {
                         index
                     };
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::Undefined
-                    } else {
-                        let index = index as usize;
-                        Value::String(StringUnits::from_units(&units[index..index + 1]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::String(StringUnits::from_units(&[unit])),
+                        None => Value::Undefined,
                     }
                 }
                 Native::StringCharAt => {
                     // Code units, not characters: `charAt` counts what `length` counts, so half
                     // of a surrogate pair is a position and reads as that half.
-                    let units: Vec<u16> = text.units().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     // Out of range is the empty string, not undefined.
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::String(String::new().into())
-                    } else {
-                        Value::String(StringUnits::from_units(&units[index as usize..=index as usize]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::String(StringUnits::from_units(&[unit])),
+                        None => Value::String(String::new().into()),
                     }
                 }
                 Native::StringCharCodeAt => {
-                    let units: Vec<u16> = text.units().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     // UTF-16 code units, so an astral character has two and this reads one.
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::Number(f64::NAN)
-                    } else {
-                        Value::Number(f64::from(units[index as usize]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::Number(f64::from(unit)),
+                        None => Value::Number(f64::NAN),
                     }
                 }
                 Native::StringPadStart | Native::StringPadEnd => {
                     let target = arguments.first().map_or(0.0, Value::as_number);
-                    let current = text.units().count();
+                    let current = text.unit_len();
                     let target = if target.is_finite() && target > 0.0 {
                         target as usize
                     } else if target.is_infinite() && target.is_sign_positive() {
@@ -2377,26 +2389,24 @@ pub(crate) fn call_native(
                 }
                 Native::StringCodePointAt => {
                     let index = arguments.first().map_or(0.0, Value::as_number);
-                    let units: Vec<u16> = text.units().collect();
-                    if index < 0.0 || index >= units.len() as f64 {
+                    if index < 0.0 || index >= text.unit_len() as f64 {
                         Value::Undefined
                     } else {
                         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let at = index as usize;
-                        let lead = units.get(at).copied().unwrap_or(0);
+                        let lead = text.unit_at(at).unwrap_or(0);
                         // A surrogate *pair* reads as the whole code point, which is the entire
                         // difference from `charCodeAt`. A lone surrogate reads as itself: the
                         // answer is a number, so there is no string here to be unable to hold one
                         // (ADR 0022). Decoding through a `String` answered U+FFFD instead, which
                         // is what the trailing half of an emoji became.
                         let paired = if (0xD800..=0xDBFF).contains(&lead) {
-                            units
-                                .get(at + 1)
-                                .filter(|low| (0xDC00..=0xDFFF).contains(*low))
+                            text.unit_at(at + 1)
+                                .filter(|low| (0xDC00..=0xDFFF).contains(low))
                                 .map(|low| {
                                     0x10000
                                         + ((u32::from(lead) - 0xD800) << 10)
-                                        + (u32::from(*low) - 0xDC00)
+                                        + (u32::from(low) - 0xDC00)
                                 })
                         } else {
                             None

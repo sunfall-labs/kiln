@@ -394,9 +394,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // receiver is supplied by `CallMethod`, not captured here.
             // Strings expose `length` and the iterator. `length` is UTF-16 code units, which is
             // what JavaScript counts, and is not the same as either bytes or characters.
-            Value::String(text) if name == "length" => {
-                Value::Number(text.encode_utf16().count() as f64)
-            }
+            Value::String(text) if name == "length" => Value::Number(text.unit_len() as f64),
             Value::String(_) => match table_step(
                 &self.intrinsics,
                 PrototypeTable::String,
