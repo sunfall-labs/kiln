@@ -227,13 +227,14 @@ fn demand_namespace_members(
                     if newly_live || newly_demanded {
                         queue.push_back(namespace.to_path_buf());
                     }
-                } else {
-                    return Err(ModuleGraphError::MissingExport {
-                        importer: namespace.to_path_buf(),
-                        provider: namespace.to_path_buf(),
-                        name: name.clone(),
-                    });
                 }
+                /* An ESM namespace is an exotic object whose own keys are exactly its resolvable
+                 * exports (ambiguous star names are omitted, ECMA-262 GetModuleNamespace). A
+                 * member read of any other name is the language's own `undefined`, and `in`
+                 * answers false -- it is not a link error. Only `import { name }` links, and that
+                 * check is made on the import binding, not here. Such a read demands nothing:
+                 * there is no binding behind it to keep live, and the namespace plan builds its
+                 * object from resolved export names only, so the name is absent at run time. */
             }
         }
     }
@@ -1182,6 +1183,71 @@ exports.annotations = function (ast, values) { return values; };
                 .live_export_slots
                 .get(&child)
                 .is_some_and(|slots| slots.contains(&0))
+        );
+    }
+
+    #[test]
+    fn namespace_read_of_absent_name_demands_nothing_but_named_import_still_fails() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-namespace-absent-{stamp}"));
+        fs::create_dir_all(&root).expect("create project fixture");
+        let root = fs::canonicalize(&root).expect("canonicalize root");
+        let _cleanup = TempProject(root.clone());
+        fs::write(root.join("package.json"), r#"{"type":"module"}"#).expect("write package format");
+        fs::write(root.join("provider.mjs"), "export const a = 1;\n").expect("write provider");
+        fs::write(
+            root.join("barrel.mjs"),
+            "export * as inner from './provider.mjs';\n",
+        )
+        .expect("write barrel");
+        let entry = root.join("entry.mjs");
+        let build = |source: &str| {
+            fs::write(&entry, source).expect("write entry");
+            let resolver =
+                kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+            kiln_module_graph::ModuleGraph::build_node(
+                &entry,
+                resolver,
+                |path: &Path| fs::read_to_string(path),
+                OxcFrontend,
+            )
+        };
+        let provider = fs::canonicalize(root.join("provider.mjs")).expect("canonical provider");
+
+        // `ns.missing` is the namespace's own `undefined`, not a link error.
+        let graph = build(
+            "import * as ns from './provider.mjs';\n\
+             import * as re from './barrel.mjs';\n\
+             console.log(ns.a, ns.missing, re.missing, re.inner.missing);\n",
+        )
+        .expect("build absent-member graph");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("an absent namespace member is not a missing import");
+        let a_slot = match graph.resolved_export(&provider, "a") {
+            Some(ResolvedExport::Local { local_slot, .. }) => *local_slot,
+            other => panic!("expected local provider export, got {other:?}"),
+        };
+        assert!(
+            selection
+                .live_export_slots
+                .get(&provider)
+                .is_some_and(|slots| slots.contains(&a_slot))
+        );
+
+        // `import { missing }` remains a link-time SyntaxError.
+        let named = build("import { missing } from './provider.mjs'; console.log(missing);\n");
+        let failed = match named {
+            Err(error) => Some(error),
+            Ok(graph) => select_executable_modules(&graph, &SelectionOptions::development()).err(),
+        };
+        assert!(
+            matches!(&failed, Some(ModuleGraphError::MissingExport { name, .. }) if name == "missing"),
+            "named import of an absent export must fail to link, got {failed:?}"
         );
     }
 
