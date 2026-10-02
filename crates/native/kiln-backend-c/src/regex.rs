@@ -507,6 +507,7 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                         'W' => return None,
+                        'b' => 0x0008,
                         't' => 0x0009,
                         'n' => 0x000A,
                         'r' => 0x000D,
@@ -539,6 +540,7 @@ impl<'a> Parser<'a> {
                 self.next(); // consume '-'
                 let end_char = match self.next()? {
                     '\\' => match self.next()? {
+                        'b' => 0x0008,
                         't' => 0x0009,
                         'n' => 0x000A,
                         'r' => 0x000D,
@@ -1332,6 +1334,28 @@ mod tests {
         assert!(try_compile_regex(r"a(?!b)", "").is_none());
         // Word boundary \b
         assert!(try_compile_regex(r"\bword\b", "").is_none());
+    }
+
+    #[test]
+    fn bracket_backspace_matches_provider_for_all_ascii() {
+        for pattern in [
+            r"[\b]",
+            r"[\0-\b]",
+            r"[\b-\t]",
+            r"[^\b]",
+            r#"^[^"\\\0-\b\n-\x1F\x7F]"#,
+        ] {
+            let compiled = try_compile_regex(pattern, "").unwrap();
+            let provider = regress::Regex::new(pattern).unwrap();
+            for code in 0..=127u16 {
+                let input = [code];
+                assert_eq!(
+                    compiled.exec_simulated(&input, 0).is_some(),
+                    provider.find_from_utf16(&input, 0).next().is_some(),
+                    "/{pattern}/ on U+{code:04X}"
+                );
+            }
+        }
     }
 
     #[test]
