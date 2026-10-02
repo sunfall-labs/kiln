@@ -22,6 +22,8 @@ export type Ticket = {
   restore(value: any): void;
 };
 const tickets = new WeakMap<object, Ticket>();
+// Marks, in a message walk's `seen` map, that the message already carries a graph ticket.
+const graphInMessage = {};
 // The interpreter snapshots into its own heap. Native prepared handles own an off-heap arena
 // instead and never enter this table.
 const preparedSnapshots = new WeakMap<object, any>();
@@ -221,21 +223,26 @@ export function prepareActorMessage(
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
     if (ticket.value === undefined) throw dataCloneError("transfer ticket is unavailable");
     if (ticket.graph) {
+      // One graph per message, alone: the same refusal whichever engine moves the graph.
+      if (seen.has(graphInMessage)) throw dataCloneError("an actor call accepts one graph ticket");
+      if (consumed.length !== 0 || buffers.length !== 0) {
+        throw dataCloneError("an actor call cannot mix graph and buffer tickets");
+      }
       if (localTicket === ticket && preparedSnapshots.has(ticket.value)) {
-        if (seen.has(ticket.value) || consumed.length !== 0 || buffers.length !== 0) {
-          throw dataCloneError("an actor call accepts one graph ticket");
-        }
-        seen.set(ticket.value, true);
+        seen.set(graphInMessage, true);
         consumed.push(ticket);
         return preparedSnapshots.get(ticket.value);
       }
       // A symbol property is only a cross-plan hint and can be forged. Moving a graph needs
       // the ticket issued by this module's private WeakMap until the engine authenticates
       // cross-plan tickets itself.
-      if (onGraphTicket && localTicket === ticket) return onGraphTicket(ticket.value, ticket);
+      if (onGraphTicket && localTicket === ticket) {
+        seen.set(graphInMessage, true);
+        return onGraphTicket(ticket.value, ticket);
+      }
       throw dataCloneError("graph transfer needs ownership proof");
     }
-    if (consumed.some((entry) => entry.graph)) {
+    if (seen.has(graphInMessage)) {
       throw dataCloneError("an actor call cannot mix graph and buffer tickets");
     }
     if (!(ticket.value instanceof ArrayBuffer)) throw dataCloneError("transfer ticket has no ArrayBuffer");

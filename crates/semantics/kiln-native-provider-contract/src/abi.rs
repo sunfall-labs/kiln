@@ -208,6 +208,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_shared_graph_find_field, shared_graph_find_field);
             (realm, kiln_shared_graph_field, shared_graph_field);
             (realm, kiln_shared_graph_build, shared_graph_build);
+            (realm, kiln_shared_graph_refusal, shared_graph_build);
             (realm, kiln_shared_release, shared_release);
             (realm, kiln_shared_grow, shared_grow);
             (realm, kiln_atomics_wait, atomics_wait);
@@ -282,7 +283,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 72;
+pub const PROVIDER_ABI_VERSION: u32 = 73;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -301,6 +302,8 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 73 and 182 exports: `kiln_shared_graph_refusal` joined, so a native `share` throws the
+        // refusal `kiln-shared-graph` words, exactly the interpreter's text. Before that,
         // 72 and 181 exports: `kiln_text_decoder_label` and `kiln_text_decode` joined, so native
         // `TextDecoder` resolves labels and decodes through `kiln-encoding` (ADR 0060) as the
         // interpreter does. Before that, 52 and 144 exports: the native launcher can move an audited realm between
@@ -351,8 +354,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 72);
-        assert_eq!(PROVIDER_EXPORTS.len(), 181);
+        assert_eq!(PROVIDER_ABI_VERSION, 73);
+        assert_eq!(PROVIDER_EXPORTS.len(), 182);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

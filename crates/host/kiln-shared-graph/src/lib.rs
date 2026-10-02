@@ -74,6 +74,24 @@ pub enum UnsupportedKind {
     Symbol,
 }
 
+impl UnsupportedKind {
+    /// What a refused value is, in the words a program's author uses: the one text both engines
+    /// put in `share`'s `TypeError`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Proxy => "a Proxy",
+            Self::Function => "a function",
+            Self::CustomPrototype => {
+                "an object whose prototype is not Object.prototype or null (a class instance)"
+            }
+            Self::InternalSlots => {
+                "a built-in object with internal state (a Date, Map, Set, RegExp, buffer or the like)"
+            }
+            Self::Symbol => "a symbol",
+        }
+    }
+}
+
 /// `inspect` must read the object's kind and own descriptors directly from engine storage. A
 /// proxy trap or getter is never a valid way to implement it.
 pub trait Inspector {
@@ -97,7 +115,7 @@ impl<E: fmt::Display> fmt::Display for SnapshotError<E> {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Source(error) => error.fmt(out),
-            Self::Unsupported(kind) => write!(out, "cannot share {kind:?}"),
+            Self::Unsupported(kind) => write!(out, "cannot share {}", kind.describe()),
             Self::SymbolKey => out.write_str("cannot share a symbol-keyed property"),
             Self::Accessor => out.write_str("cannot share an accessor property"),
             Self::DuplicateKey => out.write_str("shared graph has a duplicate own property"),

@@ -223,9 +223,7 @@ function invoke(address: any, method: any, args: any, options: { signal?: AbortS
         try {
           const reservation = message.graphReservation;
           const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (_handle: any, ticket: Ticket): any => {
-            if (graphTicket || consumed.length !== 0 || buffers.length !== 0) {
-              throw dataCloneError("graph transfer needs ownership proof");
-            }
+            // The walk has already refused a second graph or a graph beside buffers.
             if (!Number.isSafeInteger(reservation) || reservation <= 0) {
               throw dataCloneError("graph transfer needs ownership proof");
             }
@@ -235,11 +233,7 @@ function invoke(address: any, method: any, args: any, options: { signal?: AbortS
           // Snapshot getters may synchronously abort the call. The abort handler has
           // already cancelled its reservation and retained the unsuspended ticket.
           if (settled) return;
-          if (graphTicket && consumed.some((ticket) => ticket.graph)) {
-            throw dataCloneError("an actor call accepts one graph ticket");
-          }
           if (graphTicket) {
-            if (buffers.length !== 0) throw dataCloneError("graph transfer needs ownership proof");
             const sent = sender.postMessage({ kind: "invoke", id, method, construct, args: snapshot,
               graphReservation: reservation });
             if (sent === undefined) throw new ActorClosedError("actor mailbox closed");

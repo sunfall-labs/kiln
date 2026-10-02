@@ -542,6 +542,34 @@ pub unsafe extern "C" fn kiln_shared_graph_field(
     0
 }
 
+thread_local! {
+    /// Why this thread's last [`kiln_shared_graph_build`] refused, NUL-terminated.
+    static LAST_REFUSAL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Why this thread's last [`kiln_shared_graph_build`] refused (-2): a NUL-terminated UTF-8
+/// message in `*text`, valid until the next build on this thread. `kiln-shared-graph` words it,
+/// so a native `share` throws exactly the interpreter's text. -1 when nothing was refused.
+///
+/// # Safety
+///
+/// `text` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_shared_graph_refusal(text: *mut *const u8) -> i32 {
+    if text.is_null() {
+        return -1;
+    }
+    LAST_REFUSAL.with(|last| {
+        let last = last.borrow();
+        if last.is_empty() {
+            return -1;
+        }
+        // SAFETY: checked above; the buffer outlives the call while the thread builds nothing.
+        unsafe { *text = last.as_ptr() };
+        0
+    })
+}
+
 /// Seal a native object graph by synchronously inspecting C's own storage. The returned build
 /// lease keeps the graph alive until C installs a realm-local facade and releases this lease.
 /// An inspector refusal returns -2; allocation/size failure returns -3; bad ABI arguments -1.
@@ -578,7 +606,10 @@ pub unsafe extern "C" fn kiln_shared_graph_build(
                 kiln_shared_graph::SnapshotError::TooLarge
                 | kiln_shared_graph::SnapshotError::Source(NativeInspectError::TooLarge),
             ) => return -3,
-            Err(_) => return -2,
+            Err(refusal) => {
+                LAST_REFUSAL.with(|last| *last.borrow_mut() = format!("{refusal}\0"));
+                return -2;
+            }
         };
     let opaque = handle.opaque();
     let lease = insert(handle);

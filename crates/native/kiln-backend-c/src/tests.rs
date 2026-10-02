@@ -730,6 +730,10 @@ int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect
     (void)root; (void)inspect; (void)unit; (void)context; (void)out;
     return -2;
 }
+int kiln_shared_graph_refusal(const char **text) {
+    *text = "cannot share a function";
+    return 0;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;

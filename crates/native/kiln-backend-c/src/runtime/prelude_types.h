@@ -824,6 +824,7 @@ typedef int (*kiln_shared_source_unit_fn)(void *context, uint64_t string, uint64
 extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect,
                                    kiln_shared_source_unit_fn unit, void *context,
                                    kiln_shared_build_result *out);
+extern int kiln_shared_graph_refusal(const char **text);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
