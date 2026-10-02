@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02): the
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02): the
 // commonest callbacks that do not qualify, in a module small enough to be specialized, so the
 // sequential lowering chosen beside a parallel one is the one under test. Each must answer
 // what `map` does, with the same side effects in the same order. `parallel-refused.js` and

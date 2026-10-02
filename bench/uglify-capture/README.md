@@ -74,7 +74,7 @@ references; a different implementation needs a deliberate comparator update.
 
 The pre-index executable can reuse CLI67's already-built native-release binary.
 The frozen provenance record at
-`.scratch/npm-compat/results/dictionary-index-baseline.json` (`fb7750ef`)
+`docs/issues/npm-compat/results/dictionary-index-baseline.json` (`fb7750ef`)
 records binary SHA-256 `9238826aec4dd48964ac9e4576407f6a3213e34c52635da33e98b49275aad92e`
 and proves its source differs from the pre-index baseline only by the added
 dictionary semantics fixture. No control rebuild is needed. Build the index

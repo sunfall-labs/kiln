@@ -8,7 +8,7 @@ change that produces that C for every program rather than for the benchmarks som
 
 Everything here was measured in a worktree on an 18-core aarch64 macOS machine, first at
 `84b2087b` and again at `cf93bb61`, the commit that NaN-boxed the emitted bodies.
-`.scratch/fastest-native/measure.sh` reproduces the table.
+`docs/issues/fastest-native/measure.sh` reproduces the table.
 
 ## Where today's number comes from
 
@@ -76,7 +76,7 @@ the call site already proved.
 
 ## The ceiling, measured
 
-`.scratch/fastest-native/{loop,fib,class-poly}.c` is the C a middle-end should emit for those three
+`docs/issues/fastest-native/{loop,fib,class-poly}.c` is the C a middle-end should emit for those three
 programs, written by hand against the value model this repository has already decided on: NaN-boxed
 values (ADR 0053), shape-plus-slots objects (ADR 0050), interned keys and per-site caches (ADR
 0047). It is deliberately *not* clever C: a guarded fast clone and a generic fallback, a typed

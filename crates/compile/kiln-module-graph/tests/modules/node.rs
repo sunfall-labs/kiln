@@ -968,7 +968,7 @@ fn node_entry_with_an_unsettled_top_level_await_exits_13() {
         ExecutionLimits::default(),
         ExecutionCapabilities::default(),
     );
-    // Node's answer (issue 09 of `.scratch/full-runtime`): the warning and status 13, where
+    // Node's answer (issue 09 of `docs/issues/full-runtime`): the warning and status 13, where
     // this exited 0 and read as success to every shell.
     assert!(
         matches!(

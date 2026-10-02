@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 2 of the parallel built-ins (.scratch/parallel-builtins issue 07): callbacks that read
+// Tier 2 of the parallel built-ins (docs/issues/parallel-builtins issue 07): callbacks that read
 // the heap -- own properties of shaped and dictionary objects, inherited ones through a class
 // prototype and `Object.create`, absent ones, dense and holey arrays, typed arrays, and captured
 // objects of every kind -- run on the pool, and must answer exactly what the sequential method

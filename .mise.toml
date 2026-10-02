@@ -80,7 +80,7 @@ description = "The local blocking loop: contracts and core crate tests for what 
 run = "bash scripts/pre-push.sh"
 
 [tasks.hooks]
-description = "Point this checkout's git hooks at .githooks, so pre-push runs before every push"
+description = "Point this checkout's git hooks at .githooks: the issue-deletion guard before every commit, the blocking loop before every push"
 run = "git config core.hooksPath .githooks && echo 'hooks installed: core.hooksPath = .githooks'"
 
 [tasks.http-close]
@@ -114,3 +114,7 @@ run = "./scripts/npm-compat.sh"
 [tools]
 rust = "1.97.1"
 
+
+[tasks.issues-index]
+description = "Regenerate docs/issues/README.md, the per-feature open/closed index of the issue tracker"
+run = "python3 scripts/issues-index.py"

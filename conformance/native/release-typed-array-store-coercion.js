@@ -5,7 +5,7 @@
 // can throw. The release fast path converted anything that was not a number with the pure
 // runtime conversion instead: a BigInt stored `0n` (`BigInt64Array.prototype.set` from an array
 // lost every element), and an object stored NaN without calling `valueOf` or letting it throw.
-// The generic element write had the same pure conversion (.scratch/parallel-builtins issue 18).
+// The generic element write had the same pure conversion (docs/issues/parallel-builtins issue 18).
 function setAll(t, src, offset) {
   const off = offset === undefined ? 0 : offset;
   for (let i = 0; i < src.length; i++) t[off + i] = src[i];

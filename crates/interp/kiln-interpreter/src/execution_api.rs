@@ -996,7 +996,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // The entry awaited something that never settled and the loop has nothing left that could
     // settle it: a forgotten `resolve`, a server closed before the await. Node warns and exits
     // 13; exiting 0 here read as success to every shell and CI until 2026-09-19 (issue 09 of
-    // `.scratch/full-runtime`). A dependency in that state is its importer's to report.
+    // `docs/issues/full-runtime`). A dependency in that state is its importer's to report.
     if suspended_module
         && enter_runtime
         && (drain || vm.async_host.is_none())

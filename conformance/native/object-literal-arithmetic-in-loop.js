@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release
 //
-// `.scratch/realms-and-concurrency` issue 16: an object literal whose property is a product of
+// `docs/issues/realms-and-concurrency` issue 16: an object literal whose property is a product of
 // two integers, built in a loop, did not compile under the release profile. The product of two
 // integers is not proven to stay one, so the emitter writes it into the value's double twin --
 // and nothing else read that twin, so the liveness pass never declared it: the C named

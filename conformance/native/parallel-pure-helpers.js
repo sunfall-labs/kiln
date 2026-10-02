@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), the program's own functions: a callback may call
+// Tier 4 (docs/issues/parallel-builtins issue 09), the program's own functions: a callback may call
 // a function whose body satisfies the same rules -- helpers calling helpers, a helper that reads
 // a constant it captures, a closure written in the callback and only called, a recursive function
 // and a mutually recursive pair (every function of the cycle proven) -- and run on the pool with

@@ -1,7 +1,7 @@
 // native-env: KILN_PARALLEL_ARENA_KIB=256
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 3 (.scratch/parallel-builtins issue 08): a worker arena that runs out of its budget
+// Tier 3 (docs/issues/parallel-builtins issue 08): a worker arena that runs out of its budget
 // declines like any other worker, and the call runs the sequential method from its first element.
 // Each arena here may take one chunk (256 KiB): the small call fits, the large one does not.
 // Both answers must be `map`'s -- memory pressure is never a failure -- and repeated calls leave

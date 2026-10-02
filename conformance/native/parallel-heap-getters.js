@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 2 (.scratch/parallel-builtins issue 07): a read that could run user code stays
+// Tier 2 (docs/issues/parallel-builtins issue 07): a read that could run user code stays
 // sequential. A getter anywhere on the path -- own, on a class prototype, installed with
 // `Object.defineProperty` where the compiler cannot see it, on one element in the middle of the
 // array -- a proxy, and an `arguments` object each make the read decline, and the call runs the

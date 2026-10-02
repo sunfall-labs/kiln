@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 2 (.scratch/parallel-builtins issue 07), strings: a callback may read a string's length,
+// Tier 2 (docs/issues/parallel-builtins issue 07), strings: a callback may read a string's length,
 // its code units (`charCodeAt`, and an index below U+0100, which is a static one-unit string),
 // compare strings by code units and by value, and use a string as a computed key -- all on the
 // pool. An index past U+00FF would allocate a string and runs sequentially; so does a string `+`.

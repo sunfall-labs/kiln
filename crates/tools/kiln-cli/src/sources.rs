@@ -436,7 +436,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         .map(|(index, (path, _))| (PathBuf::from(path), index))
         .collect::<HashMap<_, _>>();
     // The project walk skips dot-directories, so an entry inside one -- `.scratch/probe.mjs` is
-    // the everyday case, since that is where the issue tracker puts working files -- is reachable
+    // the everyday case, since that is where throwaway probes go -- is reachable
     // but absent from the snapshot. Read it here on the same terms a transitively reached module
     // gets read below. Running a file the caller named explicitly must not depend on whether the
     // walk would have volunteered it.
@@ -1491,7 +1491,7 @@ mod tests {
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
     /// snapshot. Naming such a file as the entry used to fail with "reachable module was not
     /// captured in the source snapshot", which reads like a compiler bug and cost several people
-    /// an afternoon each; `.scratch/` is where `docs/agents/issue-tracker.md` tells them to work.
+    /// an afternoon each; `.scratch/` is where throwaway probes go.
     #[test]
     fn an_entry_inside_a_dot_directory_runs_with_its_own_neighbours() {
         let tree = Tree::new("dot-directory-entry");

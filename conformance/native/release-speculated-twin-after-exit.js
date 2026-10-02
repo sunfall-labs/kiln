@@ -7,7 +7,7 @@
 // and after `kept += list.slice(...)` exits the fast clone (a string is not the number the
 // `+=` speculated) the twin was still 0.0. `indexOf("x", 3)` became `indexOf("x", 0)`.
 // In `web.ts`'s `headerListRemove` that made `Headers.set`/`delete` loop forever
-// (.scratch/parallel-builtins issue 18). The loops below carry a guard so that a regression
+// (docs/issues/parallel-builtins issue 18). The loops below carry a guard so that a regression
 // prints instead of hanging.
 
 function straight(list, needle) {

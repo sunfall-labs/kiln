@@ -9,7 +9,7 @@
 //
 // This only bites when a collection lands inside the loop, so it passes without
 // `KILN_GC_STRESS` and the plain corpus run cannot see it. `mise run native-stress` is what
-// catches this class; see `.scratch/array-splice-gc/issues/01`.
+// catches this class; see `docs/issues/array-splice-gc/issues/01`.
 
 // splice: insert wider than the removal, so the array has to grow.
 const a = [2, 4];

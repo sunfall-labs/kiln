@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), numbers: `Number(x)`, `parseInt`, `parseFloat`,
+// Tier 4 (docs/issues/parallel-builtins issue 09), numbers: `Number(x)`, `parseInt`, `parseFloat`,
 // `Boolean`, `String`, `Number.isInteger` and friends, `toFixed` and `toString` -- the number
 // parsing and formatting a callback calls -- run on the pool and answer exactly what `map`
 // answers, `-0` and `NaN` included. `toFixed` and `parseInt`/`parseFloat` share their digits

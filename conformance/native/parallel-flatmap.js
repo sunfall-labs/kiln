@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// `parallelFlatMap` is `flatMap` (ADR 0068 rule 3; .scratch/parallel-builtins issue 10), on
+// `parallelFlatMap` is `flatMap` (ADR 0068 rule 3; docs/issues/parallel-builtins issue 10), on
 // arrays only. A pure numeric callback answers numbers, which `flatMap` never flattens, so its
 // pooled lowering is `parallelMap`'s; a callback that answers arrays (or anything else) runs the
 // sequential definition, which is `flatMap` itself.

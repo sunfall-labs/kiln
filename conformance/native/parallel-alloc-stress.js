@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release
 //
-// Tier 3 (.scratch/parallel-builtins issue 08) for `mise run native-stress`: the corpus's
+// Tier 3 (docs/issues/parallel-builtins issue 08) for `mise run native-stress`: the corpus's
 // `parallelism=` probes are skipped under collector stress (too large to collect at every
 // allocation), so this one is small, has no thread-count directive, and checks its answers
 // without allocating. What stress proves here: nothing collects while a call's worker arenas are

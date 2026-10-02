@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), string methods: a callback may call the string
+// Tier 4 (docs/issues/parallel-builtins issue 09), string methods: a callback may call the string
 // methods marked pure in the member description -- trim and its halves, split (a string
 // separator, a limit, the empty separator), slice, substring, charAt, at, codePointAt, indexOf,
 // lastIndexOf, includes, startsWith, endsWith, the ASCII case maps, padStart/padEnd, repeat,

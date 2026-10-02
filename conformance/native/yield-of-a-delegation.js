@@ -2,7 +2,7 @@
 // position -- so in `yield yield* inner()`, where the `yield` is that very instruction, the two
 // resume points were one number: the native build emitted a duplicate `case` and a redefined
 // label and did not compile, in every profile. The release build's source DCE writes this shape
-// from `const r = yield* inner(); yield r;` (.scratch/parallel-builtins issue 18).
+// from `const r = yield* inner(); yield r;` (docs/issues/parallel-builtins issue 18).
 function* inner() { const sent = yield 1; yield sent; return "inner done"; }
 function* outer() { yield yield* inner(); return "outer done"; }
 console.log([...outer()]);

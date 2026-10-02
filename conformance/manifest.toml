@@ -1462,7 +1462,7 @@ source = "regress/r17-message-port-delivery-and-transfer.mjs"
 status = "runnable"
 features = ["message-channel", "message-port", "structured-clone", "transfer-list", "array-buffer-detach", "worker-threads", "promise-jobs", "next-tick"]
 catches = """
-Issue 14 of `.scratch/realms-and-concurrency`. Delivery: node dispatches a port's messages from \
+Issue 14 of `docs/issues/realms-and-concurrency`. Delivery: node dispatches a port's messages from \
 one callback with a full checkpoint (ticks, then promise jobs, then an async handler's later \
 awaits) between two messages, and each port's queue as one batch, so `B1` comes after all of `A`. \
 Delivering the queue from one `setImmediate` without the checkpoint, or one `setImmediate` per \
@@ -1558,7 +1558,7 @@ source = "regress/r19-message-port-poll-phase-and-event-slots.mjs"
 status = "runnable"
 features = ["message-channel", "message-port", "event-target", "set-immediate", "timers", "next-tick", "promise-jobs"]
 catches = """
-Issue 14 of `.scratch/realms-and-concurrency`, after r17. Node delivers a port's messages in \
+Issue 14 of `docs/issues/realms-and-concurrency`, after r17. Node delivers a port's messages in \
 libuv's poll phase, between the timers due when a turn begins and the turn's immediates; until \
 2026-09-27 a delivery was a `setImmediate` and an immediate a zero-delay timeout, so an \
 immediate scheduled before the first `postMessage`, or beside a post from a timer callback, ran \
@@ -1604,7 +1604,7 @@ source = "regress/r20-unhandled-rejection-exits.js"
 status = "runnable"
 features = ["promise-jobs", "next-tick", "unhandled-rejections"]
 catches = """
-Issue 18 of `.scratch/realms-and-concurrency`. A rejection nothing handled ends the program as \
+Issue 18 of `docs/issues/realms-and-concurrency`. A rejection nothing handled ends the program as \
 node's default `--unhandled-rejections=throw` does: reported once the checkpoint that left it is \
 over -- after the ticks and promise jobs, so a handler attached from either is in time -- as an \
 uncaught exception, exit status 1, before any timer runs. The native backend exited 0 without a \

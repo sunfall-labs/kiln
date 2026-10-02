@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02) in a module
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02) in a module
 // past the release specialization limit (issue 13): more than 16 functions and 512
 // instructions, so `kiln-native` emits every body generic-only. The qualifying `parallelMap`
 // sites still get their parallel lowering -- the callback's typed entry and parallel clone, and

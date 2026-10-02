@@ -1,7 +1,7 @@
 // `URL`'s read surface, which both engines answer from the `url` crate: the interpreter links
 // it directly, the native backend through the provider (issue full-runtime/04). Setters,
 // iteration and `instanceof` are the interpreter's gap today (full-runtime/05) and are kept in
-// `.scratch/full-runtime/probes/url2.mjs`, where node is the reference.
+// `docs/issues/full-runtime/probes/url2.mjs`, where node is the reference.
 const u = new URL("http://user:pw@example.com:8080/a/b?x=1&y=2#frag");
 for (const k of ["href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"]) {
   console.log(k, JSON.stringify(u[k]));

@@ -143,7 +143,7 @@ fn native_unsettled_top_level_await_warns_and_exits_13() {
     let output = Command::new(&report.output)
         .output_when_launchable()
         .expect("run fixture");
-    // Node's answer, and the interpreter's (issue 09 of `.scratch/full-runtime`): the warning
+    // Node's answer, and the interpreter's (issue 09 of `docs/issues/full-runtime`): the warning
     // and status 13, which is the one status `main` does not fold to 1.
     assert_eq!(output.status.code(), Some(13));
     assert_eq!(output.stdout, b"before\n");

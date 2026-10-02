@@ -19,7 +19,7 @@ records go to `target/bench-parallel/<timestamp>/raw.json`. It needs `node`, `bu
 on `PATH`; Go comes from `PATH` when a working `go` is there and otherwise from
 `mise exec go@latest`.
 
-This is issue 11 of `.scratch/parallel-builtins/`. The current complete table is
+This is issue 11 of `docs/issues/parallel-builtins/`. The current complete table is
 [results-2026-09-27-refresh.md](results-2026-09-27-refresh.md); the earlier tier-1 baseline is
 preserved in [results-2026-09-27.md](results-2026-09-27.md).
 

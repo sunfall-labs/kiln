@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), `JSON.stringify` of plain data on the pool:
+// Tier 4 (docs/issues/parallel-builtins issue 09), `JSON.stringify` of plain data on the pool:
 // numbers (non-finite as null), strings with escapes, Latin1, UTF-16 and lone surrogates, nested
 // literals and arrays (holes as null), class instances, and the omissions -- undefined and
 // functions dropped from objects, null in arrays. What a pool thread cannot promise declines and

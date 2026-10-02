@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 1
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 1
 // (issue 05): captures the run-time guard turns away. A binding written once qualifies at
 // compile time, but only a number crosses to the workers; a string, a boolean, `undefined`,
 // `null`, or a binding still in its dead zone sends the call down the sequential path, which

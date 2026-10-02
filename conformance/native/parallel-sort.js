@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// `parallelSort` is `sort` (ADR 0068 rule 3; .scratch/parallel-builtins issue 10). A stable sort
+// `parallelSort` is `sort` (ADR 0068 rule 3; docs/issues/parallel-builtins issue 10). A stable sort
 // under a consistent order has one answer, so the pool may run it: a typed array's default
 // numeric order (`-0` before `+0`, `NaN` last), or a comparator proven to be `(a, b) => a - b`
 // or `(a, b) => b - a` over numbers with no `NaN` -- `-0` and `+0` then compare equal and keep

@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 1
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 1
 // (issue 05): captures that are parameters of the enclosing function, and captures threaded
 // through two closures. Each is written once, so each site runs in parallel.
 //

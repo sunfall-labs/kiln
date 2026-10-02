@@ -90,8 +90,8 @@
         "clang_version": null,
         "cli_binary_sha256": null,
         "evidence": [
-          ".scratch/perf-consolidation/report.md identifies the 2026-09-14 host as Apple M5 Pro (Mac17,8), 18 logical CPUs; its final-validation section reports all 15 thirdparty timing bundles measured with no regressions.",
-          ".scratch/native-perf/thirdparty-baseline-stale.md records the startup-dominated small-bundle timing issue measured on 2026-09-07.",
+          "docs/issues/perf-consolidation/report.md identifies the 2026-09-14 host as Apple M5 Pro (Mac17,8), 18 logical CPUs; its final-validation section reports all 15 thirdparty timing bundles measured with no regressions.",
+          "docs/issues/native-perf/thirdparty-baseline-stale.md records the startup-dominated small-bundle timing issue measured on 2026-09-07.",
           "The bundles with retained source files have hashes computed from the metric-file commit; generated yaml/zod bundle inputs were not retained, so their hashes are null.",
           "Historical CLI binary, Rust/Clang versions, and macOS release were not recorded."
         ],

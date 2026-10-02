@@ -1,0 +1,17 @@
+/before-kiln
+/after-kiln
+/cc
+/project/
+/build-logs/
+/*.log
+/*-gate/
+/*-gate-warm/
+/*-gate-retry/
+/*-gate-fix/
+/*-gate-final/
+/*-test262/
+/post-split-*/
+/*/cache/
+/*/compiles.log
+/*/*.stdout
+/*/*.stderr

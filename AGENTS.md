@@ -454,9 +454,11 @@ directory is the same review refusal.
 
 ### Issue tracker
 
-Issues and PRDs are repository-local Markdown under `.scratch/<feature>/`. See
-`docs/agents/issue-tracker.md`. Scratch files there are runnable — `kiln run .scratch/probe.mjs`
-works even though the project walk skips dot-directories.
+Issues and PRDs are repository-local Markdown under `docs/issues/<feature>/`. See
+`docs/agents/issue-tracker.md`. Probes there are runnable -- `kiln run docs/issues/<feature>/probe.mjs`
+works like any other path. Deleting a filing is refused by the hooks and the gate unless
+`KILN_ALLOW_ISSUE_DELETION=1` is set for that one command; a closed issue keeps its file. `.scratch/`
+is scratch paper now: nothing in it is tracked, and anything an issue cites belongs beside the issue.
 
 ### Triage labels
 

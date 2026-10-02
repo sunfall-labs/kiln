@@ -34,9 +34,9 @@ process startup and are triage measurements, not steady-state benchmark claims o
 of every Unicode case. Map/Set iterator-close tests expect an overridden insertion method to
 throw promptly; consuming an infinite iterator until the step limit was a correctness problem, now fixed.
 
-The optimization evidence lives under `.scratch/extended-unicode`, `.scratch/extended-limits`,
-and `.scratch/extended-mixed`. Those controlled comparisons name their pre-bootstrap baseline
-`80f55d78`. The [combined report](../.scratch/slow-case-opt/README.md) validates the newer common
+The optimization evidence lives under `docs/issues/extended-unicode`, `docs/issues/extended-limits`,
+and `docs/issues/extended-mixed`. Those controlled comparisons name their pre-bootstrap baseline
+`80f55d78`. The [combined report](../docs/issues/slow-case-opt/README.md) validates the newer common
 bootstrap in every realm: all 102,638 variants ran, with no chunk regressions and 43 gained passes.
 They do not claim that time to a fuel limit is the time needed to finish an exhaustive test.
 

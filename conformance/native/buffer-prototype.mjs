@@ -1,4 +1,4 @@
-// Buffer.prototype (issue 08 of .scratch/full-runtime): the shared TypeScript prototype over each
+// Buffer.prototype (issue 08 of docs/issues/full-runtime): the shared TypeScript prototype over each
 // engine's branded Uint8Array. Every line is node-identical in both engines as of 2026-09-19.
 const b = Buffer.from("héllo wörld", "utf8");
 console.log(typeof Buffer.prototype, Object.getPrototypeOf(b) === Buffer.prototype, b instanceof Buffer, b instanceof Uint8Array, Buffer.isBuffer(b), Buffer.isBuffer(new Uint8Array(1)), b.constructor === Buffer);

@@ -1173,7 +1173,7 @@ def main() -> int:
     parser.add_argument("--max-rounds", type=int, default=64)
     parser.add_argument("--disk-floor-gib", type=float, default=4.0)
     parser.add_argument("--disk-stop-gib", type=float, default=1.5)
-    parser.add_argument("--out", default=".scratch/native-real-libraries")
+    parser.add_argument("--out", default="docs/issues/native-real-libraries")
     # The measurement and the prose are separated on purpose: rewording the report, or adding a
     # cut of the same numbers, must never cost another hundred native compiles.
     parser.add_argument("--stage", choices=["enumerate", "report", "all"], default="all")

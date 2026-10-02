@@ -38,7 +38,7 @@ raw records (every round, every metric, the load average before each job) go to
 `PATH`; Go comes from `PATH` when a working `go` is there and otherwise from
 `mise exec go@latest`, which downloads into mise's cache without changing any configuration.
 
-This is issue 13 of `.scratch/realms-and-concurrency/`: the suite is extended as each issue lands,
+This is issue 13 of `docs/issues/realms-and-concurrency/`: the suite is extended as each issue lands,
 and a "not available" cell becomes a number when the feature it names exists.
 
 ## How it measures
