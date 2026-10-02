@@ -1,100 +1,12 @@
 
 /* Append everything `source` yields to `target`, which is what array spread, `for...of` and
- * destructuring all reduce to.
- *
- * An array and a string are walked directly rather than through their iterators. That is a
- * shortcut the specification does not take, and it is visible to a program that replaces
- * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
- * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+ * destructuring all reduce to. Every non-nullish value goes through @@iterator: collection and
+ * indexed-value shortcuts would skip observable user overrides such as a Map subclass's
+ * Symbol.iterator. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
-    size_t index;
     int status;
-    if (source.tag == KILN_VALUE_ARRAY) {
-        kiln_array *array = kiln_c99_array_of(source);
-        size_t length = array->count;
-        for (index = 0; index < length && index < array->count; ++index) {
-            /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
-             * That is what makes `[...[1, , 3]]` a dense three-element array where `map` over
-             * the same input leaves the hole alone. */
-            status = kiln_c99_array_push(target, array->elements[index] == KILN_VAL_HOLE
-                                                     ? kiln_c99_undefined()
-                                                     : kiln_val_to_boundary(array->elements[index]));
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-        }
-        return KILN_C99_OK;
-    }
-    if (source.tag == KILN_VALUE_TYPED_ARRAY) {
-        kiln_typed_array *view = kiln_c99_typed_array_of(source);
-        /* Read each element at the moment it is visited: a view is live over its shared buffer. */
-        for (index = 0; index < view->length; ++index) {
-            kiln_value element;
-            status = kiln_c99_typed_element(view, index, &element);
-            if (status == KILN_C99_OK) status = kiln_c99_array_push(target, element);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-        }
-        return KILN_C99_OK;
-    }
-    if (source.tag == KILN_VALUE_COLLECTION) {
-        /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
-         * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
-        kiln_collection *collection = kiln_c99_collection_of(source);
-        size_t length = collection->count;
-        for (index = 0; index < length && index < collection->count; ++index) {
-            kiln_value produced;
-            if (collection->entries[index].dead) {
-                continue;
-            }
-            produced = collection->entries[index].value;
-            if (collection->is_map) {
-                status = kiln_c99_new_array(&produced);
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_array_push(produced, collection->entries[index].key);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_array_push(produced, collection->entries[index].value);
-                }
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-            }
-            status = kiln_c99_array_push(target, produced);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-        }
-        return KILN_C99_OK;
-    }
-    if (source.tag == KILN_VALUE_STRING) {
-        /* A string iterates as its *characters*, not its code units: an astral character is one
-         * step, which is the difference between iterating a string and indexing it. */
-        uint16_t *units = NULL;
-        size_t count = 0;
-        status = kiln_c99_to_units(source, &units, &count);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        for (index = 0; index < count; ++index) {
-            size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
-                            index + 1 < count && units[index + 1] >= 0xDC00 &&
-                            units[index + 1] <= 0xDFFF)
-                               ? 2
-                               : 1;
-            status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
-            if (status != KILN_C99_OK) {
-                free(units);
-                return status;
-            }
-            index += width - 1;
-        }
-        free(units);
-        return KILN_C99_OK;
-    }
     /* Nullish is answered here rather than by the `@@iterator` lookup below, because the two
      * faults are reported differently: reading a property off null is "Cannot read properties of
      * null", but *iterating* it is "null is not iterable", and `[...null]` is the second one. */
@@ -102,18 +14,14 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         return kiln_c99_throw_not_iterable(thrown, source);
     }
     /* Everything else goes through the protocol: ask for an iterator, then drive it. */
-    if (source.tag == KILN_VALUE_GENERATOR) {
-        iterator = source;
-    } else {
+    {
         kiln_value method;
         status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* No `@@iterator` at all is the ordinary case -- `for (const x of 5)` and `[...null]` --
-         * and the language ends the program there with a TypeError the program may catch, rather
-         * than a fault. The lookup above already answered undefined for a missing `@@` name, so
-         * reaching here means the value genuinely has nothing to iterate with. */
+        /* No `@@iterator` at all is the ordinary case -- `for (const x of 5)` -- and the
+         * language reports a catchable TypeError. */
         if (!kiln_c99_is_callable(method)) {
             return kiln_c99_throw_not_iterable(thrown, source);
         }
