@@ -1260,7 +1260,22 @@ pub(super) fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     for _ in 0..MAX_PROTOTYPE_DEPTH {
         current = match current {
             Some(Value::Native(native, _)) => return Some(native),
-            Some(Value::Function(parent)) => parent.properties.borrow().prototype().cloned(),
+            Some(Value::Function(parent)) => {
+                let prototype = parent.properties.borrow().prototype().cloned();
+                match prototype {
+                    Some(prototype) => Some(prototype),
+                    // An ordinary function's implicit [[Prototype]] is virtual: it is not
+                    // stored in ObjectData. When a derived class constructor inherits through
+                    // another function, the walk must cross that function's implicit tail too.
+                    // Otherwise `class B extends A {}` reaches A's store, stops before
+                    // Function.prototype, and loses inherited `bind`/`call` methods.
+                    None => Some(Value::Native(
+                        function_kind_prototype(&parent)
+                            .unwrap_or(Native::PrototypeOf(PrototypeTable::Function)),
+                        value_realm(&Value::Function(parent)),
+                    )),
+                }
+            }
             Some(Value::Object(object)) => object.borrow().prototype().cloned(),
             _ => return None,
         };
