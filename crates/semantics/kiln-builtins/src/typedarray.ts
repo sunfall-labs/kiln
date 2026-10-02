@@ -44,9 +44,22 @@ delete (globalThis as any).__kilnTypedArraySort;
 
   const getUint16 = DataView.prototype.getUint16;
   const setUint16 = DataView.prototype.setUint16;
+  const getUint8 = DataView.prototype.getUint8;
   const floatScratch = new Float16(1);
   const bitsScratch = new Uint16(floatScratch.buffer);
   const maxSafeInteger = 9007199254740991;
+  const brandProbeSentinel = {};
+  const brandProbeOffset = { valueOf(): never { throw brandProbeSentinel; } };
+
+  function requireDataViewReceiver(receiver: any): void {
+    try {
+      getUint8.call(receiver, brandProbeOffset);
+    } catch (error) {
+      if (error === brandProbeSentinel) return;
+      throw error;
+    }
+    throw new TypeError("Method called on an incompatible receiver");
+  }
 
   function toIndex(value: any): number {
     let integer = +value;
@@ -59,12 +72,14 @@ delete (globalThis as any).__kilnTypedArraySort;
 
   const methods = {
     getFloat16(this: any, byteOffset: any): number {
+      requireDataViewReceiver(this);
       const offset = toIndex(byteOffset);
       const littleEndian = !!arguments[1];
       bitsScratch[0] = getUint16.call(this, offset, littleEndian);
       return floatScratch[0];
     },
     setFloat16(this: any, byteOffset: any, value: any): void {
+      requireDataViewReceiver(this);
       const offset = toIndex(byteOffset);
       floatScratch[0] = +value;
       const bits = bitsScratch[0];
