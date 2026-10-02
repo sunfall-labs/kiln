@@ -702,6 +702,10 @@ if (typeof JSON !== "undefined") {
 }
 "#;
 
+/// Non-filesystem base reserved for the realm-wide `process.getBuiltinModule` loader. Unlike
+/// source modules, this identity must never select an importer-scoped `createRequire` table.
+const NATIVE_BUILTIN_LOADER_BASE: &str = "kiln:runtime-builtin-loader";
+
 #[cfg(test)]
 pub(super) fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
@@ -1012,12 +1016,13 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
         if (!__kilnBuiltinModuleNames.has(name)) return undefined;
         if (__kilnBuiltinRequire === undefined) {{
             __kilnBuiltinRequire =
-                __kilnBuiltinCreateRequire("/kiln/runtime-bootstrap.ts");
+                __kilnBuiltinCreateRequire({builtin_loader_base});
         }}
         return __kilnBuiltinRequire("node:" + name);
     }};
 }}
-"#
+"#,
+        builtin_loader_base = NATIVE_BUILTIN_LOADER_BASE,
     )
 }
 
