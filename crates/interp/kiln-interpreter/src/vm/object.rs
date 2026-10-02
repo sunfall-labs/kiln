@@ -1052,6 +1052,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.proxy_get(target, &trap_key, instruction);
         }
         self.refresh_namespace_for_read(target);
+        // Array `length` is an own data property backed by the dense array header, rather than
+        // by its ordinary property store. Resolve it before walking any stored or inherited
+        // properties so a custom prototype's `length` cannot shadow the array's own value.
+        if let Value::Array(items) = target
+            && key.matches_ascii("length")
+        {
+            #[expect(clippy::cast_precision_loss)]
+            return Ok(Value::Number(items.length() as f64));
+        }
         // A `DataView` a shrink has left outside its buffer answers neither of its two
         // measurements: the specification checks the view is still in bounds before it reports
         // either, and a zero here would read as a view that is legitimately empty.

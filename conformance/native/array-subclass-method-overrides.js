@@ -15,4 +15,9 @@ delete words.toString;
 console.log(words.toString(), reads);
 console.log(words.toString(), reads);
 Object.defineProperty(Words.prototype, 'length', { value: 99 });
+const plain = [1, 2];
+Object.setPrototypeOf(plain, { length: 99 });
+if (plain.length !== 2 || words.length !== 2) {
+  throw new Error('an array own length must shadow a prototype length');
+}
 console.log(words.length);
