@@ -2029,6 +2029,29 @@ fn every_surface_member_is_named_for_its_key() {
 }
 
 #[test]
+fn reflecting_performance_preserves_its_clock_method() {
+    let program = program(Vec::new(), vec![Instruction::Return]);
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let globals = vm.global_object();
+    let performance = vm.read_property(&globals, "performance", 0).unwrap();
+    let method = vm.read_property(&performance, "now", 0).unwrap();
+    vm.intrinsics.materialize(&performance);
+    assert!(own_property_keys(&vm.intrinsics, &performance).contains(&"now".to_owned()));
+    assert!(same_value(
+        &vm.read_property(&performance, "now", 0).unwrap(),
+        &method
+    ));
+    assert!(matches!(method, Value::Native(Native::PerformanceNow, _)));
+}
+
+#[test]
 fn materializing_string_prototype_preserves_its_exotic_length() {
     let intrinsics = Intrinsics::default();
     let target = Value::Native(

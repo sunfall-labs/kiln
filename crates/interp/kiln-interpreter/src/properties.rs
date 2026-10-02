@@ -2996,6 +2996,10 @@ pub(super) fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'
             const MEMBERS: &[&str] = kiln_builtin_surface::members("Math");
             MEMBERS
         }
+        Value::Native(Native::Performance, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("performance");
+            MEMBERS
+        }
         Value::Native(Native::TypedArrayIntrinsic, _) => {
             const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArray%");
             MEMBERS
