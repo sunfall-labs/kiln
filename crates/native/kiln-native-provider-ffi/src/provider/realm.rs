@@ -778,7 +778,19 @@ struct ScheduledWait {
     timer_armed: Rc<Cell<bool>>,
     virtual_delay: Option<Duration>,
     advanced: bool,
+    /// Real-time ticks this wait has survived with its timer armed and no wake. Virtual time
+    /// may jump to the deadline only after the I/O driver has had several of them to deliver
+    /// a completion that is already on its way (see `VIRTUAL_QUIET_TICKS`).
+    quiet_ticks: u32,
 }
+
+/// How many bounded real ticks (about a millisecond each) a virtual-clock realm that is parked on
+/// a timer and on real host work must see pass without a wake before its clock jumps to the
+/// timer. The jump says "nothing can make progress", and for a socket that is a claim about the
+/// kernel, which one poll of a current-thread reactor cannot make: a loopback connect or accept
+/// registered this turn is usually still in flight, and an 8 s guard timer would otherwise fire
+/// before the connection it guards was ever accepted.
+const VIRTUAL_QUIET_TICKS: u32 = 2;
 
 /// Reasons a scheduled realm must keep its current OS lane. These are deliberately lifetime
 /// pins: an operation can leave a callback or Tokio task reachable after the submitting turn,
@@ -1923,6 +1935,14 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
             && !wait.advanced
             && wait.timer_armed.get()
             && !realm.virtual_clock_held()
+            && wait.virtual_delay.is_some()
+            && wait.quiet_ticks < VIRTUAL_QUIET_TICKS
+        {
+            wait.quiet_ticks += 1;
+        } else if wait.wake.get().is_none()
+            && !wait.advanced
+            && wait.timer_armed.get()
+            && !realm.virtual_clock_held()
             && let Some(delay) = wait.virtual_delay
         {
             // The waiter has polled its timer after the preceding yield. Advancing earlier
@@ -2010,6 +2030,7 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
                 timer_armed,
                 virtual_delay,
                 advanced: false,
+                quiet_ticks: 0,
             }));
             realm.runtime.executor().poll_local_once(waker);
             if virtual_delay.is_some() {
@@ -2056,9 +2077,13 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                     }
                     None if matches!(realm.clock.get(), NativeClock::Virtual) => {
                         let liveness = Arc::clone(realm.liveness());
-                        kiln_runtime::wait_for_turn_quiescent(signal, delay, move || {
-                            liveness.others_active()
-                        })
+                        let io_pending = realm.runtime.state.borrow().needs_io_driver();
+                        kiln_runtime::wait_for_turn_quiescent(
+                            signal,
+                            delay,
+                            move || liveness.others_active(),
+                            io_pending,
+                        )
                         .await
                     }
                     None => kiln_runtime::wait_for_turn(signal, delay).await,

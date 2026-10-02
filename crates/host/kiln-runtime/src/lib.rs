@@ -1055,18 +1055,31 @@ pub async fn wait_for_turn(signal: Arc<tokio::sync::Notify>, delay: Option<Durat
     }
 }
 
+/// How long a virtual-clock realm that is parked on real host work lets the I/O driver run
+/// before its clock may jump to the next timer.
+///
+/// The jump asserts "nothing can make progress". For a socket that is a claim about the kernel,
+/// and a paused Tokio clock makes it after a single zero-timeout poll of the reactor: a loopback
+/// connect or accept registered this turn is typically still in flight, so an 8 s guard timer
+/// would fire before the connection it guards had been accepted. Real I/O gets this much real
+/// time, with the driver turned throughout, to produce a completion first.
+pub const VIRTUAL_IO_SETTLE: Duration = Duration::from_millis(5);
+
 /// [`wait_for_turn`] for a virtual-clock realm that may be about to jump its clock to `delay`.
 ///
 /// While `others_active` holds -- another realm in the process has runnable work and so may post
 /// a message, close a port or exit within wall-clock moments -- the clock stays where it is and
-/// the wait is a real, short, repeated one that the completion signal ends at once. Only when
-/// every other realm is idle does the sleep run against the paused clock and jump to the
-/// deadline, which is what keeps a lone program's timers free (ADR 0012) without letting a
-/// timer outrun a worker that has not yet been scheduled (ADR 0070).
+/// the wait is a real, short, repeated one that the completion signal ends at once. So it does
+/// for [`VIRTUAL_IO_SETTLE`] when `io_pending` says this realm itself waits on real host work.
+/// Only when every other realm is idle and the driver has been quiet does the sleep run against
+/// the paused clock and jump to the deadline, which is what keeps a lone program's timers free
+/// (ADR 0012) without letting a timer outrun a worker that has not yet been scheduled (ADR 0070)
+/// or a socket whose completion is already on its way.
 pub async fn wait_for_turn_quiescent(
     signal: Arc<tokio::sync::Notify>,
     delay: Option<Duration>,
     others_active: impl Fn() -> bool,
+    io_pending: bool,
 ) -> DriveWake {
     let Some(delay) = delay else {
         return wait_for_turn(signal, None).await;
@@ -1074,7 +1087,8 @@ pub async fn wait_for_turn_quiescent(
     // Created first so a wake sent between the checks below is kept as a permit, not lost.
     let mut notified = std::pin::pin!(signal.notified());
     let noop = std::task::Waker::noop();
-    while others_active() {
+    let settle_until = io_pending.then(|| std::time::Instant::now() + VIRTUAL_IO_SETTLE);
+    while others_active() || settle_until.is_some_and(|until| std::time::Instant::now() < until) {
         yield_to_tasks().await;
         if notified
             .as_mut()
