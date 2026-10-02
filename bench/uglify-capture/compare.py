@@ -18,7 +18,6 @@ import os
 import platform
 import signal
 import statistics
-import stat
 import subprocess
 import sys
 import time
@@ -112,155 +111,35 @@ def parse_result(label: str, output: bytes, stderr: bytes, code: int) -> dict[st
     return result
 
 
-def git_head(path: Path | None) -> str | None:
-    if path is None:
-        return None
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "HEAD"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(f"cannot read source revision for {path}")
-    return result.stdout.decode().strip()
-
-
-def tracked_paths(root: Path) -> list[str]:
-    result = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--cached"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(
-            f"cannot list tracked files under {root}: "
-            f"{result.stderr.decode('utf-8', 'replace').strip()}"
-        )
-    return sorted(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
-
-
-def worktree_entry(root: Path, relative: str) -> tuple[str, int, bytes]:
-    """Read an indexed path from the worktree, including dirty tracked overlays."""
-    path = root / relative
-    try:
-        info = path.lstat()
-    except OSError as error:
-        raise RuntimeError(f"tracked source file is missing under {root}: {relative}: {error}") from error
-    # Git tracks executability, not owner/group permission details.
-    mode = 0o111 if info.st_mode & 0o111 else 0
-    if stat.S_ISLNK(info.st_mode):
-        return "symlink", mode, os.fsencode(os.readlink(path))
-    if stat.S_ISREG(info.st_mode):
-        try:
-            return "file", mode, path.read_bytes()
-        except OSError as error:
-            raise RuntimeError(f"cannot read tracked source file {path}: {error}") from error
-    if stat.S_ISDIR(info.st_mode):
-        # A git submodule is represented by a tracked directory entry. Record the checked-out
-        # submodule revision rather than traversing its generated or independently ignored files.
-        revision = git_head(path)
-        if revision is None:
-            raise RuntimeError(f"tracked directory is not a readable submodule: {path}")
-        return "submodule", mode, revision.encode("ascii")
-    raise RuntimeError(f"unsupported tracked file kind under {root}: {relative}")
-
-
-def digest_entry(digest: "hashlib._Hash", relative: str,
-                 entry: tuple[str, int, bytes]) -> None:
-    kind, mode, contents = entry
-    name = os.fsencode(relative)
-    digest.update(len(name).to_bytes(8, "big"))
-    digest.update(name)
-    digest.update(kind.encode("ascii") + b"\0")
-    digest.update(mode.to_bytes(4, "big"))
-    digest.update(len(contents).to_bytes(8, "big"))
-    digest.update(contents)
-
-
 def compare_sources(production: Path, control: Path) -> dict[str, object]:
-    """Require identical tracked worktrees except the explicitly controlled dynamic.c file."""
-    production = production.resolve()
-    control = control.resolve()
-    if not production.is_dir() or not control.is_dir():
-        raise RuntimeError("production and control source paths must be directories")
-    production_paths = tracked_paths(production)
-    control_paths = tracked_paths(control)
-    if production_paths != control_paths:
-        production_only = sorted(set(production_paths) - set(control_paths))
-        control_only = sorted(set(control_paths) - set(production_paths))
-        raise RuntimeError(
-            "tracked source inventories differ; "
-            f"production-only={production_only[:8]!r}, control-only={control_only[:8]!r}"
-        )
-    if DYNAMIC_CONTROL_FILE not in production_paths:
-        raise RuntimeError(f"tracked control file is missing: {DYNAMIC_CONTROL_FILE}")
+    """Require identical tracked trees except the captured-record hydration file."""
+    sys.path.insert(0, str(REPO))
+    from bench.source_match import compare_sources as match_sources
 
-    inventory_digest = hashlib.sha256()
-    common_digest = hashlib.sha256()
-    production_tree_digest = hashlib.sha256()
-    control_tree_digest = hashlib.sha256()
-    production_dynamic: tuple[str, int, bytes] | None = None
-    control_dynamic: tuple[str, int, bytes] | None = None
-    for relative in production_paths:
-        production_entry = worktree_entry(production, relative)
-        control_entry = worktree_entry(control, relative)
-        name = os.fsencode(relative)
-        inventory_digest.update(len(name).to_bytes(8, "big"))
-        inventory_digest.update(name)
-        digest_entry(production_tree_digest, relative, production_entry)
-        digest_entry(control_tree_digest, relative, control_entry)
-        if relative == DYNAMIC_CONTROL_FILE:
-            production_dynamic = production_entry
-            control_dynamic = control_entry
-            continue
-        if production_entry != control_entry:
-            raise RuntimeError(f"tracked source differs outside {DYNAMIC_CONTROL_FILE}: {relative}")
-        digest_entry(common_digest, relative, production_entry)
-
-    if production_dynamic is None or control_dynamic is None:
-        raise RuntimeError(f"tracked control file is missing: {DYNAMIC_CONTROL_FILE}")
-    if production_dynamic[0] != "file" or control_dynamic[0] != "file":
-        raise RuntimeError(f"{DYNAMIC_CONTROL_FILE} must be a regular tracked file in both trees")
-    if production_dynamic == control_dynamic:
-        raise RuntimeError(
-            f"production and control have identical {DYNAMIC_CONTROL_FILE}; "
-            "the control must contain the captured-record hydration change"
-        )
-
-    # Keep each supplied tree tied to the harness checkout's benchmark inputs. This prevents a
-    # workload or dependency-lock drift from masquerading as a runtime-only comparison.
-    try:
-        harness_workload = WORKLOAD.read_bytes()
-        harness_lock = (CORPUS / "package-lock.json").read_bytes()
-    except OSError as error:
-        raise RuntimeError(f"cannot read harness workload or package lock: {error}") from error
-    for label, root in (("production", production), ("control", control)):
-        try:
-            source_workload = (root / WORKLOAD_RELATIVE).read_bytes()
-            source_lock = (root / LOCK_RELATIVE).read_bytes()
-        except OSError as error:
-            raise RuntimeError(f"cannot read {label} workload or package lock: {error}") from error
-        if source_workload != harness_workload:
-            raise RuntimeError(f"{label} workload differs from the harness workload")
-        if source_lock != harness_lock:
-            raise RuntimeError(f"{label} package-lock.json differs from the harness corpus")
-
-    return {
-        "production_head": git_head(production),
-        "control_head": git_head(control),
-        "tracked_file_count": len(production_paths),
-        "tracked_path_inventory_sha256": inventory_digest.hexdigest(),
-        "matched_source_sha256": common_digest.hexdigest(),
-        "production_tracked_tree_sha256": production_tree_digest.hexdigest(),
-        "control_tracked_tree_sha256": control_tree_digest.hexdigest(),
-        "dynamic_c_sha256": {
-            "production": hashlib.sha256(production_dynamic[2]).hexdigest(),
-            "control": hashlib.sha256(control_dynamic[2]).hexdigest(),
+    result = match_sources(
+        production,
+        control,
+        allowed_differences={DYNAMIC_CONTROL_FILE},
+        required_equal={
+            str(WORKLOAD_RELATIVE): WORKLOAD,
+            str(LOCK_RELATIVE): CORPUS / "package-lock.json",
         },
-        "workload_sha256": hashlib.sha256(harness_workload).hexdigest(),
-        "package_lock_sha256": hashlib.sha256(harness_lock).hexdigest(),
+    )
+    difference = result["allowed_source_differences"][DYNAMIC_CONTROL_FILE]
+    return {
+        "production_head": result["production_head"],
+        "control_head": result["control_head"],
+        "tracked_file_count": result["tracked_file_count"],
+        "tracked_path_inventory_sha256": result["tracked_path_inventory_sha256"],
+        "matched_source_sha256": result["matched_source_sha256"],
+        "production_tracked_tree_sha256": result["production_tracked_tree_sha256"],
+        "control_tracked_tree_sha256": result["control_tracked_tree_sha256"],
+        "dynamic_c_sha256": {
+            "production": difference["production_sha256"],
+            "control": difference["control_sha256"],
+        },
+        "workload_sha256": result["harness_inputs_sha256"][str(WORKLOAD_RELATIVE)],
+        "package_lock_sha256": result["harness_inputs_sha256"][str(LOCK_RELATIVE)],
         "only_allowed_source_difference": DYNAMIC_CONTROL_FILE,
     }
 
