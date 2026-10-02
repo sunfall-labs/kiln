@@ -311,6 +311,7 @@ impl WarmDaemonFixture {
             .client()?
             .request(&Request::Run {
                 path,
+                stream_output: false,
                 project_root,
                 node: false,
                 // The benchmark measures the daemon's answer for a fixed program, which is the

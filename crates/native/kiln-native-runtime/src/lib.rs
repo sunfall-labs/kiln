@@ -10,7 +10,9 @@ use std::sync::OnceLock;
 
 mod launch;
 
-pub use launch::{output_built_executable, spawn_built_executable};
+pub use launch::{
+    ChildStream, output_built_executable, spawn_built_executable, stream_built_executable,
+};
 
 /// Version of the generated native runtime source and its C ABI.
 pub const NATIVE_RUNTIME_VERSION: u32 = 14;

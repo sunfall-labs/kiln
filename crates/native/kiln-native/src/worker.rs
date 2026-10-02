@@ -245,11 +245,14 @@ impl RunsABuiltBinary for Command {
 pub(crate) fn run_executable(
     command: &mut Command,
     executable: &Path,
+    on_output: Option<&mut dyn FnMut(kiln_native_runtime::ChildStream, &[u8])>,
 ) -> Result<std::process::Output, NativeError> {
-    command
-        .output_when_launchable()
-        .map_err(|source| NativeError::Launch {
-            executable: executable.to_path_buf(),
-            source,
-        })
+    match on_output {
+        Some(on_output) => kiln_native_runtime::stream_built_executable(command, on_output),
+        None => command.output_when_launchable(),
+    }
+    .map_err(|source| NativeError::Launch {
+        executable: executable.to_path_buf(),
+        source,
+    })
 }

@@ -15,6 +15,79 @@ pub fn output_built_executable(command: &mut Command) -> io::Result<Output> {
     retry_while_executable_is_busy(|| command.output())
 }
 
+/// Which of a child's standard streams a chunk of streamed output came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildStream {
+    Stdout,
+    Stderr,
+}
+
+/// Run a native executable to completion, handing its output to `on_chunk` as it is written.
+///
+/// [`output_built_executable`] holds everything until the child exits, which for a server is
+/// never: the program's first line ("listening") reaches nobody until it is killed. Here two
+/// reader threads forward each read to the calling thread, which invokes `on_chunk` in arrival
+/// order (stdout and stderr interleaved as they were produced). Nothing is retained: the
+/// returned [`Output`] carries the exit status and empty buffers. Chunks are raw bytes and may
+/// split a UTF-8 sequence.
+pub fn stream_built_executable(
+    command: &mut Command,
+    on_chunk: &mut dyn FnMut(ChildStream, &[u8]),
+) -> io::Result<Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = retry_while_executable_is_busy(|| command.spawn())?;
+    let (sender, receiver) = mpsc::channel::<(ChildStream, Vec<u8>)>();
+    let mut readers = Vec::new();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    for (stream, pipe) in [
+        (
+            ChildStream::Stdout,
+            stdout.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+        ),
+        (
+            ChildStream::Stderr,
+            stderr.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+        ),
+    ] {
+        let Some(mut pipe) = pipe else { continue };
+        let sender = sender.clone();
+        readers.push(std::thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if sender.send((stream, buffer[..read].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    drop(sender);
+    while let Ok((stream, chunk)) = receiver.recv() {
+        on_chunk(stream, &chunk);
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait()?;
+    Ok(Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
 /// Retry an operation only while the kernel reports that its executable is still open for write.
 /// The window comes from another thread's fork-to-exec interval: `O_CLOEXEC` closes inherited file
 /// descriptors at exec, but not during the interval before exec begins.

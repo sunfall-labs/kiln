@@ -5,7 +5,7 @@
 //! stays in the daemon and a command costs a socket round trip rather than a process start.
 
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
-use kiln_proto::{PROTOCOL_VERSION, Request, Response};
+use kiln_proto::{OutputStream, PROTOCOL_VERSION, Request, Response};
 use std::io::{self, BufReader, ErrorKind};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -27,15 +27,33 @@ impl Client {
     /// Send one request and wait for its response. The protocol is strictly request/response on
     /// a single connection, so responses need no correlation id.
     pub fn request(&mut self, request: &Request) -> io::Result<Response> {
+        self.request_streaming(request, &mut |_, _| {})
+    }
+
+    /// As [`Self::request`], for a request that sets `stream_output`: the program's output
+    /// arrives as [`Response::Output`] frames ahead of the answer, and each goes to `on_output`
+    /// as it is read. Still one request and one answer; the frames are the answer in pieces.
+    pub fn request_streaming(
+        &mut self,
+        request: &Request,
+        on_output: &mut dyn FnMut(OutputStream, &str),
+    ) -> io::Result<Response> {
         let json = serde_json::to_string(request)?;
         write_frame(&mut self.writer, &json)?;
 
-        match read_frame(&mut self.reader, MAX_MESSAGE_BYTES)? {
-            Some(frame) => serde_json::from_str(&frame).map_err(io::Error::from),
-            None => Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "daemon closed the connection without responding",
-            )),
+        loop {
+            match read_frame(&mut self.reader, MAX_MESSAGE_BYTES)? {
+                Some(frame) => match serde_json::from_str(&frame).map_err(io::Error::from)? {
+                    Response::Output { stream, text } => on_output(stream, &text),
+                    response => return Ok(response),
+                },
+                None => {
+                    return Err(io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "daemon closed the connection without responding",
+                    ));
+                }
+            }
         }
     }
 

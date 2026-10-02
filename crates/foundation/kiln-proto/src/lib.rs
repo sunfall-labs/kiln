@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 37;
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -594,6 +594,13 @@ pub enum Request {
         /// program does not.
         steps: StepBudget,
         source_view: SourceView,
+        /// Deliver the program's standard streams as [`Response::Output`] frames while it runs,
+        /// instead of holding them for the [`RunSummary`]. A server never finishes, so a summary
+        /// that carries its output is a summary nobody reads: with this set, each line reaches
+        /// the client when the program writes it, and the summary's `stdout`/`stderr` are empty.
+        /// Protocol 38.
+        #[serde(default)]
+        stream_output: bool,
     },
     /// Emit, compile, and link one module through the native backend.
     NativeBuild {
@@ -681,6 +688,10 @@ pub enum Request {
         pgo_generate: Option<String>,
         #[serde(default)]
         pgo_use: Option<String>,
+        /// As on [`Request::Run`]: the built program's standard streams arrive as
+        /// [`Response::Output`] frames while it runs, and the [`NativeRunSummary`]'s are empty.
+        #[serde(default)]
+        stream_output: bool,
     },
     /// Discover, select, and execute a conformance corpus in this resident process.
     Test {
@@ -726,6 +737,15 @@ pub enum Request {
     Shutdown,
 }
 
+/// Which of a program's standard streams a piece of [`Response::Output`] belongs to. Kept
+/// distinct on the wire because the stream a line went to is observable: a caller redirecting
+/// one and not the other sees the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     Pong {
@@ -733,6 +753,17 @@ pub enum Response {
         pid: u32,
         /// The daemon's own build identity, for the client to compare with its own.
         build: u64,
+    },
+    /// Part of a running program's output, delivered before the request's final response.
+    ///
+    /// Sent only for a [`Request::Run`] or [`Request::NativeRun`] that asked for
+    /// `stream_output`, as many times as the program writes, and always followed by exactly one
+    /// terminal response (`Ran`, `NativeRan`, `StaleSourceView` or `Error`). The exchange is
+    /// still one request, one answer; these frames are the answer arriving in pieces, in the
+    /// order the program produced them. Protocol 38.
+    Output {
+        stream: OutputStream,
+        text: String,
     },
     Checked(ModuleSummary),
     Ran(RunSummary),
@@ -1092,7 +1123,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 38);
 
         let requests = [
             (
@@ -1165,6 +1196,7 @@ mod tests {
                     node: true,
                     steps: StepBudget::Limited(1_000_000),
                     source_view: SourceView(12),
+                    stream_output: false,
                 },
                 serde_json::json!({"Run": {
                     "path": "main.mjs",
@@ -1172,7 +1204,8 @@ mod tests {
                     "args": [],
                     "node": true,
                     "steps": {"Limited": 1_000_000},
-                    "source_view": 12
+                    "source_view": 12,
+                    "stream_output": false
                 }}),
             ),
             (
@@ -1264,6 +1297,13 @@ mod tests {
                     paths: vec!["main.js".to_owned()],
                 },
                 serde_json::json!({"Needed": {"sync_id": 9, "paths": ["main.js"]}}),
+            ),
+            (
+                Response::Output {
+                    stream: OutputStream::Stderr,
+                    text: "listening\n".to_owned(),
+                },
+                serde_json::json!({"Output": {"stream": "Stderr", "text": "listening\n"}}),
             ),
             (
                 Response::Synced {

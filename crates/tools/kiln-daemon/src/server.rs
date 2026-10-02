@@ -228,6 +228,14 @@ impl LocalClient {
                 let mut pending = None;
                 let mut next_sync_id = 0;
                 while let Ok((request, reply)) = receiver.recv() {
+                    let streaming = crate::stream::wants_stream(&request).then(|| {
+                        let frames = reply.clone();
+                        crate::stream::install(crate::stream::OutputSink::new(Box::new(
+                            move |stream, text| {
+                                let _ = frames.send(Response::Output { stream, text });
+                            },
+                        )))
+                    });
                     let (response, next) = handle(
                         &lane_state,
                         &lane_tests,
@@ -235,6 +243,7 @@ impl LocalClient {
                         &mut next_sync_id,
                         request,
                     );
+                    drop(streaming);
                     let _ = reply.send(response);
                     if next != Next::Continue {
                         break;
@@ -250,15 +259,34 @@ impl LocalClient {
     }
 
     pub fn request(&mut self, request: Request) -> io::Result<Response> {
+        self.request_streaming(request, &mut |_, _| {})
+    }
+
+    /// As [`Self::request`], passing the program's output to `on_output` as it arrives when the
+    /// request sets `stream_output`; the answer then carries empty `stdout`/`stderr`.
+    pub fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> io::Result<Response> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.sender
             .as_ref()
             .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "local engine is closed"))?
             .send((request, reply))
             .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "local engine stopped"))?;
-        answer.recv().map_err(|_| {
-            io::Error::new(ErrorKind::UnexpectedEof, "local engine dropped its answer")
-        })
+        loop {
+            match answer.recv() {
+                Ok(Response::Output { stream, text }) => on_output(stream, &text),
+                Ok(response) => return Ok(response),
+                Err(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "local engine dropped its answer",
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -484,13 +512,27 @@ fn serve_connection<E: QueryEngine>(
         };
 
         let (response, next) = match serde_json::from_str::<Request>(&frame) {
-            Ok(request) => handle(
-                state,
-                &shared.tests,
-                &mut pending,
-                &mut next_sync_id,
-                request,
-            ),
+            Ok(request) => {
+                // Held across the request: output frames go out on this socket while the
+                // program runs, ahead of the one answer written below.
+                let _streaming = crate::stream::wants_stream(&request)
+                    .then(|| writer.try_clone().ok())
+                    .flatten()
+                    .map(|mut frames| {
+                        crate::stream::install(crate::stream::OutputSink::new(Box::new(
+                            move |stream, text| {
+                                let _ = respond(&mut frames, &Response::Output { stream, text });
+                            },
+                        )))
+                    });
+                handle(
+                    state,
+                    &shared.tests,
+                    &mut pending,
+                    &mut next_sync_id,
+                    request,
+                )
+            }
             // Line framing resynchronises on its own, so a garbled request costs one response,
             // not the connection.
             Err(error) => (
@@ -844,6 +886,7 @@ fn handle<E: QueryEngine>(
             node,
             steps,
             source_view,
+            stream_output: _,
         } => handle_run(state, path, project_root, args, node, steps, source_view),
         Request::TestInventory { root } => {
             run_without_engine_lock(|| match tests.inventory(&root) {
@@ -999,6 +1042,7 @@ fn handle<E: QueryEngine>(
             static_link,
             pgo_generate,
             pgo_use,
+            stream_output: _,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,

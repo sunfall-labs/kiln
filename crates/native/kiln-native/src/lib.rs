@@ -40,12 +40,12 @@ use kiln_module_resolver::NodeBuiltin;
 pub use kiln_native_provider_contract::{
     ProviderCapabilities, ProviderCapability, ProviderVariant,
 };
+pub use kiln_native_runtime::{ChildStream, embedding_header, embedding_module_header};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
     embedding_module_api_symbol, launcher_source, runtime_source,
 };
-pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
     CompileOptions, CompilerKind, LinkOptions, ToolIdentity, Toolchain, ToolchainError,
 };
@@ -3414,6 +3414,18 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_streaming(graph, options, None)
+    }
+
+    /// As [`Self::run_graph`], but with `on_output` the program's output is delivered as it is
+    /// written and the report's `stdout`/`stderr` are empty. A program that never exits, such as
+    /// a server, has no other way to say anything.
+    pub fn run_graph_streaming(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+    ) -> Result<NativeRunReport, NativeError> {
         let workspace = WorkDirectory::create()?;
         let private_output = workspace.path().join(if cfg!(windows) {
             "run-graph.exe"
@@ -3427,6 +3439,7 @@ impl NativeBuilder {
         let output = run_executable(
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
+            on_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
@@ -3447,6 +3460,16 @@ impl NativeBuilder {
         program: &Program,
         options: &NativeBuildOptions,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_streaming(program, options, None)
+    }
+
+    /// As [`Self::run`], delivering output through `on_output` as in [`Self::run_graph_streaming`].
+    pub fn run_streaming(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+    ) -> Result<NativeRunReport, NativeError> {
         // A public output path is stable and therefore shareable between requests. Launching it
         // directly would let another concurrent build replace the file between build and exec.
         // Build and launch a process-owned copy, then publish the same bytes afterward.
@@ -3463,6 +3486,7 @@ impl NativeBuilder {
         let output = run_executable(
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
+            on_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;

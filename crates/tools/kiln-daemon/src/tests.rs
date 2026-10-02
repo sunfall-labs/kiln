@@ -502,6 +502,7 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
     let response = stale
         .request_at_view(
             &Request::Run {
+                stream_output: false,
                 node: false,
                 steps: StepBudget::Unmetered,
                 source_view: old_view,
@@ -753,6 +754,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
@@ -808,6 +810,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     // already-prepared run above stays on the old bytecode.
     let Response::Ran(second) = editor
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -876,6 +879,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
                 steps: StepBudget::Unmetered,
                 source_view: initial_view,
@@ -898,6 +902,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         .expect("edit dependency while old graph is in flight");
     let Response::Ran(new) = setup
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: setup.source_view(),
@@ -989,6 +994,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         client.source_view = initial_view;
         client.handshake().expect("run handshake");
         client.raw_request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: initial_view,
@@ -1037,6 +1043,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let updated_view = updater.source_view();
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
@@ -1066,6 +1073,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let updated_view = updater.source_view();
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
@@ -1208,6 +1216,7 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         .expect("upload native source");
 
     let request = Request::NativeRun {
+        stream_output: false,
         source_view: SourceView(0),
         path,
         project_root,
@@ -1275,6 +1284,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload first source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -1296,6 +1306,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload second source");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2275,6 +2286,7 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
         .expect("set Node source");
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2314,6 +2326,7 @@ fn production_daemon_forwards_run_arguments_to_process_argv() {
         .expect("set source");
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2372,6 +2385,7 @@ fn production_daemon_does_not_evaluate_an_unused_side_effect_free_module() {
 
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
@@ -2410,6 +2424,7 @@ fn production_daemon_compiles_direct_eval_at_runtime() {
         .expect("set source");
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
@@ -2448,6 +2463,7 @@ fn production_daemon_compiles_function_constructor_at_runtime() {
         .expect("set source");
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
@@ -2506,6 +2522,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2530,6 +2547,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("reset counters");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2564,6 +2582,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set unsupported source");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2651,6 +2670,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
 
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2687,6 +2707,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set body-only edit");
     let Response::Ran(updated) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2725,6 +2746,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set invalid body edit");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2764,6 +2786,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("restore valid body edit");
     let Response::Ran(restored) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2784,6 +2807,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2827,6 +2851,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set cycle");
     let Response::Ran(cycle) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2911,6 +2936,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -2948,6 +2974,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
 
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -3010,6 +3037,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .expect("set relative overlay");
         let Response::Ran(result) = client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
@@ -3045,6 +3073,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
 
         let Response::Ran(repeated) = client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
@@ -3072,6 +3101,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set unresolved lexical overlay");
     let Response::Ran(lexical) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -3110,6 +3140,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set newer canonical overlay");
     let Response::Ran(newest) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
@@ -3279,6 +3310,7 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
             .expect("set source");
     }
     let request = Request::NativeRun {
+        stream_output: false,
         source_view: SourceView(0),
         path: canonical_entry.to_string_lossy().into_owned(),
         project_root: root,

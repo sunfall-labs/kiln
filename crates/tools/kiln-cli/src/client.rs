@@ -148,6 +148,18 @@ impl Backend for DaemonClient {
             .map_err(|source| Error::io("cannot reach the daemon", source))?;
         interpret(response)
     }
+
+    fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> Result<Response> {
+        let response = self
+            .inner
+            .request_streaming(&request, on_output)
+            .map_err(|source| Error::io("cannot reach the daemon", source))?;
+        interpret(response)
+    }
 }
 
 /// Where this project's daemon listens.

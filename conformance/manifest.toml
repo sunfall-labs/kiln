@@ -1977,6 +1977,29 @@ expected_stdout = """
 """
 
 [[test]]
+id = "server/s09-listen-callback"
+requires_host = "node"
+group = "server"
+source = "server/s09-listen-callback.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "promises", "async-await", "event-emitter", "for-of"]
+catches = """
+Every callback form of `server.listen` -- (port, host, cb), (port, cb), (port, host) with a
+'listening' listener, and ({port, host}, cb) -- fires the 'listening' event and then the callback,
+and both before the first request is served. The callback is the line a real server prints and a
+supervisor waits for. The interpreter and native engines both fired it; what lost it was the
+`kiln run` output path, which held a program's output until the program exited -- never, for a
+server. That path is pinned by the daemon test `streamed_output_reaches_the_client_while_a_server_runs`,
+because a corpus run captures output in-process and cannot see the difference.\
+"""
+expected_stdout = """
+port,host,cb event,callback,request
+port,cb event,callback,request
+port,host event,request
+{port,host},cb event,callback,request
+"""
+
+[[test]]
 id = "regress/proxy-ownkeys-membership"
 group = "regress"
 source = "regress/proxy-ownkeys-membership.js"

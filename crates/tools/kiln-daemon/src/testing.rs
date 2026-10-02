@@ -1671,6 +1671,7 @@ expected_stdout = "bundle\n"
             "server/s06-response-framing",
             "server/s07-vite-dev-server",
             "server/s08-binary-http-chunks",
+            "server/s09-listen-callback",
         ]
         .into_iter()
         .map(TestId::new)

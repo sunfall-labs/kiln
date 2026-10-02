@@ -5666,6 +5666,10 @@ pub struct CaptureHost {
     /// ordinary, and against a constant clock it would wait forever.
     clock_ms: f64,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
+    /// When set, each write is handed here (`true` for stderr) the moment it happens and is not
+    /// retained in `stdout`/`stderr`. A program that never finishes, a server, would otherwise
+    /// say nothing until it was killed.
+    stream: Option<Box<dyn FnMut(bool, &str)>>,
 }
 
 impl std::fmt::Debug for CaptureHost {
@@ -5686,6 +5690,7 @@ impl Default for CaptureHost {
             stderr: String::new(),
             clock_ms: CAPTURE_HOST_CLOCK_START_MS,
             fs: None,
+            stream: None,
         }
     }
 }
@@ -5693,6 +5698,13 @@ impl Default for CaptureHost {
 impl CaptureHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Deliver standard-stream writes to `stream(is_stderr, text)` as they happen instead of
+    /// buffering them; [`Self::stdout`] and [`Self::stderr`] then stay empty.
+    pub fn with_stream(mut self, stream: Box<dyn FnMut(bool, &str)>) -> Self {
+        self.stream = Some(stream);
+        self
     }
 
     pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
@@ -5730,11 +5742,13 @@ impl HostOps for CaptureHost {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
         match operation {
             HostOp::WriteStdout | HostOp::WriteStderr => {
-                let sink = if operation == HostOp::WriteStdout {
-                    &mut self.stdout
-                } else {
+                let is_stderr = operation == HostOp::WriteStderr;
+                let sink = if is_stderr {
                     &mut self.stderr
+                } else {
+                    &mut self.stdout
                 };
+                let start = sink.len();
                 if !arguments.is_empty() {
                     if !sink.is_empty() && !sink.ends_with('\n') {
                         sink.push('\n');
@@ -5747,6 +5761,10 @@ impl HostOps for CaptureHost {
                     }
                 }
                 sink.push('\n');
+                if let Some(stream) = self.stream.as_mut() {
+                    stream(is_stderr, &sink[start..]);
+                    sink.clear();
+                }
                 Ok(HostValue::Undefined)
             }
             HostOp::ClockNow => {

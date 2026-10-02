@@ -144,6 +144,7 @@ pub(crate) fn run_source_with_manifest(
         node,
         steps,
         source_view,
+        true,
     )? {
         SourceResponse::Ready(summary) => {
             finish_run_summary(path, summary, project_notes, Some(&text))
@@ -162,6 +163,7 @@ pub(crate) fn run_source_with_manifest(
                 node,
                 steps,
                 source_view,
+                true,
             )? {
                 SourceResponse::Ready(summary) => {
                     finish_run_summary(path, summary, project_notes, Some(&text))
@@ -208,6 +210,7 @@ pub(crate) fn run_watched_source_at_view(
             // but the user's patience, exactly as `kiln run` is.
             StepBudget::Unmetered,
             source_view,
+            false,
         )
         .map_err(ViewError::Other)?
     {
@@ -533,6 +536,7 @@ pub fn native_run(
         pgo_gen.clone(),
         pgo_u.clone(),
         source_view,
+        true,
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
@@ -549,6 +553,7 @@ pub fn native_run(
                 pgo_gen,
                 pgo_u,
                 source_view,
+                true,
             )? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
@@ -1864,6 +1869,7 @@ mod tests {
                 false,
                 StepBudget::Unmetered,
                 source_view,
+                false,
             )
             .expect("run succeeds");
         let SourceResponse::Ready(summary) = summary else {

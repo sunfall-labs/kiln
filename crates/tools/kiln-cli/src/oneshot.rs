@@ -42,6 +42,18 @@ impl Backend for OneShot {
             .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
         interpret(response)
     }
+
+    fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> Result<Response> {
+        let response = self
+            .client
+            .request_streaming(request, on_output)
+            .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
+        interpret(response)
+    }
 }
 
 #[cfg(test)]
@@ -702,6 +714,7 @@ server.listen(0, "127.0.0.1", () => {
                 true,
                 StepBudget::Unmetered,
                 view,
+                false,
             )
             .expect("run pinned graph")
         else {
@@ -816,6 +829,135 @@ server.listen(0, "127.0.0.1", () => {
         assert!(built.text.contains("greeting"), "{}", built.text);
         assert!(built.text.contains("Function add"), "{}", built.text);
         assert!(built.text.contains("Sites:"), "{}", built.text);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    /// A server's output has to reach the client while the server runs. `kiln run` used to hold
+    /// every line until the program exited, which for a server is never: `listen`'s callback ran
+    /// and printed "listening", and nothing was shown until the process was killed.
+    ///
+    /// The server closes itself only after it has answered a request, and the request is sent
+    /// from the client's output callback the moment "listening" arrives. A client that is only
+    /// shown output at exit therefore never sends it; the watchdog sends it after a delay, so
+    /// that failure is an assertion rather than a hung test.
+    #[test]
+    fn a_servers_listening_line_reaches_the_client_before_the_server_exits() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Spy {
+            inner: OneShot,
+            seen: Vec<(kiln_proto::OutputStream, String)>,
+            request_sent_by: Arc<std::sync::Mutex<Option<&'static str>>>,
+            sent: Arc<AtomicBool>,
+            port: u16,
+        }
+
+        fn get(port: u16) {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+                .expect("send request");
+            let mut answer = String::new();
+            let _ = stream.read_to_string(&mut answer);
+        }
+
+        impl Backend for Spy {
+            fn request(&mut self, request: Request) -> Result<Response> {
+                self.inner.request(request)
+            }
+
+            fn request_streaming(
+                &mut self,
+                request: Request,
+                _on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+            ) -> Result<Response> {
+                let Spy {
+                    inner,
+                    seen,
+                    request_sent_by,
+                    sent,
+                    port,
+                } = self;
+                inner.request_streaming(request, &mut |stream, text| {
+                    seen.push((stream, text.to_owned()));
+                    if text.contains("listening") && !sent.swap(true, Ordering::SeqCst) {
+                        *request_sent_by.lock().unwrap() = Some("output");
+                        get(*port);
+                    }
+                })
+            }
+        }
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("find a free port")
+            .local_addr()
+            .expect("local address")
+            .port();
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-streamed-listen-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create streamed listen fixture");
+        let source = fixture.join("server.mjs");
+        std::fs::write(
+            &source,
+            format!(
+                "import http from 'node:http';\n\
+                 const server = http.createServer((req, res) => {{\n\
+                   console.log('request');\n\
+                   res.end('ok');\n\
+                   server.close();\n\
+                 }});\n\
+                 server.listen({port}, '127.0.0.1', () => console.log('listening'));\n"
+            ),
+        )
+        .expect("write server");
+
+        let sent = Arc::new(AtomicBool::new(false));
+        let request_sent_by = Arc::new(std::sync::Mutex::new(None));
+        {
+            let sent = Arc::clone(&sent);
+            let by = Arc::clone(&request_sent_by);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                if !sent.swap(true, Ordering::SeqCst) {
+                    *by.lock().unwrap() = Some("watchdog");
+                    get(port);
+                }
+            });
+        }
+        let mut spy = Spy {
+            inner: OneShot::start().expect("start an in-process engine"),
+            seen: Vec::new(),
+            request_sent_by: Arc::clone(&request_sent_by),
+            sent,
+            port,
+        };
+        let output = commands::run(
+            &mut spy,
+            &source,
+            &[],
+            &fixture,
+            true,
+            StepBudget::Unmetered,
+        )
+        .expect("run the server");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            *request_sent_by.lock().unwrap(),
+            Some("output"),
+            "the client was not shown 'listening' while the server was still running"
+        );
+        let streamed: Vec<&str> = spy.seen.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(streamed.concat(), "listening\nrequest\n", "{streamed:?}");
+        assert_eq!(
+            output.text, "",
+            "streamed output is not repeated in the summary"
+        );
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }

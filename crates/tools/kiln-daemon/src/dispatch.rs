@@ -185,6 +185,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             node,
             steps,
             source_view: _,
+            stream_output: _,
         } => (
             run(engine, resolutions, path, project_root, args, node, steps),
             Next::Continue,
@@ -300,6 +301,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             static_link,
             pgo_generate,
             pgo_use,
+            stream_output: _,
         } => {
             let pgo_gen = pgo_generate.map(PathBuf::from);
             let pgo_u = pgo_use.map(PathBuf::from);
@@ -1088,6 +1090,21 @@ pub(crate) fn interpreted_argv(path: &str, args: &[String]) -> Vec<String> {
     argv
 }
 
+/// A capture host that delivers its output as it is written when the request asked for that.
+fn streaming_host(host: kiln_runtime::CaptureHost) -> kiln_runtime::CaptureHost {
+    match crate::stream::current() {
+        Some(sink) => host.with_stream(Box::new(move |is_stderr, text| {
+            let stream = if is_stderr {
+                kiln_proto::OutputStream::Stderr
+            } else {
+                kiln_proto::OutputStream::Stdout
+            };
+            sink.emit(stream, text.to_owned());
+        })),
+        None => host,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
@@ -1101,9 +1118,9 @@ fn execute_graph(
 ) -> Response {
     let capabilities =
         kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
-    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
+    let mut host = streaming_host(kiln_runtime::CaptureHost::new().with_fs(Box::new(
         kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    ));
+    )));
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
     // keeps the interpreter conservative; a reduction failure runs the full
@@ -1643,9 +1660,9 @@ fn execute_program(
         }
     };
 
-    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
+    let mut host = streaming_host(kiln_runtime::CaptureHost::new().with_fs(Box::new(
         kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    ));
+    )));
     let result = if node {
         kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits, capabilities)
     } else {
@@ -2173,6 +2190,31 @@ pub(crate) fn native_build_graph(
     }
 }
 
+/// Run a native build-and-launch, passing it a sink for the child's output when the request
+/// asked to stream, and flushing any incomplete UTF-8 tail once the child is gone.
+fn run_streaming_native(
+    run: impl FnOnce(
+        Option<&mut dyn FnMut(kiln_native::ChildStream, &[u8])>,
+    ) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError>,
+) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError> {
+    let Some(sink) = crate::stream::current() else {
+        return run(None);
+    };
+    let mut chunker = crate::stream::Utf8Chunker::default();
+    let wire = |stream: kiln_native::ChildStream| match stream {
+        kiln_native::ChildStream::Stdout => kiln_proto::OutputStream::Stdout,
+        kiln_native::ChildStream::Stderr => kiln_proto::OutputStream::Stderr,
+    };
+    let outcome = run(Some(&mut |stream, bytes| {
+        let stream = wire(stream);
+        sink.emit(stream, chunker.push(stream, bytes));
+    }));
+    for (stream, text) in chunker.finish() {
+        sink.emit(stream, text);
+    }
+    outcome
+}
+
 pub(crate) fn native_run_program(
     program: kiln_ir::Program,
     path: String,
@@ -2192,19 +2234,23 @@ pub(crate) fn native_run_program(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    match builder.run(
-        &program,
-        &kiln_native::NativeBuildOptions {
-            output,
-            profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
-            march_native: false,
-            static_link,
-            pgo_generate,
-            pgo_use,
-            node: false,
-        },
-    ) {
+    let result = run_streaming_native(|sink| {
+        builder.run_streaming(
+            &program,
+            &kiln_native::NativeBuildOptions {
+                output,
+                profile: native_profile(profile),
+                realm: kiln_native::NativeRealmPolicy::default(),
+                march_native: false,
+                static_link,
+                pgo_generate,
+                pgo_use,
+                node: false,
+            },
+            sink,
+        )
+    });
+    match result {
         Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
@@ -2233,19 +2279,23 @@ pub(crate) fn native_run_graph(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    match builder.run_graph(
-        graph,
-        &kiln_native::NativeBuildOptions {
-            output,
-            profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
-            march_native: false,
-            static_link,
-            pgo_generate,
-            pgo_use,
-            node,
-        },
-    ) {
+    let result = run_streaming_native(|sink| {
+        builder.run_graph_streaming(
+            graph,
+            &kiln_native::NativeBuildOptions {
+                output,
+                profile: native_profile(profile),
+                realm: kiln_native::NativeRealmPolicy::default(),
+                march_native: false,
+                static_link,
+                pgo_generate,
+                pgo_use,
+                node,
+            },
+            sink,
+        )
+    });
+    match result {
         Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),

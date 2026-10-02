@@ -42,6 +42,7 @@ mod graph_cache;
 mod output;
 mod server;
 mod socket;
+mod stream;
 mod testing;
 
 #[cfg(test)]
