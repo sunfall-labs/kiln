@@ -911,7 +911,7 @@ mod tests {
                 kiln_parallel_sort(
                     ints.as_mut_ptr().cast(),
                     4,
-                    ElementKind::BigUint64 as i32 + 1,
+                    -1,
                     SORT_DEFAULT,
                 )
             },
