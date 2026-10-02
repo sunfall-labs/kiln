@@ -75,6 +75,14 @@ run = "./scripts/native-realms.sh"
 description = "Real library bundles, both engines"
 run = "./scripts/thirdparty.sh"
 
+[tasks.pre-push]
+description = "The local blocking loop: contracts and core crate tests for what changed since origin/main (--all for everything)"
+run = "bash scripts/pre-push.sh"
+
+[tasks.hooks]
+description = "Point this checkout's git hooks at .githooks, so pre-push runs before every push"
+run = "git config core.hooksPath .githooks && echo 'hooks installed: core.hooksPath = .githooks'"
+
 [tasks.http-close]
 description = "The Node HTTP close contract, across all four seams"
 run = "./scripts/check-http-close-contract.sh"

@@ -76,6 +76,18 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 
 `mise trust` once per checkout, or the tasks are invisible.
 
+### Before every push: `scripts/pre-push.sh`, as a hook
+
+GitHub CI no longer runs on push: with a commit landing on `main` every few minutes from several
+sessions and `cancel-in-progress` set, no run ever finished (twelve in a row cancelled on
+2026-10-02, the last completed one red), so it reported nothing and cost money doing it.
+`ci.yml` stays runnable by hand and on a release tag. The blocking loop is local.
+`scripts/pre-push.sh` runs the HTTP close contract, the native provider contract and the core
+crate tests, each only when the commits being pushed touch what it checks; `--all` runs everything.
+`mise run hooks` points the checkout's `core.hooksPath` at `.githooks`, after which it runs before
+every `git push`; `mise run pre-push` runs it by hand. `KILN_SKIP_PRE_PUSH=1` bypasses the hook
+for a deliberate exception, and the bypass, not the habit, is the record.
+
 `conformance/test262-baseline.json` holds a pass/fail count per chunk. A whole-corpus number is one
 figure and hides everything -- a change that wins forty rows in one chunk while losing forty in
 another reads as no change at all -- so the gate compares chunk by chunk and a regression names the
