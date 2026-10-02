@@ -1019,6 +1019,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return KILN_C99_OK;
         }
         {
+            int found;
+            int status = kiln_c99_prototype_store_read_with_receiver(
+                host, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, target, key, ikey,
+                out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
             /* One range, shared with the prototype table and with `in`, so a read and a presence
