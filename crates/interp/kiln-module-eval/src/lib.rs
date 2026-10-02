@@ -2123,6 +2123,14 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
         };
         if let Some(path) = self.cache_targets.get(&std::rc::Rc::as_ptr(&cell)).cloned() {
             self.execute_target(&path, false)?;
+            if matches!(
+                unsafe { (&*self.states).get(&path) },
+                Some(CommonJsExecutionState::Executing)
+            ) && let Some(module_object) = self.module_objects.get(&path)
+            {
+                return Ok(own_data_property(module_object, "exports")
+                    .unwrap_or_else(|| cell.borrow().clone()));
+            }
             return Ok(cell.borrow().clone());
         }
         require
