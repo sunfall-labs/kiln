@@ -2876,9 +2876,10 @@ const _: () = assert_refusals_name_themselves(
 /// The shared callable descriptor authority removed one duplicate fixed method-name scan.
 /// Refused computed builtin own-key queries name the fixed C-literal builtin registry owner.
 // The added parser-error site measures a fixed C diagnostic, never a JavaScript key.
-// The two collection-cache sites measure names from the fixed native method registry,
-// never a JavaScript property key (whose stored unit length remains the authority).
-pub const C_STRING_LENGTH_SITES: usize = 85;
+// The two collection-cache scans moved from boxed.c into the shared prelude_types.h
+// authority, outside this domain-C manifest. Both still measure the fixed native method
+// registry names, never JavaScript property keys with explicit stored unit lengths.
+pub const C_STRING_LENGTH_SITES: usize = 83;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
