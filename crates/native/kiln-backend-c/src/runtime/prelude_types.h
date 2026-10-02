@@ -1515,6 +1515,12 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified_mask(uint64_t 
 #define kiln_c99_builtin_member_unmodified(id, member)                                             \
     (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||                                              \
      kiln_c99_realm_builtin_member_untouched((uint32_t)(id), (member), sizeof(member) - 1))
+static KILN_ALWAYS_INLINE inline int kiln_c99_builtin_member_unmodified_n(uint32_t id,
+                                                                           const char *member,
+                                                                           size_t length) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+           kiln_c99_realm_builtin_member_untouched(id, member, length);
+}
 
 #ifdef KILN_SEPARATE_PRELUDE
 extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
@@ -3070,6 +3076,24 @@ typedef struct kiln_collection {
      * ordinary Map costs nothing for it. */
     kiln_value properties;
 } kiln_collection;
+
+/* A collection's tagged backing store is not enough to answer a method call. A subclass keeps
+ * its ordinary prototype (and any own properties) in `properties`, and a program can replace a
+ * member on Map.prototype or Set.prototype. Emitted collection fast paths may use the backing
+ * table only while lookup is still the untouched built-in method. */
+static inline int kiln_c99_collection_intrinsic_method_allowed(const kiln_collection *collection,
+                                                               const char *member,
+                                                               size_t member_len) {
+    uint32_t prototype;
+    if (collection == NULL || member == NULL || collection->is_weak ||
+        collection->properties.tag != KILN_VALUE_UNDEFINED) return 0;
+    if ((strcmp(member, "get") == 0 || strcmp(member, "set") == 0) && !collection->is_map)
+        return 0;
+    if (strcmp(member, "add") == 0 && collection->is_map) return 0;
+    prototype = collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                   : KILN_C99_BUILTIN_SET_PROTOTYPE;
+    return kiln_c99_builtin_member_unmodified_n(prototype, member, member_len);
+}
 
 /* A promise: a value that arrives once, later, and everything waiting for it.
  *

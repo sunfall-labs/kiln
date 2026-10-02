@@ -1086,6 +1086,21 @@ static inline int kiln_c99_site_member_matches_key(const kiln_c99_site *site,
     return 1;
 }
 
+static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
+                                                        const char *method) {
+    size_t length;
+    if (key == NULL || method == NULL) return 0;
+    length = strlen(method);
+    if (key->unit_len != length ||
+        (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) !=
+            (kiln_c99_fixed_key_flags(method, length) &
+             (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY))) return 0;
+    for (size_t index = 0; index < length; ++index) {
+        if (kiln_string_unit_at(key, (uint32_t)index) != (unsigned char)method[index]) return 0;
+    }
+    return 1;
+}
+
 static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t tag,
                                                   uint64_t method, uint32_t builtin,
                                                   const kiln_string *key) {
@@ -1119,7 +1134,31 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     if (ctag != KILN_VALUE_BUILTIN && KILN_UNLIKELY(!kiln_c99_tag_method_pristine(ctag, site->cached_method))) return 0;
     if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
         void *ptr = KILN_VAL_PTR(target);
-        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION;
+        if (kiln_c99_gc_kind_of_ptr(ptr) != KILN_GC_COLLECTION) return 0;
+        const kiln_collection *collection = (const kiln_collection *)ptr;
+        const char *method = kiln_c99_method_name(site->cached_method);
+        if (collection->properties.tag != KILN_VALUE_UNDEFINED ||
+            !kiln_c99_collection_key_matches_method(key, method)) return 0;
+        switch (site->cached_method) {
+        case KILN_C99_METHOD_COLLECTION_GET:
+        case KILN_C99_METHOD_COLLECTION_SET:
+        case KILN_C99_METHOD_COLLECTION_ADD:
+        case KILN_C99_METHOD_COLLECTION_HAS:
+        case KILN_C99_METHOD_COLLECTION_DELETE:
+        case KILN_C99_METHOD_COLLECTION_CLEAR:
+        case KILN_C99_METHOD_COLLECTION_FOR_EACH:
+        case KILN_C99_METHOD_COLLECTION_KEYS:
+        case KILN_C99_METHOD_COLLECTION_VALUES:
+        case KILN_C99_METHOD_COLLECTION_ENTRIES:
+        case KILN_C99_METHOD_COLLECTION_SELF:
+            return kiln_c99_collection_intrinsic_method_allowed(collection, method, strlen(method));
+        default:
+            /* Object.prototype methods can also be cached for collections, but only when the
+             * collection has no own/subclass property overlay and the call site's key is the
+             * member this cached code implements. The tag-pristine check above covers the
+             * prototype chain for these shared methods. */
+            return 1;
+        }
     } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {

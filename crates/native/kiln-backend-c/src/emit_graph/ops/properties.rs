@@ -231,7 +231,7 @@ pub(super) fn emit_get_property(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              const kiln_collection *col = (const kiln_collection *)ptr; \
-                             if (!col->is_weak) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"size\", sizeof(\"size\") - 1)) {{ \
                                  {size_int_stmt}{size_double_stmt}{size_box_stmt} \
                                  handled = 1; \
                              }} \

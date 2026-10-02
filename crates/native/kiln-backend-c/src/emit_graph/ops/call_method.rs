@@ -3309,7 +3309,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"set\", sizeof(\"set\") - 1)) {{ \
                                  kiln_c99_collection_put_val_fast(col, v{a0}, v{a1}); \
                                  v{v} = v{o}; \
                                  handled = 1; \
@@ -3326,7 +3326,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"get\", sizeof(\"get\") - 1)) {{ \
                                  v{v} = kiln_c99_collection_get_val_fast(col, v{a0}); \
                                  handled = 1; \
                              }} \
@@ -3341,8 +3341,10 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             v{v} = kiln_c99_collection_has_val_fast(col, v{a0}); \
-                             handled = 1; \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"has\", sizeof(\"has\") - 1)) {{ \
+                                 v{v} = kiln_c99_collection_has_val_fast(col, v{a0}); \
+                                 handled = 1; \
+                             }} \
                          }} \
                      }}",
             o = object.0,
@@ -3354,7 +3356,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (!col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"add\", sizeof(\"add\") - 1)) {{ \
                                  kiln_c99_collection_put_val_fast(col, v{a0}, v{a0}); \
                                  v{v} = v{o}; \
                                  handled = 1; \
@@ -3370,8 +3372,10 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             v{v} = kiln_c99_collection_delete_val_fast(col, v{a0}); \
-                             handled = 1; \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"delete\", sizeof(\"delete\") - 1)) {{ \
+                                 v{v} = kiln_c99_collection_delete_val_fast(col, v{a0}); \
+                                 handled = 1; \
+                             }} \
                          }} \
                      }}",
             o = object.0,
@@ -3383,13 +3387,15 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             col->count = 0; \
-                             col->live = 0; \
-                             if (col->hash_table != NULL && col->hash_capacity > 0) {{ \
-                                 memset(col->hash_table, 0, col->hash_capacity * sizeof(uint32_t)); \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"clear\", sizeof(\"clear\") - 1)) {{ \
+                                 col->count = 0; \
+                                 col->live = 0; \
+                                 if (col->hash_table != NULL && col->hash_capacity > 0) {{ \
+                                     memset(col->hash_table, 0, col->hash_capacity * sizeof(uint32_t)); \
+                                 }} \
+                                 v{v} = KILN_VAL_UNDEFINED; \
+                                 handled = 1; \
                              }} \
-                             v{v} = KILN_VAL_UNDEFINED; \
-                             handled = 1; \
                          }} \
                      }}",
             o = object.0,
