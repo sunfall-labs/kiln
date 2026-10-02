@@ -695,12 +695,23 @@ export interface Host {
   remove(parent: number, child: number): void;
   destroy(handle: number): void;
   call(handle: number, command: string, arg?: string): void;
+  /** What the toolkit holds for a widget's assistive technology: label, hint, whether it is
+   * announced at all (`element`) and whether it has keyboard focus. */
+  describe(handle: number): Omit<AccessibilityDescription, "role">;
   /** Processes OS events for up to `ms`, returning early when any arrive. */
   wait(ms: number): void;
   nextEvent(): HostEvent | null;
   /** How many tree or property operations the host has seen; the event loop reads activity. */
   readonly operations: number;
   readonly services: Services;
+}
+
+export interface AccessibilityDescription {
+  role: string;
+  label: string;
+  hint: string;
+  element: boolean;
+  focused: boolean;
 }
 
 export interface FileFilter {
@@ -749,6 +760,7 @@ export class HeadlessHost implements Host {
   private next = 1;
   private clipboard = "";
   private events: HostEvent[] = [];
+  private focused = 0;
   dark = false;
 
   create(kind: string): number {
@@ -788,11 +800,23 @@ export class HeadlessHost implements Host {
   }
   call(handle: number, command: string, arg?: string): void {
     const w = this.widget(handle);
+    if (command === "focus") this.focused = handle;
     if (command === "show") w.props.visible = true;
     if (command === "close" || command === "hide") w.props.visible = false;
     void arg;
   }
   wait(_ms: number): void {}
+  describe(handle: number): Omit<AccessibilityDescription, "role"> {
+    const w = this.widget(handle);
+    const label = String(w.props.accessibilityLabel ?? "");
+    const pressable = w.props.pressable === true;
+    return {
+      label,
+      hint: String(w.props.accessibilityHint ?? ""),
+      element: w.kind === "image" ? label !== "" : w.kind !== "container" || pressable,
+      focused: this.focused === handle,
+    };
+  }
   nextEvent(): HostEvent | null {
     return this.events.shift() || null;
   }
@@ -868,7 +892,7 @@ function fallbackPath(name: string): string {
   }
 }
 
-const ABI_VERSION = 2;
+const ABI_VERSION = 3;
 
 const NATIVE_FUNCTIONS: Record<string, { arguments: string[]; return: string }> = {
   kiln_gui_abi_version: { arguments: [], return: "u32" },
@@ -881,6 +905,7 @@ const NATIVE_FUNCTIONS: Record<string, { arguments: string[]; return: string }> 
   kiln_gui_remove: { arguments: ["u32", "u32"], return: "i32" },
   kiln_gui_destroy: { arguments: ["u32"], return: "i32" },
   kiln_gui_call: { arguments: ["u32", "pointer", "pointer"], return: "i32" },
+  kiln_gui_describe: { arguments: ["u32"], return: "i32" },
   kiln_gui_wait: { arguments: ["f64"], return: "i32" },
   kiln_gui_next_event: { arguments: ["pointer"], return: "i32" },
   kiln_gui_dialog: { arguments: ["pointer", "pointer"], return: "i32" },
@@ -962,6 +987,10 @@ class NativeHost implements Host {
   }
   wait(ms: number): void {
     this.check(this.fn.kiln_gui_wait(ms), "wait");
+  }
+  describe(handle: number): Omit<AccessibilityDescription, "role"> {
+    const n = this.check(this.fn.kiln_gui_describe(handle), "describe");
+    return JSON.parse(this.result(n));
   }
   nextEvent(): HostEvent | null {
     if (this.fn.kiln_gui_next_event(this.header) !== 1) return null;
@@ -1113,10 +1142,30 @@ const LAYOUT_PROPS = new Set([
 ]);
 
 /** Props every widget forwards to its host. */
-const COMMON_NATIVE = ["hidden", "disabled", "tooltip", "opacity"];
+const COMMON_NATIVE = ["hidden", "disabled", "tooltip", "opacity", "accessibilityLabel", "accessibilityHint"];
 
 const ALIGN: Record<string, string> = { start: "start", leading: "start", top: "start", center: "center", end: "end", trailing: "end", bottom: "end", stretch: "stretch", baseline: "baseline" };
 const JUSTIFY: Record<string, string> = { start: "start", center: "center", end: "end", between: "space-between", around: "space-around", evenly: "space-evenly" };
+
+/** Accessibility roles by widget kind, in AppKit's vocabulary without the `AX` prefix. */
+const ROLES: Record<string, string> = {
+  window: "window",
+  scroll: "scrollarea",
+  divider: "separator",
+  text: "statictext",
+  button: "button",
+  textinput: "textfield",
+  secureinput: "textfield",
+  textarea: "textarea",
+  slider: "slider",
+  progress: "progressindicator",
+  spinner: "busyindicator",
+  toggle: "switch",
+  checkbox: "checkbox",
+  select: "popupbutton",
+  segmented: "radiogroup",
+  image: "image",
+};
 
 let nextNodeId = 1;
 const mounted = new Map<number, Node>(); // host handle -> node
@@ -1429,6 +1478,18 @@ export class Node {
    */
   receive(_event: string, _a: number, _b: number, _text: string): void {}
 
+  /** The accessibility role kiln gives this widget; the same word on every host. */
+  get role(): string {
+    if (this.props.pressable) return "button";
+    return ROLES[this.kind] || "group";
+  }
+
+  /** What assistive technology sees for this widget (it must be mounted: in a shown window). */
+  describe(): AccessibilityDescription {
+    if (!this.handle) throw new Error("kiln:gui: describe() needs the node to be in a shown window");
+    return { role: this.role, ...currentHost().describe(this.handle) };
+  }
+
   toString(): string {
     return inspect(this);
   }
@@ -1465,6 +1526,10 @@ export interface LayoutProps {
   disabled?: MaybeAccessor<boolean>;
   tooltip?: MaybeAccessor<string>;
   opacity?: MaybeAccessor<number>;
+  /** What VoiceOver announces, when the visible text is not enough (an icon-only button). */
+  accessibilityLabel?: MaybeAccessor<string>;
+  /** A longer description VoiceOver reads after a pause. */
+  accessibilityHint?: MaybeAccessor<string>;
   /** Raw flexbox/grid properties (camelCase CSS names), applied before the props above. */
   style?: MaybeAccessor<Record<string, unknown>>;
   ref?: (node: any) => void;
@@ -1672,6 +1737,15 @@ export interface WindowProps extends ContainerProps {
 
 const openWindows = new Set<Window>();
 
+function findAutofocus(node: Node): Node | null {
+  if (node.props.autofocus && node.handle) return node;
+  for (const child of node.children) {
+    const found = findAutofocus(child);
+    if (found) return found;
+  }
+  return null;
+}
+
 /** A top-level window. Its content is a padded column; `show()` puts it on screen. */
 export class Window extends Box {
   constructor(props?: WindowProps, children?: unknown) {
@@ -1727,6 +1801,8 @@ export class Window extends Box {
     if (this.props.height === undefined) this.props.height = 600;
     this.mount();
     host.call(this.handle, "show");
+    const autofocus = findAutofocus(this);
+    if (autofocus) host.call(autofocus.handle, "focus");
     openWindows.add(this);
     eventLoop.start();
   }
@@ -1895,6 +1971,8 @@ export interface TextInputProps extends LayoutProps, TextStyleProps {
   placeholder?: MaybeAccessor<string>;
   /** Hides what is typed (a password field). Fixed at creation. */
   secure?: boolean;
+  /** Takes keyboard focus when its window is shown. */
+  autofocus?: boolean;
   /** Every edit. */
   onChange?: (value: string) => void;
   /** Return pressed. */
@@ -1942,7 +2020,7 @@ export class TextInput extends Node {
 
 /** A multi-line, scrolling plain-text editor. */
 export class TextArea extends Node {
-  constructor(props?: LayoutProps & TextStyleProps & { value?: MaybeAccessor<string>; onChange?: (value: string) => void }) {
+  constructor(props?: LayoutProps & TextStyleProps & { value?: MaybeAccessor<string>; autofocus?: boolean; onChange?: (value: string) => void }) {
     super(props as Record<string, unknown>);
   }
   get kind(): string {

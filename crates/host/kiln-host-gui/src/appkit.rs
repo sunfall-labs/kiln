@@ -455,6 +455,18 @@ extern "C" fn root_layout(this: &Object, _: Sel) {
     }
 }
 
+/// VoiceOver (or any assistive technology) pressing a pressable container: the same event a
+/// click delivers.
+extern "C" fn accessibility_press(this: &Object, _: Sel) -> BOOL {
+    match lookup(this as *const Object as *mut Object) {
+        Some(h) => {
+            push(h, EventKind::Press, 0.0, 0.0, String::new());
+            YES
+        }
+        None => NO,
+    }
+}
+
 fn view_class(name: &str, root: bool) -> &'static Class {
     if let Some(class) = Class::get(name) {
         return class;
@@ -469,6 +481,10 @@ fn view_class(name: &str, root: bool) -> &'static Class {
         decl.add_method(
             sel!(updateLayer),
             update_layer as extern "C" fn(&Object, Sel),
+        );
+        decl.add_method(
+            sel!(accessibilityPerformPress),
+            accessibility_press as extern "C" fn(&Object, Sel) -> BOOL,
         );
         if root {
             decl.add_method(sel!(layout), root_layout as extern "C" fn(&Object, Sel));
@@ -715,6 +731,8 @@ unsafe fn create_widget(app: &mut App, kind: Kind) -> Result<u32, String> {
                 let () = msg_send![root, setWantsLayer: YES];
                 let () = msg_send![effect, addSubview: root];
                 let () = msg_send![window, center];
+                // Tab and Shift-Tab move through the controls in layout order.
+                let () = msg_send![window, setAutorecalculatesKeyViewLoop: YES];
                 inner = window;
                 ROOTS.with(|r| r.borrow_mut().insert(root as usize, handle));
                 REGISTRY.with(|r| r.borrow_mut().insert(window as usize, handle));
@@ -854,6 +872,8 @@ unsafe fn create_widget(app: &mut App, kind: Kind) -> Result<u32, String> {
                 let alloc: Id = msg_send![class!(NSImageView), alloc];
                 let image: Id = msg_send![alloc, initWithFrame: rect(0.0, 0.0, 16.0, 16.0)];
                 let () = msg_send![image, setImageScaling: 2usize]; // proportionally up or down
+                // Decorative until labelled: VoiceOver should not announce "image" for an icon.
+                let () = msg_send![image, setAccessibilityElement: NO];
                 image
             }
             Kind::Divider => {
@@ -1112,6 +1132,18 @@ unsafe fn apply(app: &mut App, handle: u32, name: &str, value: Value) -> Result<
                 let () = msg_send![view, setHidden: truthy(&value) as BOOL];
                 relayout = true;
             }
+            (_, "accessibilityLabel" | "accessibilityHint") => {
+                let target = if kind == Kind::TextArea { inner } else { view };
+                let text = ns_string(&text(&value));
+                if name == "accessibilityLabel" {
+                    let () = msg_send![target, setAccessibilityLabel: text];
+                    if kind == Kind::Image {
+                        let () = msg_send![view, setAccessibilityElement: YES];
+                    }
+                } else {
+                    let () = msg_send![target, setAccessibilityHelp: text];
+                }
+            }
             (_, "tooltip") => {
                 let () = msg_send![view, setToolTip: ns_string(&text(&value))];
             }
@@ -1147,7 +1179,10 @@ unsafe fn apply(app: &mut App, handle: u32, name: &str, value: Value) -> Result<
                         msg_send![alloc, initWithTarget: app.target action: sel!(kilnTap:)];
                     let () = msg_send![view, addGestureRecognizer: click];
                     let () = msg_send![click, release];
+                    let () = msg_send![view, setAccessibilityElement: YES];
+                    let () = msg_send![view, setAccessibilityRole: ns_string("AXButton")];
                 } else if !truthy(&value) {
+                    let () = msg_send![view, setAccessibilityElement: NO];
                     for i in (0..count).rev() {
                         let r: Id = msg_send![recognizers, objectAtIndex: i];
                         let () = msg_send![view, removeGestureRecognizer: r];
@@ -1547,6 +1582,44 @@ pub fn destroy(handle: u32) -> Result<(), String> {
 /// `show`, `hide`, `close`, `minimize`, `maximize`, `unmaximize`, `fullscreen` (arg "true" or
 /// "false"), `center`, `focus` and `snapshot` (arg: a PNG path) for windows; `click` and `focus`
 /// for controls.
+/// What AppKit holds for `handle`'s assistive technology, as JSON: `label`, `hint`, `element`
+/// (whether it is announced at all) and `focused`. The role is kiln's, from the widget kind.
+pub fn describe(handle: u32) -> Result<String, String> {
+    let (kind, view, inner) = with_app(|app| {
+        let widget = app
+            .widgets
+            .get(&handle)
+            .ok_or_else(|| format!("no widget {handle}"))?;
+        Ok((widget.kind, widget.view, widget.inner))
+    })?;
+    autoreleasepool(|| unsafe {
+        let target = if kind == Kind::TextArea { inner } else { view };
+        let label: Id = msg_send![target, accessibilityLabel];
+        let hint: Id = msg_send![target, accessibilityHelp];
+        let element: BOOL = msg_send![target, isAccessibilityElement];
+        let window: Id = msg_send![view, window];
+        let focused = !window.is_null() && {
+            let responder: Id = msg_send![window, firstResponder];
+            // A text field being edited hands first responder to its field editor, whose
+            // delegate is the field.
+            let field_editor: BOOL = msg_send![responder, isKindOfClass: class!(NSTextView)];
+            let delegate: Id = if field_editor == YES {
+                msg_send![responder, delegate]
+            } else {
+                ptr::null_mut()
+            };
+            responder == target || delegate == target
+        };
+        Ok(serde_json::json!({
+            "label": rust_string(label),
+            "hint": rust_string(hint),
+            "element": element == YES,
+            "focused": focused,
+        })
+        .to_string())
+    })
+}
+
 pub fn call(handle: u32, command: &str, arg: &str) -> Result<i32, String> {
     let (kind, view, window, activate) = with_app(|app| {
         let widget = app

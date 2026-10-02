@@ -149,12 +149,22 @@ declare module "kiln:gui" {
       remove(parent: number, child: number): void;
       destroy(handle: number): void;
       call(handle: number, command: string, arg?: string): void;
+      /** What the toolkit holds for a widget's assistive technology: label, hint, whether it is
+       * announced at all (`element`) and whether it has keyboard focus. */
+      describe(handle: number): Omit<AccessibilityDescription, "role">;
       /** Processes OS events for up to `ms`, returning early when any arrive. */
       wait(ms: number): void;
       nextEvent(): HostEvent | null;
       /** How many tree or property operations the host has seen; the event loop reads activity. */
       readonly operations: number;
       readonly services: Services;
+  }
+  export interface AccessibilityDescription {
+      role: string;
+      label: string;
+      hint: string;
+      element: boolean;
+      focused: boolean;
   }
   export interface FileFilter {
       name: string;
@@ -202,6 +212,7 @@ declare module "kiln:gui" {
       private next;
       private clipboard;
       private events;
+      private focused;
       dark: boolean;
       create(kind: string): number;
       set(handle: number, name: string, value: unknown): void;
@@ -210,6 +221,7 @@ declare module "kiln:gui" {
       destroy(handle: number): void;
       call(handle: number, command: string, arg?: string): void;
       wait(_ms: number): void;
+      describe(handle: number): Omit<AccessibilityDescription, "role">;
       nextEvent(): HostEvent | null;
       /** Queues an event as if the OS had delivered it; the next drain dispatches it. */
       post(event: HostEvent): void;
@@ -298,6 +310,10 @@ declare module "kiln:gui" {
        * changed, emits the event, then restores controlled props.
        */
       receive(_event: string, _a: number, _b: number, _text: string): void;
+      /** The accessibility role kiln gives this widget; the same word on every host. */
+      get role(): string;
+      /** What assistive technology sees for this widget (it must be mounted: in a shown window). */
+      describe(): AccessibilityDescription;
       toString(): string;
   }
   export interface LayoutProps {
@@ -319,6 +335,10 @@ declare module "kiln:gui" {
       disabled?: MaybeAccessor<boolean>;
       tooltip?: MaybeAccessor<string>;
       opacity?: MaybeAccessor<number>;
+      /** What VoiceOver announces, when the visible text is not enough (an icon-only button). */
+      accessibilityLabel?: MaybeAccessor<string>;
+      /** A longer description VoiceOver reads after a pause. */
+      accessibilityHint?: MaybeAccessor<string>;
       /** Raw flexbox/grid properties (camelCase CSS names), applied before the props above. */
       style?: MaybeAccessor<Record<string, unknown>>;
       ref?: (node: any) => void;
@@ -502,6 +522,8 @@ declare module "kiln:gui" {
       placeholder?: MaybeAccessor<string>;
       /** Hides what is typed (a password field). Fixed at creation. */
       secure?: boolean;
+      /** Takes keyboard focus when its window is shown. */
+      autofocus?: boolean;
       /** Every edit. */
       onChange?: (value: string) => void;
       /** Return pressed. */
@@ -522,6 +544,7 @@ declare module "kiln:gui" {
   export class TextArea extends Node {
       constructor(props?: LayoutProps & TextStyleProps & {
           value?: MaybeAccessor<string>;
+          autofocus?: boolean;
           onChange?: (value: string) => void;
       });
       get kind(): string;

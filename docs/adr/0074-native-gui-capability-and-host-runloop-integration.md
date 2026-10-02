@@ -133,7 +133,17 @@ and `processEvents()` drains host events.
 The headless host is what makes `conformance/native/gui-*.ts` meaningful: the same program runs
 in the interpreter and the native backend and must print the same thing.
 
-### 8. Capability planning
+### 8. Accessibility and keyboard focus
+
+Every widget takes `accessibilityLabel` and `accessibilityHint`. A container with `onPress` is
+announced as a button and VoiceOver can press it (`accessibilityPerformPress` delivers the same
+event a click does); an unlabelled symbol image is decorative and not announced. Tab and
+Shift-Tab move through controls in layout order, and `autofocus` gives a text field focus when
+its window is shown. `node.describe()` reports what assistive technology sees: the role is kiln's
+(from the widget kind, the same word on every host), and the host reports the label, hint,
+whether the widget is announced, and whether it has focus.
+
+### 9. Capability planning
 
 `kiln:gui` and `kiln:gui/jsx-runtime` retain the `gui` provider capability (ADR 0062); a program
 that does not import them plans none of it. Because the widget library is loaded with FFI at
@@ -160,7 +170,7 @@ run time, the native build does not yet link it: shipping a GUI binary means shi
   semantics and was removed rather than kept as a second, untested model.
 * **Linking the library into the binary** as a planned provider staticlib, so a GUI program is
   one file.
-* Accessibility labels, focus order, drag and drop, images from memory, tables.
+* Drag and drop, images from memory, tables, custom focus order beyond layout order.
 
 ## Rejected alternatives
 

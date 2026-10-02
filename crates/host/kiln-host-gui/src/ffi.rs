@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Bumped on any change a binding must know about; the TypeScript side refuses a mismatch.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 thread_local! {
     static RESULT: RefCell<String> = const { RefCell::new(String::new()) };
@@ -100,6 +100,9 @@ mod backend {
         Err(NONE.into())
     }
     pub fn set_menu(_: &str) -> Result<(), String> {
+        Err(NONE.into())
+    }
+    pub fn describe(_: u32) -> Result<String, String> {
         Err(NONE.into())
     }
 }
@@ -181,6 +184,13 @@ pub unsafe extern "C" fn kiln_gui_call(
 ) -> i32 {
     let (command, arg_text) = unsafe { (arg(command), arg(arg_text)) };
     guard(|| backend::call(handle, &command, &arg_text))
+}
+
+/// What AppKit holds for `handle`'s assistive technology (JSON: label, hint, element, focused).
+/// Returns the length of the text `kiln_gui_result` copies out.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_describe(handle: u32) -> i32 {
+    guard(|| backend::describe(handle).map(stash))
 }
 
 // --- Events ----------------------------------------------------------------------------------

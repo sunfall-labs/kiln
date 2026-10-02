@@ -34,6 +34,7 @@ let checkbox: any;
 let label: any;
 let row: any;
 let rowPresses = 0;
+let input: any;
 
 const win = new Window({
   title: "kiln:gui smoke",
@@ -51,9 +52,10 @@ render(
     <checkbox ref={(n: any) => (checkbox = n)} checked={checked} onChange={setChecked}>
       Checked
     </checkbox>,
-    <hstack ref={(n: any) => (row = n)} onPress={() => rowPresses++} padding={8} background="fill">
+    <hstack ref={(n: any) => (row = n)} onPress={() => rowPresses++} padding={8} background="fill" accessibilityLabel="Open row">
       <text>A pressable row</text>
     </hstack>,
+    <input ref={(n: any) => (input = n)} placeholder="Focused on show" autofocus />,
   ],
   win,
 );
@@ -71,6 +73,9 @@ async function main() {
   expect("checkbox reported its state", await until(() => checked()));
   expect("label followed", label.text.startsWith("count 2"));
   expect("pressable container is wired natively", row.handle > 0 && row.props.pressable === true);
+  const rowA11y = row.describe();
+  expect(`pressable row is an accessible button (${JSON.stringify(rowA11y)})`, rowA11y.role === "button" && rowA11y.label === "Open row" && rowA11y.element);
+  expect("autofocus took keyboard focus", await until(() => input.describe().focused));
 
   const start = ticks();
   expect("timers run alongside the UI loop", await until(() => ticks() >= start + 10, 2000));
