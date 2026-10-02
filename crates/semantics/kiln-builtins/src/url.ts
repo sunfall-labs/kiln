@@ -278,12 +278,7 @@ class URL {
   constructor(input: any, base?: any) {
     const fast = __urlFast(input, base);
     if (fast !== undefined) return fast;
-    // Hoisted on purpose: written as `{ c: parseRecord(input, base), sp: undefined, ... }` this
-    // literal's `c` read back `undefined` when the bootstrap is emitted generic-only, while the
-    // same class as a user program under `native-release-size` is fine. Filed as an emitter
-    // question (.scratch/full-runtime/issues/05); do not fold it back until that is answered.
-    const rec = parseRecord(input, base);
-    this[STATE] = { c: rec, sp: undefined, input: undefined, base: undefined };
+    this[STATE] = { c: parseRecord(input, base), sp: undefined, input: undefined, base: undefined };
   }
 
   static canParse(input: any, base?: any): boolean {
