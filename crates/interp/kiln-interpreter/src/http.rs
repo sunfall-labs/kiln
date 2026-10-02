@@ -305,6 +305,30 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
     }
 }
 
+/// Host capabilities captured by the TypeScript HTTP and web facades. Keep them separate from
+/// the public namespace: its complete materialized export store excludes these private hooks.
+pub(crate) fn native_capabilities() -> Value {
+    let mut module = ObjectData::default();
+    for name in [
+        "createServer",
+        "Server",
+        "IncomingMessage",
+        "request",
+        "get",
+        "ServerResponse",
+    ] {
+        if let Some(value) = property(name) {
+            module.set(name, value);
+        }
+    }
+    for name in ["createFetchServer", "fetchRespond"] {
+        if let Some(value) = property(name) {
+            module.set_non_enumerable(name, value);
+        }
+    }
+    Value::Object(Rc::new(RefCell::new(module)))
+}
+
 pub(crate) fn https_property(prop: &str) -> Option<Value> {
     match prop {
         "createServer" => Some(Value::Native(

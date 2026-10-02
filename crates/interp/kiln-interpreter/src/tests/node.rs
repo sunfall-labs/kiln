@@ -513,6 +513,22 @@ fn process_private_native_modules_are_separate_from_public_ts_projection() {
             "missing private native capability: {name}"
         );
     }
+    let http = vm
+        .read_property(&modules, "http", 0)
+        .expect("private HTTP adapter");
+    // Reflection completes the public export store. It must not erase private serve hooks.
+    let public_http = Value::Native(Native::NodeHttp, RealmId::PRIMARY);
+    vm.intrinsics.materialize(&public_http);
+    for name in ["createFetchServer", "fetchRespond"] {
+        assert!(matches!(
+            vm.read_property(&http, name, 0),
+            Ok(Value::Native(..))
+        ));
+        assert!(matches!(
+            vm.read_property(&public_http, name, 0),
+            Ok(Value::Undefined)
+        ));
+    }
     assert!(matches!(
         vm.dispatch_native(
             Native::ProcessGetBuiltinModule,

@@ -180,10 +180,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "fs_promises".to_owned(),
                 Value::Native(Native::NodeFsPromises, RealmId::PRIMARY),
             ),
-            (
-                "http".to_owned(),
-                Value::Native(Native::NodeHttp, RealmId::PRIMARY),
-            ),
+            ("http".to_owned(), crate::http::native_capabilities()),
             ("net".to_owned(), crate::net::native_capabilities()),
         ]);
         process.set_non_enumerable("__kilnNativeModules", native_modules);
