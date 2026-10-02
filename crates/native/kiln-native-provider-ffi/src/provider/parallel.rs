@@ -827,7 +827,14 @@ mod tests {
         expected.sort_by(|a, b| default_float_order(*a, *b));
         // SAFETY: the vector is live and sized to `n`.
         assert_eq!(
-            unsafe { kiln_parallel_sort(xs.as_mut_ptr().cast(), n, 8, SORT_DEFAULT) },
+            unsafe {
+                kiln_parallel_sort(
+                    xs.as_mut_ptr().cast(),
+                    n,
+                    ElementKind::Float64 as i32,
+                    SORT_DEFAULT,
+                )
+            },
             0
         );
         assert!(
@@ -839,7 +846,14 @@ mod tests {
         let before = xs.clone();
         // SAFETY: as above.
         assert_eq!(
-            unsafe { kiln_parallel_sort(xs.as_mut_ptr().cast(), n, 8, SORT_ASCENDING) },
+            unsafe {
+                kiln_parallel_sort(
+                    xs.as_mut_ptr().cast(),
+                    n,
+                    ElementKind::Float64 as i32,
+                    SORT_ASCENDING,
+                )
+            },
             1
         );
         assert!(
@@ -872,7 +886,14 @@ mod tests {
         sorted.sort();
         // SAFETY: as above.
         assert_eq!(
-            unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), n, 5, SORT_DEFAULT) },
+            unsafe {
+                kiln_parallel_sort(
+                    ints.as_mut_ptr().cast(),
+                    n,
+                    ElementKind::Int32 as i32,
+                    SORT_DEFAULT,
+                )
+            },
             0
         );
         assert_eq!(ints, sorted);
@@ -886,7 +907,14 @@ mod tests {
         );
         // SAFETY: as above.
         assert_eq!(
-            unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), 4, 9, SORT_DEFAULT) },
+            unsafe {
+                kiln_parallel_sort(
+                    ints.as_mut_ptr().cast(),
+                    4,
+                    ElementKind::BigUint64 as i32 + 1,
+                    SORT_DEFAULT,
+                )
+            },
             INVALID_ARGUMENT
         );
     }
