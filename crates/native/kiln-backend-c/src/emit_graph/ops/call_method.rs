@@ -764,7 +764,7 @@ fn heap_sort_lowering(
                          {negate}\
                          if (count0 > 0) memcpy(phsort_sorted, phsort_keys, count0 * sizeof(double)); \
                          struct {{ const double *sorted; size_t count; }} phsort_order = {{ phsort_sorted, count0 }}; \
-                         if (kiln_parallel_sort(phsort_sorted, count0, 8, 1) == 0 && kiln_parallel_map(phsort_keys, count0, phsort_ranks, {symbol}_pmap_hrank_{target}, &phsort_order) == 0) {{ \
+                         if (kiln_parallel_sort(phsort_sorted, count0, KILN_TYPED_FLOAT64, 1) == 0 && kiln_parallel_map(phsort_keys, count0, phsort_ranks, {symbol}_pmap_hrank_{target}, &phsort_order) == 0) {{ \
                              uint32_t *phsort_seen = phsort_ranks + count0 + 1; \
                              if (count0 > 0) memcpy(phsort_copy, arr->elements, count0 * sizeof(kiln_val)); \
                              for (size_t i = 0; i < count0; ++i) {{ uint32_t r = phsort_ranks[i]; arr->elements[r + phsort_seen[r]++] = phsort_copy[i]; }} \
@@ -781,6 +781,21 @@ fn heap_sort_lowering(
         o = object,
         c = comparator,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_key_sort_uses_the_float64_kind_constant_for_its_scratch_keys() {
+        let emitted =
+            heap_sort_lowering("fixture", 2, crate::parallel::SortOrder::Ascending, 0, 1, 3);
+        assert!(
+            emitted.contains("kiln_parallel_sort(phsort_sorted, count0, KILN_TYPED_FLOAT64, 1)")
+        );
+        assert!(!emitted.contains("kiln_parallel_sort(phsort_sorted, count0, 8, 1)"));
+    }
 }
 
 /// The pooled `parallelMap` (and `parallelFlatMap`) lowering of one site whose callback is proto
