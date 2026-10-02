@@ -3110,6 +3110,32 @@ static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
     return 1;
 }
 
+static inline int kiln_c99_collection_cached_method_allowed(const kiln_collection *collection,
+                                                            const kiln_string *key,
+                                                            uint64_t method_code,
+                                                            const char *method) {
+    if (collection == NULL || collection->properties.tag != KILN_VALUE_UNDEFINED ||
+        !kiln_c99_collection_key_matches_method(key, method)) return 0;
+    switch (method_code) {
+    case KILN_C99_METHOD_COLLECTION_GET:
+    case KILN_C99_METHOD_COLLECTION_SET:
+    case KILN_C99_METHOD_COLLECTION_ADD:
+    case KILN_C99_METHOD_COLLECTION_HAS:
+    case KILN_C99_METHOD_COLLECTION_DELETE:
+    case KILN_C99_METHOD_COLLECTION_CLEAR:
+    case KILN_C99_METHOD_COLLECTION_FOR_EACH:
+    case KILN_C99_METHOD_COLLECTION_KEYS:
+    case KILN_C99_METHOD_COLLECTION_VALUES:
+    case KILN_C99_METHOD_COLLECTION_ENTRIES:
+    case KILN_C99_METHOD_COLLECTION_SELF:
+        return kiln_c99_collection_intrinsic_method_allowed(collection, method, strlen(method));
+    default:
+        /* Object.prototype methods are cacheable only while the collection has no own or
+         * subclass overlay. Their prototype mutations are covered by the tag-pristine guard. */
+        return 1;
+    }
+}
+
 /* A promise: a value that arrives once, later, and everything waiting for it.
  *
  * `state` is pending, fulfilled or rejected, and only the first settlement counts -- a promise is

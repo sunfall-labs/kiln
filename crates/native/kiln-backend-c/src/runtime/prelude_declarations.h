@@ -395,24 +395,8 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         if (kiln_c99_gc_kind_of_ptr(ptr) != KILN_GC_COLLECTION) return 0;
         const kiln_collection *collection = (const kiln_collection *)ptr;
         const char *method = kiln_c99_method_name(site->cached_method);
-        if (collection->properties.tag != KILN_VALUE_UNDEFINED ||
-            !kiln_c99_collection_key_matches_method(key, method)) return 0;
-        switch (site->cached_method) {
-        case KILN_C99_METHOD_COLLECTION_GET:
-        case KILN_C99_METHOD_COLLECTION_SET:
-        case KILN_C99_METHOD_COLLECTION_ADD:
-        case KILN_C99_METHOD_COLLECTION_HAS:
-        case KILN_C99_METHOD_COLLECTION_DELETE:
-        case KILN_C99_METHOD_COLLECTION_CLEAR:
-        case KILN_C99_METHOD_COLLECTION_FOR_EACH:
-        case KILN_C99_METHOD_COLLECTION_KEYS:
-        case KILN_C99_METHOD_COLLECTION_VALUES:
-        case KILN_C99_METHOD_COLLECTION_ENTRIES:
-        case KILN_C99_METHOD_COLLECTION_SELF:
-            return kiln_c99_collection_intrinsic_method_allowed(collection, method, strlen(method));
-        default:
-            return 1;
-        }
+        return kiln_c99_collection_cached_method_allowed(collection, key, site->cached_method,
+                                                         method);
     } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {
