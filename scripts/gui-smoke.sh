@@ -16,7 +16,9 @@ trap 'rm -rf "$work"' EXIT
 	cat "$work/build.log" >&2
 	exit 1
 }
-KILN_GUI_LIB="$PWD/target/release/libkiln_host_gui.dylib" "$work/smoke" &
+# The shipping path: the bridge linked into the binary, the realm parked in the run loop. Set
+# KILN_GUI_LIB to a development dylib to exercise the polling fallback instead.
+"$work/smoke" &
 pid=$!
 for _ in $(seq 1 120); do
 	kill -0 "$pid" 2>/dev/null || break

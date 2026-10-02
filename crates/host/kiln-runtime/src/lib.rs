@@ -609,6 +609,13 @@ pub trait RealmHostProvider: AsyncHostOps {
 
     fn has_pending_work(&self) -> bool;
 
+    /// Whether pending work needs the I/O driver turned to make progress (sockets, tasks), as
+    /// opposed to work that is woken directly through the completion signal (port waits). A
+    /// park that waits outside Tokio (ADR 0074) must poll the driver while this holds.
+    fn needs_io_driver(&self) -> bool {
+        self.has_pending_work()
+    }
+
     /// Returns the sticky realm failure, if the provider's asynchronous supervisor failed.
     fn runtime_failure(&self) -> Option<&RuntimeFailure> {
         None
@@ -1044,6 +1051,90 @@ pub async fn wait_for_turn(signal: Arc<tokio::sync::Notify>, delay: Option<Durat
         None => {
             signal.notified().await;
             DriveWake::Completion
+        }
+    }
+}
+
+/// A foreign event loop the main-thread realm parks inside (ADR 0074): the GUI's run loop.
+///
+/// `wait` blocks in that loop for up to `timeout_ms` (negative: until something happens) and
+/// returns non-zero when it received events for the program. `wake` may be called from any
+/// thread and makes a running `wait` return. `port` is a worker port the program waits on: an
+/// event-bearing wait enqueues a message there, which wakes the language like any completion.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ParkHook {
+    pub wait: extern "C" fn(timeout_ms: f64) -> i32,
+    pub wake: extern "C" fn(),
+    pub port: u64,
+}
+
+thread_local! {
+    static PARK_HOOK: std::cell::Cell<Option<ParkHook>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install (or with `None`, remove) the park hook for the realm driven on this thread.
+pub fn set_park_hook(hook: Option<ParkHook>) {
+    PARK_HOOK.with(|cell| cell.set(hook));
+}
+
+pub fn park_hook() -> Option<ParkHook> {
+    PARK_HOOK.with(|cell| cell.get())
+}
+
+/// How long a hooked park waits in the foreign loop before turning the I/O driver again, while
+/// work that needs the driver (sockets, tasks) is pending. With none pending, it waits for the
+/// exact deadline or an event and uses no CPU.
+const HOOKED_IO_SLICE: Duration = Duration::from_millis(4);
+
+struct HookWaker(extern "C" fn());
+
+impl std::task::Wake for HookWaker {
+    fn wake(self: Arc<Self>) {
+        (self.0)();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        (self.0)();
+    }
+}
+
+/// [`wait_for_turn`] inside a foreign event loop. The completion signal is polled with a waker
+/// that interrupts the foreign wait, so a completion from any thread ends the park at once;
+/// timers end it at their exact deadline; foreign events are posted to the hook's port.
+pub async fn wait_for_turn_in(
+    hook: ParkHook,
+    signal: Arc<tokio::sync::Notify>,
+    delay: Option<Duration>,
+    needs_io_driver: impl Fn() -> bool,
+) -> DriveWake {
+    let deadline = delay.map(|delay| std::time::Instant::now() + delay);
+    let waker = std::task::Waker::from(Arc::new(HookWaker(hook.wake)));
+    let mut notified = std::pin::pin!(signal.notified());
+    loop {
+        // Run woken tasks and give the I/O driver a zero-timeout turn.
+        yield_to_tasks().await;
+        if notified
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            return DriveWake::Completion;
+        }
+        let remaining = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        if remaining == Some(Duration::ZERO) {
+            return DriveWake::Timer;
+        }
+        let slice = if needs_io_driver() {
+            Some(remaining.map_or(HOOKED_IO_SLICE, |r| r.min(HOOKED_IO_SLICE)))
+        } else {
+            remaining
+        };
+        let timeout_ms = slice.map_or(-1.0, |s| s.as_secs_f64() * 1000.0);
+        if (hook.wait)(timeout_ms) != 0 {
+            workers::enqueue(
+                hook.port,
+                workers::Message::new(workers::kind::USER, Vec::new()),
+            );
         }
     }
 }
@@ -1872,6 +1963,12 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// only the provider owns the authoritative resource-liveness bit.
     pub fn has_referenced_host_work(&self) -> bool {
         self.host.has_referenced_work()
+    }
+
+    /// Whether a park outside Tokio must keep turning the I/O driver: host tasks, or HTTP work
+    /// on a direct connection.
+    pub fn needs_io_driver(&self) -> bool {
+        self.host.needs_io_driver() || self.requests_in_flight() != 0 || self.has_live_http_work()
     }
 
     /// Cancels one asynchronous host request owned by this realm.
@@ -4321,6 +4418,11 @@ impl RealmHostProvider for TokioHost {
 
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn needs_io_driver(&self) -> bool {
+        // Port waits are woken by `completed` directly; only spawned tasks need the driver.
+        !self.tasks.is_empty()
     }
 
     fn ready_completions_count(&self) -> usize {

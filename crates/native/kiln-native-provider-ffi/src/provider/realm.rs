@@ -2031,7 +2031,20 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                 }
                 let delay = introspect_park(realm, delay);
                 let parked = reclaim::park();
-                let wake = kiln_runtime::wait_for_turn(signal, delay).await;
+                // A GUI on this thread owns the OS run loop (ADR 0074): park inside it, so
+                // its events, the next timer and completions all end the wait without polling.
+                let hook = kiln_runtime::park_hook()
+                    .filter(|_| matches!(realm.clock.get(), NativeClock::Wall { .. }));
+                let wake = match hook {
+                    Some(hook) => {
+                        let state = &realm.runtime.state;
+                        kiln_runtime::wait_for_turn_in(hook, signal, delay, || {
+                            state.borrow().needs_io_driver()
+                        })
+                        .await
+                    }
+                    None => kiln_runtime::wait_for_turn(signal, delay).await,
+                };
                 drop(parked);
                 if yield_first
                     && wake == kiln_runtime::DriveWake::Timer

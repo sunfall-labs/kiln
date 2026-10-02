@@ -700,6 +700,10 @@ export interface Host {
   describe(handle: number): Omit<AccessibilityDescription, "role">;
   /** Processes OS events for up to `ms`, returning early when any arrive. */
   wait(ms: number): void;
+  /** Parks the realm inside the OS run loop, announcing events on worker `port`. False when the
+   * host cannot (then the event loop polls with bounded waits). */
+  park?(port: number): boolean;
+  unpark?(): void;
   nextEvent(): HostEvent | null;
   /** How many tree or property operations the host has seen; the event loop reads activity. */
   readonly operations: number;
@@ -892,7 +896,7 @@ function fallbackPath(name: string): string {
   }
 }
 
-const ABI_VERSION = 3;
+const ABI_VERSION = 4;
 /** The `node:ffi` specifier of the bridge linked into the provider archive. Not a path. */
 const HOST_GUI_LIBRARY = "kiln:host-gui";
 
@@ -909,6 +913,8 @@ const NATIVE_FUNCTIONS: Record<string, { arguments: string[]; return: string }> 
   kiln_gui_call: { arguments: ["u32", "pointer", "pointer"], return: "i32" },
   kiln_gui_describe: { arguments: ["u32"], return: "i32" },
   kiln_gui_wait: { arguments: ["f64"], return: "i32" },
+  kiln_gui_park: { arguments: ["u64"], return: "i32" },
+  kiln_gui_unpark: { arguments: [], return: "i32" },
   kiln_gui_next_event: { arguments: ["pointer"], return: "i32" },
   kiln_gui_dialog: { arguments: ["pointer", "pointer"], return: "i32" },
   kiln_gui_clipboard_read: { arguments: [], return: "i32" },
@@ -989,6 +995,12 @@ class NativeHost implements Host {
   }
   wait(ms: number): void {
     this.check(this.fn.kiln_gui_wait(ms), "wait");
+  }
+  park(port: number): boolean {
+    return this.check(this.fn.kiln_gui_park(port), "park") === 1;
+  }
+  unpark(): void {
+    this.check(this.fn.kiln_gui_unpark(), "unpark");
   }
   describe(handle: number): Omit<AccessibilityDescription, "role"> {
     const n = this.check(this.fn.kiln_gui_describe(handle), "describe");
@@ -2510,17 +2522,57 @@ const ACTIVE_SLICE_MS = 8;
 const IDLE_SLICE_MS = 50;
 const ACTIVE_WINDOW_MS = 500;
 
+// The runtime's worker ports, as the engine's message ports expose them to its own modules.
+const OP_CHANNEL = 1;
+
+function portInternals(): any {
+  const MessagePort = (globalThis as any).MessagePort;
+  return MessagePort ? MessagePort[Symbol.for("kiln.messagePort")] : undefined;
+}
+
 const eventLoop = {
   running: false,
   activeUntil: 0,
   lastOperations: 0,
   keepAlive: 0,
   closedWaiters: [] as Cleanup[],
+  /** Parked mode: the realm waits inside the OS run loop and hears about events on this port. */
+  port: null as { start(): void; close(): void } | null,
 
   start(): void {
     if (this.running || !currentHost().interactive) return;
     this.running = true;
-    setTimeout(tick, 0);
+    if (!this.park()) setTimeout(tick, 0);
+  },
+
+  /**
+   * Parks the realm inside the OS run loop when the native library supports it (ADR 0074 §6):
+   * timers, I/O completions and OS events then end the wait exactly, and an idle app uses no
+   * CPU. The bridge announces events on a runtime endpoint; a message port bound to it wakes
+   * the program, and keeps it alive while it listens. Without parking (a development dylib),
+   * the bounded-wait tick runs instead.
+   */
+  park(): boolean {
+    const host = currentHost();
+    const internals = portInternals();
+    if (!host.park || !internals) return false;
+    const ends = internals.workerOp(OP_CHANNEL);
+    if (!ends || !host.park(Number(ends[0]))) return false;
+    const port = internals.internalPort(Number(ends[0]), () => this.drainOnce(), null, false);
+    port.start();
+    this.port = port;
+    return true;
+  },
+
+  /** Stops the loop once nothing needs it: no open window, tray or shortcut. */
+  settle(): void {
+    if (!this.running || openWindows.size > 0 || this.keepAlive > 0) return;
+    this.running = false;
+    if (this.port) {
+      currentHost().unpark?.();
+      this.port.close();
+      this.port = null;
+    }
   },
 
   /** Dispatches every queued host event as one batch. Returns how many there were. */
@@ -2544,8 +2596,19 @@ const eventLoop = {
     if (openWindows.size > 0) return;
     const waiters = this.closedWaiters.splice(0, this.closedWaiters.length);
     for (const w of waiters) w();
+    this.settle();
   },
 };
+
+/**
+ * How the event loop is waiting: `"parked"` inside the OS run loop (no polling; an idle app uses
+ * no CPU), `"polling"` with bounded waits (the bridge is not linked into this binary), or
+ * `"stopped"` (no window, tray or shortcut needs it).
+ */
+export function eventLoopMode(): "parked" | "polling" | "stopped" {
+  if (!eventLoop.running) return "stopped";
+  return eventLoop.port !== null ? "parked" : "polling";
+}
 
 /** Dispatches every event the host has queued, as one batch. The event loop calls this; tests
  * and programs with their own loop can too. Returns how many events there were. */
@@ -2743,6 +2806,7 @@ export class Tray {
     trayHandlers.delete(this.id);
     currentHost().services.trayDestroy(this.id);
     eventLoop.keepAlive--;
+    eventLoop.settle();
   }
 }
 
@@ -2761,6 +2825,7 @@ export const shortcuts = {
       hotkeyHandlers.delete(id);
       currentHost().services.hotkeyUnregister(id);
       eventLoop.keepAlive--;
+      eventLoop.settle();
     };
   },
 };

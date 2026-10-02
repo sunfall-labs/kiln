@@ -202,6 +202,7 @@ declare_ts_builtins! {
             "createSignal",
             "currentHost",
             "dialog",
+            "eventLoopMode",
             "fire",
             "flush",
             "getOwner",

@@ -2,7 +2,7 @@
 // A native end-to-end check of kiln:gui against the real window system (scripts/gui-smoke.sh).
 // It drives the app through the host the way AppKit would, waits for each effect with a
 // deadline, prints what it observed, and exits non-zero on any mismatch.
-import { createSignal, currentHost, render, Window } from "kiln:gui";
+import { createSignal, currentHost, eventLoopMode, render, Window } from "kiln:gui";
 
 const host = currentHost();
 const failures: string[] = [];
@@ -63,6 +63,10 @@ render(
 async function main() {
   expect(`native host (${host.name})`, host.interactive);
   win.show();
+  // A binary built by kiln links the bridge in, so the realm parks in the run loop; the
+  // development dylib (KILN_GUI_LIB) cannot, and polls.
+  const expected = process.env.KILN_GUI_LIB ? "polling" : "parked";
+  expect(`event loop is ${expected}`, eventLoopMode() === expected);
   const timer = setInterval(() => setTicks((t) => t + 1), 20);
 
   // Real clicks through AppKit: action -> event queue -> drained by the event loop.
@@ -80,6 +84,19 @@ async function main() {
   const start = ticks();
   expect("timers run alongside the UI loop", await until(() => ticks() >= start + 10, 2000));
 
+  // While parked, an idle timer ends the wait at its deadline rather than a slice later.
+  if (expected === "parked") {
+    clearInterval(timer);
+    await new Promise((resolve) => setTimeout(resolve, 600)); // let the loop go idle
+    const lates: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const start = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      lates.push(Date.now() - start - 200);
+    }
+    const worst = Math.max(...lates);
+    expect(`idle timers fire on time while parked (worst ${worst} ms late)`, worst < 15);
+  }
   win.set("width", 400);
   expect("resize event", await until(() => resized === "400x260"));
 

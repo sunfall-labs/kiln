@@ -110,23 +110,28 @@ A widget that reports user input updates its props first, emits the event, and t
 *bound* prop the handler did not follow: a `value={signal}` input is controlled, exactly like a
 controlled input elsewhere.
 
-### 6. The event loop: bounded waits, honestly
+### 6. The event loop: the realm parks inside the OS run loop
 
 The OS delivers events to the main thread's run loop; kiln's own work (timers, I/O) runs on its
-realm loop, a Tokio current-thread runtime whose idle wait is its I/O driver (kqueue on macOS).
-Neither wait can see the other's sources today. So, while a window is open, each tick:
+realm loop, a Tokio current-thread runtime whose idle wait is its I/O driver. While a window is
+open, the realm *parks inside the OS run loop* instead (`kiln_runtime::ParkHook`, installed by
+the bridge through `kiln_gui_park`):
 
-1. dispatches queued events;
-2. waits in the OS run loop for up to 8 ms when something happened in the last 500 ms, or 50 ms
-   when idle, returning at once when an OS event arrives;
-3. dispatches again and schedules the next tick with a 1 ms timer, so the realm loop parks in
-   its own driver and runs its I/O and timers.
+* The realm's single park point (`drive_async`) calls the hook's `wait` with the exact time to
+  its next timer. With no I/O in flight that is one wait, ended by an OS event, the deadline, or
+  a completion from any thread — the completion signal is polled with a waker that calls the
+  hook's thread-safe `wake` (`postEvent:` on AppKit). An idle app uses no CPU and timers fire on
+  time (measured: within 2 ms; the smoke test holds it under 15 ms).
+* While I/O needs the driver turned (sockets, host tasks), the wait is sliced at 4 ms and the
+  driver gets a zero-timeout turn between slices.
+* OS events are announced on a runtime endpoint; `kiln:gui` listens with a message port bound
+  to it (the engine's own port internals), which also keeps the program alive while it listens.
 
-Input is handled as soon as it arrives. Timers and I/O completions are at most one slice late.
-Measured idle cost of the to-do example: about 20 ms of CPU in 5 s (0.2–0.4% of a core).
-
-This is not zero-CPU idle. That needs a runtime hook that lets the realm's park wait on the OS
-run loop and its own driver together; it is the follow-up below, not a claim.
+`eventLoopMode()` reports `"parked"`, `"polling"` or `"stopped"`. A library that cannot park —
+the development dylib loaded with `KILN_GUI_LIB`, which is not linked with the runtime — falls
+back to bounded polling: dispatch, wait up to 8 ms (50 ms idle), yield with a 1 ms timer. Input
+is still immediate there; timers and I/O can be a slice late. The interpreter is headless and
+needs neither.
 
 ### 7. Headless is a host, not a fallback that pretends
 
@@ -170,8 +175,6 @@ run time, the native build does not yet link it: shipping a GUI binary means shi
 
 ## Not done yet
 
-* **Zero-CPU idle and exact timers:** a realm-park hook that waits on the OS run loop and the
-  realm driver together, and turns OS events into realm turns.
 * **Linux and Windows backends** behind the same ABI (GTK4, Win32/WinUI), with the same Taffy
   layout. The earlier TypeScript GTK driver drove `libgtk-4` directly, had its own layout
   semantics and was removed rather than kept as a second, untested model.

@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Bumped on any change a binding must know about; the TypeScript side refuses a mismatch.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 thread_local! {
     static RESULT: RefCell<String> = const { RefCell::new(String::new()) };
@@ -105,6 +105,7 @@ mod backend {
     pub fn describe(_: u32) -> Result<String, String> {
         Err(NONE.into())
     }
+    pub fn wake() {}
 }
 
 #[unsafe(no_mangle)]
@@ -191,6 +192,62 @@ pub unsafe extern "C" fn kiln_gui_call(
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_gui_describe(handle: u32) -> i32 {
     guard(|| backend::describe(handle).map(stash))
+}
+
+// --- Parking the realm in the run loop -------------------------------------------------------
+
+/// How the kiln runtime installs a park hook (`kiln_runtime::set_park_hook`), passed in by the
+/// native provider when it links this library in. A setter rather than a dependency: this crate
+/// stays free of the runtime, and a separately loaded copy of it (the development dylib) simply
+/// has none, so parking is unavailable there and the program keeps polling.
+pub type ParkSetter = extern "C" fn(
+    wait: Option<extern "C" fn(f64) -> i32>,
+    wake: Option<extern "C" fn()>,
+    port: u64,
+);
+
+static PARK_SETTER: std::sync::OnceLock<ParkSetter> = std::sync::OnceLock::new();
+
+/// Called once by the provider that links this library into a kiln binary.
+pub fn bind_park_setter(setter: ParkSetter) {
+    let _ = PARK_SETTER.set(setter);
+}
+
+extern "C" fn park_wait(timeout_ms: f64) -> i32 {
+    match backend::wait(timeout_ms) {
+        Ok(ready) => {
+            crate::poll_services();
+            i32::from(ready || !events::is_empty())
+        }
+        Err(_) => 0,
+    }
+}
+
+extern "C" fn park_wake() {
+    backend::wake();
+}
+
+/// Makes the realm on this thread park inside the GUI run loop (ADR 0074): OS events, timers and
+/// completions then end its wait without polling, and events are announced on worker `port`.
+/// Returns 1 when installed, 0 when this copy of the library is not linked into a kiln binary.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_park(port: u64) -> i32 {
+    match PARK_SETTER.get() {
+        Some(set) => {
+            set(Some(park_wait), Some(park_wake), port);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Removes the park hook (the last window closed): the realm parks in its own loop again.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_gui_unpark() -> i32 {
+    if let Some(set) = PARK_SETTER.get() {
+        set(None, None, 0);
+    }
+    0
 }
 
 // --- Events ----------------------------------------------------------------------------------
@@ -386,6 +443,8 @@ pub fn exports() -> Vec<(&'static str, *const core::ffi::c_void)> {
         kiln_gui_hotkey_register,
         kiln_gui_hotkey_unregister,
         kiln_gui_describe,
+        kiln_gui_park,
+        kiln_gui_unpark,
     ]
 }
 

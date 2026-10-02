@@ -155,6 +155,20 @@ impl Drop for Library {
     }
 }
 
+/// Installs (or, with either function absent, removes) the GUI bridge's park hook on the realm
+/// driven by this thread.
+#[cfg(all(feature = "gui", feature = "realm"))]
+extern "C" fn set_gui_park_hook(
+    wait: Option<extern "C" fn(f64) -> i32>,
+    wake: Option<extern "C" fn()>,
+    port: u64,
+) {
+    kiln_runtime::set_park_hook(match (wait, wake) {
+        (Some(wait), Some(wake)) => Some(kiln_runtime::ParkHook { wait, wake, port }),
+        _ => None,
+    });
+}
+
 /// The libraries linked into this archive, by the specifier a program opens them with.
 ///
 /// `Ok(None)` is an ordinary path for the loader. `Err` names a specifier this archive knows but
@@ -166,6 +180,10 @@ fn static_library(path: &[u8]) -> Result<Option<HashMap<&'static str, *const c_v
     }
     #[cfg(feature = "gui")]
     {
+        // The bridge can park this realm inside the GUI run loop (ADR 0074 §6) only through
+        // the runtime it is linked with; hand it the setter before the program can ask.
+        #[cfg(feature = "realm")]
+        kiln_host_gui::ffi::bind_park_setter(set_gui_park_hook);
         Ok(Some(kiln_host_gui::ffi::exports().into_iter().collect()))
     }
     #[cfg(not(feature = "gui"))]

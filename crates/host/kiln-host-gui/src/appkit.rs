@@ -1714,8 +1714,27 @@ pub fn call(handle: u32, command: &str, arg: &str) -> Result<i32, String> {
 // ---------------------------------------------------------------------------------------------
 // Events
 
-/// Waits up to `timeout_ms` for the first OS event, then dispatches every queued one. Returns
-/// whether the kiln event queue holds anything for the program.
+/// Ends a running [`wait`] early. Safe from any thread: it posts an application-defined event,
+/// which the main thread's event wait receives.
+pub fn wake() {
+    autoreleasepool(|| unsafe {
+        let event: Id = msg_send![class!(NSEvent),
+            otherEventWithType: 15usize // NSEventTypeApplicationDefined
+            location: CGPoint::default()
+            modifierFlags: 0usize
+            timestamp: 0.0f64
+            windowNumber: 0isize
+            context: ptr::null_mut::<Object>()
+            subtype: 0i16
+            data1: 0isize
+            data2: 0isize];
+        let app: Id = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app, postEvent: event atStart: NO];
+    });
+}
+
+/// Waits up to `timeout_ms` (negative: until an event) for the first OS event, then dispatches
+/// every queued one. Returns whether the kiln event queue holds anything for the program.
 pub fn wait(timeout_ms: f64) -> Result<bool, String> {
     if APP.with(|cell| cell.borrow().is_none()) {
         return Err("kiln:gui is not initialised on this thread".into());
@@ -1724,10 +1743,12 @@ pub fn wait(timeout_ms: f64) -> Result<bool, String> {
     autoreleasepool(|| unsafe {
         let app: Id = msg_send![class!(NSApplication), sharedApplication];
         let mode: Id = ns_string("kCFRunLoopDefaultMode");
-        let mut until: Id = if events::is_empty() && timeout_ms > 0.0 {
-            msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: timeout_ms / 1000.0]
-        } else {
+        let mut until: Id = if !events::is_empty() || timeout_ms == 0.0 {
             msg_send![class!(NSDate), distantPast]
+        } else if timeout_ms < 0.0 {
+            msg_send![class!(NSDate), distantFuture]
+        } else {
+            msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: timeout_ms / 1000.0]
         };
         loop {
             let event: Id = msg_send![app, nextEventMatchingMask: EVENT_MASK_ANY

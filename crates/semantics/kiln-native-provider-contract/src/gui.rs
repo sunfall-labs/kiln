@@ -43,6 +43,8 @@ pub const GUI_EXPORTS: &[&str] = &[
     "kiln_gui_hotkey_register",
     "kiln_gui_hotkey_unregister",
     "kiln_gui_describe",
+    "kiln_gui_park",
+    "kiln_gui_unpark",
 ];
 
 /// Linker arguments a program needs when its provider archive carries the bridge: the OS

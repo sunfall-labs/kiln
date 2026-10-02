@@ -154,6 +154,10 @@ declare module "kiln:gui" {
       describe(handle: number): Omit<AccessibilityDescription, "role">;
       /** Processes OS events for up to `ms`, returning early when any arrive. */
       wait(ms: number): void;
+      /** Parks the realm inside the OS run loop, announcing events on worker `port`. False when the
+       * host cannot (then the event loop polls with bounded waits). */
+      park?(port: number): boolean;
+      unpark?(): void;
       nextEvent(): HostEvent | null;
       /** How many tree or property operations the host has seen; the event loop reads activity. */
       readonly operations: number;
@@ -684,6 +688,12 @@ declare module "kiln:gui" {
    * quits). A root that is not a window is placed in one.
    */
   export function runApp(app: unknown | (() => unknown)): Promise<void>;
+  /**
+   * How the event loop is waiting: `"parked"` inside the OS run loop (no polling; an idle app uses
+   * no CPU), `"polling"` with bounded waits (the bridge is not linked into this binary), or
+   * `"stopped"` (no window, tray or shortcut needs it).
+   */
+  export function eventLoopMode(): "parked" | "polling" | "stopped";
   /** Dispatches every event the host has queued, as one batch. The event loop calls this; tests
    * and programs with their own loop can too. Returns how many events there were. */
   export function processEvents(): number;
