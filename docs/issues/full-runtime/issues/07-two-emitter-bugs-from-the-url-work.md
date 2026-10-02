@@ -1,6 +1,6 @@
 # Issue 07: two emitter bugs the URL class exposed
 
-Status: one fixed, one open
+Status: closed (the second bug does not reproduce; workaround removed 2026-10-02)
 Feature: full-runtime
 
 **Fixed** (`emit_graph/ops/call_method.rs`, 2026-09-19): a devirtualized method call guarded on
@@ -23,3 +23,15 @@ so the trigger is something about the bootstrap module -- its size, its `compact
 the intrinsic being a `Direct` method value. `crates/semantics/kiln-builtins/src/url.ts` keeps the hoist
 with a comment pointing here; the repro is to fold it back and run
 `docs/issues/full-runtime/probes/url.mjs` natively.
+
+## Comments
+
+**2026-10-02.** The open half does not reproduce. With the hoist folded back into `url.ts`, native
+output matches the interpreter at HEAD, under `KILN_GC_STRESS=1`, and at `d0b176d6` (where the hoist
+was introduced) under `native-dev`, `native-release-size`, `native-release` and `--node`. The
+bootstrap really is emitted generic-only (`kiln-native/src/graph.rs`, `bootstrap_policy.generic_only`),
+so the path was exercised. Reverting `f92de8ec` (the cached-literal write barrier) did not bring it
+back either, so the cause is unknown and was probably a transient state of the tree. The hoist and
+its comment are gone, and `conformance/native/object-literal-call-value.mjs` holds the shape --
+a call inside a literal, beside the hoisted form, under allocation churn, plus the real `URL`
+class -- so a recurrence fails the native corpus by name.

@@ -7,7 +7,7 @@ line is the truth.
 
 | | in progress | ready | needs triage | other open | closed |
 |---|---:|---:|---:|---:|---:|
-| **all features** | 5 | 31 | 3 | 11 | 158 |
+| **all features** | 5 | 31 | 3 | 10 | 159 |
 
 | feature | PRD | in progress | ready | needs triage | other open | closed |
 |---|---|---:|---:|---:|---:|---:|
@@ -43,7 +43,7 @@ line is the truth.
 | [`fastest-native`](fastest-native/) |  |  |  |  |  |  |
 | [`finally-after-throw-in-catch`](finally-after-throw-in-catch/) | PRD: Finally Block Execution After Throw in Catch Block |  |  |  | 1 |  |
 | [`fs-promises-order`](fs-promises-order/) | PRD: the two concurrent `fs.promises` ordering probes assert a race |  |  |  |  | 2 |
-| [`full-runtime`](full-runtime/) | PRD: Full runtime — the native surface converges on the interpreter's |  | 3 |  | 1 | 5 |
+| [`full-runtime`](full-runtime/) | PRD: Full runtime — the native surface converges on the interpreter's |  | 3 |  |  | 6 |
 | [`function-has-instance`](function-has-instance/) | PRD: Function.prototype[Symbol.hasInstance] Builtin Property |  |  |  |  | 1 |
 | [`generator-throw-never-resumes`](generator-throw-never-resumes/) | PRD: Generator.throw() Resumes Catch Handler in Suspended Body |  |  |  |  | 1 |
 | [`ghui-opentui`](ghui-opentui/) | Run ghui with OpenTUI | 2 |  |  | 2 | 2 |
