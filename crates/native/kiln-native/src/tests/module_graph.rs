@@ -205,18 +205,23 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
     let root = TestDirectory::new("kiln-native-release-reexport-origin");
     let project = root.path.join("project");
     fs::create_dir_all(&project).expect("create project");
+    fs::write(
+        project.join("package.json"),
+        r#"{"type":"module","sideEffects":["./compile.mjs"]}"#,
+    )
+    .expect("write side-effect metadata");
     let entry = project.join("main.mjs");
     fs::write(
         &entry,
-        "import { publicName } from './facade.mjs'; import { publicName as directName } from './schemas.mjs'; console.log(publicName(), directName());",
+        "import { publicName } from './facade.mjs'; console.log(publicName());",
     )
     .expect("write entry");
     let facade = project.join("facade.mjs");
     fs::write(
         &facade,
-        "export { publicName } from './index.mjs'; export const metadata = import.meta.url;",
+        "export * from './index.mjs'; export const metadata = import.meta.url;",
     )
-    .expect("write facade");
+    .expect("write outer star barrel");
     let barrel = project.join("index.mjs");
     fs::write(&barrel, "export * from './schemas.mjs';").expect("write star barrel");
     let schemas = project.join("schemas.mjs");
@@ -242,6 +247,32 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
     let demand =
         kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::production())
             .expect("compute release demand");
+    let schemas_node = graph.module(&schemas).expect("schemas module node");
+    let schemas_export = schemas_node
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("schemas named re-export");
+    assert!(
+        demand
+            .slots
+            .get(&schemas)
+            .is_some_and(|slots| slots.contains(&schemas_export.local_slot)),
+        "demand through export-star barrels must reach the named re-export slot"
+    );
+    let schemas_import = schemas_node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local_slot == schemas_export.local_slot)
+        .expect("named re-export backing import");
+    assert!(
+        demand
+            .live_imports
+            .contains(&(schemas.clone(), schemas_import))
+    );
+    assert!(demand.live.contains(&barrel));
     let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
     let previous = reduced
         .resolved_export(&barrel, "publicName")

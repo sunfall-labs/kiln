@@ -331,31 +331,137 @@ fn mark_reexport_import_live(
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     queue: &mut VecDeque<PathBuf>,
 ) {
+    let Some(resolved) = graph.resolved_export(owner, exported_name).cloned() else {
+        return;
+    };
+    mark_resolved_export_path_live(
+        graph,
+        owner,
+        exported_name,
+        &resolved,
+        live,
+        live_imports,
+        live_export_slots,
+        queue,
+        &mut BTreeSet::new(),
+    );
+}
+
+/// Keep the intermediate export slots that make a public name resolve. The graph's resolved
+/// export table flattens a chain of barrels to its final provider, but release DCE must retain
+/// named re-export rows below any live `export *` barrels as well.
+fn mark_resolved_export_path_live(
+    graph: &ModuleGraph,
+    owner: &Path,
+    exported_name: &str,
+    resolved: &ResolvedExport,
+    live: &mut BTreeSet<PathBuf>,
+    live_imports: &mut BTreeSet<(PathBuf, usize)>,
+    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
+    queue: &mut VecDeque<PathBuf>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) {
+    if !visited.insert((owner.to_path_buf(), exported_name.to_owned())) {
+        return;
+    }
     let Some(node) = graph.module(owner) else {
         return;
     };
-    let Some(export) = node.program.exports.iter().find(|export| {
+
+    if node.source == ModuleSource::CommonJs {
+        if matches!(resolved, ResolvedExport::CommonJsNamed { module, .. } if module == owner)
+            || matches!(resolved, ResolvedExport::Local { module, local_slot: 0 } if module == owner)
+        {
+            let newly_live = live.insert(owner.to_path_buf());
+            let newly_demanded = live_export_slots
+                .entry(owner.to_path_buf())
+                .or_default()
+                .insert(0);
+            if newly_live || newly_demanded {
+                queue.push_back(owner.to_path_buf());
+            }
+        }
+        return;
+    }
+
+    if let Some(export) = node.program.exports.iter().find(|export| {
         !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
             && export.exported == exported_name
-    }) else {
+    }) {
+        let newly_live = live.insert(node.path.clone());
+        let newly_demanded = live_export_slots
+            .entry(node.path.clone())
+            .or_default()
+            .insert(export.local_slot);
+        if newly_live || newly_demanded {
+            queue.push_back(node.path.clone());
+        }
+        if let Some((index, import)) = node
+            .program
+            .imports
+            .iter()
+            .enumerate()
+            .find(|(_, import)| import.local_slot == export.local_slot)
+        {
+            let newly_imported = live_imports.insert((node.path.clone(), index));
+            if newly_imported {
+                queue.push_back(node.path.clone());
+            }
+            if import.imported != kiln_ir::NAMESPACE_IMPORT
+                && let Some(dependency) = node
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == import.source)
+                && graph.resolved_export(&dependency.target, &import.imported) == Some(resolved)
+            {
+                mark_resolved_export_path_live(
+                    graph,
+                    &dependency.target,
+                    &import.imported,
+                    resolved,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                    visited,
+                );
+            }
+        }
         return;
-    };
-    let Some(import_index) = node
+    }
+
+    // An export-star has no per-name import slot. Walk the star edge(s) which resolve to the
+    // same canonical origin; this also handles arbitrarily nested barrel chains and cycles.
+    for star in node
         .program
-        .imports
+        .exports
         .iter()
-        .position(|import| import.local_slot == export.local_slot)
-    else {
-        return;
-    };
-    let newly_imported = live_imports.insert((node.path.clone(), import_index));
-    let newly_live = live.insert(node.path.clone());
-    let newly_demanded = live_export_slots
-        .entry(node.path.clone())
-        .or_default()
-        .insert(export.local_slot);
-    if newly_live || newly_demanded || newly_imported {
-        queue.push_back(node.path.clone());
+        .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+    {
+        let Some(dependency) = node
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.specifier == star)
+        else {
+            continue;
+        };
+        if graph.resolved_export(&dependency.target, exported_name) != Some(resolved) {
+            continue;
+        }
+        if live.insert(node.path.clone()) {
+            queue.push_back(node.path.clone());
+        }
+        mark_resolved_export_path_live(
+            graph,
+            &dependency.target,
+            exported_name,
+            resolved,
+            live,
+            live_imports,
+            live_export_slots,
+            queue,
+            visited,
+        );
     }
 }
 
