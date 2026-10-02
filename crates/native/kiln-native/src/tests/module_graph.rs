@@ -208,21 +208,27 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
     let entry = project.join("main.mjs");
     fs::write(
         &entry,
-        "import { publicName } from './facade.mjs'; console.log(publicName());",
+        "import { publicName } from './facade.mjs'; import { publicName as directName } from './schemas.mjs'; console.log(publicName(), directName());",
     )
     .expect("write entry");
     let facade = project.join("facade.mjs");
     fs::write(
         &facade,
-        "export { publicName } from './barrel.mjs'; export const metadata = import.meta.url;",
+        "export { publicName } from './index.mjs'; export const metadata = import.meta.url;",
     )
     .expect("write facade");
-    let barrel = project.join("barrel.mjs");
+    let barrel = project.join("index.mjs");
     fs::write(
         &barrel,
+        "export * from './schemas.mjs';",
+    )
+    .expect("write star barrel");
+    let schemas = project.join("schemas.mjs");
+    fs::write(
+        &schemas,
         "export { implementation as deadA } from './provider.mjs'; export { implementation as deadB } from './provider.mjs'; export { implementation as deadC } from './provider.mjs'; export { implementation as publicName } from './provider.mjs'; export const metadata = import.meta.url;",
     )
-    .expect("write barrel");
+    .expect("write named re-export barrel");
     let provider = project.join("provider.mjs");
     fs::write(
         &provider,
@@ -249,6 +255,11 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
         &previous,
         ResolvedExport::Local { module, .. } if module == &provider
     ));
+    assert_eq!(
+        reduced.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "star barrels must retain the public name's ultimate origin"
+    );
 
     let (specialized, _) = dce_release_graph(&reduced, &demand);
     assert_eq!(
@@ -260,14 +271,16 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
         specialized.resolved_export(&facade, "publicName"),
         Some(ResolvedExport::Local { module, .. }) if module == &provider
     ));
-    let specialized_barrel = specialized.module(&barrel).expect("specialized barrel");
-    let export = specialized_barrel
+    let specialized_schemas = specialized
+        .module(&schemas)
+        .expect("specialized named re-export barrel");
+    let export = specialized_schemas
         .program
         .exports
         .iter()
         .find(|export| export.exported == "publicName")
         .expect("retained public export");
-    let backing_import = specialized_barrel
+    let backing_import = specialized_schemas
         .program
         .imports
         .iter()
