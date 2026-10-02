@@ -877,8 +877,12 @@ impl NodePackageResolver {
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
                 let decoded = percent_decode_specifier(specifier);
+                let resolution_specifier = match request {
+                    NodeRequestKind::Import => decoded.as_ref(),
+                    NodeRequestKind::Require => specifier,
+                };
                 let resolution = packages
-                    .resolve(importer_directory, decoded.as_ref())
+                    .resolve(importer_directory, resolution_specifier)
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
                     .package_json()
