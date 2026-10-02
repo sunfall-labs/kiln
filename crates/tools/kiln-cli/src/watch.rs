@@ -921,6 +921,14 @@ fn watch_native_result(output: &Path) -> PathBuf {
 }
 
 fn launch_native(path: &Path, result_path: &Path) -> Result<NativeRun> {
+    launch_native_with_args(path, &[], result_path)
+}
+
+fn launch_native_with_args(
+    path: &Path,
+    args: &[&std::ffi::OsStr],
+    result_path: &Path,
+) -> Result<NativeRun> {
     const TIMEOUT: Duration = Duration::from_secs(5);
     match std::fs::remove_file(result_path) {
         Ok(()) => {}
@@ -936,6 +944,7 @@ fn launch_native(path: &Path, result_path: &Path) -> Result<NativeRun> {
         }
     }
     let mut command = Command::new(path);
+    command.args(args);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1076,9 +1085,17 @@ fn stop_native_descendants(_: &mut Child) -> Result<()> {
 }
 
 #[cfg(test)]
-fn execute_native(path: &Path) -> Result<NativeExecution> {
-    let result_path = watch_native_result(path);
-    match launch_native(path, &result_path)?.finish(Arc::new(AtomicBool::new(false)))? {
+// Shell fixtures are passed to `/bin/sh` rather than executed directly. During parallel tests,
+// Linux can report ETXTBSY when a sibling fork inherits a writable descriptor for a new script;
+// the tests below exercise process cleanup and result handling, not executable publication.
+fn execute_native_with_args(
+    path: &Path,
+    args: &[&std::ffi::OsStr],
+    result_path: &Path,
+) -> Result<NativeExecution> {
+    match launch_native_with_args(path, args, result_path)?
+        .finish(Arc::new(AtomicBool::new(false)))?
+    {
         NativeRunResult::Completed(execution) => Ok(execution),
         NativeRunResult::Cancelled => Err(Error::Protocol(
             "native test execution was cancelled".into(),
@@ -2387,8 +2404,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_refresh_executor_captures_the_artifacts_real_process_result() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch("native-executor");
         let executable = dir.join("program");
         std::fs::write(
@@ -2396,13 +2411,13 @@ mod tests {
             "#!/bin/sh\nprintf 'native stdout\\n'\nprintf 'native stderr\\n' >&2\nexit 4\n",
         )
         .expect("write executable");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("executable metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make executable");
-
-        let execution = execute_native(&executable).expect("execute fixture");
+        let result_path = watch_native_result(&executable);
+        let execution = execute_native_with_args(
+            Path::new("/bin/sh"),
+            &[executable.as_os_str()],
+            &result_path,
+        )
+        .expect("execute fixture through the shell");
         assert_eq!(execution.exit_code, Some(4));
         assert_eq!(execution.stdout, b"native stdout\n");
         assert_eq!(execution.stderr, b"native stderr\n");
@@ -2414,8 +2429,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_refresh_executor_decodes_a_private_scalar_without_touching_stdio() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch("native-result-executor");
         let executable = dir.join("program");
         let fixture = dir.join("fixture.result");
@@ -2434,13 +2447,13 @@ mod tests {
             ),
         )
         .expect("write executable");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("executable metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make executable");
-
-        let execution = execute_native(&executable).expect("execute fixture");
+        let result_path = watch_native_result(&executable);
+        let execution = execute_native_with_args(
+            Path::new("/bin/sh"),
+            &[executable.as_os_str()],
+            &result_path,
+        )
+        .expect("execute fixture through the shell");
         assert_eq!(execution.exit_code, Some(0));
         assert_eq!(execution.stdout, b"native stdout\n");
         assert!(execution.stderr.is_empty());
@@ -2449,7 +2462,12 @@ mod tests {
 
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n")
             .expect("replace executable without a result writer");
-        let error = execute_native(&executable).expect_err("successful process needs a result");
+        let error = execute_native_with_args(
+            Path::new("/bin/sh"),
+            &[executable.as_os_str()],
+            &result_path,
+        )
+        .expect_err("successful process needs a result");
         assert!(
             error.to_string().contains("native refresh result"),
             "{error}"
@@ -2461,8 +2479,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cancelling_a_native_refresh_stops_descendants_that_hold_its_pipes() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch("native-process-group");
         let executable = dir.join("program");
         let descendant_pid = dir.join("descendant.pid");
@@ -2475,14 +2491,13 @@ mod tests {
             ),
         )
         .expect("write executable");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("executable metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make executable");
-
         let result_path = dir.join("result.bin");
-        let run = launch_native(&executable, &result_path).expect("launch fixture");
+        let run = launch_native_with_args(
+            Path::new("/bin/sh"),
+            &[executable.as_os_str()],
+            &result_path,
+        )
+        .expect("launch fixture through the shell");
         let ready_deadline = Instant::now() + Duration::from_secs(5);
         let descendant = loop {
             match std::fs::read_to_string(&descendant_pid) {
@@ -2532,8 +2547,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dropping_an_unfinished_native_refresh_stops_its_process_tree() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch("native-drop-process-group");
         let executable = dir.join("program");
         let descendant_pid = dir.join("descendant.pid");
@@ -2546,14 +2559,13 @@ mod tests {
             ),
         )
         .expect("write executable");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("executable metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make executable");
-
         let result_path = dir.join("result.bin");
-        let run = launch_native(&executable, &result_path).expect("launch fixture");
+        let run = launch_native_with_args(
+            Path::new("/bin/sh"),
+            &[executable.as_os_str()],
+            &result_path,
+        )
+        .expect("launch fixture through the shell");
         let ready_deadline = Instant::now() + Duration::from_secs(5);
         let descendant = loop {
             match std::fs::read_to_string(&descendant_pid) {
