@@ -6,7 +6,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The conversion is the program's own -- `{length: {valueOf() { throw x }}}` throws here --
     /// and a `length` that is an object with no `valueOf` reads as `NaN`, which is an empty walk
     /// rather than an error.
-    pub(super) fn array_like_length(
+    pub(crate) fn array_like_length(
         &mut self,
         target: &Value,
         instruction: usize,

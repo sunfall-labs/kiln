@@ -1169,9 +1169,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             return Err(type_error("locales is not an object"));
         }
 
-        let length = self.read_property(value, "length", instruction)?;
-        let length = self.as_number_argument(Some(&length), instruction)?;
-        let length = Self::to_length(length);
+        let length = self.array_like_length(value, instruction)?;
         // Read and validate each entry before touching the next one. A malformed locale at index
         // zero must throw before a getter at index one runs. HasProperty also distinguishes a
         // sparse hole (which is skipped) from a present `undefined` (which is an invalid locale).
@@ -1194,10 +1192,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         seen: &mut Vec<String>,
     ) -> Result<(), ExecutionError> {
         let tag = match &element {
-            Value::Intl(value) => match value.as_ref() {
-                IntlValue::Locale(tag) => tag.clone(),
-                _ => return Err(type_error("a locale list element is not a string")),
-            },
+            Value::Intl(value) if matches!(value.as_ref(), IntlValue::Locale(_)) => {
+                let IntlValue::Locale(tag) = value.as_ref() else {
+                    unreachable!()
+                };
+                tag.clone()
+            }
             Value::String(text) => text
                 .to_scalar_string()
                 .map_err(|_| range("locale contains a lone surrogate"))?,

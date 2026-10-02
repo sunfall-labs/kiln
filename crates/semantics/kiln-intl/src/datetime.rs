@@ -451,16 +451,14 @@ impl DateTimeFormat {
             None => resolution.value("hc").and_then(spelled_hour_cycle),
         };
         preferences.hour_cycle = hour_cycle;
-        let zero_digit = DecimalFormatter::try_new(
-            (&preferences).into(),
-            DecimalFormatterOptions::default(),
-        )
-        .map(|formatter| {
-            formatter
-                .format(&fixed_decimal::Decimal::from(0))
-                .to_string()
-        })
-        .unwrap_or_else(|_| "0".to_owned());
+        let zero_digit =
+            DecimalFormatter::try_new((&preferences).into(), DecimalFormatterOptions::default())
+                .map(|formatter| {
+                    formatter
+                        .format(&fixed_decimal::Decimal::from(0))
+                        .to_string()
+                })
+                .unwrap_or_else(|_| "0".to_owned());
 
         let zone = options
             .time_zone
