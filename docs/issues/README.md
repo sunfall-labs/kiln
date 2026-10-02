@@ -7,12 +7,12 @@ line is the truth.
 
 | | in progress | ready | needs triage | other open | closed |
 |---|---:|---:|---:|---:|---:|
-| **all features** | 4 | 32 | 3 | 11 | 158 |
+| **all features** | 5 | 31 | 3 | 11 | 158 |
 
 | feature | PRD | in progress | ready | needs triage | other open | closed |
 |---|---|---:|---:|---:|---:|---:|
 | [`ambient-ts-prelude`](ambient-ts-prelude/) | PRD: Ambient TypeScript Runtime Bootstrap & Native Intrinsics |  |  |  |  | 1 |
-| [`architecture-consolidation`](architecture-consolidation/) | PRD: Architecture consolidation |  | 13 |  |  | 5 |
+| [`architecture-consolidation`](architecture-consolidation/) | PRD: Architecture consolidation | 1 | 12 |  |  | 5 |
 | [`array-bench`](array-bench/) |  |  |  |  |  |  |
 | [`array-prototype-parity`](array-prototype-parity/) |  |  |  |  |  | 1 |
 | [`array-prototype-writes`](array-prototype-writes/) |  |  |  |  |  |  |

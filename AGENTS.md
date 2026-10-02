@@ -23,7 +23,7 @@ every core; several of them will thrash a machine that `mbx` would have kept bus
 
 `rust@1.97.1` and `mbx` are pinned in the global mise config. Do not install Rust tooling by hand,
 and do not stub a tool to test a fallback: put a stub in a directory and prepend it to `PATH` for
-one command. (NOTES.md records ninety minutes lost to a stubbed `rustup` that resolved back into
+one command. (The archived log, `docs/notes/2026-08-29-to-2026-10-02.md`, records ninety minutes lost to a stubbed `rustup` that resolved back into
 itself.)
 
 ## Measure in a worktree you own
@@ -32,7 +32,7 @@ itself.)
 the single highest-value habit in this repo.
 
 Several sessions write to the main checkout continuously, so a number taken there is a clock
-reading rather than a measurement. Every wrong result recorded in `NOTES.md` on 2026-08-31 — test
+reading rather than a measurement. Every wrong result recorded in the archived log (`docs/notes/`) on 2026-08-31 — test
 counts that changed three times in ten minutes, "main is red" versus "main is green", a
 regression that did not reproduce because the binary was three commits old — came from measuring a
 tree something else was writing. A commit name is not a description of your working tree; `git

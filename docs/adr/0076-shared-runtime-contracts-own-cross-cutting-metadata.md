@@ -1,8 +1,12 @@
-# ADR 0059: Shared runtime contracts own cross-cutting metadata and dispatch policy
+# ADR 0076: Shared runtime contracts own cross-cutting metadata and dispatch policy
 
 ## Status
 
 Accepted.
+
+Filed as ADR 0059 on 2026-09-13, the same day as "Intrinsics are ordinary realm objects built from
+one description", which kept that number. Renumbered 2026-10-02 so each number names one decision;
+every existing reference to ADR 0059 meant the intrinsics ADR. The decision itself is unchanged.
 
 ## Decision
 
