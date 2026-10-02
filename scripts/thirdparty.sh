@@ -198,7 +198,7 @@ trap cleanup EXIT
 
 if [[ $BENCH -eq 1 ]]; then
 python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" "$WAIT_FOR_RELEASE" <<'PY'
-import json, os, statistics, subprocess, sys, time
+import datetime, hashlib, json, os, platform, re, shlex, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str, wait_for_release = sys.argv[1:15]
@@ -219,12 +219,93 @@ if os.path.exists(baseline_path):
     with open(baseline_path) as handle:
         baseline = json.load(handle)
 else:
-    baseline = {"schema": 1, "profile": profile, "threshold_pct": threshold, "bundles": {}}
+    baseline = {"schema": 2, "threshold_pct": threshold, "platforms": {}}
+
+def first_line(argv):
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.splitlines()[0].strip() if result.returncode == 0 and result.stdout.splitlines() else None
+
+def cpu_identity():
+    if platform.system() == "Darwin":
+        return first_line(["sysctl", "-n", "machdep.cpu.brand_string"]) or platform.processor() or "unknown"
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+                for line in cpuinfo:
+                    key, sep, value = line.partition(":")
+                    if sep and key.strip().lower() in {"model name", "hardware"}:
+                        return " ".join(value.split())
+        except OSError:
+            pass
+    return platform.processor() or "unknown"
+
+def key_part(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "unknown"
+
+def current_platform():
+    system = platform.system()
+    machine = platform.machine()
+    cpu_model = cpu_identity()
+    details = {
+        "system": system,
+        "release": platform.release(),
+        "machine": machine,
+        "cpu_model": cpu_model,
+    }
+    key_parts = [system, machine, cpu_model]
+    if system == "Darwin":
+        details["machine_model"] = first_line(["sysctl", "-n", "hw.model"])
+        if details["machine_model"]:
+            key_parts.append(details["machine_model"])
+    key_parts.append(profile)
+    key = "-".join(map(key_part, key_parts))
+    return key, details
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+def git_output(*args):
+    try:
+        result = subprocess.run(["git", *args], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+def tool_version(command):
+    return first_line([*shlex.split(command), "--version"]) if command else None
+
+platform_key, platform_details = current_platform()
+platforms = baseline.get("platforms", {}) if baseline.get("schema") == 2 else {}
+platform_record = platforms.get(platform_key)
+
+if not update:
+    if baseline.get("schema") != 2:
+        sys.exit("thirdparty baseline has no platform provenance (legacy schema); refusing an incomparable timing check")
+    if platform_record is None:
+        available = ", ".join(sorted(platforms)) or "none"
+        sys.exit(
+            f"no thirdparty baseline for platform/profile {platform_key}; available: {available}. "
+            "Cross-platform timings are incomparable; collect this platform with --update after correctness checks."
+        )
+    if platform_record.get("profile") != profile:
+        sys.exit(
+            f"thirdparty baseline profile mismatch for {platform_key}: "
+            f"baseline={platform_record.get('profile')!r}, requested={profile!r}"
+        )
 
 # Determine bundles to measure
 if target_bundles_str:
     bundle_names = [b.strip() for b in target_bundles_str.split(",") if b.strip()]
-elif baseline.get("bundles"):
+elif platform_record and platform_record.get("bundles"):
+    bundle_names = sorted(platform_record["bundles"].keys())
+elif baseline.get("schema") == 1 and update and baseline.get("bundles"):
     bundle_names = sorted(baseline["bundles"].keys())
 else:
     bundle_names = DEFAULT_BASELINE_BUNDLES
@@ -246,6 +327,26 @@ present_bundles = [
     if os.path.exists(os.path.join(bundles_dir, f"{name}.bundle.js"))
 ]
 absent_bundles = [name for name in bundle_names if name not in present_bundles]
+if not update:
+    unverifiable = []
+    changed_inputs = []
+    for name in present_bundles:
+        expected = platform_record.get("bundles", {}).get(name, {}).get("workload_sha256")
+        actual = file_sha256(os.path.join(bundles_dir, f"{name}.bundle.js"))
+        if expected is None:
+            unverifiable.append(name)
+        elif expected != actual:
+            changed_inputs.append(name)
+    if unverifiable or changed_inputs:
+        details = []
+        if unverifiable:
+            details.append("missing workload hashes: " + ", ".join(unverifiable))
+        if changed_inputs:
+            details.append("workload hash changed: " + ", ".join(changed_inputs))
+        sys.exit(
+            f"thirdparty baseline is not comparable on {platform_key}: {'; '.join(details)}. "
+            "Refresh this platform deliberately with --update after reviewing workload changes."
+        )
 deferred_summary = ", ".join(deferred_bundles) if deferred_bundles else "none"
 print(
     f"coverage: suite={suite}, selected={len(bundle_names)} ({len(present_bundles)} present, "
@@ -350,9 +451,13 @@ for index, name in enumerate(bundle_names, 1):
 
     median_ms = round(statistics.median(times), 2)
     min_ms = round(min(times), 2)
-    measured[name] = {"median_ms": median_ms, "min_ms": min_ms}
+    measured[name] = {
+        "median_ms": median_ms,
+        "min_ms": min_ms,
+        "workload_sha256": file_sha256(os.path.join(bundles_dir, f"{name}.bundle.js")),
+    }
 
-    was = baseline.get("bundles", {}).get(name)
+    was = platform_record.get("bundles", {}).get(name) if platform_record else None
     if was and "median_ms" in was:
         was_ms = was["median_ms"]
         diff_ms = median_ms - was_ms
@@ -373,16 +478,41 @@ measurement_elapsed = time.perf_counter() - measurement_started
 print(f"serial warmup/measurement phase completed in {measurement_elapsed:.2f}s", flush=True)
 
 if update:
-    baseline["schema"] = 1
-    baseline["profile"] = profile
+    if baseline.get("schema") == 1:
+        # Preserve an old unqualified file for audit, but never treat its entries as comparable.
+        baseline = {
+            "schema": 2,
+            "threshold_pct": threshold,
+            "platforms": {},
+            "legacy_unqualified": baseline,
+        }
+    baseline["schema"] = 2
     baseline["threshold_pct"] = threshold
-    baseline.setdefault("bundles", {})
-    baseline["bundles"].update(measured)
+    baseline.setdefault("platforms", {})
+    if platform_record is None:
+        platform_record = {
+            "platform": platform_details,
+            "profile": profile,
+            "bundles": {},
+        }
+        baseline["platforms"][platform_key] = platform_record
+    platform_record["platform"] = platform_details
+    platform_record["profile"] = profile
+    platform_record["provenance"] = {
+        "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source_commit": git_output("rev-parse", "HEAD"),
+        "source_diff_sha256": hashlib.sha256((git_output("diff", "--binary", "HEAD") or "").encode()).hexdigest(),
+        "working_tree_dirty": bool(git_output("status", "--porcelain")),
+        "kiln_binary_sha256": file_sha256(kiln) if os.path.isfile(kiln) else None,
+        "rustc_version": tool_version(os.environ.get("RUSTC", "rustc")),
+        "clang_version": tool_version(os.environ.get("CC", "clang")),
+    }
+    platform_record.setdefault("bundles", {}).update(measured)
     os.makedirs(os.path.dirname(os.path.abspath(baseline_path)), exist_ok=True)
     with open(baseline_path, "w") as handle:
         json.dump(baseline, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    print(f"\nwrote {baseline_path}: {len(baseline['bundles'])} bundle(s) recorded")
+    print(f"\nwrote {baseline_path}: platform={platform_key}, {len(platform_record['bundles'])} bundle(s) recorded")
     sys.exit(0)
 
 for line in gains:

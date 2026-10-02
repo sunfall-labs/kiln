@@ -1,4 +1,5 @@
 """Resource bounds and real stream/exit-status comparisons for the fast gate."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -141,6 +142,7 @@ output.chmod(0o755)
             stage_dir = root / "stage"
             runtime_tmpdir.mkdir()
             stage_dir.mkdir()
+            baseline_path = root / "baseline.json"
             build_env_log = root / "build-env.json"
             environment = dict(os.environ, KILN_BIN=str(kiln), KILN_THIRDPARTY_DIR=str(root),
                                KILN_THIRDPARTY_NATIVE="0", KILN_JOBS="1",
@@ -150,7 +152,8 @@ output.chmod(0o755)
                                FIXTURE_BUILD_ENV_LOG=str(build_env_log))
             process = subprocess.Popen(
                 [str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
-                 "--bundles", "fixture", "--passes", "1", "--warmup", "0",
+                 "--bundles", "fixture", "--passes", "1", "--warmup", "0", "--update",
+                 "--baseline-file", str(baseline_path),
                  "--wait-for-release", str(marker)],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
@@ -203,6 +206,55 @@ output.chmod(0o755)
             self.assertEqual(binary_log.read_text(), "run\n" * 3)
             self.assertIn("gate barrier wait completed", "".join(output))
             self.assertIn("serial warmup/measurement phase completed", "".join(output))
+            measured_baseline = json.loads(baseline_path.read_text())
+            self.assertEqual(measured_baseline["schema"], 2)
+            self.assertEqual(len(measured_baseline["platforms"]), 1)
+            platform_key, platform_record = next(iter(measured_baseline["platforms"].items()))
+            self.assertIn("native-release", platform_key)
+            self.assertEqual(platform_record["profile"], "native-release")
+            self.assertTrue(platform_record["platform"]["system"])
+            self.assertTrue(platform_record["platform"]["machine"])
+            self.assertTrue(platform_record["platform"]["cpu_model"])
+            self.assertTrue(platform_record["provenance"]["source_commit"])
+            self.assertTrue(platform_record["provenance"]["rustc_version"])
+            self.assertTrue(platform_record["provenance"]["clang_version"])
+            self.assertEqual(
+                platform_record["bundles"]["fixture"]["workload_sha256"],
+                hashlib.sha256((root / "fixture.bundle.js").read_bytes()).hexdigest(),
+            )
+
+    def test_benchmark_rejects_baseline_from_another_platform_before_building(self):
+        with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-platform-") as directory:
+            root = Path(directory)
+            (root / "fixture.bundle.js").write_text("// fixture bundle\n")
+            kiln_log = root / "kiln.calls"
+            kiln = root / "kiln"
+            kiln.write_text("#!/usr/bin/env python3\nimport os\nopen(os.environ['FIXTURE_KILN_LOG'], 'a').write('build\\n')\n")
+            kiln.chmod(0o755)
+            baseline_path = root / "baseline.json"
+            baseline_path.write_text(json.dumps({
+                "schema": 2,
+                "threshold_pct": 25,
+                "platforms": {
+                    "macos-arm64-apple-m5-pro-native-release": {
+                        "platform": {"system": "Darwin", "machine": "arm64", "cpu_model": "Apple M5 Pro"},
+                        "profile": "native-release",
+                        "provenance": {"status": "inferred"},
+                        "bundles": {"fixture": {"median_ms": 1, "min_ms": 1, "workload_sha256": "unused"}},
+                    }
+                },
+            }))
+            environment = dict(os.environ, KILN_BIN=str(kiln), KILN_THIRDPARTY_DIR=str(root),
+                               KILN_THIRDPARTY_NATIVE="0", KILN_JOBS="1",
+                               FIXTURE_KILN_LOG=str(kiln_log))
+            result = subprocess.run(
+                [str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
+                 "--bundles", "fixture", "--baseline-file", str(baseline_path)],
+                env=environment, capture_output=True, text=True, timeout=20,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Cross-platform timings are incomparable", result.stderr)
+            self.assertFalse(kiln_log.exists(), "a mismatched baseline must be rejected before compilation")
 
 
 if __name__ == "__main__":
