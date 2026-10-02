@@ -386,6 +386,9 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // are open at once, so the numbers are handed out in advance and the branch holding the
     // lower range lands into a hole. Keep the two lists in step.
     const RESERVED_METHOD_IDS: &[u64] = &[442, 443, 444, 445, 446, 447, 448, 449];
+    // Retired, never reused: 494 was `Array.prototype.parallelMap`, now one TypeScript
+    // definition (`kiln-builtins/src/parallel.ts`). Mirrors `RETIRED_METHOD_IDS` in prelude.rs.
+    const RETIRED_METHOD_IDS: &[u64] = &[494];
     let custom_values: Vec<_> = methods
         .keys()
         .copied()
@@ -395,7 +398,11 @@ fn assert_numeric_id_invariants(prelude: &str) {
         .last()
         .expect("prelude declares the append-only method tail");
     let missing_custom: Vec<_> = (APPEND_ONLY_METHOD_BASE..=custom_max)
-        .filter(|value| !methods.contains_key(value) && !RESERVED_METHOD_IDS.contains(value))
+        .filter(|value| {
+            !methods.contains_key(value)
+                && !RESERVED_METHOD_IDS.contains(value)
+                && !RETIRED_METHOD_IDS.contains(value)
+        })
         .collect();
     assert!(
         missing_custom.is_empty(),
@@ -1149,7 +1156,10 @@ fn runtime_prelude_size() {
     // encoding_rs exports (ADR 0060). The C label whitelist and UTF-8-only decode were replaced by
     // glue that calls kiln_text_decoder_label/kiln_text_decode and maps their errors, 103 net
     // source lines for 99 emitted; no runtime section is duplicated. Keep ~120 lines of headroom.
-    const CEILING_LINES: usize = 79_650;
+    // The same day the parallel-family unification (IsCallable checks before the callback walks,
+    // species-aware filter/flatMap, the Reflect refusal paths; method 494 removed) and the
+    // engine-private channel's overlay and realm slot (ADR 0068) added reviewed runtime lines.
+    const CEILING_LINES: usize = 79_850;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
