@@ -517,6 +517,58 @@ int main(void) {
 }
 
 #[test]
+fn weak_key_predicate_handles_fresh_and_compact_symbol_values() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_value key = kiln_c99_copy_text("weak-key-fixture", 16);
+    kiln_value fresh, registered, well_known, object;
+    kiln_value compact_registered;
+    kiln_val compact_fresh;
+    kiln_value compact_fresh_boundary;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+
+    if (kiln_c99_new_symbol(&fresh, key) != KILN_C99_OK || fresh.ptr == NULL) return 2;
+    if (!kiln_c99_can_be_held_weakly(fresh)) return 3;
+    /* Runtime-created symbols carry their payload in ptr. Exercise the compact representation
+     * separately, where the same pointer arrives in bits and ptr is null. */
+    compact_fresh = KILN_VAL_TAG_PTR(KILN_TAG_SYMBOL_PREFIX, fresh.ptr);
+    compact_fresh_boundary = kiln_val_to_boundary(compact_fresh);
+    if (compact_fresh_boundary.tag != KILN_VALUE_SYMBOL ||
+        compact_fresh_boundary.ptr != NULL ||
+        compact_fresh_boundary.bits != (uint64_t)(uintptr_t)fresh.ptr ||
+        !kiln_c99_can_be_held_weakly(compact_fresh_boundary)) return 4;
+
+    if (!kiln_c99_symbol_of_key("@@iterator", 10, &well_known) ||
+        !kiln_c99_can_be_held_weakly(well_known)) return 5;
+    if (kiln_c99_symbol_for(&registered, key) != KILN_C99_OK ||
+        kiln_c99_can_be_held_weakly(registered)) return 6;
+    compact_registered = kiln_val_to_boundary(
+        KILN_VAL_TAG_PTR(KILN_TAG_SYMBOL_PREFIX, registered.ptr));
+    if (compact_registered.tag != KILN_VALUE_SYMBOL || compact_registered.ptr != NULL ||
+        !kiln_c99_can_be_held_weakly(fresh) ||
+        kiln_c99_can_be_held_weakly(compact_registered)) return 7;
+
+    if (kiln_c99_new_object(&object) != KILN_C99_OK ||
+        !kiln_c99_can_be_held_weakly(object) ||
+        kiln_c99_can_be_held_weakly(kiln_c99_number(1.0))) return 8;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "weak-key-symbol-representations");
+    assert!(
+        run.status.success(),
+        "weak-key symbol representations failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn unique_symbols_are_collected_but_property_keys_keep_their_identity() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
