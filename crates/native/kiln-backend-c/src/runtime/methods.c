@@ -159,11 +159,13 @@ int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
     kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
     if (resolve != NULL) {
-        kiln_value process;
-        kiln_value native_modules;
-        kiln_value decorator;
+        kiln_value *process_slot;
+        kiln_value process = kiln_c99_undefined();
+        kiln_value native_modules = kiln_c99_undefined();
+        kiln_value decorator = kiln_c99_undefined();
         kiln_value decorated;
-        int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
+        int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process_slot);
+        if (status == KILN_C99_OK) process = *process_slot;
         if (status == KILN_C99_OK && process.tag == KILN_VALUE_OBJECT) {
             status = kiln_c99_get(NULL, process, "__kilnNativeModules", 19,
                                   &native_modules, 0, NULL);
