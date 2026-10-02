@@ -103,5 +103,6 @@ crates/host/kiln-host-gui/Cargo.toml
 crates/host/kiln-host-gui/src/appkit.rs
 crates/host/kiln-host-gui/src/events.rs
 crates/host/kiln-host-gui/src/ffi.rs
+crates/host/kiln-host-gui/src/gtk.rs
 crates/host/kiln-host-gui/src/layout.rs
 crates/host/kiln-host-gui/src/lib.rs

@@ -85,9 +85,11 @@ one provider archive, `kiln-native-provider-ffi`, carried by the `gui` and `full
 (`full` deliberately stops short of it, so a headless program never links AppKit), and the native
 `node:ffi` engine answers `dlopen("kiln:host-gui")` from the table the archive carries
 (`kiln_host_gui::ffi::exports`). That table is also what keeps the bridge alive through
-whole-archive LTO. The frameworks a `gui` archive adds to the link line are listed in the
-contract (`gui::link_arguments`) and proven at packaging time by linking a probe that references
-every export. `KILN_GUI_LIB` still points a program at a shared library instead, as a developer
+whole-archive LTO. The platform libraries a `gui` archive adds to the link line — AppKit's
+frameworks on macOS, GTK 4 and libwayland-client on Linux — are listed in the contract
+(`gui::link_arguments`) and proven at packaging time by linking a probe that references every
+export. On Linux they are shared libraries: linking a GUI program needs the GTK 4 development
+files, running it needs GTK 4, and a fully static link (`--static`) cannot carry them. `KILN_GUI_LIB` still points a program at a shared library instead, as a developer
 override for iterating on the Rust side.
 
 It has two widget backends behind the same contract (the functions of the stub `backend` module
@@ -138,7 +140,7 @@ the bridge through `kiln_gui_park`):
 * The realm's single park point (`drive_async`) calls the hook's `wait` with the exact time to
   its next timer. With no I/O in flight that is one wait, ended by an OS event, the deadline, or
   a completion from any thread — the completion signal is polled with a waker that calls the
-  hook's thread-safe `wake` (`postEvent:` on AppKit). An idle app uses no CPU and timers fire on
+  hook's thread-safe `wake` (`postEvent:` on AppKit, `g_main_context_wakeup` on GTK). An idle app uses no CPU and timers fire on
   time (measured: within 2 ms; the smoke test holds it under 15 ms).
 * While I/O needs the driver turned (sockets, host tasks), the wait is sliced at 4 ms and the
   driver gets a zero-timeout turn between slices.

@@ -72,6 +72,28 @@ pub fn link_arguments(rust_target: &str) -> &'static [&'static str] {
             "-lobjc",
             "-liconv",
         ]
+    } else if rust_target.contains("-linux-") {
+        // What `rustc --print native-static-libs` reports for a `gui` archive on Linux, less the
+        // C runtime every provider link already has: libwayland-client for the clipboard and
+        // file-dialog portals (`wayland-sys`), then `pkg-config --libs gtk4` for the GTK 4 backend
+        // (`kiln-host-gui`'s default `gtk` feature). Shared libraries, so the linking machine needs
+        // the GTK 4 development files (`libgtk-4-dev`, which brings the Wayland and Vulkan ones)
+        // and the running machine GTK 4.
+        &[
+            "-lwayland-client",
+            "-lgtk-4",
+            "-lpangocairo-1.0",
+            "-lpango-1.0",
+            "-lharfbuzz",
+            "-lgdk_pixbuf-2.0",
+            "-lcairo-gobject",
+            "-lcairo",
+            "-lvulkan",
+            "-lgraphene-1.0",
+            "-lgio-2.0",
+            "-lgobject-2.0",
+            "-lglib-2.0",
+        ]
     } else {
         &[]
     }
@@ -129,11 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn link_arguments_name_frameworks_only_where_the_bridge_links_them() {
+    fn link_arguments_name_platform_libraries_only_where_the_bridge_links_them() {
         assert!(link_arguments("aarch64-apple-darwin").contains(&"Cocoa"));
         assert!(link_arguments("x86_64-apple-darwin").contains(&"-lobjc"));
-        assert!(link_arguments("x86_64-unknown-linux-gnu").is_empty());
-        assert!(link_arguments("aarch64-unknown-linux-musl").is_empty());
+        assert!(link_arguments("x86_64-unknown-linux-gnu").contains(&"-lgtk-4"));
+        assert!(link_arguments("aarch64-unknown-linux-musl").contains(&"-lglib-2.0"));
+        assert!(link_arguments("x86_64-pc-windows-msvc").is_empty());
     }
 
     #[test]
