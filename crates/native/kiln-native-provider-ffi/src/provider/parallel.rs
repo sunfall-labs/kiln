@@ -907,14 +907,7 @@ mod tests {
         );
         // SAFETY: as above.
         assert_eq!(
-            unsafe {
-                kiln_parallel_sort(
-                    ints.as_mut_ptr().cast(),
-                    4,
-                    -1,
-                    SORT_DEFAULT,
-                )
-            },
+            unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), 4, -1, SORT_DEFAULT,) },
             INVALID_ARGUMENT
         );
     }
