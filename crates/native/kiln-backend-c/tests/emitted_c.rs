@@ -1158,8 +1158,9 @@ fn runtime_prelude_size() {
     // source lines for 99 emitted; no runtime section is duplicated. Keep ~120 lines of headroom.
     // The same day the parallel-family unification (IsCallable checks before the callback walks,
     // species-aware filter/flatMap, the Reflect refusal paths; method 494 removed) and the
-    // engine-private channel's overlay and realm slot (ADR 0068) added reviewed runtime lines.
-    const CEILING_LINES: usize = 79_850;
+    // engine-private channel's overlay and realm slot (ADR 0068) added reviewed runtime lines:
+    // 79,797 measured with all three. Keep ~120 lines of headroom.
+    const CEILING_LINES: usize = 79_920;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

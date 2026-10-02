@@ -1004,6 +1004,7 @@ typedef struct kiln_shared_source_field {
 typedef int (*kiln_shared_source_inspect_fn)(void *context, uint64_t object, uint64_t field,
 typedef int (*kiln_shared_source_unit_fn)(void *context, uint64_t string, uint64_t index,
 extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect,
+extern int kiln_shared_graph_refusal(uint32_t kind, const char **text);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -1647,6 +1648,7 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable);
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out);
 static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
 static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
+static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value target,
 static int kiln_c99_has_property_key(kiln_host *host, kiln_value target,
 static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
 static int kiln_c99_temporal_unsupported_key(kiln_value *thrown, const char *owner,
@@ -2754,6 +2756,8 @@ static int kiln_c99_shared_prototype(kiln_value value, kiln_value *out) {
 #define KILN_C99_SHARED_SOURCE_ARRAY UINT64_C(2)
 static uint64_t kiln_c99_shared_source_id(kiln_value value) {
 static kiln_object *kiln_c99_shared_source_store(uint64_t id, kiln_array **array_out) {
+static uint32_t kiln_c99_shared_refusal_kind(kiln_value value) {
+#define KILN_C99_SHARED_REFUSED(kind) (-(16 + (int)(kind)))
 static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_field *field) {
 static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t index,
 static int kiln_c99_shared_source_unit(void *context, uint64_t string, uint64_t index,
@@ -2770,6 +2774,7 @@ static int kiln_c99_text_decoder_utf8(kiln_value value, uint8_t **owned, size_t 
 static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int depth,
 static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
 static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
+static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *message,
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
 static int kiln_c99_buffer_encoding_is(const char *name, size_t length, const char *wanted) {
@@ -3008,6 +3013,7 @@ extern char **environ;
 #define kiln_c99_environ environ
 #endif
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
+static int kiln_c99_private_object(kiln_value *out);
 static const char *const kiln_c99_atomics_names[] = {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
@@ -3051,9 +3057,11 @@ static int kiln_c99_process_object(kiln_value *out) {
 static int kiln_c99_global_object(kiln_value *out) {
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
-static _Thread_local int kiln_c99_kiln_shared_hooks_active;
-static int kiln_c99_kiln_shared_hook_read(kiln_value target, const kiln_string *key,
-int kiln_realm_kiln_shared_hooks(int begin) {
+#define KILN_C99_REALM_SLOT_PRIVATE UINT32_C(13)
+static int kiln_c99_private_object(kiln_value *out) {
+static _Thread_local int kiln_c99_private_hooks_active;
+static int kiln_c99_private_hook_read(kiln_value target, const kiln_string *key,
+int kiln_realm_private_window(int begin) {
 int kiln_realm_kiln_extensions_on(void) {
 static int kiln_c99_global_object_val(kiln_val *out) {
 static int kiln_c99_object_prototype_binding(kiln_host *host, kiln_value *out,
@@ -3160,7 +3168,7 @@ typedef struct {
 static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
 static const unsigned char kiln_c99_builtin_member_is_extension[] = {
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 #define KILN_C99_PRELUDE_LITERAL_KEYS(X) \
@@ -3605,6 +3613,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 #define KILN_C99_WORKER_OP_ACTOR_PREPARE 37
 #define KILN_C99_WORKER_OP_ACTOR_PLAIN_MESSAGE 38
+#define KILN_C99_WORKER_OP_PORT_HOLD 39
+#define KILN_C99_WORKER_OP_PORT_RELEASE 40
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
 static int kiln_c99_prepared_graph_has(kiln_gc_heap *heap, kiln_value handle);
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
@@ -3735,6 +3745,7 @@ static int kiln_c99_crypto_key_public_raw(kiln_value *result, const kiln_value *
 static int kiln_c99_crypto_key_free_raw(kiln_value *result, const kiln_value *args,
 static int kiln_c99_crypto_key_info_raw(kiln_host *host, kiln_value *result, const kiln_value *args,
 static int kiln_c99_crypto_key_export_raw(kiln_value *result, const kiln_value *args,
+static int kiln_c99_array_species_create(kiln_host *host, kiln_value receiver, double length,
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
 #if KILN_RETAIN_GROUP_NODE_EVENT
 #endif
@@ -3847,6 +3858,9 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
 static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, const char *name,
 static int kiln_c99_callable_intrinsic_name_length(kiln_host *host, kiln_value target,
+#define KILN_C99_DEFINE_REFUSAL(throw_expr) \
+static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value target,
+#undef KILN_C99_DEFINE_REFUSAL
 static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
 int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key,
