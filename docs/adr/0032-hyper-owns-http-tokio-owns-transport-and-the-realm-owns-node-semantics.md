@@ -8,6 +8,10 @@ This refines ADRs 0028, 0029, and 0031. It replaces Kiln's incremental HTTP/1 pa
 once the migration reaches each connection path; it does not replace the realm scheduler,
 HostOps, or Node stream state machines.
 
+ADR 0046 later replaces the byte-transport bridge described below with Hyper tasks over
+host-owned transports. The ownership split remains; bridge-specific types and APIs below are
+historical where ADR 0046 supersedes them.
+
 ## Context
 
 Kiln now runs `node:http` servers and `http.get` over Tokio-owned TCP resources. The first vertical
@@ -40,7 +44,7 @@ There is one Tokio runtime and one realm completion ingress. Hyper connection fu
 tasks on the realm's existing current-thread runtime. They never call JavaScript directly; decoded
 protocol events are queued back to the realm with the ordinary monotonic submission sequence.
 
-### One byte-transport bridge serves live and deterministic execution
+### Historical bridge design (superseded by ADR 0046)
 
 The runtime owns a private duplex byte channel for each HTTP connection. Its Hyper-facing half
 implements Hyper's Tokio I/O traits. Its realm-facing half translates demand and produced bytes to
@@ -58,25 +62,23 @@ second user-visible backpressure model.
 same operations and identities. Deterministic conformance therefore runs the real Hyper connection
 future on paused Tokio time without binding a port or installing a mock executor.
 
-The bridge represents an attached connection as `HttpResourceId` and publishes
-`HttpStreamAction`, not the generic Node stream action. HTTP may select typed read, write, and
-shutdown operations directly, but the action type has no raw `CloseResource` operation. A
-graceful or abort transition instead mints a non-cloneable `HttpCloseCapability` whose
-constructor is private to the transport module; one runtime-owned adapter consumes that
-capability when it lowers the transition to the unchanged HostOps close operation and registers
-its completion.
-Language adapters can inspect the resource for correlation, but cannot fabricate or duplicate
-authority to close an HTTP-owned resource. This nominal boundary makes bypassing Hyper's
-drain/abort lifecycle a Rust type error while preserving the provider and C ABIs. Compile-fail
-tests pin both the missing raw-close operation and the opaque close capability. Runtime
-state-machine tests still prove the temporal property that queued and in-flight writes complete
-before a graceful close.
+The original bridge represented an attached connection as `HttpResourceId` and published
+`HttpStreamAction`. Its close transition minted a non-cloneable `HttpCloseCapability`, and
+compile-fail doctests pinned that nominal API. ADR 0046 replaced the bridge and deleted these
+types. They are historical design details, not guarantees of the current API.
 
-The complete cross-crate contract is available as one developer command:
+The active contract is runtime ownership. The language adapter asks the realm runtime to close a
+`ResourceId`; the runtime accepts the request only when its HTTP server or client engine owns that
+resource. An unowned resource returns `false` and does not create host work. The provider also
+rejects a raw `CloseResource` operation for a resource registered to HTTP. Runtime and native
+tests pin these ownership checks, while the scripted and socket tests pin graceful-drain and abort
+ordering. This is an ownership and dispatch contract, not a compile-time unforgeable capability.
+
+The current runtime-ownership and close-ordering checks are available as one developer command:
 
     bash scripts/check-http-close-contract.sh
 
-It checks the compile-time authority, deterministic transport ordering, provider escape-hatch
+It checks rejection of unowned resources, deterministic transport ordering, provider escape-hatch
 denial, emitted-C routing, and the real native graceful and abort regressions in that order.
 
 ### Migration is event-shaped, not API-shaped

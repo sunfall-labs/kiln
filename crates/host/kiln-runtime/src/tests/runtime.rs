@@ -2799,6 +2799,27 @@ fn scripted_runtime_with(
     (runtime, log)
 }
 
+#[test]
+fn unattached_http_resource_cannot_be_closed_or_keep_the_realm_alive() {
+    let resource = ResourceId::new(49);
+    let (mut runtime, _log) = scripted_http_runtime(resource, &[], false);
+
+    assert!(!runtime.http_owns(resource));
+    for mode in [HttpCloseMode::Graceful, HttpCloseMode::Abort] {
+        assert!(
+            !runtime.http_close(resource, mode),
+            "only an HTTP engine that owns the resource may close it"
+        );
+    }
+
+    // A raw CloseResource fallback would be recorded by ScriptedHost as pending unexpected
+    // work. Rejection must leave both transport ownership and scheduler liveness untouched.
+    assert!(!runtime.has_pending_host_work());
+    assert!(!runtime.has_referenced_host_work());
+    assert!(!runtime.has_live_http_work());
+    assert!(!runtime.http_owns(resource));
+}
+
 /// Let the runtime's real turn selector drive engine tasks and collect what they queued.
 fn drain_server_events<H: RealmHostProvider>(
     runtime: &mut RealmRuntime<H>,

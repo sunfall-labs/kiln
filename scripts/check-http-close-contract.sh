@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Exercise the complete Node HTTP close contract without running the whole workspace. The
-# invariant crosses Rust types, the provider FFI, emitted C and a real native socket, so keeping
-# the commands together prevents a local change from validating only the layer it happened to
-# touch.
+# invariant crosses runtime ownership, the provider FFI, emitted C and a real native socket.
+# Keeping the commands together prevents a local change from validating only the layer it happened
+# to touch.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
@@ -11,8 +11,9 @@ set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 cd "$(kiln_repo_root)"
 
-kiln_say "http-close contract: close authority is unforgeable"
-kiln_cargo test --locked -p kiln-runtime --doc
+kiln_say "http-close contract: unattached resources cannot be closed or keep the realm alive"
+kiln_cargo test --locked -p kiln-runtime \
+	unattached_http_resource_cannot_be_closed_or_keep_the_realm_alive
 
 kiln_say "http-close contract: graceful close drains the scripted response"
 kiln_cargo test --locked -p kiln-runtime \
