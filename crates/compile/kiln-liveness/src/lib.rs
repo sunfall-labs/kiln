@@ -388,14 +388,9 @@ fn mark_resolved_export_path_live(
     // `reduce_to_live` rewrites the importing edge to the canonical provider when this path is
     // absent from `live`. Keep the module itself only when it is the export's actual provider or
     // package metadata does not license skipping its evaluation.
-    let resolved_provider_is_owner = match resolved {
-        ResolvedExport::Local { module, .. }
-        | ResolvedExport::CommonJsNamed { module, .. }
-        | ResolvedExport::Namespace { module } => module == owner,
-        ResolvedExport::Ambiguous => true,
-    };
-    let retain_owner = resolved_provider_is_owner
-        || !package_declares_no_side_effects(&node.path, graph.project_root());
+    let can_skip_owner = matches!(resolved, ResolvedExport::Local { module, .. } if module != owner)
+        && package_declares_no_side_effects(&node.path, graph.project_root());
+    let retain_owner = !can_skip_owner;
 
     if let Some(export) = node.program.exports.iter().find(|export| {
         !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
