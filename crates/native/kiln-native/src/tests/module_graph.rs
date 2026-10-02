@@ -199,6 +199,75 @@ fn native_import_meta_reparse_preserves_indirect_export_origin() {
 }
 
 #[test]
+fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-release-reexport-origin");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { publicName } from './barrel.mjs'; console.log(publicName());",
+    )
+    .expect("write entry");
+    let barrel = project.join("barrel.mjs");
+    fs::write(
+        &barrel,
+        "export { implementation as deadA } from './provider.mjs'; export { implementation as deadB } from './provider.mjs'; export { implementation as deadC } from './provider.mjs'; export { implementation as publicName } from './provider.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write barrel");
+    let provider = project.join("provider.mjs");
+    fs::write(
+        &provider,
+        "export function implementation() { return 42; } export function unused() { return 0; }",
+    )
+    .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::production())
+            .expect("compute release demand");
+    let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
+    let previous = reduced
+        .resolved_export(&barrel, "publicName")
+        .expect("initial indirect export")
+        .clone();
+    assert!(matches!(
+        &previous,
+        ResolvedExport::Local { module, .. } if module == &provider
+    ));
+
+    let (specialized, _) = dce_release_graph(&reduced, &demand);
+    assert_eq!(
+        specialized.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "release DCE must keep the public export wired to its original provider"
+    );
+    let specialized_barrel = specialized.module(&barrel).expect("specialized barrel");
+    let export = specialized_barrel
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("retained public export");
+    let backing_import = specialized_barrel
+        .program
+        .imports
+        .iter()
+        .find(|import| import.local_slot == export.local_slot)
+        .expect("re-export import row remains linked");
+    assert_eq!(backing_import.source, "./provider.mjs");
+    assert_eq!(backing_import.imported, "implementation");
+}
+
+#[test]
 fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
     let root = TestDirectory::new("kiln-native-loader-path");
     let real = root.path.join("real");

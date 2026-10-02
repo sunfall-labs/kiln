@@ -433,6 +433,13 @@ fn dce_release_graph(
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
 
+        // Source-level DCE can renumber the compiler-generated locals used to represent
+        // indirect exports. Reconcile those links by public export name, just as the later
+        // import.meta reparse does, rather than relying on a generated local name surviving
+        // the reparse. Otherwise a barrel can retain the export row while losing the import
+        // that supplies its value, which leaves the slot uninitialized in release builds.
+        restore_reexport_imports(&node.program, &program);
+
         let replacement_slots = export_slots_for_names(&program.exports, &demanded_names);
         let replacement_names = program
             .exports
@@ -454,6 +461,45 @@ fn dce_release_graph(
         // failure. An unfamiliar export/re-export shape keeps the already
         // reduced graph and its original slot numbering.
         Err(_) => (graph.clone(), demand.clone()),
+    }
+}
+
+fn restore_reexport_imports(previous: &kiln_ir::Program, reparsed: &mut kiln_ir::Program) {
+    for export in &reparsed.exports {
+        let Some(previous_export) = previous
+            .exports
+            .iter()
+            .find(|previous| previous.exported == export.exported)
+        else {
+            continue;
+        };
+        let Some(previous_import) = previous
+            .imports
+            .iter()
+            .find(|import| import.local_slot == previous_export.local_slot)
+        else {
+            continue;
+        };
+
+        if let Some(import) = reparsed
+            .imports
+            .iter_mut()
+            .find(|import| import.local_slot == export.local_slot)
+        {
+            import.source.clone_from(&previous_import.source);
+            import.imported.clone_from(&previous_import.imported);
+        } else {
+            reparsed.imports.push(kiln_ir::ImportBinding {
+                source: previous_import.source.clone(),
+                imported: previous_import.imported.clone(),
+                local: format!(
+                    "{}release-reexport-{}*",
+                    kiln_ir::REEXPORT_LOCAL_PREFIX,
+                    reparsed.imports.len()
+                ),
+                local_slot: export.local_slot,
+            });
+        }
     }
 }
 
