@@ -2449,6 +2449,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 self.emit_http_server(state, "close", vec![], instruction)
             }
             ServerAction::Connection(accepted) => {
+                // The accept completion can land after `server.close()` has begun, or finished
+                // when no connection was tracked yet. Node never emits `connection` for a peer
+                // its closed listener did not accept; the kernel resets it. Close the late
+                // resource instead of publishing a socket on a server whose wrapper is retired.
+                if !state.borrow().driver.accepts_connections() {
+                    return self.close_late_connect_resource(accepted.resource.id, instruction);
+                }
                 let protocol = state.borrow().protocol;
                 // HTTP and raw TCP retain one socket identity and one transport owner. The
                 // parser owns reads until upgrade; socket writes already need that owner while
@@ -3135,6 +3142,29 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             StreamAction::Event(StreamEvent::Error) => Ok(()),
             StreamAction::Error(error) => {
                 let error = self.node_error_value(error);
+                // A transport failure on a raw socket (a `net` client, an accepted `net`
+                // connection or an upgraded one) is that socket's `error` event, as in Node. Only
+                // the HTTP parser's connections report it as the server's `clientError`; a `net`
+                // client's owner is a placeholder with no wrapper, so emitting there reached an
+                // `undefined` receiver and aborted the realm.
+                let raw_socket = {
+                    let server = server.borrow();
+                    server
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
+                        .is_some_and(|stream| !stream.runtime_http)
+                };
+                if raw_socket && let Some(socket) = node_net_socket_value(server, resource) {
+                    return self
+                        .dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &socket,
+                            &[Value::String("error".into()), error],
+                            instruction,
+                        )
+                        .map(|_| ());
+                }
                 self.emit_http_server(server, "clientError", vec![error], instruction)
             }
         }

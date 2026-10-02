@@ -12,7 +12,10 @@ server.listen(19840, '127.0.0.1', () => {
     if (ready !== false) throw new Error('a large corked write failed to apply backpressure');
     socket.uncork();
     socket.end();
-    server.close();
     console.log('corked backpressure honored');
   });
+  // Close the listener only once the connection is finished. Closing it inside the connect
+  // callback races the accept of this very connection: an unaccepted peer is reset, and both
+  // node and kiln then report ECONNRESET on the client instead of the line above.
+  socket.on('close', () => server.close());
 });
