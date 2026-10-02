@@ -73,6 +73,11 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
         owner: "kiln-native-provider-ffi foreign interface",
         kind: OwnershipKind::ForeignInterface,
     },
+    GroupOwnership {
+        group: "date",
+        owner: "kiln-date-core",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
 ];
 
 /// Expand the private provider ABI entries as `(feature, symbol, signature)` tuples.
@@ -343,7 +348,7 @@ mod tests {
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
         assert_eq!(PROVIDER_ABI_VERSION, 71);
-        assert_eq!(PROVIDER_EXPORTS.len(), 176);
+        assert_eq!(PROVIDER_EXPORTS.len(), 179);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }
