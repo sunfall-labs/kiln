@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // Nested captures must lower completely in native-release's literal matcher.
 const cases = [
   [/^((a(b)?))$/, 'a'],

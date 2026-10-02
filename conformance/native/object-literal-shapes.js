@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // Object literals with static keys are built straight into the shape their site learned the
 // first time, instead of one transition per member. Every literal below runs several times from
 // one site, so the later iterations take the remembered shape; the forms the remembered shape
