@@ -789,10 +789,12 @@
              * Read through the ordinary chain walk, so an accessor on a prototype runs -- the
              * usual spelling is a getter on the class rather than a field on each instance.
              *
-             * Only for an object, because only an object can carry one. A primitive's tag comes
-             * from its kind and asking it for a property would be a conversion the operation does
-             * not make. */
-            if (receiver.tag == KILN_VALUE_OBJECT || receiver.tag == KILN_VALUE_SHARED) {
+             * Callable and builtin values are objects too, so their inherited kind tags (for
+             * example AsyncFunction.prototype[@@toStringTag]) must participate in this Get.
+             * Primitive tags still come from their kind without a property conversion. */
+            if (receiver.tag == KILN_VALUE_OBJECT || receiver.tag == KILN_VALUE_SHARED ||
+                receiver.tag == KILN_VALUE_FUNCTION || receiver.tag == KILN_VALUE_METHOD ||
+                receiver.tag == KILN_VALUE_BOUND || receiver.tag == KILN_VALUE_BUILTIN) {
                 int status = kiln_c99_probe_symbol(host, receiver, "@@toStringTag", 13, &custom, depth,
                                           thrown);
                 if (status != KILN_C99_OK) {
