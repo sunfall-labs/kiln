@@ -143,7 +143,7 @@ while [[ $# -gt 0 ]]; do
 			echo ""
 			echo "Options:"
 			echo "  --bench, --timing, --baseline   Time thirdparty bundles and verify against baseline"
-			echo "  --update                        Regenerate the full baseline (unless --bundles is set)"
+			echo "  --update                        Update this platform's baseline, preserving other platforms"
 			echo "  --threshold <pct>               Regression threshold percentage (default: 25)"
 			echo "  --min-delta-ms <ms>             Minimum absolute delta in ms to consider regression (default: 3.0)"
 			echo "  --baseline-file <path>          Path to baseline JSON (default: bench/results/thirdparty-baseline.json)"
