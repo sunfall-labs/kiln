@@ -282,8 +282,8 @@ module.exports = { loads: globalThis.__loads };"#,
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
-    let expected_url = url::Url::from_file_path(&dev.output)
-        .expect("special-character executable path becomes a file URL")
+    let expected_url = url::Url::from_file_path(&entry)
+        .expect("special-character source entry becomes a file URL")
         .to_string();
     let expected_identity_url = url::Url::from_file_path(&identity_module)
         .expect("special-character importer becomes a file URL")
@@ -320,10 +320,9 @@ module.exports = { loads: globalThis.__loads };"#,
         String::from_utf8_lossy(&release_run.stdout),
         String::from_utf8_lossy(&release_run.stderr)
     );
-    let release_url = url::Url::from_file_path(&release.output)
-        .expect("release executable path becomes a file URL")
-        .to_string();
-    let expected_release_stdout = format!("{release_url}\n{expected_tail}");
+    // The native entry's `import.meta` keeps the source identity used for graph planning in both
+    // profiles; it does not change to the executable path after linking.
+    let expected_release_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
         String::from_utf8(release_run.stdout).expect("release stdout is UTF-8"),
         expected_release_stdout,
