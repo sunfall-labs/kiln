@@ -42,9 +42,10 @@ behave differently from Node.**
 4. **On by default, with one switch to remove them all.** `kiln build --no-kiln-extensions` for a
    binary, and `KILN_EXTENSIONS=0` at run time for either engine, install exactly Node's surface.
    The switch is for the rare program that audits the built-ins; nobody should need it otherwise.
-5. **One definition.** The engines own the extension. A package that also offers it
-   (`@kiln/concurrency`) defines its fallback only when the method is absent, so under kiln there
-   are never two definitions competing.
+5. **One definition.** The engines own the extension. A package that also offers it defines its
+   fallback only when the method is absent, so under kiln there are never two definitions
+   competing. (Since 2026-10-02 no kiln package offers one: `@kiln/concurrency` is removed, and
+   `@kiln/types` only declares the engine's members.)
 6. **Proven, not argued.** Test262, `conformance/thirdparty` and the deploy corpus
    (`.scratch/deploy-with-kiln/`) run with extensions installed and must stay identical to Node. A
    regression an extension causes fails the gate like any other divergence.

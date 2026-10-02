@@ -121,6 +121,50 @@ Use [the capacity benchmark](../bench/concurrency/README.md) on your deployment
 machine when choosing actor counts; these figures are measured limits of this
 implementation, not API limits.
 
+## Errors
+
+A call rejects with one of:
+
+- `ActorRemoteError` -- the method threw. `remoteName` is the name of what it
+  threw, and `cause` a clone of its cause when that could be cloned.
+- `ActorClosedError` -- the actor was stopped or its realm ended (an uncaught
+  error, `process.exit`), including for calls already in flight.
+- `DOMException` named `DataCloneError` -- an argument or result could not
+  cross, as `structuredClone` would refuse it. The actor keeps running.
+- the signal's reason, when the call's `AbortSignal` aborts it.
+
+Both error classes are exported from `kiln:actors`, so `error instanceof
+ActorClosedError` works. A constructor's arguments travel like a call's, and a
+constructor that throws rejects `spawnActor` with `ActorRemoteError`.
+
+## Types
+
+`@kiln/types` declares `kiln:actors` and kiln's other modules; add it to
+`compilerOptions.types`. `ActorRef<T>.call` accepts only `T`'s public methods
+with their argument types and resolves to their awaited results.
+
+## Using an actor from Effect
+
+An actor is a scoped resource: acquire it with `spawnActor` and release it with
+`owner.stop()`. No adapter package is needed.
+
+```ts
+import { Effect, Layer, Context } from "effect";
+import { spawnActor, type ActorRef } from "kiln:actors";
+import type { Counter } from "./counter.ts";
+
+class Counters extends Context.Service<Counters, ActorRef<Counter>>()("Counters") {}
+
+const CountersLive = Layer.effect(
+  Counters,
+  Effect.acquireRelease(
+    Effect.promise(() => spawnActor<Counter>({
+      module: new URL("./counter.ts", import.meta.url), export: "Counter", args: [0],
+    })),
+    (owner) => Effect.promise(() => owner.stop()),
+  ).pipe(Effect.map((owner) => owner.ref)),
+);
+```
+
 These modules are kiln extensions. `KILN_EXTENSIONS=0` removes them without
-changing Node's built-in surface. `@kiln/concurrency` re-exports the actor API
-for migration from its former in-realm proxy API.
+changing Node's built-in surface.

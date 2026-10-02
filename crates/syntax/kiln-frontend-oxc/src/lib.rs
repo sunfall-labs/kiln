@@ -1270,7 +1270,7 @@ fn worker_script_specifiers(
 /// (ADR 0072): relative to this file (`./x.mjs`) or absolute.
 ///
 /// The call is found by its binding, not its spelling: `spawnActor` imported from
-/// `kiln:actors` (or the `@kiln/concurrency` re-export) under any local name, a namespace or
+/// `kiln:actors` under any local name, a namespace or
 /// CommonJS module object's `.spawnActor`, and a destructured `require`. A call spelled
 /// `spawnActor` that resolves to none of those is still read, as before: a program's own wrapper
 /// that forwards to the engine is common, and reading one that does not only links a module
@@ -1283,12 +1283,8 @@ fn actor_module_requests(
     semantic: &oxc_semantic::Semantic<'_>,
 ) -> Vec<String> {
     let scoping = semantic.scoping();
-    let (spawn_symbols, namespace_symbols) = imported_bindings(
-        program,
-        semantic,
-        &["kiln:actors", "@kiln/concurrency"],
-        "spawnActor",
-    );
+    let (spawn_symbols, namespace_symbols) =
+        imported_bindings(program, semantic, &["kiln:actors"], "spawnActor");
     let mut out = Vec::new();
     for node in semantic.nodes() {
         let AstKind::CallExpression(call) = node.kind() else {
@@ -6171,9 +6167,9 @@ mod tests {
     fn actor_modules_follow_commonjs_bindings() {
         let source = r#"
             const { spawnActor: start } = require("kiln:actors");
-            const concurrency = require("@kiln/concurrency");
+            const actors = require("kiln:actors");
             start({ module: new URL("./destructured.mjs", import.meta.url), export: "A" });
-            concurrency.spawnActor({ module: new URL("./module-object.mjs", import.meta.url), export: "A" });
+            actors.spawnActor({ module: new URL("./module-object.mjs", import.meta.url), export: "A" });
         "#;
         let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
             .into_iter()

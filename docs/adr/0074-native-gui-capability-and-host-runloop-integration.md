@@ -196,7 +196,7 @@ run time, the native build does not yet link it: shipping a GUI binary means shi
   `KILN_GUI_SNAPSHOT=out.png ./program` writes the first window of a `runApp` program to a PNG
   half a second after it is shown, on either backend.
 * `cargo test -p kiln-host-gui` — style parsing, layout, the event queue.
-* `scripts/gen-gui-types.sh --check` — the published declarations match the implementation and
+* `scripts/gen-kiln-types.sh --check` — the published declarations (`@kiln/types`) match the implementation and
   the examples type-check against them.
 
 ## Not done yet

@@ -6,11 +6,13 @@
 const nativeIsShared: ((value: any) => boolean) | undefined =
   (globalThis as any).structuredClone?.[Symbol.for("kiln.structuredClone")]?.isShared;
 
+/** Base class of every actor: `spawnActor` constructs a subclass in its own realm. */
 export abstract class Actor {}
 // The module graph can evaluate this internal module in more than one dynamic-import plan.
 // A global symbol marks the prototype chain across those plans without sharing mutable state.
 Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
+/** @internal */
 export type Ticket = {
   readonly value: any;
   readonly consumed: boolean;
@@ -88,6 +90,7 @@ function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {
   }
 }
 
+/** Run `factory` and hold its graph so `transfer` can move it to an actor without a copy. */
 export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
@@ -128,6 +131,7 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   return handle;
 }
 
+/** Snapshot a plain data graph for an actor call; `value` stays usable. */
 export function prepareTransfer<T>(value: T): Isolated<T> {
   if (value === null || typeof value !== "object") {
     throw dataCloneError("prepareTransfer requires an ordinary object or array graph");
@@ -146,6 +150,10 @@ export function prepareTransfer<T>(value: T): Isolated<T> {
   return handle;
 }
 
+/** A one-use ticket an actor call consumes when the actor accepts it: an isolated or prepared
+ *  graph moves to the actor, an `ArrayBuffer` is detached here and arrives without a copy. */
+export function transfer<T>(value: Isolated<T>): TransferTicket<T>;
+export function transfer(value: ArrayBuffer): TransferTicket<ArrayBuffer>;
 export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T> {
   const markedHandle = value !== null && typeof value === "object"
     && (value as any)[isolatedMark] === true;
@@ -187,6 +195,7 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
   return ticket;
 }
 
+/** @internal */
 export function prepareActorMessage(
   value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>(),
   onGraphTicket?: (handle: any, ticket: Ticket) => any,
@@ -258,6 +267,7 @@ export function prepareActorMessage(
   return copy;
 }
 
+/** @internal */
 export function consumeActorTickets(consumed: Ticket[]): void {
   for (const ticket of consumed) ticket.consume();
 }

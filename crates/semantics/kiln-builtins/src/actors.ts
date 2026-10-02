@@ -293,11 +293,15 @@ function invoke(address: any, method: any, args: any, options: { signal?: AbortS
   });
 }
 
+/** A reference to the actor `address` names; any realm may hold one. Only the owner can stop it. */
 export function connectActor<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
   senderFor(address);
   return reference(address);
 }
 
+/** Construct `options.export` of `options.module` (an absolute path or URL) in a realm of its own.
+ *  Its constructor receives `options.args` as a call would; calls queue in a mailbox of
+ *  `mailboxCapacity` (default 64). */
 export async function spawnActor<T extends Actor>(options: {
   module: string | URL;
   export: string;

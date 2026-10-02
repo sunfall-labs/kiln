@@ -14,10 +14,13 @@ if (typeof nativeShare !== "function" || typeof nativeIsShared !== "function") {
   throw new Error("kiln:shared requires enabled Kiln extensions");
 }
 
+/** A frozen copy of a plain data graph that every realm -- workers, actors -- reads without a
+ *  copy. Sharing a shared value answers it; functions, accessors and class instances refuse. */
 export function share<T>(value: T): Shared<T> {
   return nativeShare(value);
 }
 
+/** Whether `value` is a graph `share` made. */
 export function isShared(value: unknown): boolean {
   return nativeIsShared(value);
 }

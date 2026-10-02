@@ -91,9 +91,9 @@ run = "./scripts/check-http-close-contract.sh"
 description = "kiln:gui against the real window system: clicks, timers, resize, close (macOS)"
 run = "./scripts/gui-smoke.sh"
 
-[tasks.gui-types]
-description = "Check the published kiln:gui declarations match gui.ts and the examples type-check"
-run = "./scripts/gen-gui-types.sh --check"
+[tasks.kiln-types]
+description = "Check @kiln/types matches the engine's sources; its usage test and the GUI examples type-check"
+run = "./scripts/gen-kiln-types.sh --check"
 
 [tasks.silent-undefined]
 description = "The expensive class: a native member read answering undefined (several hundred compiles)"

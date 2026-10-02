@@ -1,0 +1,13 @@
+{
+  "name": "@kiln/types",
+  "version": "0.3.0",
+  "description": "TypeScript declarations for kiln's own modules -- kiln:gui (and its JSX runtime), kiln:actors, kiln:shared, kiln:process -- and its parallel collection methods. Generated from the engine's sources.",
+  "types": "index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./index.d.ts"
+    }
+  },
+  "files": ["*.d.ts"]
+}
