@@ -85,11 +85,6 @@ crates/native/kiln-native-provider-ffi/src/provider/regexp_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/workers.rs
-crates/host/kiln-host-gui/Cargo.toml
-crates/host/kiln-host-gui/src/appkit.rs
-crates/host/kiln-host-gui/src/ffi.rs
-crates/host/kiln-host-gui/src/layout.rs
-crates/host/kiln-host-gui/src/lib.rs
 crates/native/kiln-native-provider-ffi/src/provider/date.rs
 crates/native/kiln-native-provider-ffi/src/provider/key_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/keys.rs
@@ -104,3 +99,9 @@ crates/foundation/kiln-key-core/Cargo.toml
 crates/host/kiln-shared-graph/Cargo.toml
 crates/semantics/kiln-regexp/Cargo.toml
 crates/semantics/kiln-intl/src/casemap.rs
+crates/host/kiln-host-gui/Cargo.toml
+crates/host/kiln-host-gui/src/appkit.rs
+crates/host/kiln-host-gui/src/events.rs
+crates/host/kiln-host-gui/src/ffi.rs
+crates/host/kiln-host-gui/src/layout.rs
+crates/host/kiln-host-gui/src/lib.rs

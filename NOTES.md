@@ -5990,9 +5990,11 @@ inside the checkout that built the cdylib and died three frames from the cause a
 bridge is now a feature of the one provider archive (`gui = ["ffi", "dep:kiln-host-gui"]`),
 carried by the `gui` and new `full-gui` variants, and `kiln_ffi_open("kiln:host-gui")` resolves
 from a table the archive carries (`kiln_host_gui::ffi::exports`). `full` stops short of `gui` so
-a headless `hello.ts` still links only `libSystem`; `examples/gui-mac-demo.ts` built natively
-runs from an unrelated directory and links Cocoa, AppKit, Foundation, CoreFoundation,
-CoreGraphics, Carbon, libobjc and libiconv directly (`otool -L`). Schema 5 manifests carry
+a headless `hello.ts` still links only `libSystem`; `examples/gui-counter.tsx` built natively
+runs from an unrelated directory without the headless fallback warning and links Cocoa, AppKit,
+Foundation, CoreFoundation, CoreGraphics, Carbon, libobjc and libiconv directly (`otool -L`).
+Rebased onto the kiln:gui rewrite (ABI v3): the table lists its 27 exports, `openNative()` opens
+`kiln:host-gui` first, and `KILN_GUI_LIB` is the override. Schema 5 manifests carry
 `link_arguments`; the contract owns the list and the packager proves it. Details in AGENTS.md
 ("The host GUI bridge is linked in") and the ADR 0074 amendment.
 
@@ -6021,6 +6023,5 @@ empty project cache (`rm -rf .kiln` in a scratch project), never in a checkout t
 anything, and never while a provider LTO build is running beside it -- the same build read
 6.2 s of emission under load and 1.1 s idle.
 
-Not done: `examples/gui-mac-studio.tsx` fails resolution on both engines with "could not find
-package `kiln`" (the `@jsxImportSource kiln` pragma); it did before this branch too, and it is a
-resolver question, not a linking one.
+The `@jsxImportSource kiln` resolution failure noted while this was in flight went away with the
+rewrite, which spells the runtime `kiln:gui/jsx-runtime` only.

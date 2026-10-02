@@ -1893,7 +1893,7 @@ fn provider_capability_demand_is_typed_and_conservative() {
         "main.mjs",
         &[(
             "main.mjs",
-            "import { systemTheme } from 'kiln:gui';\nconsole.log(typeof systemTheme);\n",
+            "import { currentHost } from 'kiln:gui';\nconsole.log(typeof currentHost);\n",
         )],
     );
     assert!(gui.contains(ProviderCapability::Gui), "{:?}", gui.names());

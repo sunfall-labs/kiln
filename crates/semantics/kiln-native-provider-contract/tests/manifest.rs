@@ -32,7 +32,10 @@ fn full_and_common_manifests_round_trip_and_match_source_identity() {
         );
         assert_eq!(source.archive, variant.archive());
         assert_eq!(
-            source.exports.last().map(String::as_str) == Some("kiln_gui_appkit_poll_event"),
+            source.exports.last().map(String::as_str)
+                == kiln_native_provider_contract::gui::GUI_EXPORTS
+                    .last()
+                    .copied(),
             variant.capabilities().contains(ProviderCapability::Gui),
             "{variant:?} must list the GUI bridge's exports exactly when it declares gui"
         );
@@ -136,7 +139,11 @@ fn manifest_cli_rejects_invalid_variant_and_argument_counts() {
     let manifest: ProviderManifest =
         serde_json::from_slice(&linked.stdout).expect("full-gui manifest");
     assert_eq!(manifest.link_arguments, ["-framework", "Cocoa", "-lobjc"]);
-    assert!(manifest.exports.contains(&"kiln_gui_get_theme".to_owned()));
+    assert!(
+        manifest
+            .exports
+            .contains(&"kiln_gui_abi_version".to_owned())
+    );
 }
 
 #[test]
