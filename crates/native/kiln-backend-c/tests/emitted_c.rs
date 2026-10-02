@@ -1130,7 +1130,10 @@ fn runtime_prelude_size() {
     // Shared exotic spread snapshots, named array deletion and live namespace enumeration
     // bring the inspected prelude to 79,082 lines; runtime sections are still emitted once.
     // Typed-array indexed descriptor projection and array deletion invariants add 43 lines.
-    const CEILING_LINES: usize = 79_140;
+    // Reviewed realm-private dictionary index: 104 runtime/header lines for ordinal hashing,
+    // malloc ownership, mutation invalidation and profile accounting. No built-in is added;
+    // each section is emitted once. The inspected total is 79,165 lines.
+    const CEILING_LINES: usize = 79_180;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

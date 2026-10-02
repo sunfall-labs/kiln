@@ -1044,6 +1044,7 @@ typedef struct kiln_sealed_values {
 #define KILN_C99_SEALED_ENV_CODE (UINT64_MAX - UINT64_C(1))
 #define KILN_C99_INLINE_SLOTS 8
 enum {
+typedef struct kiln_dictionary_index {
 typedef struct kiln_object {
 typedef struct kiln_c99_candidate_object_properties {
 static inline kiln_c99_candidate_object_properties *kiln_c99_object_candidate_header(
@@ -1052,6 +1053,7 @@ static inline kiln_c99_candidate_object_slots *kiln_c99_object_candidate_slots_h
 typedef struct kiln_c99_candidate_object_elements {
 static inline kiln_c99_candidate_object_elements *kiln_c99_object_candidate_elements_header(
 static inline int kiln_c99_object_properties_in_block(const kiln_object *object) {
+static inline void kiln_c99_dictionary_index_reset(kiln_object *object) {
 static inline void kiln_c99_object_properties_free(kiln_object *object) {
 static inline int kiln_c99_object_slots_owned(const kiln_object *object) {
 static inline void kiln_c99_object_slots_free(kiln_object *object) {
@@ -2836,7 +2838,10 @@ static int kiln_c99_same_name_key(const kiln_string *key, const char *name) {
 static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
+static kiln_dictionary_index *kiln_c99_dictionary_index_for(kiln_object *object) {
+static void kiln_c99_dictionary_index_appended(kiln_object *object) {
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
+checked:
 static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
 static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
 static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
