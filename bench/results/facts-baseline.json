@@ -186625,7 +186625,7 @@
       },
       "modules": [
         {
-          "path": ".kiln/builtins/fs.builtin",
+          "path": ".kiln/builtins/node/fs.builtin",
           "functions": [
             {
               "name": "<top-level>",
@@ -188380,7 +188380,7 @@
           ]
         },
         {
-          "path": ".kiln/builtins/fs/promises.builtin",
+          "path": ".kiln/builtins/node/fs/promises.builtin",
           "functions": [
             {
               "name": "<top-level>",
@@ -189428,7 +189428,7 @@
           ]
         },
         {
-          "path": ".kiln/builtins/path.builtin",
+          "path": ".kiln/builtins/node/path.builtin",
           "immutable_bindings": [
             "posix"
           ],
@@ -190406,7 +190406,7 @@
           ]
         },
         {
-          "path": ".kiln/builtins/url.builtin",
+          "path": ".kiln/builtins/node/url.builtin",
           "functions": [
             {
               "name": "<top-level>",
