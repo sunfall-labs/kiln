@@ -73,7 +73,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
  * predicate shared by mutation methods and iterable constructors: accepting a key here means
  * the collector can later decide whether its identity is still live. Date is the one object tag
  * omitted by `is_reference` because numeric coercion treats it specially. */
-int kiln_c99_can_be_held_weakly(kiln_value value) {
+static int kiln_c99_can_be_held_weakly(kiln_value value) {
     if (value.tag == KILN_VALUE_SYMBOL) {
         const kiln_symbol *symbol = (const kiln_symbol *)(uintptr_t)value.bits;
         return symbol != NULL && symbol->registry_id == 0;

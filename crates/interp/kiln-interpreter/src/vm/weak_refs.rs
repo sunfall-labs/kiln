@@ -9,10 +9,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// promise the engine could never keep.
     pub(super) fn can_be_held_weakly(&self, value: &Value) -> bool {
         match value {
-            Value::Symbol(_) => !self
-                .symbol_registry
-                .iter()
-                .any(|(_, registered)| strict_equal(registered, value)),
+            Value::Symbol(_) => match &self.module_realm {
+                Some(realm) => !realm
+                    .borrow()
+                    .symbol_registry
+                    .iter()
+                    .any(|(_, registered)| strict_equal(registered, value)),
+                None => !self
+                    .symbol_registry
+                    .iter()
+                    .any(|(_, registered)| strict_equal(registered, value)),
+            },
             other => is_reflect_target(other),
         }
     }

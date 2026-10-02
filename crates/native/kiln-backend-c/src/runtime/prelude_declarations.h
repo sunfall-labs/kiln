@@ -194,7 +194,6 @@ extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 extern kiln_value kiln_c99_builtin(uint64_t code);
 extern int kiln_c99_is_callable(kiln_value value);
 extern int kiln_c99_is_reference(kiln_value value);
-extern int kiln_c99_can_be_held_weakly(kiln_value value);
 /* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
  * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
  * "default" and a number for "number", which is the whole of why `date + date` concatenates while
