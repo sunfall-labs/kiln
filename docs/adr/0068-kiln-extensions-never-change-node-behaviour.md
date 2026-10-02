@@ -97,7 +97,10 @@ Rule 4's switch removes every kiln extension, and an audit found four places it 
   `structuredClone`, `senderEndpoint`, `spawnActorWorker`). No `Symbol.for("kiln...")` key remains
   on any built-in, and a program cannot forge an actor mark, which is an unregistered symbol.
 - `KILN_ENGINE_PRIVATE_FOR_TESTS=1` leaves the name readable. It exists for the conformance probes
-  that drive the actor protocol directly and is off in both engines unless a developer sets it.
+  that drive the actor protocol directly (forged requests, a patched `workerOp`, a stranger binding
+  a mailbox) and is off in both engines unless whoever launches the process sets it -- node's own
+  test suite reaches its internals the same way, with `--expose-internals`. An environment
+  variable is the launcher's choice, never the program's, so it widens nothing a program can do.
 
 ## Consequences
 
