@@ -540,6 +540,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 current = kiln_c99_closure_store(kiln_c99_closure_of(current));
             }
             if (current.tag != KILN_VALUE_OBJECT) {
+                /* A boxed primitive's [[Prototype]] is represented by its prototype builtin.
+                 * If that builtin has a user-installed accessor, the accessor is found in the
+                 * builtin's own store, but [[Get]] must still use the original boxed object as
+                 * its receiver. Resolve that store here before recursing into the builtin's
+                 * normal member lookup, which intentionally uses the builtin itself as receiver
+                 * when it is the direct target. */
+                if (current.tag == KILN_VALUE_BUILTIN) {
+                    int found = 0;
+                    int status = kiln_c99_prototype_store_read_with_receiver(
+                        host, current.bits, target, key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                }
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
                     return kiln_c99_get_key(host, current, key, ikey, out, depth, thrown);
                 }
