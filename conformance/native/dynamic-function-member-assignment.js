@@ -39,6 +39,19 @@ if (assign(object, dynamicKey, () => 9) !== 9 || keyCalls !== 1 || keyCoercions 
     getterCalls !== 0 || setterCalls !== 1 || value !== 9) {
   throw new Error("computed member assignment effects must run once");
 }
+const assignmentOrder = [];
+const orderedKey = {
+  [Symbol.toPrimitive]() { assignmentOrder.push("coerce"); return "value"; },
+};
+const assignAfterRhs = new Function("object", "key", "rhs",
+  "object[key()] = rhs(); return 0;");
+assignAfterRhs(object,
+  () => { assignmentOrder.push("key"); return orderedKey; },
+  () => { assignmentOrder.push("rhs"); return 11; });
+if (assignmentOrder.join(",") !== "key,rhs,coerce") {
+  throw new Error("simple assignment must coerce its final key after the RHS");
+}
+value = 9;
 keyCalls = keyCoercions = getterCalls = setterCalls = 0;
 const updateOnce = new Function("object", "key", "return object[key()]++;");
 if (updateOnce(object, dynamicKey) !== 9 || keyCalls !== 1 || keyCoercions !== 2 ||

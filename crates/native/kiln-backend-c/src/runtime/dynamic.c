@@ -3792,11 +3792,6 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                             "Expected ']' in assignment reference");
             kiln_dyn_lexer_next(lex);
-            kiln_value property_key;
-            status = kiln_c99_reduce_key(host, target, key, &property_key, depth, thrown);
-            kiln_c99_gc_keep_alive(&target);
-            if (status != KILN_C99_OK) return status;
-            key = property_key;
         } else {
             key = kiln_c99_copy_text(lex->curr.start, lex->curr.len);
             kiln_c99_gc_keep_alive(&target);
@@ -3805,6 +3800,8 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
         }
         if (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
             kiln_value next;
+            /* Intermediate components are read now, so their keys are coerced by Get. Keep the
+             * final component raw as a Reference key: PutValue must coerce it after the RHS. */
             status = kiln_c99_get_computed(host, target, key, &next, depth, thrown);
             kiln_c99_gc_keep_alive(&target);
             kiln_c99_gc_keep_alive(&key);
