@@ -627,6 +627,9 @@ fn discover_node_runtime_requests_from_semantic(
             }
             BindingPattern::ObjectPattern(pattern) => {
                 for property in &pattern.properties {
+                    if property.computed {
+                        continue;
+                    }
                     let oxc_ast::ast::PropertyKey::StaticIdentifier(key) = &property.key else {
                         continue;
                     };
@@ -5564,6 +5567,18 @@ mod tests {
                 "a load must not become resolution-only"
             );
         }
+    }
+
+    #[test]
+    fn computed_module_destructuring_does_not_invent_create_require_provenance() {
+        let requests = discover_node_runtime_requests(
+            "fixture.cjs",
+            "const key = 'other'; const {[key]: loader} = require('module'); loader('./bogus.js');",
+        );
+        assert!(
+            requests.is_empty(),
+            "computed destructuring does not prove the loader came from createRequire"
+        );
     }
 
     #[test]
