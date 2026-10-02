@@ -14,3 +14,8 @@ export class Initial extends Actor {
 export class Throws extends Actor {
   constructor() { super(); throw new RangeError("constructor refused"); }
 }
+// Not an actor: it only carries the global symbol the actor brand once was.
+export class Forged {
+  describe() { return ["forged"]; }
+}
+Object.defineProperty(Forged.prototype, Symbol.for("kiln.actor.base"), { value: true });

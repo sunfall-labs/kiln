@@ -2324,9 +2324,12 @@ pub(super) const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
         "once",
         "emit",
         "listeners",
-        "eventNames",
+        "listenerCount",
+        "removeListener",
+        "off",
         "removeAllListeners",
         "setMaxListeners",
+        "eventNames",
     ]);
 pub(super) const CONSOLE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[

@@ -8,9 +8,6 @@ const nativeIsShared: ((value: any) => boolean) | undefined =
 
 /** Base class of every actor: `spawnActor` constructs a subclass in its own realm. */
 export abstract class Actor {}
-// The module graph can evaluate this internal module in more than one dynamic-import plan.
-// A global symbol marks the prototype chain across those plans without sharing mutable state.
-Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
 /** @internal */
 export type Ticket = {

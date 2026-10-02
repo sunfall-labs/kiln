@@ -29,3 +29,4 @@ await spawn("constructor throws", "Throws", [transfer(kept)], () => `left ${kept
 const unsent = new Uint8Array([5, 0, 0, 0]).buffer;
 await spawn("missing export", "Missing", [transfer(unsent)], () => `left ${unsent.byteLength}`);
 await spawn("args not an array", "Initial", "abc");
+await spawn("forged brand", "Forged", []);

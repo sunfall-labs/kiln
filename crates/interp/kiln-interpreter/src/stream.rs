@@ -240,9 +240,12 @@ readable_prototype_members! {
     ("once", NodeEventOnce),
     ("emit", NodeEventEmit),
     ("listeners", NodeEventListeners),
-    ("eventNames", NodeEventNames),
+    ("listenerCount", NodeEventListenerCount),
+    ("removeListener", NodeEventRemoveListener),
+    ("off", NodeEventRemoveListener),
     ("removeAllListeners", NodeEventRemoveAllListeners),
     ("setMaxListeners", NodeEventSetMaxListeners),
+    ("eventNames", NodeEventNames),
 }
 
 pub(crate) fn writable_constructor_property(prop: &str) -> Option<Value> {

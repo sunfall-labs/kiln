@@ -1,7 +1,7 @@
 // This module is a worker entry, linked into programs that import kiln:actors. It is harmless
 // when evaluated in the spawning realm. The target class is loaded only inside this new realm.
 import { isMainThread, parentPort, workerData, MessagePort } from "node:worker_threads";
-import { prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
+import { Actor, prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
 
 export const actorWorkerEntry = "kiln:actors/worker";
 const BIND_RECEIVER = 33;
@@ -348,7 +348,10 @@ function serve(): void {
   void import(init.module).then((loaded: any) => {
     try {
       const ctor: any = loaded[init.exportName];
-      if (typeof ctor !== "function" || !ctor.prototype || !(Symbol.for("kiln.actor.base") in ctor.prototype)) {
+      // A realm evaluates `kiln:actors/core` once, so the target's `Actor` is this one: the
+      // check is the real prototype chain, which no property a program writes can forge.
+      if (typeof ctor !== "function" || !ctor.prototype ||
+          !Object.prototype.isPrototypeOf.call(Actor.prototype, ctor.prototype)) {
         throw new TypeError("actor export must be a class extending Actor");
       }
       actorClass = ctor;
