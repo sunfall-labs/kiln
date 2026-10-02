@@ -604,8 +604,9 @@ fn discover_node_runtime_requests_from_semantic(
     create_symbols.retain(|symbol| !scoping.symbol_is_mutated(*symbol));
     module_symbols.retain(|symbol, _| !scoping.symbol_is_mutated(*symbol));
     let mut require_symbols = HashMap::new();
-    // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
-    // pass because semantic node order is an AST walk detail, not a source-order contract.
+    // First collect CommonJS module-object and destructured `createRequire` bindings. Do this as
+    // a separate pass because semantic node order is an AST walk detail, not a source-order
+    // contract.
     for node in semantic.nodes().iter() {
         let AstKind::VariableDeclarator(declarator) = node.kind() else {
             continue;
@@ -613,13 +614,36 @@ fn discover_node_runtime_requests_from_semantic(
         let Some(init) = &declarator.init else {
             continue;
         };
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+        if !is_global_require_of_module(init, scoping) {
             continue;
-        };
-        if let Some(symbol) = identifier.symbol_id.get() {
-            if !scoping.symbol_is_mutated(symbol) && is_global_require_of_module(init, scoping) {
-                module_symbols.insert(symbol, path.to_owned());
+        }
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(identifier) => {
+                if let Some(symbol) = identifier.symbol_id.get()
+                    && !scoping.symbol_is_mutated(symbol)
+                {
+                    module_symbols.insert(symbol, path.to_owned());
+                }
             }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    let oxc_ast::ast::PropertyKey::StaticIdentifier(key) = &property.key else {
+                        continue;
+                    };
+                    if key.name != "createRequire" {
+                        continue;
+                    }
+                    let BindingPattern::BindingIdentifier(identifier) = &property.value else {
+                        continue;
+                    };
+                    if let Some(symbol) = identifier.symbol_id.get()
+                        && !scoping.symbol_is_mutated(symbol)
+                    {
+                        create_symbols.insert(symbol);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     // Track only aliases initialized from the proven imported/module factory. A shadowed local
@@ -5268,7 +5292,7 @@ mod tests {
     fn native_import_meta_uses_the_cached_process_capability() {
         let module = parse_dce_native(
             "entry.mjs",
-            "const meta = import.meta;",
+            "console.log(import.meta);",
             &BTreeSet::new(),
             true,
         );
@@ -5612,18 +5636,28 @@ mod tests {
             "fixture.mjs",
             "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const loaded = require('os'); loaded('path');",
         );
-        assert!(
-            loaded_value.is_empty(),
-            "a module value returned by require is not itself a loader"
+        assert_eq!(
+            loaded_value,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "fixture.mjs".to_owned(),
+                resolve_only: false,
+            }],
+            "the loaded module is not itself a loader"
         );
 
         let ordinary = discover_node_runtime_requests(
             "fixture.mjs",
             "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const notLoader = (id) => ({ os: require('os') }); notLoader('path');",
         );
-        assert!(
-            ordinary.is_empty(),
-            "a function that uses require internally but returns another value is not a loader"
+        assert_eq!(
+            ordinary,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "fixture.mjs".to_owned(),
+                resolve_only: false,
+            }],
+            "the returned object/function is not itself a loader"
         );
     }
 
