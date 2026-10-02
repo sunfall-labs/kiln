@@ -1204,7 +1204,7 @@ mod tests {
         .expect("write entry");
         std::fs::write(
             tree.0.join("node_modules/pkg/package.json"),
-            r#"{"exports":"./index.js"}"#,
+            r#"{"type":"module","exports":"./index.js"}"#,
         )
         .expect("write manifest");
         std::fs::write(
@@ -1279,11 +1279,9 @@ mod tests {
             )
         );
         assert_eq!(node_formats.len(), 2);
-        assert!(
-            node_formats
-                .iter()
-                .all(|format| format.path.contains("node_modules/pkg/"))
-        );
+        assert!(node_formats.iter().all(|format| {
+            format.path.contains("node_modules/pkg/") && format.format == NodeModuleFormat::EsModule
+        }));
     }
 
     #[test]
