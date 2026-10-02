@@ -44,6 +44,12 @@
             case KILN_C99_METHOD_COLLECTION_ADD:
                 /* A Set stores each value under itself, which is what makes `has` one lookup
                  * rather than two shapes. Both answer with the collection, so they chain. */
+                if (collection->is_weak && !kiln_c99_can_be_held_weakly(first)) {
+                    return kiln_c99_throw_error(
+                        thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                        collection->is_map ? "Invalid value used as weak map key"
+                                           : "Invalid value used in weak set");
+                }
                 status = kiln_c99_collection_put(receiver, first,
                                                  code == KILN_C99_METHOD_COLLECTION_SET
                                                      ? (argc > 1 ? args[1] : kiln_c99_undefined())

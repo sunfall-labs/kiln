@@ -69,6 +69,18 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     return KILN_C99_OK;
 }
 
+/* WeakMap and WeakSet keys are objects, functions, or non-registered symbols. Keep this
+ * predicate shared by mutation methods and iterable constructors: accepting a key here means
+ * the collector can later decide whether its identity is still live. Date is the one object tag
+ * omitted by `is_reference` because numeric coercion treats it specially. */
+int kiln_c99_can_be_held_weakly(kiln_value value) {
+    if (value.tag == KILN_VALUE_SYMBOL) {
+        const kiln_symbol *symbol = (const kiln_symbol *)(uintptr_t)value.bits;
+        return symbol != NULL && symbol->registry_id == 0;
+    }
+    return kiln_c99_is_reference(value) || value.tag == KILN_VALUE_DATE;
+}
+
 /* Map/Set hashes follow SameValueZero's string units. The boundary pointer names a canonical
  * header; hashing it as if it were a byte span folds the header's first bytes into the key and
  * makes an equal Latin1/UTF16 pair land in different buckets. */

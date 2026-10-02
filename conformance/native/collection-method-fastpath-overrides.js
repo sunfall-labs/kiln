@@ -182,9 +182,33 @@ if (!throwsTypeError(() => setAt(weakMap, 1, 2)) ||
 	throw new Error('WeakMap fast path skipped key or method validation');
 }
 
+const localSymbol = Symbol('weak key');
+const registeredSymbol = Symbol.for('weak key');
+const weakFunction = function weakFunction() {};
+weakMap.set(localSymbol, 1);
+weakMap.set(weakFunction, 2);
+if (weakMap.get(localSymbol) !== 1 || weakMap.get(weakFunction) !== 2 ||
+	!throwsTypeError(() => weakMap.set(registeredSymbol, 3)) ||
+	!throwsTypeError(() => new WeakMap([[registeredSymbol, 4]]))) {
+	throw new Error('WeakMap did not distinguish weakly holdable keys');
+}
+for (const primitive of [undefined, null, true, 1, 'key', 1n]) {
+	if (!throwsTypeError(() => weakMap.set(primitive, 5))) {
+		throw new Error('WeakMap accepted a primitive key');
+	}
+}
+
 const weakSet = new WeakSet();
 if (!throwsTypeError(() => addAt(weakSet, 1))) {
 	throw new Error('WeakSet fast path skipped weak-key validation');
+}
+const weakObject = {};
+weakSet.add(localSymbol);
+weakSet.add(weakObject);
+if (!weakSet.has(localSymbol) || !weakSet.has(weakObject) ||
+	!throwsTypeError(() => weakSet.add(registeredSymbol)) ||
+	!throwsTypeError(() => new WeakSet([registeredSymbol]))) {
+	throw new Error('WeakSet did not distinguish weakly holdable keys');
 }
 
 console.log('collection method fast paths respect overrides and collection brands');

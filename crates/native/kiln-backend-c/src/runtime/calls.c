@@ -509,6 +509,12 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
                                      ? kiln_val_to_boundary(pair->elements[1])
                                      : kiln_c99_undefined();
                     }
+                    if (is_weak && !kiln_c99_can_be_held_weakly(key)) {
+                        return kiln_c99_throw_error(
+                            thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                            is_map ? "Invalid value used as weak map key"
+                                   : "Invalid value used in weak set");
+                    }
                     status = kiln_c99_collection_put(built, key, member);
                     if (status != KILN_C99_OK) {
                         return status;
