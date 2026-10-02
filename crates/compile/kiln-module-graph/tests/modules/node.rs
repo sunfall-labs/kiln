@@ -133,6 +133,49 @@ fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
 }
 
 #[test]
+fn lazy_node_builtin_extension_links_facade_without_making_it_startup_reachable() {
+    let project = TempProject::new();
+    let entry = project.write("main.js", "console.log('hello');");
+    let graph = project.graph(&entry).expect("build ordinary graph");
+    let http_path = kiln_module_resolver::NodeBuiltin::Http.virtual_path(&project.root);
+
+    assert!(!graph.module_map().contains_key(&http_path));
+    let extended = graph
+        .with_lazy_node_builtin(
+            graph.entry(),
+            "/kiln/runtime-bootstrap.ts",
+            kiln_module_resolver::NodeBuiltin::Http,
+        )
+        .expect("materialize lazy HTTP facade");
+
+    let http = extended.module(&http_path).expect("HTTP facade is linked");
+    assert!(matches!(&http.source, ModuleSource::NodeBuiltin(_)));
+    for dependency in ["node:net", "node:stream"] {
+        let edge = http
+            .dependencies
+            .iter()
+            .find(|edge| edge.specifier == dependency)
+            .unwrap_or_else(|| panic!("HTTP facade is missing its `{dependency}` import"));
+        assert!(matches!(
+            &extended
+                .module(&edge.target)
+                .expect("facade dependency is linked")
+                .source,
+            ModuleSource::NodeBuiltin(_)
+        ));
+    }
+    assert!(
+        extended
+            .module(graph.entry())
+            .expect("entry remains linked")
+            .runtime_dependencies
+            .iter()
+            .any(|dependency| dependency.target == http_path)
+    );
+    assert!(!extended.statically_reachable().contains(&http_path));
+}
+
+#[test]
 fn computed_commonjs_loader_can_use_only_a_declared_target() {
     let project = TempProject::new();
     let included = project.write("task.cjs", "console.log('task'); module.exports = 42;");

@@ -36,6 +36,7 @@ use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
+use kiln_module_resolver::NodeBuiltin;
 pub use kiln_native_provider_contract::{
     ProviderCapabilities, ProviderCapability, ProviderVariant,
 };
@@ -2643,6 +2644,45 @@ impl NativeBuilder {
         let selection = selection_options_with_exclusions(&options.profile, &native_plan.excluded);
         let selected = kiln_liveness::select_executable_modules(graph, &selection)
             .map_err(NativeError::Graph)?;
+        let initial_demand = selected.demand();
+        let initial_members = kiln_graph::analyze_demanded_members(
+            graph,
+            &initial_demand.live,
+            &initial_demand.slots,
+        );
+        let needs_http_facade = initial_members
+            .globals
+            .iter()
+            .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
+            || (initial_members
+                .globals
+                .iter()
+                .any(|name| matches!(name.as_str(), "globalThis" | "global"))
+                && initial_members
+                    .names
+                    .iter()
+                    .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln")));
+        let (graph, native_plan, selected) = if needs_http_facade {
+            // Global fetch is part of the separately compiled web bootstrap, so its dependency
+            // is invisible to source-graph discovery. Add the public facade as a lazy runtime
+            // edge before liveness/relinking; ordinary programs keep the original graph.
+            let graph = graph
+                .with_lazy_node_builtin(
+                    graph.entry(),
+                    "/kiln/runtime-bootstrap.ts",
+                    NodeBuiltin::Http,
+                )
+                .map_err(NativeError::Graph)?;
+            let native_plan = native_graph_plan(&graph)?;
+            let selection =
+                selection_options_with_exclusions(&options.profile, &native_plan.excluded);
+            let selected = kiln_liveness::select_executable_modules(&graph, &selection)
+                .map_err(NativeError::Graph)?;
+            (graph, native_plan, selected)
+        } else {
+            (graph.clone(), native_plan, selected)
+        };
+        let graph = &graph;
         // One shaken graph feeds emission: reduce to the live subset first,
         // so the emitter and launcher below only ever see live modules and
         // live edges. With everything live this is the identity transform.

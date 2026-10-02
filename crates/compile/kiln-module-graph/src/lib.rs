@@ -390,6 +390,158 @@ impl ModuleGraph {
         &self.modules
     }
 
+    /// Return a graph that retains a builtin for a lazy loader created outside user modules.
+    ///
+    /// The builtin and its static builtin dependencies become available to the runtime loader,
+    /// but remain lazy: the synthetic edge is a `RuntimeDependency`, never a static import. This
+    /// is for trusted bootstraps such as global `fetch`, whose public facade needs to be loadable
+    /// by `process.getBuiltinModule()` even when the user's source contains no `node:` import.
+    pub fn with_lazy_node_builtin(
+        &self,
+        owner: impl AsRef<Path>,
+        importer: impl AsRef<Path>,
+        builtin: NodeBuiltin,
+    ) -> Result<Self, ModuleGraphError> {
+        let owner = owner.as_ref();
+        let owner = if self.modules.contains_key(owner) {
+            owner.to_path_buf()
+        } else {
+            fs::canonicalize(owner).map_err(|_| ModuleGraphError::InternalMissingModule {
+                path: owner.to_path_buf(),
+            })?
+        };
+        let importer = importer.as_ref().to_path_buf();
+        let target = builtin.virtual_path(&self.project_root);
+        let mut modules: BTreeMap<PathBuf, ModuleNode> = self
+            .order
+            .iter()
+            .filter_map(|path| {
+                self.module_node(path)
+                    .cloned()
+                    .map(|node| (path.clone(), node))
+            })
+            .collect();
+        let mut order = (*self.order).clone();
+        let mut visiting = HashSet::new();
+
+        fn add_builtin(
+            project_root: &Path,
+            builtin: NodeBuiltin,
+            modules: &mut BTreeMap<PathBuf, ModuleNode>,
+            order: &mut Vec<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+        ) -> Result<PathBuf, ModuleGraphError> {
+            let path = builtin.virtual_path(project_root);
+            if modules.contains_key(&path) || !visiting.insert(path.clone()) {
+                return Ok(path);
+            }
+
+            let source = kiln_builtins::builtin_source(builtin);
+            let logical_path = kiln_builtins::builtin_logical_path(builtin);
+            let mut hir = kiln_frontend_oxc::parse(logical_path, source);
+            hir.module_id = Arc::from(graph_module_identity(project_root, &path));
+            let program =
+                compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                    path: path.clone(),
+                    diagnostics,
+                })?;
+            validate_exports(&path, &program)?;
+
+            let mut dependencies = Vec::with_capacity(program.dependencies.len());
+            for specifier in &program.dependencies {
+                let dependency_builtin = NodeBuiltin::parse(specifier).ok_or_else(|| {
+                    ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: format!(
+                            "builtin `{}` has a dependency outside the Node builtin registry: `{specifier}`",
+                            builtin.specifier()
+                        ),
+                    }
+                })?;
+                let target =
+                    add_builtin(project_root, dependency_builtin, modules, order, visiting)?;
+                dependencies.push(Dependency {
+                    specifier: specifier.clone(),
+                    target,
+                });
+            }
+
+            let mut runtime_dependencies = Vec::new();
+            for request in &program.link_facts.node_runtime_requests {
+                // These requests are themselves lazy, but their targets must be present in the
+                // graph so the bootstrap's createRequire can resolve them when called. Unknown
+                // names retain the builtin's existing catchable runtime-failure behavior.
+                let Some(dependency_builtin) = NodeBuiltin::parse(&request.specifier) else {
+                    continue;
+                };
+                let target =
+                    add_builtin(project_root, dependency_builtin, modules, order, visiting)?;
+                runtime_dependencies.push(RuntimeDependency {
+                    importer: PathBuf::from(&request.importer),
+                    specifier: request.specifier.clone(),
+                    target,
+                    source: ModuleSource::NodeBuiltin(dependency_builtin),
+                    resolve_only: request.resolve_only,
+                });
+            }
+
+            let node = ModuleNode {
+                path: path.clone(),
+                source: ModuleSource::NodeBuiltin(builtin),
+                program,
+                data: None,
+                dependencies,
+                runtime_dependencies,
+            };
+            modules.insert(path.clone(), node);
+            visiting.remove(&path);
+            order.push(path.clone());
+            Ok(path)
+        }
+
+        add_builtin(
+            &self.project_root,
+            builtin,
+            &mut modules,
+            &mut order,
+            &mut visiting,
+        )?;
+        let owner_node =
+            modules
+                .get_mut(&owner)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                    path: owner.clone(),
+                })?;
+        if !owner_node.runtime_dependencies.iter().any(|dependency| {
+            dependency.importer == importer
+                && dependency.specifier == builtin.specifier()
+                && dependency.target == target
+        }) {
+            owner_node.runtime_dependencies.push(RuntimeDependency {
+                importer,
+                specifier: builtin.specifier().to_owned(),
+                target,
+                source: ModuleSource::NodeBuiltin(builtin),
+                resolve_only: false,
+            });
+        }
+
+        let export_resolutions = resolve_exports(&modules, &order)?;
+        validate_links(&modules, &order, &export_resolutions)?;
+        Ok(Self {
+            entry: self.entry.clone(),
+            project_root: self.project_root.clone(),
+            declared_includes: Arc::clone(&self.declared_includes),
+            modules: Arc::new(modules),
+            order: Arc::new(order),
+            export_resolutions: Arc::new(export_resolutions),
+            patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
+            dynamic_failures: Arc::clone(&self.dynamic_failures),
+            runtime_failures: Arc::clone(&self.runtime_failures),
+        })
+    }
+
     pub fn export_resolutions(&self) -> &HashMap<PathBuf, BTreeMap<String, ResolvedExport>> {
         &self.export_resolutions
     }

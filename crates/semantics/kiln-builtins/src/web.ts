@@ -1175,16 +1175,26 @@ function fetch(input: any, init?: any): Promise<Response> {
       return reject(new TypeError(`Unsupported protocol: ${parsed.protocol}`));
     }
 
-    const httpModule =
-      typeof process !== "undefined"
-        ? (process as any).__kilnNativeModules?.http || null
-        : null;
+    const processObject = typeof process !== "undefined" ? process as any : null;
+    // Fetch uses the same public node:http facade as an explicit builtin import. That facade
+    // installs the IncomingMessage/Readable prototype relationship used by the transport.
+    // Native planning retains node:http lazily when a program demands fetch, Bun, or Kiln.
+    let httpModule: any = null;
+    if (typeof processObject?.getBuiltinModule === "function") {
+      httpModule = processObject.getBuiltinModule("node:http") || null;
+    }
+    if (!httpModule) {
+      httpModule = processObject?.__kilnNativeModules?.http || null;
+    }
 
     let httpReqFn = httpModule?.request;
     if (!httpReqFn) {
       try {
         const h = typeof require !== "undefined" ? require("node:http") : null;
-        if (h && typeof h.request === "function") httpReqFn = h.request;
+        if (h && typeof h.request === "function") {
+          httpModule = h;
+          httpReqFn = h.request;
+        }
       } catch (_) {}
     }
 
@@ -1208,7 +1218,7 @@ function fetch(input: any, init?: any): Promise<Response> {
 
     let clientReq: any;
     try {
-      clientReq = httpReqFn(options, (res: any) => {
+      clientReq = httpReqFn.call(httpModule, options, (res: any) => {
         const chunks: any[] = [];
         res.on("data", (chunk: any) => {
           chunks.push(chunk);
