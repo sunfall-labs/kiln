@@ -36,6 +36,20 @@ class ProfileEnvironmentTests(unittest.TestCase):
     def test_development_oracle_preserves_unset_mode(self):
         self.assertEqual(self.child_mode('native-dev', None), 'undefined')
 
+    def test_every_profile_uses_utc_even_when_parent_timezone_is_local(self):
+        inherited = dict(os.environ, TZ='America/Denver')
+        for profile in ('native-dev', 'native-release'):
+            environment = runner.profile_environment(profile, inherited)
+            self.assertEqual(environment['TZ'], 'UTC')
+            with tempfile.TemporaryDirectory() as directory:
+                prefix = Path(directory) / 'zone.log'
+                result = runner.command(
+                    ['node', '-e', 'console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)'],
+                    prefix, 10, environment)
+                self.assertEqual(result['exit'], 0)
+                self.assertEqual(prefix.with_suffix('.stdout').read_text().strip(), 'UTC')
+        self.assertEqual(inherited['TZ'], 'America/Denver')
+
 
 if __name__ == '__main__':
     unittest.main()

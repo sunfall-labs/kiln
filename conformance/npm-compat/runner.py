@@ -17,6 +17,9 @@ HERE = Path(__file__).resolve().parent
 
 def profile_environment(profile, inherited):
     environment = dict(inherited)
+    # The interpreter's realm clock is UTC. Keep Node's oracle, compiler and native
+    # execution on the same zone regardless of the launcher's local timezone.
+    environment['TZ'] = 'UTC'
     # Release graph selection and KILN_NODE_ENV_PRODUCTION both select production.
     # The oracle and build must see that same mode, including .env file selection.
     if profile == 'native-release':
@@ -104,13 +107,13 @@ def main():
                 'kiln_sha256': hashlib.sha256(Path(kiln).read_bytes()).hexdigest(),
                 'selected': len(selected), 'deferred': len(rows) - len(selected),
                 'discovered': len(rows),
-                'timezone': os.environ.get('TZ'),
+                'timezone': environment.get('TZ'),
                 'host': 'node',
                 'execution_engine': 'native',
                 'native_profile': args.profile,
                 'require_pass': args.require_pass,
                 'node_env': environment.get('NODE_ENV'),
-                'environment_policy': 'release production mode; otherwise inherited environment',
+                'environment_policy': 'TZ=UTC for every phase; native-release forces NODE_ENV=production, otherwise NODE_ENV is inherited',
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}

@@ -70,7 +70,9 @@ env -u NODE_ENV python3 conformance/npm-compat/runner.py \
 ```
 
 Omit package filters for full coverage, and require 361 selected, completed and
-discovered cases with zero deferred in `results.json`. `native-release` aligns
+discovered cases with zero deferred in `results.json`. The Python runner pins
+`TZ=UTC` for Node, compilation and native execution even when invoked directly;
+evidence records the effective timezone and policy. `native-release` aligns
 Node, compilation and binary execution with `NODE_ENV=production`. The original
 `warning` smoke assumes development logging and fails its Node oracle in production;
 it remains visible as `node-baseline-failed` and makes `--require-pass` fail. A
