@@ -170,7 +170,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::SharedIsRaw => "__kilnSharedIs".to_owned(),
         Native::TypedArrayCopyRaw => "__kilnTypedArrayCopy".to_owned(),
         Native::TypedArraySortRaw => "__kilnTypedArraySort".to_owned(),
-        Native::DataViewHasInternalSlotRaw => "__kilnDataViewHasInternalSlot".to_owned(),
+        Native::DataViewStateRaw => "__kilnDataViewState".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::QueueIoRaw => "__kilnQueueIo".to_owned(),
         Native::WorkerOpRaw => "__kilnWorkerOp".to_owned(),

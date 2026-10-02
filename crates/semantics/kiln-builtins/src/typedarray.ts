@@ -32,9 +32,11 @@ const __kilnTypedArrayCopy: (target: any, targetIndex: number, source: any, sour
 delete (globalThis as any).__kilnTypedArrayCopy;
 const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
 delete (globalThis as any).__kilnTypedArraySort;
-const __kilnDataViewHasInternalSlot: (view: any) => boolean =
-  (globalThis as any).__kilnDataViewHasInternalSlot;
-delete (globalThis as any).__kilnDataViewHasInternalSlot;
+// Internal state: 0 is a non-view, 1 a mutable view, 2 a view of an immutable buffer. This reads
+// slots only; detachment/bounds are checked by the numeric accessor after argument coercion.
+const __kilnDataViewState: (view: any) => number =
+  (globalThis as any).__kilnDataViewState;
+delete (globalThis as any).__kilnDataViewState;
 
 // DataView's half-precision accessors share the existing Float16Array element conversion. They
 // live in this bootstrap family because the backend already retains it whenever DataView or a
@@ -47,16 +49,16 @@ delete (globalThis as any).__kilnDataViewHasInternalSlot;
 
   const getUint16 = DataView.prototype.getUint16;
   const setUint16 = DataView.prototype.setUint16;
-  const viewBufferGetter = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer")!.get!;
-  const immutableBufferGetter = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "immutable")?.get;
   const floatScratch = new Float16(1);
   const bitsScratch = new Uint16(floatScratch.buffer);
   const maxSafeInteger = 9007199254740991;
 
-  function requireDataViewReceiver(receiver: any): void {
-    if (!__kilnDataViewHasInternalSlot(receiver)) {
+  function requireDataViewReceiver(receiver: any): number {
+    const state = __kilnDataViewState(receiver);
+    if (state === 0) {
       throw new TypeError("Method called on an incompatible receiver");
     }
+    return state;
   }
 
   function toIndex(value: any): number {
@@ -77,11 +79,9 @@ delete (globalThis as any).__kilnDataViewHasInternalSlot;
       return floatScratch[0];
     },
     setFloat16(this: any, byteOffset: any, value: any): void {
-      requireDataViewReceiver(this);
-      // SetViewValue checks mutability before either argument is coerced. Captured getters read
-      // internal slots even when user code replaces a view's public buffer/immutable properties.
-      if (immutableBufferGetter !== undefined &&
-          immutableBufferGetter.call(viewBufferGetter.call(this))) {
+      // SetViewValue checks mutability before either argument is coerced, directly from slots
+      // even when user code replaces a view's public buffer/immutable properties.
+      if (requireDataViewReceiver(this) === 2) {
         throw new TypeError("ArrayBuffer is immutable");
       }
       const offset = toIndex(byteOffset);

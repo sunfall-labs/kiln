@@ -770,9 +770,9 @@ pub enum Native {
     /// `__kilnTypedArraySort(view)`: the default-order sort in place (ADR 0065, representation),
     /// over the order `kiln_number_core::typed_order` owns for both engines.
     TypedArraySortRaw,
-    /// `__kilnDataViewHasInternalSlot(view)`: a side-effect-free internal-slot predicate for
-    /// shared DataView accessors, checked before any argument coercion.
-    DataViewHasInternalSlotRaw,
+    /// `__kilnDataViewState(view)`: 0 for a non-view, 1 for a mutable view, 2 for an immutable
+    /// view. A side-effect-free internal-slot read, checked before any argument coercion.
+    DataViewStateRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,

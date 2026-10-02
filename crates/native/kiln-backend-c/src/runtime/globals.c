@@ -575,7 +575,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                       * way by `kiln-builtins/src/typedarray.ts`. */
                      {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},
                      {"__kilnTypedArraySort", KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW},
-                     {"__kilnDataViewHasInternalSlot", KILN_C99_METHOD_DATA_VIEW_HAS_INTERNAL_SLOT_RAW},
+                     {"__kilnDataViewState", KILN_C99_METHOD_DATA_VIEW_STATE_RAW},
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
