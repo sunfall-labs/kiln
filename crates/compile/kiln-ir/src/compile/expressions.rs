@@ -172,6 +172,9 @@ impl super::Compiler {
                 self.code
                     .push(Instruction::LoadBuiltin(Builtin::GlobalThis));
             }
+            ExpressionKind::ProcessObject => {
+                self.code.push(Instruction::LoadBuiltin(Builtin::Process));
+            }
             // `undefined` in a field initialiser: the initialiser is its own function to the
             // language, and reading the frame's `new.target` there answered `C` for
             // `class C { x = new.target }` because Kiln emits the initialiser into the

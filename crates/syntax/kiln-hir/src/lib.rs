@@ -803,6 +803,12 @@ pub enum ExpressionKind {
     /// Frontend-generated references (such as the native `import.meta` bridge) must not be
     /// captured by a user binding named `globalThis` or `process`.
     GlobalObject,
+    /// The realm's cached Node process capability, loaded independently of a mutable
+    /// `globalThis.process` property and of lexical bindings named `process`.
+    ///
+    /// This is for compiler-generated capability access (for example the import-meta bridge),
+    /// not an alternate source-level identifier.
+    ProcessObject,
     /// A class expression.
     Class(Box<Class>),
     /// A function expression or arrow function used as a value.

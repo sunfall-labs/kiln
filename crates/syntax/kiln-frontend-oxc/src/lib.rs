@@ -2264,7 +2264,7 @@ fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> Hash
 fn inline_eval_syntax(expression: &HirExpression) -> bool {
     use HirExpressionKind as K;
     match &expression.kind {
-        K::Literal(_) | K::This | K::GlobalObject => true,
+        K::Literal(_) | K::This | K::GlobalObject | K::ProcessObject => true,
         K::Identifier(name) => !matches!(name.as_str(), "eval" | "await" | "yield"),
         K::StaticMember {
             object,
@@ -3861,14 +3861,7 @@ impl Lowerer<'_> {
                                 object: Box::new(HirExpression {
                                     kind: HirExpressionKind::StaticMember {
                                         object: Box::new(HirExpression {
-                                            kind: HirExpressionKind::StaticMember {
-                                                object: Box::new(HirExpression {
-                                                    kind: HirExpressionKind::GlobalObject,
-                                                    span: expression_span,
-                                                }),
-                                                property: "process".to_string(),
-                                                optional: false,
-                                            },
+                                            kind: HirExpressionKind::ProcessObject,
                                             span: expression_span,
                                         }),
                                         property: "__kilnNativeModules".to_string(),
@@ -5270,6 +5263,20 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_import_meta_uses_the_cached_process_capability() {
+        let module = parse_dce_native(
+            "entry.mjs",
+            "const meta = import.meta;",
+            &BTreeSet::new(),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(hir.contains("ProcessObject"), "{hir}");
+        assert!(!hir.contains("property: \"process\""), "{hir}");
+    }
 
     #[test]
     fn ordinary_isolate_calls_do_not_claim_graph_ownership() {

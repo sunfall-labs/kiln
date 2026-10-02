@@ -347,7 +347,7 @@ export class Hash {
   }
 }
 
-const cryptoNativeModules = (globalThis as any).process?.__kilnNativeModules;
+const cryptoNativeModules = process?.__kilnNativeModules;
 const cryptoKeyImportBridge = cryptoNativeModules?.__kilnCryptoKeyImport;
 const cryptoKeyPublicBridge = cryptoNativeModules?.__kilnCryptoKeyPublic;
 const cryptoKeyInfoBridge = cryptoNativeModules?.__kilnCryptoKeyInfo;
