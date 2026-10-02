@@ -32,6 +32,9 @@ const __kilnTypedArrayCopy: (target: any, targetIndex: number, source: any, sour
 delete (globalThis as any).__kilnTypedArrayCopy;
 const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
 delete (globalThis as any).__kilnTypedArraySort;
+const __kilnDataViewHasInternalSlot: (view: any) => boolean =
+  (globalThis as any).__kilnDataViewHasInternalSlot;
+delete (globalThis as any).__kilnDataViewHasInternalSlot;
 
 // DataView's half-precision accessors share the existing Float16Array element conversion. They
 // live in this bootstrap family because the backend already retains it whenever DataView or a
@@ -44,21 +47,14 @@ delete (globalThis as any).__kilnTypedArraySort;
 
   const getUint16 = DataView.prototype.getUint16;
   const setUint16 = DataView.prototype.setUint16;
-  const getUint8 = DataView.prototype.getUint8;
   const floatScratch = new Float16(1);
   const bitsScratch = new Uint16(floatScratch.buffer);
   const maxSafeInteger = 9007199254740991;
-  const brandProbeSentinel = {};
-  const brandProbeOffset = { valueOf(): never { throw brandProbeSentinel; } };
 
   function requireDataViewReceiver(receiver: any): void {
-    try {
-      getUint8.call(receiver, brandProbeOffset);
-    } catch (error) {
-      if (error === brandProbeSentinel) return;
-      throw error;
+    if (!__kilnDataViewHasInternalSlot(receiver)) {
+      throw new TypeError("Method called on an incompatible receiver");
     }
-    throw new TypeError("Method called on an incompatible receiver");
   }
 
   function toIndex(value: any): number {

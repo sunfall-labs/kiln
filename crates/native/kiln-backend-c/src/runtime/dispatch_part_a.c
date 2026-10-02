@@ -1975,6 +1975,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_typed_array_copy_raw(result, args, argc);
     if (code == KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW)
         return kiln_c99_typed_array_sort_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_DATA_VIEW_HAS_INTERNAL_SLOT_RAW) {
+        *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_DATA_VIEW);
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_JOBS_PENDING_RAW)
         return kiln_c99_jobs_pending_raw(result);
     if (code == KILN_C99_METHOD_WORKER_OP_RAW)

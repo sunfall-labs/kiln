@@ -797,6 +797,9 @@ pub(crate) fn call_native(
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
             _ => Value::Boolean(false),
         },
+        Native::DataViewHasInternalSlotRaw => {
+            Value::Boolean(matches!(arguments.first(), Some(Value::DataView(_))))
+        }
         Native::CollectionSizeRaw => {
             let Some(receiver) = arguments.first() else {
                 return Err(ExecutionError::TypeErrorMessage {

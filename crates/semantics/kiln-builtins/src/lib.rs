@@ -1589,6 +1589,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         (family::JSON, "__kilnJsonParse"),
         (family::JSON, "__kilnJsonUnbox"),
         (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
+        (family::TYPED_ARRAY, "__kilnDataViewHasInternalSlot"),
         (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),
         (family::WEAK_REFS, "__kilnSharedWeak"),
