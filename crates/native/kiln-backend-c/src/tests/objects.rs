@@ -73,7 +73,7 @@ fn large_dictionary_lookup_cache_is_private_and_gc_owned() {
     let wrapper = r#"
 int main(void) {
     kiln_gc_heap heap;
-    kiln_value source = kiln_c99_undefined(), readonly = kiln_c99_undefined(), value;
+    kiln_value source = kiln_c99_undefined(), readonly = kiln_c99_undefined(), value, keys;
     kiln_object *source_object, *readonly_object;
     kiln_c99_no_write_frame frame;
     kiln_c99_clone_arena arena = {0};
@@ -90,14 +90,16 @@ int main(void) {
         char key[16];
         int len = snprintf(key, sizeof key, "key%02zu", i);
         if (len <= 0 || (size_t)len >= sizeof key ||
-            kiln_c99_define_method(source, key, (size_t)len,
-                                   kiln_c99_number((double)i)) != KILN_C99_OK ||
-            kiln_c99_define_method(readonly, key, (size_t)len,
-                                   kiln_c99_number((double)(i + 100))) != KILN_C99_OK)
+            kiln_c99_put(NULL, source, key, (size_t)len,
+                         kiln_c99_number((double)i), 0, NULL) != KILN_C99_OK ||
+            kiln_c99_put(NULL, readonly, key, (size_t)len,
+                         kiln_c99_number((double)(i + 100)), 0, NULL) != KILN_C99_OK)
             return 2;
     }
     source_object = kiln_c99_object_of(source);
     readonly_object = kiln_c99_object_of(readonly);
+    if (kiln_c99_all_own_keys(NULL, source, &keys, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 40) return 21;
     kiln_c99_dictionary_index_reset(source_object);
     kiln_c99_dictionary_index_reset(readonly_object);
     if (source_object->count != 40 || source_object->dictionary_index != NULL ||
@@ -132,9 +134,13 @@ int main(void) {
 
     /* A prepared cross-region clone owns fresh object storage and never aliases the source
      * cache; arena discard frees its own side storage without relying on object finalizers. */
-    if (kiln_c99_clone_arena_prepare(&arena, &heap, source,
-                                     2 * heap.nursery.capacity) != KILN_C99_OK ||
-        !arena.certified || arena.capsule.root.tag != KILN_VALUE_OBJECT) return 8;
+    {
+        int status = kiln_c99_clone_arena_prepare(&arena, &heap, source,
+                                                   2 * heap.nursery.capacity);
+        if (status != KILN_C99_OK) return 81;
+    }
+    if (!arena.certified) return 82;
+    if (arena.capsule.root.tag != KILN_VALUE_OBJECT) return 83;
     {
         kiln_object *copy = kiln_c99_object_of(arena.capsule.root);
         if (copy == NULL || copy == source_object || copy->dictionary_index != NULL ||
