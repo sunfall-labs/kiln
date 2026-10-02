@@ -392,11 +392,6 @@ pub(super) struct Frame {
     pub(super) stack_base: usize,
 }
 
-pub(super) enum DynamicModuleState {
-    Evaluated(Rc<Vec<Value>>),
-    Failed(Value),
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum HostResultConversion {
     Direct,

@@ -903,6 +903,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         vm.actor_realm_id = session.shared.borrow().actor_realm_id;
         vm.actor_graph_requests = Rc::clone(&session.shared.borrow().actor_graph_requests);
         vm.global_objects = session.shared.borrow().global_objects.clone();
+        vm.module_map = Rc::clone(&session.shared.borrow().module_map);
     }
     // The realm is built and bootstrapped before the body's first instruction: by this machine
     // if it is the first of its session to run, and found already built otherwise.
@@ -932,6 +933,15 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // it now, rather than letting the entry VM try to resume a continuation whose owner is gone.
     let suspended_module = vm.module_suspension.is_some();
     vm.esm_body_pending_checkpoint = commonjs_module.is_none();
+    // A body that ran to its end has been evaluated: its bindings are final, and the realm's
+    // module map learns them now, before the event loop runs the jobs the body queued -- one of
+    // which may be an `import()` of this very module. A module suspended at a top-level `await`
+    // is reported when it settles, below.
+    if !suspended_module
+        && let (Some(loader), Some(path)) = (commonjs_loader.as_deref_mut(), module_path)
+    {
+        loader.module_evaluated(path, &own_exports(module, &vm.locals)?);
+    }
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
     if enter_runtime {
@@ -1022,20 +1032,11 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         steps: vm.steps,
         ..execution
     };
-    let mut exports = Vec::with_capacity(module.exports.len());
-    for binding in &module.exports {
-        let Some(value) = vm.locals.get(binding.local_slot as usize) else {
-            return Err(ExecutionError::LocalOutOfBounds {
-                index: binding.local_slot as usize,
-            });
-        };
-        // The cell itself, not what is in it: the importer holds this module's binding rather
-        // than a copy of the value it had when the module finished. `namespace_object` and the
-        // star expansion read through it, because those *are* snapshots.
-        exports.push(ModuleExportValue {
-            name: binding.exported.clone(),
-            value: value.clone(),
-        });
+    let exports = own_exports(module, &vm.locals)?;
+    if suspended_module
+        && let (Some(loader), Some(path)) = (commonjs_loader.as_deref_mut(), module_path)
+    {
+        loader.module_evaluated(path, &exports);
     }
     let commonjs_exports = commonjs_module
         .as_ref()
@@ -1049,6 +1050,29 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         exports,
         commonjs_exports,
     })
+}
+
+/// The values a module's own export slots hold.
+fn own_exports(
+    module: &ModuleProgram,
+    locals: &[Value],
+) -> Result<Vec<ModuleExportValue>, ExecutionError> {
+    let mut exports = Vec::with_capacity(module.exports.len());
+    for binding in &module.exports {
+        let Some(value) = locals.get(binding.local_slot as usize) else {
+            return Err(ExecutionError::LocalOutOfBounds {
+                index: binding.local_slot as usize,
+            });
+        };
+        // The cell itself, not what is in it: the importer holds this module's binding rather
+        // than a copy of the value it had when the module finished. `namespace_object` and the
+        // star expansion read through it, because those *are* snapshots.
+        exports.push(ModuleExportValue {
+            name: binding.exported.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(exports)
 }
 
 /// Slots a module body reads as cells -- captured by a function it makes, or loaded and stored

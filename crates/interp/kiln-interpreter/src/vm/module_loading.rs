@@ -188,143 +188,220 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         let realm = self.current_realm;
-        if let Some(DynamicModuleState::Failed(failure)) =
-            self.dynamic_modules.get(&(realm, plan.key.clone()))
-        {
-            return Ok(Err(failure.clone()));
-        }
-        if let Some(namespace) = self.dynamic_namespaces.get(&(realm, plan.key.clone())) {
-            return Ok(Ok(namespace.clone()));
+        // A module the realm has already settled is answered from its record: the same
+        // namespace object every time, or the same error (ECMA-262 16.2.1.5.3 step 4).
+        let settled = self.module_map.borrow().status(realm, &plan.key);
+        match settled {
+            Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
+            Some(ModuleStatus::Evaluated) => {
+                return Ok(Ok(self.module_map.borrow_mut().namespace(realm, &plan.key)));
+            }
+            _ => {}
         }
 
-        let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
         for planned in &plan.modules {
-            if let Some(state) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
-                match state {
-                    DynamicModuleState::Evaluated(cached) => {
-                        evaluated.push(Rc::clone(cached));
-                        continue;
-                    }
-                    DynamicModuleState::Failed(failure) => return Ok(Err(failure.clone())),
-                }
+            match self.module_map.borrow().status(realm, &planned.key) {
+                // Evaluated by whoever reached it first -- the static graph, or another
+                // `import()` -- or still evaluating further up this realm's stack (a module
+                // that imports itself, or one suspended at a top-level `await`). Either way it
+                // has its one evaluation, and this request links to it.
+                Some(ModuleStatus::Evaluated | ModuleStatus::Evaluating) => continue,
+                Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
+                Some(ModuleStatus::Linked) | None => {}
             }
-            let mut locals = vec![Value::Undefined; planned.program.local_count as usize];
-            for (slot, binding) in &planned.bindings {
-                let value = self.module_binding(binding, &evaluated)?;
-                let Some(local) = locals.get_mut(*slot as usize) else {
-                    return Err(ExecutionError::LocalOutOfBounds {
-                        index: *slot as usize,
-                    });
-                };
-                // An import slot always holds a cell, because an import is a live view of the
-                // exporter's binding -- the same rule `execute_module` follows for a statically
-                // linked graph.
-                *local = match value {
-                    Value::Cell(_) => value,
-                    other => Value::Cell(Rc::new(RefCell::new(other))),
-                };
-            }
-            let module_path = Rc::from(planned.key.as_str());
-            let saved_shared_global = if planned.kiln_shared {
-                if !kiln_builtin_surface::kiln_extensions_installed() {
-                    return Ok(Err(self.construct_error(
-                        ErrorKind::Type,
-                        &[Value::String(
-                            "kiln:shared requires enabled Kiln extensions".into(),
-                        )],
-                    )));
-                }
-                if let Value::Object(global) = self.global_object_in(realm) {
-                    let mut global = global.borrow_mut();
-                    let saved = global.properties.clone();
-                    install_kiln_shared_hooks(&mut global, realm, true);
-                    Some(saved)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let module_result =
-                self.drive_module(Rc::clone(&planned.program), locals, Some(module_path));
-            if let Some(saved) = saved_shared_global
-                && let Value::Object(global) = self.global_object_in(realm)
-            {
-                global.borrow_mut().properties = saved;
-            }
-            match module_result? {
-                Ok(returned) => {
-                    let Value::Array(exported) = returned else {
-                        let error = self.construct_error(
-                            ErrorKind::Type,
-                            &[Value::String(
-                                format!("module `{}` did not hand back its exports", planned.key)
-                                    .into(),
-                            )],
-                        );
-                        self.dynamic_modules.insert(
-                            (realm, planned.key.clone()),
-                            DynamicModuleState::Failed(error.clone()),
-                        );
-                        return Ok(Err(error));
-                    };
-                    let exported = Rc::new(exported.items.borrow().clone());
-                    self.dynamic_modules.insert(
-                        (realm, planned.key.clone()),
-                        DynamicModuleState::Evaluated(Rc::clone(&exported)),
-                    );
-                    evaluated.push(exported);
-                }
-                Err(thrown) => {
-                    self.dynamic_modules.insert(
-                        (realm, planned.key.clone()),
-                        DynamicModuleState::Failed(thrown.clone()),
-                    );
-                    return Ok(Err(thrown));
-                }
+            if let Err(rejection) = self.evaluate_planned(planned, realm)? {
+                return Ok(Err(rejection));
             }
         }
 
-        let mut entries = Vec::with_capacity(plan.namespace.len());
-        for (name, reference) in &plan.namespace {
-            entries.push((name.clone(), Self::planned_value(reference, &evaluated)?));
-        }
-        let namespace = namespace_object(entries);
-        self.dynamic_namespaces
-            .insert((realm, plan.key), namespace.clone());
-        Ok(Ok(namespace))
+        Ok(Ok(self.module_map.borrow_mut().namespace(realm, &plan.key)))
     }
 
-    /// Build one value a planned module imports out of what the plan has already evaluated.
+    /// Evaluate one planned module into the realm's module map.
+    ///
+    /// `Ok(Err(value))` is the module's failure, which is also recorded in the map so that every
+    /// later import of it rejects with the same value.
+    fn evaluate_planned(
+        &mut self,
+        planned: &PlannedModule,
+        realm: RealmId,
+    ) -> Result<Result<(), Value>, ExecutionError> {
+        let (program, names, kiln_shared) = match &planned.body {
+            PlannedBody::Exports(entries) => {
+                let exports = entries.iter().cloned().collect();
+                self.module_map
+                    .borrow_mut()
+                    .publish(realm, &planned.key, exports);
+                return Ok(Ok(()));
+            }
+            PlannedBody::Host => return self.evaluate_host_module(&planned.key),
+            PlannedBody::Source {
+                program,
+                exports,
+                kiln_shared,
+            } => (program, exports, *kiln_shared),
+        };
+        let mut locals = vec![Value::Undefined; program.local_count as usize];
+        for (slot, binding) in &planned.bindings {
+            let value = match self.module_binding(binding, realm) {
+                Some(value) => value,
+                None => return Ok(Err(self.missing_binding(planned, binding))),
+            };
+            let Some(local) = locals.get_mut(*slot as usize) else {
+                return Err(ExecutionError::LocalOutOfBounds {
+                    index: *slot as usize,
+                });
+            };
+            // An import slot always holds a cell, because an import is a live view of the
+            // exporter's binding -- the same rule `execute_module` follows for a statically
+            // linked graph.
+            *local = match value {
+                Value::Cell(_) => value,
+                other => Value::Cell(Rc::new(RefCell::new(other))),
+            };
+        }
+        let module_path = Rc::from(planned.key.as_str());
+        let saved_shared_global = if kiln_shared {
+            if !kiln_builtin_surface::kiln_extensions_installed() {
+                return Ok(Err(self.construct_error(
+                    ErrorKind::Type,
+                    &[Value::String(
+                        "kiln:shared requires enabled Kiln extensions".into(),
+                    )],
+                )));
+            }
+            if let Value::Object(global) = self.global_object_in(realm) {
+                let mut global = global.borrow_mut();
+                let saved = global.properties.clone();
+                install_kiln_shared_hooks(&mut global, realm, true);
+                Some(saved)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.module_map.borrow_mut().begin(realm, &planned.key);
+        let module_result = self.drive_module(Rc::clone(program), locals, Some(module_path));
+        if let Some(saved) = saved_shared_global
+            && let Value::Object(global) = self.global_object_in(realm)
+        {
+            global.borrow_mut().properties = saved;
+        }
+        let returned = match module_result? {
+            Ok(returned) => returned,
+            Err(thrown) => {
+                self.module_map
+                    .borrow_mut()
+                    .fail(realm, &planned.key, thrown.clone());
+                return Ok(Err(thrown));
+            }
+        };
+        let Value::Array(returned) = returned else {
+            let error = self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(
+                    format!("module `{}` did not hand back its exports", planned.key).into(),
+                )],
+            );
+            self.module_map
+                .borrow_mut()
+                .fail(realm, &planned.key, error.clone());
+            return Ok(Err(error));
+        };
+        let mut exports: std::collections::HashMap<String, Value> = names
+            .iter()
+            .cloned()
+            .zip(returned.items.borrow().iter().cloned())
+            .collect();
+        for (name, binding) in &planned.reexports {
+            if exports.contains_key(name) {
+                continue;
+            }
+            if let Some(value) = self.module_binding(binding, realm) {
+                exports.insert(name.clone(), value);
+            }
+        }
+        self.module_map
+            .borrow_mut()
+            .publish(realm, &planned.key, exports);
+        Ok(Ok(()))
+    }
+
+    /// Evaluate a CommonJS or JSON module through the host's CommonJS loader, which publishes
+    /// it into the map exactly as a `require` of it would have.
+    fn evaluate_host_module(&mut self, key: &str) -> Result<Result<(), Value>, ExecutionError> {
+        let instruction = self.instruction;
+        let Some(loader) = self.commonjs_loader else {
+            let error = self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(
+                    format!("`import()` of `{key}` is not implemented without a CommonJS loader")
+                        .into(),
+                )],
+            );
+            return Ok(Err(error));
+        };
+        // SAFETY: the loader outlives every machine it is installed in; see `commonjs_loader`.
+        match unsafe { (&mut *loader).evaluate_module(key, instruction) } {
+            Ok(()) => Ok(Ok(())),
+            Err(ExecutionError::Uncaught { message, .. }) => {
+                let value = unsafe { (&mut *loader).take_thrown_value() };
+                Ok(Err(value.unwrap_or_else(|| {
+                    self.construct_error(ErrorKind::Error, &[Value::String(message.into())])
+                })))
+            }
+            Err(ExecutionError::ModuleNotFound { message, .. }) => Ok(Err(
+                self.construct_error(ErrorKind::Error, &[Value::String(message.into())])
+            )),
+            Err(
+                error @ (ExecutionError::DynamicImportUnsupported { .. }
+                | ExecutionError::Host { .. }),
+            ) => Ok(Err(self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(error.to_string().into())],
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The `SyntaxError` a plan earns by naming an export its module turned out not to have.
+    fn missing_binding(&mut self, planned: &PlannedModule, binding: &ModuleBinding) -> Value {
+        let name = match binding {
+            ModuleBinding::Export { name, .. } => name.as_str(),
+            _ => "*",
+        };
+        self.construct_error(
+            ErrorKind::Syntax,
+            &[Value::String(
+                format!(
+                    "module `{}` imports `{name}`, which is not exported",
+                    planned.key
+                )
+                .into(),
+            )],
+        )
+    }
+
+    /// Build one value a planned module imports, from the realm's module map.
+    ///
+    /// A module that has finished hands over its binding; one that has not (a cycle, or a
+    /// module still evaluating further up the stack) hands over a dead-zone cell its
+    /// publication fills.
     pub(super) fn module_binding(
         &mut self,
         binding: &ModuleBinding,
-        evaluated: &[Rc<Vec<Value>>],
-    ) -> Result<Value, ExecutionError> {
+        realm: RealmId,
+    ) -> Option<Value> {
         match binding {
-            ModuleBinding::Ready(value) => Ok(value.clone()),
-            ModuleBinding::Value(reference) => Self::planned_value(reference, evaluated),
-            ModuleBinding::Namespace(entries) => {
-                let mut names = Vec::with_capacity(entries.len());
-                for (name, reference) in entries {
-                    names.push((name.clone(), Self::planned_value(reference, evaluated)?));
-                }
-                Ok(namespace_object(names))
+            ModuleBinding::Ready(value) => Some(value.clone()),
+            ModuleBinding::Export { module, name } => {
+                self.module_map.borrow_mut().binding(realm, module, name)
+            }
+            ModuleBinding::Namespace { module } => {
+                Some(self.module_map.borrow_mut().namespace(realm, module))
             }
         }
-    }
-
-    pub(super) fn planned_value(
-        reference: &ModuleValueRef,
-        evaluated: &[Rc<Vec<Value>>],
-    ) -> Result<Value, ExecutionError> {
-        evaluated
-            .get(reference.module)
-            .and_then(|values| values.get(reference.index))
-            .cloned()
-            .ok_or_else(|| ExecutionError::DynamicImportUnsupported {
-                message: "a module plan referred to a value that was never evaluated".to_owned(),
-            })
     }
 
     /// Run one planned module body to completion and hand back what it exported.

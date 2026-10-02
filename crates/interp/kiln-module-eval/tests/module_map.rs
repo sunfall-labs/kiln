@@ -1,0 +1,390 @@
+//! One module map per realm: a module is evaluated once however it is reached -- by the static
+//! graph, by `import()`, by `require` -- and every importer sees the same bindings and the same
+//! namespace object.
+
+use kiln_host_abi::{HostError, HostOp, HostOps, HostValue};
+use kiln_interpreter::{ExecutionCapabilities, ExecutionError, ExecutionLimits};
+use kiln_module_eval::{GraphModuleLoader, ModuleEvaluationError, ModuleGraphExecution};
+use kiln_module_graph::{CommonJsParse, Frontend, ModuleGraph};
+use kiln_module_resolver::NodeRuntimeResolver;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+struct Project {
+    root: PathBuf,
+}
+
+impl Project {
+    fn new() -> Self {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("kiln-module-map-{}-{id}", std::process::id()));
+        fs::create_dir_all(&root).expect("create project");
+        Self {
+            root: fs::canonicalize(root).expect("canonical root"),
+        }
+    }
+
+    fn write(&self, name: &str, source: &str) -> PathBuf {
+        let path = self.root.join(name);
+        fs::write(&path, source).expect("write source");
+        path
+    }
+
+    /// Run `main.mjs` as `kiln --node run` does: the Node graph, with `import()` linked
+    /// against the same graph. The program's standard output, line by line, or its failure.
+    fn run(&self, main: &str) -> (Vec<String>, Result<(), ModuleEvaluationError>) {
+        struct Oxc;
+        impl Frontend for Oxc {
+            fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+                kiln_frontend_oxc::parse_with_goal(path, source, kiln_hir::SourceGoal::Module)
+            }
+            fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse {
+                let (module, static_requires) =
+                    kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
+                CommonJsParse {
+                    module,
+                    static_requires,
+                }
+            }
+        }
+        let entry = self.write("main.mjs", main);
+        let graph = Arc::new(
+            ModuleGraph::build_node(
+                &entry,
+                NodeRuntimeResolver::new(&self.root).expect("resolver"),
+                |path: &Path| fs::read_to_string(path),
+                Oxc,
+            )
+            .expect("build graph"),
+        );
+        let mut host = Output::default();
+        let outcome = graph
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default().with_module_loader_service(Arc::new(
+                    GraphModuleLoader::new(Arc::clone(&graph)),
+                )),
+            )
+            .map(|_| ());
+        (host.lines, outcome)
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[derive(Default)]
+struct Output {
+    lines: Vec<String>,
+}
+
+impl HostOps for Output {
+    fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
+        if operation == HostOp::WriteStdout {
+            self.lines.push(
+                arguments
+                    .iter()
+                    .map(HostValue::to_js_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        Ok(HostValue::Undefined)
+    }
+}
+
+fn expect_lines(project: &Project, main: &str, expected: &[&str]) {
+    let (lines, outcome) = project.run(main);
+    outcome.unwrap_or_else(|error| panic!("program failed: {error}; printed {lines:?}"));
+    assert_eq!(lines, expected);
+}
+
+#[test]
+fn static_then_dynamic_links_to_the_static_record() {
+    let project = Project::new();
+    project.write(
+        "m.mjs",
+        "globalThis.runs = (globalThis.runs || 0) + 1;\n\
+         export class K {}\n\
+         export let n = 1;\n\
+         export function bump() { n++; }",
+    );
+    expect_lines(
+        &project,
+        "import { K, bump } from './m.mjs';\n\
+         import * as ns from './m.mjs';\n\
+         const d = await import('./m.mjs');\n\
+         const again = await import('./m.mjs');\n\
+         bump();\n\
+         console.log(K === d.K, ns === d, d === again, d.n, globalThis.runs);",
+        &["true true true 2 1"],
+    );
+}
+
+#[test]
+fn dynamic_then_static_links_to_the_dynamic_record() {
+    let project = Project::new();
+    project.write("a.mjs", "export const early = await import('./b.mjs');");
+    project.write(
+        "b.mjs",
+        "globalThis.bRuns = (globalThis.bRuns || 0) + 1;\nexport const v = {};",
+    );
+    expect_lines(
+        &project,
+        "import { early } from './a.mjs';\n\
+         import { v } from './b.mjs';\n\
+         import * as b from './b.mjs';\n\
+         console.log(early.v === v, early === b, globalThis.bRuns);",
+        &["true true 1"],
+    );
+}
+
+#[test]
+fn two_dynamic_importers_share_one_instance() {
+    let project = Project::new();
+    project.write("x.mjs", "export const get = () => import('./shared.mjs');");
+    project.write("y.mjs", "export const get = () => import('./shared.mjs');");
+    project.write(
+        "shared.mjs",
+        "globalThis.sRuns = (globalThis.sRuns || 0) + 1;\nexport const o = {};",
+    );
+    expect_lines(
+        &project,
+        "import { get as gx } from './x.mjs';\n\
+         import { get as gy } from './y.mjs';\n\
+         const [p, q] = await Promise.all([gx(), gy()]);\n\
+         console.log(p === q, p.o === q.o, globalThis.sRuns);",
+        &["true true 1"],
+    );
+}
+
+#[test]
+fn builtin_modules_are_one_instance_per_realm() {
+    let project = Project::new();
+    expect_lines(
+        &project,
+        "import { EventEmitter } from 'node:events';\n\
+         import * as events from 'node:events';\n\
+         const ev = await import('node:events');\n\
+         console.log(EventEmitter === ev.EventEmitter, events === ev);",
+        &["true true"],
+    );
+}
+
+#[test]
+fn a_failed_module_rethrows_the_same_error_and_runs_once() {
+    let project = Project::new();
+    project.write(
+        "bad.mjs",
+        "console.log('bad ran');\nthrow new Error('boom');",
+    );
+    project.write(
+        "a.mjs",
+        "let first;\n\
+         try { await import('./bad.mjs'); } catch (error) { first = error; }\n\
+         let second;\n\
+         try { await import('./bad.mjs'); } catch (error) { second = error; }\n\
+         console.log(first === second, first.message);",
+    );
+    // `bad.mjs` is also a static dependency of the entry, reached after `a.mjs` caught its
+    // failure: the static graph rethrows the same error rather than running it again.
+    let (lines, outcome) =
+        project.run("import './a.mjs';\nimport './bad.mjs';\nconsole.log('unreachable');");
+    assert_eq!(lines, ["bad ran", "true boom"]);
+    match outcome {
+        Err(ModuleEvaluationError::Execution {
+            module,
+            error: ExecutionError::Uncaught { message, .. },
+        }) => {
+            assert!(module.ends_with("bad.mjs"), "{}", module.display());
+            assert!(message.contains("boom"), "{message}");
+        }
+        other => panic!("expected bad.mjs's error, got {other:?}"),
+    }
+}
+
+#[test]
+fn cycles_link_through_the_map_statically_and_dynamically() {
+    let project = Project::new();
+    project.write(
+        "c1.mjs",
+        "import { two } from './c2.mjs';\n\
+         globalThis.c1Runs = (globalThis.c1Runs || 0) + 1;\n\
+         export function one() { return 'one'; }\n\
+         export const seen = () => two();",
+    );
+    project.write(
+        "c2.mjs",
+        "import { one } from './c1.mjs';\n\
+         export function two() { return one(); }",
+    );
+    // Reached statically first.
+    expect_lines(
+        &project,
+        "import { seen } from './c1.mjs';\n\
+         const d1 = await import('./c1.mjs');\n\
+         const d2 = await import('./c2.mjs');\n\
+         console.log(seen(), d1.seen === seen, d2.two(), globalThis.c1Runs);",
+        &["one true one 1"],
+    );
+    // Reached only dynamically: the plan links the cycle's back edge to a dead-zone cell that
+    // `c1.mjs` fills when it publishes.
+    let other = Project::new();
+    other.write(
+        "c1.mjs",
+        "import { two } from './c2.mjs';\n\
+         export function one() { return 'one'; }\n\
+         export const seen = () => two();",
+    );
+    other.write(
+        "c2.mjs",
+        "import { one } from './c1.mjs';\n\
+         export function two() { return one(); }",
+    );
+    expect_lines(
+        &other,
+        "const m = await import('./c1.mjs');\n\
+         const n = await import('./c2.mjs');\n\
+         console.log(m.seen(), n.two === n.two, m === await import('./c1.mjs'));",
+        &["one true true"],
+    );
+}
+
+#[test]
+fn import_and_require_of_commonjs_share_module_exports() {
+    let project = Project::new();
+    project.write(
+        "c.cjs",
+        "globalThis.cRuns = (globalThis.cRuns || 0) + 1;\nmodule.exports = { a: 1 };",
+    );
+    expect_lines(
+        &project,
+        "import { createRequire } from 'node:module';\n\
+         const require = createRequire(import.meta.url);\n\
+         const r = require('./c.cjs');\n\
+         const d = await import('./c.cjs');\n\
+         console.log(d.default === r, d.a, globalThis.cRuns);",
+        &["true 1 1"],
+    );
+}
+
+#[test]
+fn export_star_as_is_the_modules_own_namespace_everywhere() {
+    let project = Project::new();
+    project.write("inner.mjs", "export const b = 2;");
+    project.write(
+        "barrel.mjs",
+        "export * as inner from './inner.mjs';\nexport const outer = 'outer';",
+    );
+    project.write("dyn-inner.mjs", "export const c = 3;");
+    project.write(
+        "dyn-barrel.mjs",
+        "export * as nested from './dyn-inner.mjs';\nexport const d = 4;",
+    );
+    expect_lines(
+        &project,
+        "import * as inner from './inner.mjs';\n\
+         import * as barrel from './barrel.mjs';\n\
+         const dynBarrel = await import('./barrel.mjs');\n\
+         console.log(barrel.inner === inner, dynBarrel === barrel, dynBarrel.inner === inner, Object.keys(dynBarrel).join(','));\n\
+         const only = await import('./dyn-barrel.mjs');\n\
+         const nested = await import('./dyn-inner.mjs');\n\
+         console.log(Object.keys(only).join(','), only.nested === nested, only.nested.c);",
+        &["true true true inner,outer", "d,nested true 3"],
+    );
+}
+
+#[test]
+fn a_module_importing_itself_sees_its_own_finished_bindings() {
+    let project = Project::new();
+    // The entry's body finishes before the job its `import()` queued runs, so the import links
+    // to the entry's own record -- live bindings, one namespace -- rather than running it again.
+    expect_lines(
+        &project,
+        "globalThis.runs = (globalThis.runs || 0) + 1;\n\
+         let x = 0;\n\
+         export { x, x as y };\n\
+         async function fn() {\n\
+           const imported = await import('./main.mjs');\n\
+           const before = [imported.x, imported.y].join();\n\
+           x = 1;\n\
+           console.log(before, imported.x, imported.y, imported === await import('./main.mjs'), globalThis.runs);\n\
+         }\n\
+         fn();",
+        &["0,0 1 1 true 1"],
+    );
+}
+
+/// A loader that builds a graph of its own for every request, as the Test262 runner's does: the
+/// plan it hands back links by module key, so a module the static graph already evaluated is
+/// still not evaluated again.
+struct FreshGraphLoader;
+
+impl kiln_interpreter::ModuleLoaderService for FreshGraphLoader {
+    fn load(
+        &self,
+        request: kiln_interpreter::ModuleLoadRequest,
+    ) -> Result<kiln_interpreter::ModulePlan, kiln_interpreter::ModuleLoadError> {
+        let base = Path::new(request.importer.as_deref().expect("importer"))
+            .parent()
+            .expect("importer directory")
+            .to_path_buf();
+        let entry = base
+            .join(&request.specifier)
+            .canonicalize()
+            .expect("canonical target");
+        let graph = ModuleGraph::build(
+            &entry,
+            &base,
+            |path: &Path| fs::read_to_string(path),
+            kiln_frontend_oxc::parse,
+        )
+        .expect("build request graph");
+        graph
+            .import_plan_for_request(&entry, None)
+            .map_err(|error| kiln_interpreter::ModuleLoadError::Unsupported(error.to_string()))
+    }
+}
+
+#[test]
+fn a_loader_with_its_own_graph_links_to_the_static_record() {
+    let project = Project::new();
+    let entry = project.write(
+        "main.mjs",
+        "globalThis.runs = (globalThis.runs || 0) + 1;\n\
+         let x = 0;\n\
+         export { x, x as y };\n\
+         async function fn() {\n\
+           const imported = await import('./main.mjs');\n\
+           const before = [imported.x, imported.y].join();\n\
+           x = 1;\n\
+           console.log(before, imported.x, imported.y, globalThis.runs);\n\
+         }\n\
+         fn();",
+    );
+    let graph = ModuleGraph::build(
+        &entry,
+        &project.root,
+        |path: &Path| fs::read_to_string(path),
+        kiln_frontend_oxc::parse,
+    )
+    .expect("build graph");
+    let mut host = Output::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(FreshGraphLoader)),
+        )
+        .expect("run");
+    assert_eq!(host.lines, ["0,0 1 1 1"]);
+}

@@ -110,8 +110,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             },
             entropy,
             closures: Vec::new(),
-            dynamic_modules: std::collections::HashMap::new(),
-            dynamic_namespaces: std::collections::HashMap::new(),
+            module_map: SharedModuleMap::default(),
             limits,
         })
     }

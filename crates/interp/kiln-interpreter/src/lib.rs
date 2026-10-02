@@ -240,6 +240,9 @@ impl ErrorKind {
 mod native;
 pub use native::*;
 
+mod module_map;
+pub use module_map::{ModuleMap, ModuleStatus, SharedModuleMap, lookup_export};
+
 /// Which built-in's method table a `Native::PrototypeOf` marker stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrototypeTable {
@@ -877,6 +880,20 @@ pub trait CommonJsModuleLoader {
         specifier: &str,
         instruction: usize,
     ) -> Result<Value, ExecutionError>;
+
+    /// The body of the module at `module_path` has run to its end (or its top-level `await` has
+    /// settled), and `exports` are its own bindings. Called before the event loop runs the jobs
+    /// the body queued, so the realm's module map can record the module as evaluated first.
+    fn module_evaluated(&mut self, _module_path: &str, _exports: &[ModuleExportValue]) {}
+
+    /// Evaluate the CommonJS or JSON module `key` into the realm's module map, as `import()`
+    /// of it needs, through the same cache `require` uses. A loader that cannot answers with
+    /// the refusal it has always given.
+    fn evaluate_module(&mut self, key: &str, _instruction: usize) -> Result<(), ExecutionError> {
+        Err(ExecutionError::DynamicImportUnsupported {
+            message: format!("`import()` of `{key}` needs a CommonJS loader"),
+        })
+    }
 }
 
 /// One statically resolved CommonJS `require` environment.
@@ -1706,52 +1723,62 @@ impl ExecutionCapabilities {
     }
 }
 
-/// One module a dynamic import has to evaluate, compiled and linked by the host.
+/// One module a dynamic import may have to evaluate, compiled and linked by the host.
 ///
 /// The interpreter deliberately owns no linker for the same reason it owns no parser: resolving
 /// a specifier is filesystem policy and reading a star re-export is graph work, and neither
-/// belongs in a machine that runs bytecode. What arrives here is already decided.
+/// belongs in a machine that runs bytecode. What arrives here is already decided -- and linked
+/// by *name* against the realm's [`ModuleMap`], so a module some other importer (the static
+/// graph, or another `import()`) already evaluated is linked to rather than run again.
 pub struct PlannedModule {
-    /// A stable identity for this module -- its canonical path. Two imports naming the same key
-    /// share one evaluation, which is the whole of what a module cache is.
+    /// The module's canonical key -- its path -- which is its key in the realm's module map.
     pub key: String,
-    /// The body to run. Its `Return` yields an array holding, in order, the values the rest of
-    /// the plan refers to by index.
-    ///
-    /// The epilogue that builds that array is the host's work, because only the host has a
-    /// compiler: nothing here can look inside a module and decide which slots an importer wants.
-    pub program: Rc<Program>,
-    /// The `kiln:shared` initializer alone captures temporary realm-local engine hooks.
-    pub kiln_shared: bool,
+    /// How the module is evaluated if the map does not already hold it.
+    pub body: PlannedBody,
     /// Module-scope slots to fill before the body runs, and where each value comes from.
     pub bindings: Vec<(u32, ModuleBinding)>,
+    /// Names this module exports that are not its own bindings (`export *`, `export * as ns`),
+    /// and where each one comes from.
+    pub reexports: Vec<(String, ModuleBinding)>,
+}
+
+/// How a planned module is evaluated.
+pub enum PlannedBody {
+    /// A body to run. Its `Return` yields an array holding the module's own exports, in the
+    /// order `exports` names them.
+    ///
+    /// The epilogue that builds that array is the host's work, because only the host has a
+    /// compiler: nothing here can look inside a module and decide which slots it exports.
+    Source {
+        program: Rc<Program>,
+        exports: Vec<String>,
+        /// The `kiln:shared` initializer alone captures temporary realm-local engine hooks.
+        kiln_shared: bool,
+    },
+    /// Exports the host computed without running anything (a file asset's path).
+    Exports(Vec<(String, Value)>),
+    /// A module the host's CommonJS loader evaluates (CommonJS, JSON), through the same cache
+    /// `require` uses, so `import()` and `require` of it share one `module.exports`.
+    Host,
 }
 
 /// Where one value a planned module imports comes from.
 pub enum ModuleBinding {
-    /// A value an earlier plan entry returned.
-    Value(ModuleValueRef),
-    /// `import * as ns`: an object over values earlier plan entries returned.
-    Namespace(Vec<(String, ModuleValueRef)>),
-    /// A value the host already holds -- a JSON module's default, a Node builtin's exports.
+    /// The export `name` of the module whose key is `module`.
+    Export { module: String, name: String },
+    /// `import * as ns`: the namespace object of the module whose key is `module`.
+    Namespace { module: String },
+    /// A value the host already holds.
     Ready(Value),
-}
-
-/// The `index`-th value returned by plan entry `module`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModuleValueRef {
-    pub module: usize,
-    pub index: usize,
 }
 
 /// Everything one `import(specifier)` needs, in the order it has to happen.
 pub struct ModulePlan {
     /// The key of the module that was asked for, which is one of `modules`' keys.
     pub key: String,
-    /// Dependencies first, with the requested module last. Every entry is evaluated once.
+    /// Dependencies first, with the requested module last. A module the realm's map already
+    /// holds is not evaluated again.
     pub modules: Vec<PlannedModule>,
-    /// The requested module's namespace: each visible export and where its value comes from.
-    pub namespace: Vec<(String, ModuleValueRef)>,
 }
 
 /// Why a host produced no plan for a specifier.
@@ -1959,6 +1986,11 @@ impl ModuleRealmSession {
         }
     }
 
+    /// The realm's module map, which the graph executor evaluates its modules into.
+    pub fn module_map(&self) -> SharedModuleMap {
+        Rc::clone(&self.shared.borrow().module_map)
+    }
+
     pub fn end_kiln_shared(&mut self) {
         let mut shared = self.shared.borrow_mut();
         shared.shared_hooks_pending = false;
@@ -2025,6 +2057,9 @@ struct ModuleRealmShared {
     isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
     actor_realm_id: u64,
     actor_graph_requests: Rc<RefCell<std::collections::HashMap<u64, u8>>>,
+    /// The realm's module map: one record per module, shared by the static graph executor and
+    /// every machine that runs `import()` in this realm.
+    module_map: SharedModuleMap,
 }
 
 impl Default for ModuleRealmSession {
@@ -2053,6 +2088,7 @@ impl Default for ModuleRealmSession {
                 isolated_graphs: Rc::new(RefCell::new(Vec::new())),
                 actor_realm_id: kiln_runtime::workers::actor_request_id(),
                 actor_graph_requests: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                module_map: SharedModuleMap::default(),
             })),
         }
     }

@@ -405,25 +405,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
     /// the closures again and cut the links.
     pub(super) closures: Vec<Weak<Closure>>,
-    /// What each module a dynamic import has already evaluated, or how it failed, by the host's
-    /// key for it.
-    ///
-    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once
-    /// (including the once-only evaluation rule for a rejected module).
-    /// It is realm state rather than the loader's, because it holds *values* -- a second
-    /// evaluation would produce a second set of objects, and a program that compared the two
-    /// namespaces would see them differ.
-    ///
-    /// Keyed by realm as well as by specifier, because each realm has its own module map. Two
-    /// realms importing one specifier get two independent instances, which is what stops a
-    /// `ShadowRealm` from sharing module state with the realm that made it: a shared map would
-    /// let a write to an export in one realm be read in the other, and no amount of wrapping
-    /// values at the boundary would close that.
-    pub(super) dynamic_modules: std::collections::HashMap<(RealmId, String), DynamicModuleState>,
-    /// The namespace object handed back for each module, so two imports of one module hand back
-    /// the same object rather than two equal ones. A namespace has identity in the
-    /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
-    /// sees it.
-    pub(super) dynamic_namespaces: std::collections::HashMap<(RealmId, String), Value>,
+    /// The realm's module map (see [`ModuleMap`]): what each module has come to, by realm and
+    /// canonical key. Shared with every other machine in this realm session, and with the static
+    /// graph executor, so a module is evaluated once however it is reached. A machine running
+    /// outside a session has a map of its own.
+    pub(super) module_map: SharedModuleMap,
     pub(super) limits: ExecutionLimits,
 }
