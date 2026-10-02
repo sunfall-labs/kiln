@@ -1098,6 +1098,25 @@ fn empty_containers_and_nesting_read_the_way_node_writes_them() {
 }
 
 #[test]
+fn console_inspection_wraps_nested_objects_at_break_length() {
+    let value = object(&[(
+        "outer",
+        object(&[(
+            "value",
+            Value::String(
+                "a value long enough to make this nested object wrap when combined with its parent"
+                    .to_owned()
+                    .into(),
+            ),
+        )]),
+    )]);
+    assert_eq!(
+        inspect(&value),
+        "{\n  outer: {\n    value: 'a value long enough to make this nested object wrap when combined with its parent'\n  }\n}"
+    );
+}
+
+#[test]
 fn a_timers_delay_costs_nothing_to_wait_for() {
     // The property the differential harness cannot check, because node would sleep for it:
     // an hour-long delay is as cheap as a zero-length one, and the order is still by time.

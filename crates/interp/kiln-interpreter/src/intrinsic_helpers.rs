@@ -2101,14 +2101,13 @@ pub(super) fn json_value_and_sources_from_tape(
 /// are not, for the same reason -- `console.log("hi")` prints hi, but `{ a: "hi" }` has to show
 /// that `a` holds a string rather than a bare word.
 ///
-/// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it,
-/// with two documented limits: output is always one line, where node wraps past about 72
-/// characters, and a cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
+/// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it.
+/// A cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
 pub(crate) fn inspect(value: &Value) -> String {
     match value {
         // A top-level string prints as itself; only a nested one is quoted.
         Value::String(text) => text.to_lossy_string(),
-        other => inspect_nested(other, 0, &mut Vec::new()),
+        other => inspect_nested_at(other, 0, &mut Vec::new(), 0),
     }
 }
 
@@ -2116,6 +2115,10 @@ pub(crate) fn inspect(value: &Value) -> String {
 pub(super) const INSPECT_DEPTH: usize = 2;
 
 pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String {
+    inspect_nested_at(value, depth, seen, 0)
+}
+
+fn inspect_nested_at(value: &Value, depth: usize, seen: &mut Vec<usize>, column: usize) -> String {
     match value {
         Value::String(text) => quote_for_console(&text.to_lossy_string()),
         Value::Undefined | Value::Null | Value::Boolean(_) | Value::Number(_) => {
@@ -2153,7 +2156,10 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
         Value::CommonJsResolve(_) => "[Function: resolve]".to_owned(),
         // Node shows what the traps produce; this shows the target, and says so, rather than
         // running a program's code because something was printed.
-        Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
+        Value::Proxy(proxy) => format!(
+            "Proxy [ {} ]",
+            inspect_nested_at(&proxy.target, depth, seen, column + 8)
+        ),
         Value::TypedArray(view) => {
             let items = view
                 .items()
@@ -2259,7 +2265,7 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
             if depth > INSPECT_DEPTH {
                 return "[Object]".to_owned();
             }
-            inspect_object(&object.borrow(), depth, guard.seen)
+            inspect_object_at(&object.borrow(), depth, guard.seen, column)
         }
         Value::Shared(facade) => format!(
             "Shared {{ graph: {}, node: {} }}",
@@ -2271,6 +2277,17 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
 }
 
 pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> String {
+    inspect_object_at(object, depth, seen, 0)
+}
+
+fn inspect_object_at(
+    object: &ObjectData,
+    depth: usize,
+    seen: &mut Vec<usize>,
+    column: usize,
+) -> String {
+    // Match Node's default `breakLength`: compact objects stay on the current line while
+    // multiline descendants or the current column would push the row beyond 80 characters.
     // A Set or Map is an object carrying reserved state, and a console shows what it holds
     // rather than the bookkeeping that makes it work.
     if let Some(Value::Array(entries)) = object.get_own("@@entries") {
@@ -2313,24 +2330,11 @@ pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<u
         return format!("{label}({}) {{ {} }}", live.len(), parts.join(", "));
     }
 
-    let parts = object
+    let entries = object
         .entries()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
         .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
-        .map(|(key, property)| {
-            let shown = match property {
-                Property::Value(value) => inspect_nested(value, depth + 1, seen),
-                // Node names the accessor rather than calling it: showing a value here would run
-                // the program's code just because something was printed.
-                Property::Accessor { get, set } => match (get.is_some(), set.is_some()) {
-                    (true, true) => "[Getter/Setter]".to_owned(),
-                    (true, false) => "[Getter]".to_owned(),
-                    _ => "[Setter]".to_owned(),
-                },
-            };
-            format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
-        })
         .collect::<Vec<_>>();
     // Node names the class an instance came from, so a printed object says what it is. A plain
     // object's prototype is `Object.prototype`, which this realm does not have as an object, so
@@ -2339,10 +2343,50 @@ pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<u
         Some(name) => format!("{name} "),
         None => String::new(),
     };
-    if parts.is_empty() {
+    if entries.is_empty() {
         return format!("{label}{{}}");
     }
-    format!("{label}{{ {} }}", parts.join(", "))
+    let mut parts = Vec::with_capacity(entries.len());
+    let mut body_len = 0usize;
+    let mut has_newline = false;
+    for (key, property) in entries {
+        let key = inspect_key(&key.to_lossy_string());
+        let shown = match property {
+            Property::Value(value) => inspect_nested_at(
+                value,
+                depth + 1,
+                seen,
+                column
+                    .saturating_add(label.len())
+                    .saturating_add(2)
+                    .saturating_add(body_len)
+                    .saturating_add(key.len())
+                    .saturating_add(2),
+            ),
+            // Node names the accessor rather than calling it: showing a value here would run
+            // the program's code just because something was printed.
+            Property::Accessor { get, set } => match (get.is_some(), set.is_some()) {
+                (true, true) => "[Getter/Setter]".to_owned(),
+                (true, false) => "[Getter]".to_owned(),
+                _ => "[Setter]".to_owned(),
+            },
+        };
+        let part = format!("{key}: {shown}");
+        has_newline |= part.contains('\n');
+        body_len = body_len.saturating_add(part.len() + usize::from(!parts.is_empty()) * 2);
+        parts.push(part);
+    }
+    let flat_len = label.len().saturating_add(4).saturating_add(body_len);
+    if !has_newline && column.saturating_add(flat_len) <= 80 {
+        format!("{label}{{ {} }}", parts.join(", "))
+    } else {
+        let indent = "  ".repeat(depth + 1);
+        let close = "  ".repeat(depth);
+        format!(
+            "{label}{{\n{indent}{}\n{close}}}",
+            parts.join(&format!(",\n{indent}"))
+        )
+    }
 }
 
 /// The name a console puts in front of an object's contents, if it has one.
