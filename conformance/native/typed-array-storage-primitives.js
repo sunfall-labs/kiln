@@ -5,7 +5,9 @@
 // if through a temporary; two element types take the element loop. (A comparator is consistent
 // only without `NaN`, so the comparator sort drops them first: otherwise the order is the
 // engine's.)
-const kinds = [Float64Array, Float32Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
+// Keep every native kind represented here: in particular Float16 sits between Uint32 and
+// Float32 in the C enum, while BigInt64 sorts signed rather than as its unsigned bit pattern.
+const kinds = [Float64Array, Float32Array, Float16Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
 const src = [3, -0, NaN, 0, -7.5, Infinity, 1e-300, -Infinity, 2, NaN, -0, 129, -129, 65536.5];
 const show = (t) => Array.prototype.map.call(t, (x) => (Object.is(x, -0) ? "-0" : String(x))).join(",");
 for (const K of kinds) {

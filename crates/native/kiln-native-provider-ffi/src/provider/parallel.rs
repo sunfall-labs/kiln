@@ -363,7 +363,7 @@ pub const SORT_ASCENDING: i32 = 1;
 pub const SORT_DESCENDING: i32 = 2;
 
 /// The element kind of an array's own element storage -- NaN-boxed values, each a number whose
-/// bits are its `double` -- beside the `kiln_typed_kind` values 0..=8 of a typed array.
+/// bits are its `double` -- beside the native `kiln_typed_kind` discriminants of a typed array.
 pub const SORT_KIND_VALUES: i32 = 100;
 
 /// Below this many elements the sort runs on the calling thread: a sort of 10,000 doubles takes
@@ -372,7 +372,7 @@ pub const SORT_PARALLEL_MIN: usize = 10_000;
 
 // `%TypedArray%` default order over floats (`SORT_DEFAULT`); integers compare as integers. The
 // order is `kiln_number_core::typed_order`'s, which the sequential sort runs too.
-use kiln_number_core::typed_order::compare_default as default_float_order;
+use kiln_number_core::typed_order::{ElementKind, compare_default as default_float_order};
 
 /// `a - b < 0`, `> 0`, else equal, for numbers that are not `NaN` -- `Infinity - Infinity` is
 /// `NaN`, which the comparator's caller reads as `+0`, so equal.
@@ -630,9 +630,10 @@ unsafe fn sort_typed<T: Send + Copy + Into<f64>>(
     0
 }
 
-/// Sort `count` elements at `data` in place for `parallelSort`: `kind` is a `kiln_typed_kind`
-/// (0..=8; the BigInt kinds are not taken) or [`SORT_KIND_VALUES`] for an array's own numeric
-/// elements; `order` is [`SORT_DEFAULT`] (typed arrays only), [`SORT_ASCENDING`] or
+/// Sort `count` elements at `data` in place for `parallelSort`: `kind` is a native
+/// `kiln_typed_kind` discriminant (Float16 and BigInt kinds are not taken) or
+/// [`SORT_KIND_VALUES`] for an array's own numeric elements; `order` is [`SORT_DEFAULT`]
+/// (typed arrays only), [`SORT_ASCENDING`] or
 /// [`SORT_DESCENDING`].
 ///
 /// Returns 0 when sorted, 1 when a comparator order met a `NaN` -- nothing was written and the
@@ -659,14 +660,6 @@ pub unsafe extern "C" fn kiln_parallel_sort(
     // SAFETY (every arm): the caller's contract, for the element type `kind` names.
     unsafe {
         match kind {
-            0 => sort_typed::<i8>(data, count, order),
-            1 | 2 => sort_typed::<u8>(data, count, order),
-            3 => sort_typed::<i16>(data, count, order),
-            4 => sort_typed::<u16>(data, count, order),
-            5 => sort_typed::<i32>(data, count, order),
-            6 => sort_typed::<u32>(data, count, order),
-            7 => sort_typed::<f32>(data, count, order),
-            8 => sort_typed::<f64>(data, count, order),
             SORT_KIND_VALUES if order != SORT_DEFAULT => {
                 // A number's value bits are its double; `NaN` (the one boxed spelling) is
                 // refused by the comparator orders, the only ones an array takes.
@@ -685,7 +678,24 @@ pub unsafe extern "C" fn kiln_parallel_sort(
                 }
                 0
             }
-            _ => INVALID_ARGUMENT,
+            SORT_KIND_VALUES => INVALID_ARGUMENT,
+            _ => match ElementKind::from_native(kind) {
+                Some(ElementKind::Int8) => sort_typed::<i8>(data, count, order),
+                Some(ElementKind::Uint8 | ElementKind::Uint8Clamped) => {
+                    sort_typed::<u8>(data, count, order)
+                }
+                Some(ElementKind::Int16) => sort_typed::<i16>(data, count, order),
+                Some(ElementKind::Uint16) => sort_typed::<u16>(data, count, order),
+                Some(ElementKind::Int32) => sort_typed::<i32>(data, count, order),
+                Some(ElementKind::Uint32) => sort_typed::<u32>(data, count, order),
+                // Float16 has no native scalar representation in this parallel helper; let
+                // the sequential typed-array sort handle it. Float32/64 and BigInt therefore
+                // follow the same discriminant authority as the sequential provider entry.
+                Some(ElementKind::Float32) => sort_typed::<f32>(data, count, order),
+                Some(ElementKind::Float64) => sort_typed::<f64>(data, count, order),
+                Some(ElementKind::Float16 | ElementKind::BigInt64 | ElementKind::BigUint64)
+                | None => INVALID_ARGUMENT,
+            },
         }
     }
 }

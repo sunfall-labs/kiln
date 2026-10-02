@@ -31,7 +31,10 @@ check("other comparator", xs.slice(0, 3000).parallelSort((a, b) => (a < b ? -1 :
 check("array default order", xs.slice(0, 2000).parallelSort(), xs.slice(0, 2000).sort());
 check("empty", [].parallelSort((a, b) => a - b), [].sort((a, b) => a - b));
 
-const kinds = [Float64Array, Float32Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
+// Float16's C enum slot precedes Float32, although the parallel provider does not currently
+// specialize it; it must safely fall back while the neighboring Float32/Float64 kinds stay
+// aligned with the shared native-kind mapping.
+const kinds = [Float64Array, Float32Array, Float16Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
 for (let j = 0; j < kinds.length; j++) {
   const Kind = kinds[j];
   const view = new Kind(j % 3 === 0 ? 40000 : 700);
