@@ -1525,6 +1525,32 @@
                         thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                         "Object prototype may only be an Object or null");
                 }
+                /* `OrdinarySetPrototypeOf`: a non-extensible object (a frozen or sealed one
+                 * included) keeps the prototype it has. Asking for that same one succeeds;
+                 * asking for any other is a refusal, which this spelling throws and
+                 * `Reflect.setPrototypeOf` reports as `false`. Writing the link anyway let a
+                 * frozen object change its chain. */
+                {
+                    kiln_value extensible;
+                    status = kiln_c99_invoke_method(host, &extensible,
+                                                    KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE,
+                                                    kiln_c99_undefined(), &subject, 1, depth,
+                                                    thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!kiln_c99_truthy(extensible)) {
+                        kiln_value current;
+                        status = kiln_c99_invoke_method(host, &current,
+                                                        KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                                        kiln_c99_undefined(), &subject, 1, depth,
+                                                        thrown);
+                        if (status != KILN_C99_OK) return status;
+                        if (!kiln_c99_strict_equal(current, wanted))
+                            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                        "Cannot set prototype of a non-extensible object");
+                        *result = subject;
+                        return KILN_C99_OK;
+                    }
+                }
             }
             status = kiln_c99_set_prototype(subject, argc > 1 ? args[1] : kiln_c99_undefined());
             /* The object, so a `setPrototypeOf` can be inlined into the expression that built
@@ -2650,6 +2676,8 @@
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         size_t at = array->count;
+        /* `IsCallable` before the walk, so an empty array throws too. */
+        if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
         *result = code == KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX ? kiln_c99_number(-1.0)
                                                                 : kiln_c99_undefined();
         while (at > 0) {
@@ -2793,7 +2821,6 @@
     case KILN_C99_METHOD_ARRAY_FLAT_MAP:
     case KILN_C99_METHOD_MAP:
     case KILN_C99_METHOD_ARRAY_GENERIC_MAP:
-    case KILN_C99_METHOD_ARRAY_PARALLEL_MAP:
     case KILN_C99_METHOD_FILTER:
     case KILN_C99_METHOD_ARRAY_GENERIC_FILTER:
     case KILN_C99_METHOD_FOR_EACH: {
@@ -2801,28 +2828,33 @@
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         kiln_val vcallee = kiln_val_from_boundary(callback);
-        if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
-             code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) &&
+        int filtering = code == KILN_C99_METHOD_FILTER || code == KILN_C99_METHOD_ARRAY_GENERIC_FILTER;
+        /* `IsCallable(callbackfn)` is checked before anything else, and before the length is
+         * looked at: `[].map(1)` is a TypeError, not an empty array. Every loop below only
+         * reached a non-callable when there was an element to call it on. */
+        if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
+        /* `flatMap` asks the species for an empty array before the first callback, then fills
+         * it with what the plain walk below flattens. */
+        kiln_value species_flat = kiln_c99_undefined();
+        if (code == KILN_C99_METHOD_ARRAY_FLAT_MAP &&
+            (array->properties.tag != KILN_VALUE_UNDEFINED ||
+             !kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_ARRAY, KILN_C99_BUILTIN_ARRAY_PROTOTYPE))) {
+            status = kiln_c99_array_species_create(host, receiver, 0.0, &species_flat, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_GENERIC_MAP || filtering) &&
             (array->properties.tag != KILN_VALUE_UNDEFINED ||
              !kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_ARRAY, KILN_C99_BUILTIN_ARRAY_PROTOTYPE))) {
             /* ArraySpeciesCreate is observable before the first callback. Keep the plain-array
-             * fast loop below; custom prototypes/constructors use ordinary property authority. */
+             * fast loop below; custom prototypes/constructors use ordinary property authority.
+             * `map` asks the species for an array of the receiver's length and defines each
+             * answer at its own index; `filter` asks for an empty one and defines each kept
+             * element at the next index -- the same walk, and what `class extends Array` sees
+             * from either. */
             size_t length = array->count;
-            kiln_value constructor, species, requested = kiln_c99_number((double)length);
-            if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
-            status = kiln_c99_get(host, receiver, "constructor", 11, &constructor, depth, thrown);
-            if (status != KILN_C99_OK) return status;
-            species = constructor;
-            if (kiln_c99_can_be_prototype(constructor) && constructor.tag != KILN_VALUE_NULL) {
-                status = kiln_c99_probe_symbol(host, constructor, "@@species", 9, &species, depth, thrown);
-                if (status != KILN_C99_OK) return status;
-                if (species.tag == KILN_VALUE_NULL) species = kiln_c99_undefined();
-            }
-            if (species.tag == KILN_VALUE_UNDEFINED)
-                status = kiln_c99_array_constructor(&built, &requested, 1, thrown);
-            else if (!kiln_c99_heritage_constructs(species))
-                return kiln_c99_throw_not_a(thrown, species, "constructor");
-            else status = kiln_c99_construct(host, &built, species, &requested, 1, depth, thrown);
+            size_t kept = 0;
+            status = kiln_c99_array_species_create(host, receiver, filtering ? 0.0 : (double)length,
+                                                   &built, depth, thrown);
             if (status != KILN_C99_OK) return status;
             kiln_value descriptor;
             status = kiln_c99_new_object(&descriptor);
@@ -2841,17 +2873,19 @@
                 kiln_value visit[3] = {value, key, receiver};
                 status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
                 if (status != KILN_C99_OK) return status;
-                status = kiln_c99_own_data(descriptor, "value", 5, produced);
+                if (filtering && !kiln_c99_truthy(produced)) continue;
+                status = kiln_c99_own_data(descriptor, "value", 5, filtering ? value : produced);
                 if (status != KILN_C99_OK) return status;
                 char spelling[32];
-                size_t spelling_len = kiln_c99_double_to_js((double)index, spelling);
+                size_t spelling_len =
+                    kiln_c99_double_to_js(filtering ? (double)kept++ : (double)index, spelling);
                 status = kiln_c99_define_property(host, built, spelling, spelling_len, descriptor, depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
             *result = built;
             return KILN_C99_OK;
         }
-        if ((code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) &&
+        if (code == KILN_C99_METHOD_MAP &&
             KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
             kiln_value built_val;
             status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
@@ -2924,8 +2958,7 @@
                  * shift everything after it. */
                 if (array->elements[index] == KILN_VAL_HOLE) {
                     if (code == KILN_C99_METHOD_MAP ||
-                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
-                        code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP) {
+                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
                         status = kiln_c99_array_push(built, kiln_c99_hole());
                         if (status != KILN_C99_OK) {
                             return status;
@@ -2942,7 +2975,6 @@
                 }
                 if (code == KILN_C99_METHOD_MAP ||
                     code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
-                    code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP ||
                     code == KILN_C99_METHOD_ARRAY_FLAT_MAP) {
                     status = kiln_c99_array_push(built, produced);
                 } else if ((code == KILN_C99_METHOD_FILTER ||
@@ -2961,8 +2993,34 @@
             /* One level, and only of what the callback produced -- `flatMap` does not flatten an
              * array that was already an element. */
             kiln_value one = kiln_c99_number(1.0);
-            return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_ARRAY_FLAT, built, &one, 1,
-                                          depth, thrown);
+            kiln_value flat;
+            kiln_value descriptor;
+            kiln_array *items;
+            status = kiln_c99_invoke_method(host, &flat, KILN_C99_METHOD_ARRAY_FLAT, built, &one, 1,
+                                            depth, thrown);
+            if (status != KILN_C99_OK || species_flat.tag == KILN_VALUE_UNDEFINED) {
+                if (status == KILN_C99_OK) *result = flat;
+                return status;
+            }
+            /* CreateDataPropertyOrThrow of each flattened element on the species' answer. */
+            status = kiln_c99_new_object(&descriptor);
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "writable", 8, kiln_c99_boolean(1));
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "enumerable", 10, kiln_c99_boolean(1));
+            if (status == KILN_C99_OK) status = kiln_c99_own_data(descriptor, "configurable", 12, kiln_c99_boolean(1));
+            if (status != KILN_C99_OK) return status;
+            items = kiln_c99_array_of(flat);
+            for (index = 0; index < items->count; ++index) {
+                char spelling[32];
+                size_t spelling_len = kiln_c99_double_to_js((double)index, spelling);
+                status = kiln_c99_own_data(descriptor, "value", 5,
+                                           kiln_val_to_boundary(items->elements[index]));
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_define_property(host, species_flat, spelling, spelling_len,
+                                                  descriptor, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            *result = species_flat;
+            return KILN_C99_OK;
         }
         *result = built;
         return KILN_C99_OK;
@@ -3031,6 +3089,8 @@
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         size_t length = array->count;
         int matched = 0;
+        /* `IsCallable` before the walk, so an empty array throws too. */
+        if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
         /* `every` is the only one that answers true for an empty array, and the only one that
          * stops on a *falsy* result. Everything else about the four is the same walk. */
         for (index = 0; index < length && index < array->count; ++index) {

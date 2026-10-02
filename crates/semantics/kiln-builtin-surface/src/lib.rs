@@ -980,7 +980,6 @@ pub enum ArrayMethod {
     Keys,
     LastIndexOf,
     Map,
-    ParallelMap,
     Pop,
     Push,
     Reduce,
@@ -1217,13 +1216,6 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         kind: MemberKind::Method { length: 1 },
         attributes: DescriptorAttributes::METHOD,
         binding: SemanticBinding::ArrayMethod(ArrayMethod::Map),
-    },
-    PrototypeMember {
-        prototype: PrototypeId::Array,
-        key: MemberKey::Named("parallelMap"),
-        kind: MemberKind::Method { length: 1 },
-        attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ArrayMethod(ArrayMethod::ParallelMap),
     },
     PrototypeMember {
         prototype: PrototypeId::Array,
@@ -2205,12 +2197,18 @@ pub enum ExtensionInstaller {
 
 /// Every kiln extension, in both engines. See [`KilnExtension`].
 pub const KILN_EXTENSIONS: &[KilnExtension] = &[
+    // The parallel family (ADR 0058, ADR 0069): one sequential definition of every member, on
+    // both owners, in `kiln-builtins/src/parallel.ts`, and a pooled lowering where the native
+    // backend proves the callback pure (`kiln-backend-c/src/parallel.rs`). Neither engine answers
+    // any of them natively: `parallelMap` was once a `PROTOTYPE_SURFACE` row each engine answered
+    // as `map` under another name, which made three definitions of one method.
+    // `parallelFlatMap` is on arrays only.
     KilnExtension {
         owner: "Array.prototype",
         key: MemberKey::Named("parallelMap"),
         attributes: DescriptorAttributes::METHOD,
         decided_by: "ADR 0058",
-        installed_by: ExtensionInstaller::Description,
+        installed_by: ExtensionInstaller::Bootstrap,
     },
     KilnExtension {
         owner: "%TypedArray%.prototype",
@@ -2219,9 +2217,6 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
         decided_by: "ADR 0058",
         installed_by: ExtensionInstaller::Bootstrap,
     },
-    // The parallel family (ADR 0069, parallel-builtins issue 10): sequential definitions in
-    // `kiln-builtins/src/parallel.ts`, and a pooled lowering where the native backend proves the
-    // callback pure (`kiln-backend-c/src/parallel.rs`). `parallelFlatMap` is on arrays only.
     KilnExtension {
         owner: "Array.prototype",
         key: MemberKey::Named("parallelFilter"),
@@ -2663,7 +2658,8 @@ mod tests {
             .iter()
             .filter(|member| member.is_kiln_extension())
             .collect();
-        assert!(!marked.is_empty());
+        // Every extension today is the bootstrap's (`parallel.ts`), so no row is marked; a row
+        // that ever is must be non-enumerable too.
         for member in marked {
             assert!(
                 !member.attributes.enumerable,
@@ -2679,9 +2675,13 @@ mod tests {
         assert!(is_kiln_extension("Array.prototype", "parallelMap"));
         assert!(is_kiln_extension("%TypedArray%.prototype", "parallelMap"));
         assert!(!is_kiln_extension("Array.prototype", "map"));
+        // The whole family is the bootstrap's (`kiln-builtins/src/parallel.ts`): no engine
+        // answers a member of it from the description.
+        assert!(find_prototype_member(PrototypeId::Array, "parallelMap").is_none());
         assert!(
-            find_prototype_member(PrototypeId::Array, "parallelMap")
-                .is_some_and(PrototypeMember::is_kiln_extension)
+            KILN_EXTENSIONS
+                .iter()
+                .all(|e| e.installed_by == ExtensionInstaller::Bootstrap)
         );
         assert!(
             !find_prototype_member(PrototypeId::Array, "map")
@@ -2723,11 +2723,11 @@ mod tests {
     #[test]
     fn array_prototype_members_are_complete() {
         let members: Vec<_> = prototype_members(PrototypeId::Array).collect();
-        assert_eq!(members.len(), 43);
+        assert_eq!(members.len(), 42);
         assert!(prototype_has(PrototypeId::Array, "length"));
         assert!(prototype_has(PrototypeId::Array, "constructor"));
         assert!(prototype_has(PrototypeId::Array, "map"));
-        assert!(prototype_has(PrototypeId::Array, "parallelMap"));
+        assert!(!prototype_has(PrototypeId::Array, "parallelMap"));
         assert!(prototype_has(PrototypeId::Array, "push"));
         assert!(prototype_has(PrototypeId::Array, "pop"));
         assert!(prototype_has(PrototypeId::Array, "slice"));

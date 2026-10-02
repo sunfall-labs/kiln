@@ -349,7 +349,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ARRAY_TO_SPLICED: return "toSpliced";
     case KILN_C99_METHOD_ARRAY_WITH: return "with";
     case KILN_C99_METHOD_MAP: return "map";
-    case KILN_C99_METHOD_ARRAY_PARALLEL_MAP: return "parallelMap";
     case KILN_C99_METHOD_FILTER: return "filter";
     case KILN_C99_METHOD_ARRAY_GENERIC_MAP: return "map";
     case KILN_C99_METHOD_ARRAY_GENERIC_FILTER: return "filter";

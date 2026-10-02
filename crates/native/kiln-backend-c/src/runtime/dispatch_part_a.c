@@ -1685,6 +1685,27 @@ static int kiln_c99_crypto_key_export_raw(kiln_value *result, const kiln_value *
     return KILN_C99_OK;
 }
 
+/* `ArraySpeciesCreate(receiver, length)`: the receiver's `constructor[Symbol.species]`, or a
+ * plain array when there is none. Observable -- a getter, a subclass constructor -- so it runs
+ * before the first callback, as each caller below arranges. */
+static int kiln_c99_array_species_create(kiln_host *host, kiln_value receiver, double length,
+                                         kiln_value *out, int depth, kiln_value *thrown) {
+    kiln_value constructor, species, requested = kiln_c99_number(length);
+    int status = kiln_c99_get(host, receiver, "constructor", 11, &constructor, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    species = constructor;
+    if (kiln_c99_can_be_prototype(constructor) && constructor.tag != KILN_VALUE_NULL) {
+        status = kiln_c99_probe_symbol(host, constructor, "@@species", 9, &species, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (species.tag == KILN_VALUE_NULL) species = kiln_c99_undefined();
+    }
+    if (species.tag == KILN_VALUE_UNDEFINED)
+        return kiln_c99_array_constructor(out, &requested, 1, thrown);
+    if (!kiln_c99_heritage_constructs(species))
+        return kiln_c99_throw_not_a(thrown, species, "constructor");
+    return kiln_c99_construct(host, out, species, &requested, 1, depth, thrown);
+}
+
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
                                            kiln_c99_method_metadata metadata,
                                            kiln_value receiver, const kiln_value *args,

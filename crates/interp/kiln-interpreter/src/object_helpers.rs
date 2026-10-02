@@ -689,6 +689,13 @@ pub(super) fn has_property_key(
     target: &Value,
     key: PropertyKeyRef<'_>,
 ) -> bool {
+    // A shared value (ADR 0073) answers `in` as the frozen object it is: its own fields, then the
+    // chain its facade reports. It has no store of its own, so every arm below missed it and
+    // `"a" in share({ a: 1 })` was false while the read answered 1.
+    if let Value::Shared(facade) = target {
+        return facade.own_property(key).is_some()
+            || has_property_key(intrinsics, &facade.prototype(), key);
+    }
     if let Value::Array(items) = target
         && let Some(index) = array_index_key(key)
     {

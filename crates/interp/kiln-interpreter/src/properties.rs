@@ -2138,7 +2138,6 @@ pub(super) const TYPED_ARRAY_VIEW_MEMBERS: intrinsic_members::NamedMembers =
 pub(super) const ARRAY_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "map",
-        "parallelMap",
         "forEach",
         "filter",
         "reduce",

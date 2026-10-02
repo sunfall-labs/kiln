@@ -235,6 +235,11 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                          const kiln_string *view,
                                          const kiln_string *canonical, kiln_value descriptor,
                                          int depth, kiln_value *thrown);
+static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value target,
+                                               const kiln_string *view,
+                                               const kiln_string *canonical,
+                                               kiln_value descriptor, int depth,
+                                               kiln_value *thrown, int *refusal);
 static int kiln_c99_has_property_key(kiln_host *host, kiln_value target,
                                      const kiln_string *view, const kiln_string *canonical,
                                      int *answer, int depth, kiln_value *thrown);

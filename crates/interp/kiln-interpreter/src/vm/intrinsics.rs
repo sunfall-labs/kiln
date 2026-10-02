@@ -2639,6 +2639,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ));
                 }
                 let closed = match &target {
+                    // A shared value is a frozen graph (ADR 0073): already non-extensible, so
+                    // closing it again is the success a frozen ordinary object reports.
+                    Value::Shared(_) => true,
                     Value::Object(object) => {
                         object.borrow_mut().prevent_extensions();
                         true

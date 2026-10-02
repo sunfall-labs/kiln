@@ -316,7 +316,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Callback(method, _) => matches!(
                 method,
                 CallbackMethod::Map
-                    | CallbackMethod::ParallelMap
                     | CallbackMethod::ForEach
                     | CallbackMethod::Filter
                     | CallbackMethod::Reduce

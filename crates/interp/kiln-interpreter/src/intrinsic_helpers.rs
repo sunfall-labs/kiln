@@ -847,7 +847,6 @@ pub(super) fn array_method_value(
         ArrayMethod::Keys => Value::Native(Native::ArrayKeys, realm),
         ArrayMethod::LastIndexOf => Value::Native(Native::ArrayLastIndexOf, realm),
         ArrayMethod::Map => Value::Callback(CallbackMethod::Map, realm),
-        ArrayMethod::ParallelMap => Value::Callback(CallbackMethod::ParallelMap, realm),
         ArrayMethod::Pop => Value::Native(Native::ArrayPop, realm),
         ArrayMethod::Push => Value::Native(Native::ArrayPush, realm),
         ArrayMethod::Reduce => Value::Callback(CallbackMethod::Reduce, realm),
@@ -888,11 +887,6 @@ pub enum CallbackMethod {
     /// `throw` on an async generator: raises at the suspension point, promising the next step.
     AsyncGeneratorThrow,
     Map,
-    /// `parallelMap`: `map` by another name on this engine. The compiled backend may run the
-    /// walk on a pool (ADR 0058, application 2); the answer is the same array either way, and
-    /// a name that reads `undefined` here while the other engine has a value is the failure
-    /// CLAUDE.md calls the expensive one.
-    ParallelMap,
     ForEach,
     Filter,
     /// `reduce`: the only one whose callback takes the accumulator, so it does not fit the

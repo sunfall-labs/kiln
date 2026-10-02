@@ -317,10 +317,26 @@ static int kiln_c99_callable_intrinsic_name_length(kiln_host *host, kiln_value t
  * false on a property it creates. `Object.defineProperty(o, "k", { value: 1 })` and `o.k = 1`
  * differ in all four ways, and the lazy-getter idiom -- a prototype accessor that replaces
  * itself with an own value the first time it is read -- depends on every one of them. */
-static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
-                                        const kiln_string *view,
-                                        const kiln_string *canonical, kiln_value descriptor,
-                                        int depth, kiln_value *thrown) {
+/* `[[DefineOwnProperty]]` answers false when `ValidateAndApplyPropertyDescriptor` refuses: a
+ * non-extensible object asked for a new name, or a non-configurable property asked to change.
+ * `Object.defineProperty` turns that false into a TypeError; `Reflect.defineProperty` reports it.
+ * With `refusal` this answers the second way -- `*refusal` set and `KILN_C99_OK` -- and only that
+ * refusal: a descriptor getter that throws, or a proxy trap, still throws through it, which is
+ * why the refusal is not recovered from a thrown TypeError afterwards. Without it (NULL) every
+ * refusal throws, as before. */
+#define KILN_C99_DEFINE_REFUSAL(throw_expr) \
+    do { \
+        if (refusal != NULL) { \
+            *refusal = 1; \
+            return KILN_C99_OK; \
+        } \
+        return (throw_expr); \
+    } while (0)
+static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value target,
+                                               const kiln_string *view,
+                                               const kiln_string *canonical,
+                                               kiln_value descriptor, int depth,
+                                               kiln_value *thrown, int *refusal) {
     const kiln_string *stable = canonical;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value store;
@@ -407,7 +423,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             (has_enumerable && kiln_c99_truthy(enumerable)) ||
             (has_configurable && kiln_c99_truthy(configurable)) ||
             (!can_write && has_writable && kiln_c99_truthy(writable)))
-            return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+            KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
         if (!has_value || !can_write) {
             status = kiln_c99_prototype_object(target, &prototype);
             if (status != KILN_C99_OK) return status;
@@ -419,8 +435,10 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                 same = (isnan(left) && isnan(right)) ||
                        (left == right && (left != 0.0 || signbit(left) == signbit(right)));
             }
-            return same ? KILN_C99_OK : kiln_c99_throw_named_key_text(
-                thrown, "Cannot redefine property: ", view, "");
+            if (!same)
+                KILN_C99_DEFINE_REFUSAL(
+                    kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
+            return KILN_C99_OK;
         }
         /* This is an existing intrinsic property even when its attribute overlay has not been
          * allocated yet. A non-extensible callable still permits redefining its writable value. */
@@ -452,7 +470,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             (!regexp->last_index_writable && has_writable && kiln_c99_truthy(writable)) ||
             (!regexp->last_index_writable && has_value &&
              kiln_c99_as_number(value) != regexp->last_index)) {
-            return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+            KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
         }
         if (has_value && regexp->last_index_writable)
             regexp->last_index = kiln_c99_as_number(value);
@@ -472,7 +490,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             (!has_enumerable || (kiln_c99_truthy(enumerable) != 0) == held_enumerable)) {
             return KILN_C99_OK;
         }
-        return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+        KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
     }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An array index is an element, not a name. The store below holds `a.total = 1`; putting
@@ -490,7 +508,31 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             kiln_array *array = kiln_c99_array_of(target);
             size_t slot = (size_t)at;
             size_t fill;
-            if (has_getter || has_setter || !has_value || array->frozen ||
+            if (array->frozen) {
+                /* Every element of a frozen array is a non-writable, non-configurable data
+                 * property, and there is no room for a new one: the one definition it accepts
+                 * is one that changes nothing, and anything else is the language's refusal
+                 * rather than this backend's. */
+                int present = slot < array->count && array->elements[slot] != KILN_VAL_HOLE;
+                int unchanged =
+                    present && !has_getter && !has_setter &&
+                    (!has_value ||
+                     kiln_c99_strict_equal(value, kiln_val_to_boundary(array->elements[slot]))) &&
+                    (!has_writable || !kiln_c99_truthy(writable)) &&
+                    (!has_configurable || !kiln_c99_truthy(configurable)) &&
+                    (!has_enumerable || kiln_c99_truthy(enumerable));
+                if (unchanged) return KILN_C99_OK;
+                KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(
+                    thrown, present ? "Cannot redefine property: " : "Cannot define property ",
+                    view, ""));
+            }
+            if (array->not_extensible &&
+                (slot >= array->count || array->elements[slot] == KILN_VAL_HOLE)) {
+                /* A non-extensible array takes no new element. */
+                KILN_C99_DEFINE_REFUSAL(
+                    kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, ""));
+            }
+            if (has_getter || has_setter || !has_value ||
                 (has_writable && !kiln_c99_truthy(writable)) ||
                 (has_enumerable && !kiln_c99_truthy(enumerable)) ||
                 (has_configurable && !kiln_c99_truthy(configurable))) {
@@ -515,6 +557,13 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* An array keeps its integrity level on its header, not on the store its named properties
+     * live in, so a frozen or non-extensible array's store reads as open. Carry the header's
+     * answer into the checks below, or `Object.defineProperty(Object.freeze([]), "z", ...)`
+     * adds a property to a frozen array. */
+    int owner_frozen = target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->frozen;
+    int owner_closed = owner_frozen ||
+                       (target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->not_extensible);
     /* Callable `name` and `length` are real own data properties even though the runtime can
      * answer them without allocating a store slot. Treat that implicit descriptor as the
      * existing property while merging; materialize only when the successful merge is committed.
@@ -532,7 +581,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     {
         kiln_object *object = kiln_c99_object_of(store);
         if (!intrinsic_callable_name_length && object->shape != NULL && !object->frozen &&
-            !object->not_extensible &&
+            !object->not_extensible && !owner_closed &&
             !object->module_namespace && !has_getter && !has_setter) {
             const kiln_string *ikey = stable != NULL ? stable : kiln_c99_intern_key(view);
             uint32_t existing;
@@ -563,7 +612,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
              * particular, export descriptors report writable=true even though [[Set]] rejects;
              * turning one non-writable would make this object look like an ordinary frozen one. */
             if (!existed) {
-                return kiln_c99_throw_module_namespace_define_key(thrown, view);
+                KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_module_namespace_define_key(thrown, view));
             }
             if (current.value.tag == KILN_VALUE_CELL) {
                 kiln_val *cell = kiln_c99_cell_of(current.value);
@@ -582,7 +631,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                    (current.enumerable != 0)) ||
                               (has_configurable && kiln_c99_truthy(configurable));
                 if (refused) {
-                    return kiln_c99_throw_module_namespace_define_key(thrown, view);
+                    KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_module_namespace_define_key(thrown, view));
                 }
             }
             return KILN_C99_OK;
@@ -599,9 +648,9 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
          *
          * `frozen` is the object-wide form of the same promise -- freezing is recorded on the
          * object here rather than by rewriting every slot -- so it fails for the same reason. */
-        if (existed && (object->frozen || !current.configurable)) {
+        if (existed && (object->frozen || owner_frozen || !current.configurable)) {
             int accessor = (has_getter || has_setter) ? 1 : 0;
-            int settled = object->frozen || !current.writable;
+            int settled = object->frozen || owner_frozen || !current.writable;
             int refused = (has_configurable && kiln_c99_truthy(configurable)) ||
                           (has_enumerable &&
                            (kiln_c99_truthy(enumerable) != 0) != (current.enumerable != 0));
@@ -616,13 +665,13 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                           (settled && has_value && !kiln_c99_strict_equal(value, current.value));
             }
             if (refused) {
-                return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
+                KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
             }
         }
-        if (!existed && (object->frozen || object->not_extensible)) {
+        if (!existed && (object->frozen || object->not_extensible || owner_closed)) {
             /* A frozen object is not extensible either, so a name it never had cannot be added.
              * Same promise, the other half of it. */
-            return kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, "");
+            KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, ""));
         }
     }
     if (existed) next = current;
@@ -680,6 +729,16 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     return kiln_c99_property_storage_commit(store, view, stable, &next);
 }
 
+
+#undef KILN_C99_DEFINE_REFUSAL
+
+static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
+                                        const kiln_string *view,
+                                        const kiln_string *canonical, kiln_value descriptor,
+                                        int depth, kiln_value *thrown) {
+    return kiln_c99_define_property_key_answer(host, target, view, canonical, descriptor, depth,
+                                               thrown, NULL);
+}
 
 /* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns all
  * semantic branches and interns only when a proxy or property slot retains the key. */

@@ -740,6 +740,10 @@ const fn validate_method_ids(ids: &[MethodId]) {
     // block took 450..=469. The row goes when it lands -- a reserved ID that has since been
     // declared is simply an ID, and nothing below objects to one.
     const RESERVED_METHOD_IDS: [u16; 8] = [442, 443, 444, 445, 446, 447, 448, 449];
+    // Numbers whose member went away and must never be handed out again: a cached artifact or a
+    // provider built against the old table would read a reused number as the old member. 494 was
+    // `Array.prototype.parallelMap`, now defined once in TypeScript (`kiln-builtins/src/parallel.ts`).
+    const RETIRED_METHOD_IDS: [u16; 1] = [494];
     let mut value = APPEND_ONLY_BASE;
     while value <= tail_high {
         let mut found = false;
@@ -757,6 +761,14 @@ const fn validate_method_ids(ids: &[MethodId]) {
                 found = true;
             }
             reserved += 1;
+        }
+        let mut retired = 0;
+        while retired < RETIRED_METHOD_IDS.len() {
+            if RETIRED_METHOD_IDS[retired] == value {
+                assert!(!found, "a retired method ID was handed out again");
+                found = true;
+            }
+            retired += 1;
         }
         assert!(
             found,
@@ -1252,12 +1264,10 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ALS_EXIT, 491, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_ALS_DISABLE, 492, Direct; 0, 0),
     (KILN_C99_METHOD_STRING_FROM_CODE_POINT, 493, Generic; 0, 0),
-    /* `parallelMap` (ADR 0058, application 2). A member of `Array.prototype` on both engines,
-     * so a *read* answers a callable and a feature test takes the same branch as on the
-     * interpreter; called through a read value it is `map` under its own name, generic like
-     * the one borrowed from `Array.prototype`. The pooled walk is a direct-call-site lowering
-     * and never reaches this code. */
-    (KILN_C99_METHOD_ARRAY_PARALLEL_MAP, 494, ArrayLookup; 0, 0),
+    /* 494 was `Array.prototype.parallelMap`, answered here as `map` under its own name. The
+     * parallel family is one TypeScript definition now (`kiln-builtins/src/parallel.ts`), which
+     * the bootstrap installs on `Array.prototype` like the rest of the family; the pooled walk
+     * stays a direct-call-site lowering. The code is retired, not reused. */
     (KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT, 502, NodeEvent; 0, 0),
     (KILN_C99_METHOD_PROCESS_KILL, 503, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE, 504, NodeStream; 0, 0),
@@ -1789,8 +1799,6 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "length", num("0.0")),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "constructor", ctor(KILN_C99_BUILTIN_ARRAY)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "map", code(KILN_C99_METHOD_ARRAY_GENERIC_MAP)),
-    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
-     kiln_extension),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "forEach", code(KILN_C99_METHOD_FOR_EACH)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "filter", code(KILN_C99_METHOD_ARRAY_GENERIC_FILTER)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduce", code(KILN_C99_METHOD_REDUCE)),
@@ -4080,7 +4088,7 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
     static const char *const members[] = {
         "at", "concat", "constructor", "copyWithin", "entries", "every", "fill", "filter", "find",
         "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach", "includes",
-        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "parallelMap", "pop", "push",
+        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "pop", "push",
         "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice",
         "toLocaleString", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values",
         "with"};

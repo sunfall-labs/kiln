@@ -274,10 +274,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // has no way to consult it that the generic one does not already have.
         if matches!(
             method,
-            CallbackMethod::Map
-                | CallbackMethod::ParallelMap
-                | CallbackMethod::Filter
-                | CallbackMethod::FlatMap
+            CallbackMethod::Map | CallbackMethod::Filter | CallbackMethod::FlatMap
         ) {
             return self.generic_array_callback(method, receiver, arguments, instruction);
         }
@@ -306,7 +303,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // has to *leave* one: its result has an entry per input position, so a skipped hole
             // that produced nothing would shorten the array and shift everything after it.
             if Self::is_hole(&item) {
-                if matches!(method, CallbackMethod::Map | CallbackMethod::ParallelMap) {
+                if matches!(method, CallbackMethod::Map) {
                     collected.push(Value::Native(Native::Hole, RealmId::PRIMARY));
                 }
                 index += 1;
@@ -338,7 +335,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(Value::Number(index as f64));
                     }
                 }
-                CallbackMethod::Map | CallbackMethod::ParallelMap => collected.push(result),
+                CallbackMethod::Map => collected.push(result),
                 CallbackMethod::ForEach => {}
                 CallbackMethod::Filter => {
                     if result.is_truthy() {
@@ -394,9 +391,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Not undefined: `findIndex` reports -1 for "nowhere", where `find` reports the
             // absence of a value.
             CallbackMethod::FindIndex => Value::Number(-1.0),
-            CallbackMethod::Map | CallbackMethod::ParallelMap | CallbackMethod::Filter => {
-                Value::Array(ArrayData::new(collected))
-            }
+            CallbackMethod::Map | CallbackMethod::Filter => Value::Array(ArrayData::new(collected)),
             CallbackMethod::ForEach | CallbackMethod::Find => Value::Undefined,
             CallbackMethod::Some => Value::Boolean(false),
             CallbackMethod::Every => Value::Boolean(true),

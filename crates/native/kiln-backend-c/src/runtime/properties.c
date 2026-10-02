@@ -1363,13 +1363,12 @@ static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_stri
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }
-    if (object->frozen) {
-        *answer = 0;
-        return KILN_C99_OK;
-    }
     index = kiln_c99_own_index_key(object, ikey, key);
+    /* A name the object does not have is deleted by doing nothing, frozen or not:
+     * `[[Delete]]` only answers false for an own property that is non-configurable, so
+     * `Reflect.deleteProperty(Object.freeze({}), "missing")` is true. */
     if (index == object->count) return KILN_C99_OK;
-    if (!object->properties[index].configurable) {
+    if (object->frozen || !object->properties[index].configurable) {
         *answer = 0;
         return KILN_C99_OK;
     }

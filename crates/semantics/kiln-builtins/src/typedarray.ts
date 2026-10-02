@@ -338,6 +338,11 @@ delete (globalThis as any).__kilnDataViewState;
   });
 
   const Proto = Object.getPrototypeOf(Uint8Array.prototype);
+  // `Call(F, V, args)` as the specification spells it: captured once, so a program that replaces
+  // `Function.prototype.call` cannot change what a method here walks or whom a callback sees as
+  // `this`. Every `.call` below used to read that property at each use -- `lengthOf` among them,
+  // which every method reaches, so replacing it emptied `map` and `filter` (and `parallelMap`).
+  const apply = Reflect.apply;
   if (!Proto) {
     return;
   }
@@ -350,7 +355,7 @@ delete (globalThis as any).__kilnDataViewState;
   const lengthGetter: ((this: any) => number) | undefined =
     lengthDescriptor && typeof lengthDescriptor.get === "function" ? lengthDescriptor.get : undefined;
   function lengthOf(ta: any): number {
-    return lengthGetter !== undefined ? lengthGetter.call(ta) : ta.length;
+    return lengthGetter !== undefined ? apply(lengthGetter, ta, []) : ta.length;
   }
 
   function requireTypedArray(thisArg: any, methodName: string): any {
@@ -570,7 +575,7 @@ delete (globalThis as any).__kilnDataViewState;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return kValue;
       }
     }
@@ -585,7 +590,7 @@ delete (globalThis as any).__kilnDataViewState;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return k;
       }
     }
@@ -600,7 +605,7 @@ delete (globalThis as any).__kilnDataViewState;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return kValue;
       }
     }
@@ -615,7 +620,7 @@ delete (globalThis as any).__kilnDataViewState;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return k;
       }
     }
@@ -629,7 +634,7 @@ delete (globalThis as any).__kilnDataViewState;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this)) {
+      if (thisArg === undefined ? predicate(this[k], k, this) : apply(predicate, thisArg, [this[k], k, this])) {
         return true;
       }
     }
@@ -643,7 +648,7 @@ delete (globalThis as any).__kilnDataViewState;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (!(thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this))) {
+      if (!(thisArg === undefined ? predicate(this[k], k, this) : apply(predicate, thisArg, [this[k], k, this]))) {
         return false;
       }
     }
@@ -666,7 +671,7 @@ delete (globalThis as any).__kilnDataViewState;
       if (thisArg === undefined) {
         callback(this[k], k, this);
       } else {
-        callback.call(thisArg, this[k], k, this);
+        apply(callback, thisArg, [this[k], k, this]);
       }
     }
   } }.forEach;
@@ -679,7 +684,7 @@ delete (globalThis as any).__kilnDataViewState;
     const len = lengthOf(this);
     const result = typedArraySpeciesCreate(this, len, "map");
     for (let k = 0; k < len; k++) {
-      result[k] = thisArg === undefined ? callback(this[k], k, this) : callback.call(thisArg, this[k], k, this);
+      result[k] = thisArg === undefined ? callback(this[k], k, this) : apply(callback, thisArg, [this[k], k, this]);
     }
     return result;
   } }.map;
@@ -693,8 +698,8 @@ delete (globalThis as any).__kilnDataViewState;
     const kept: any[] = [];
     for (let k = 0; k < len; k++) {
       const val = this[k];
-      if (thisArg === undefined ? callback(val, k, this) : callback.call(thisArg, val, k, this)) {
-        kept.push(val);
+      if (thisArg === undefined ? callback(val, k, this) : apply(callback, thisArg, [val, k, this])) {
+        kept[kept.length] = val;
       }
     }
     const result = typedArraySpeciesCreate(this, kept.length, "filter");
@@ -764,7 +769,7 @@ delete (globalThis as any).__kilnDataViewState;
       const el = this[k];
       parts.push(el !== undefined && el !== null ? String(el) : "");
     }
-    return arrayJoin.call(parts, sep);
+    return apply(arrayJoin, parts, [sep]);
   } }.join;
 
   function createTypedArrayIterator(ta: any, kind: "entries" | "keys" | "values"): any {
@@ -812,17 +817,17 @@ delete (globalThis as any).__kilnDataViewState;
 
   const entries = { entries(this: any): any {
     validateTypedArray(this, "entries");
-    return typeof arrayEntries === "function" ? arrayEntries.call(this) : createTypedArrayIterator(this, "entries");
+    return typeof arrayEntries === "function" ? apply(arrayEntries, this, []) : createTypedArrayIterator(this, "entries");
   } }.entries;
 
   const keys = { keys(this: any): any {
     validateTypedArray(this, "keys");
-    return typeof arrayKeys === "function" ? arrayKeys.call(this) : createTypedArrayIterator(this, "keys");
+    return typeof arrayKeys === "function" ? apply(arrayKeys, this, []) : createTypedArrayIterator(this, "keys");
   } }.keys;
 
   const values = { values(this: any): any {
     validateTypedArray(this, "values");
-    return typeof arrayValues === "function" ? arrayValues.call(this) : createTypedArrayIterator(this, "values");
+    return typeof arrayValues === "function" ? apply(arrayValues, this, []) : createTypedArrayIterator(this, "values");
   } }.values;
 
   // --- Mutators / Copiers ---
@@ -1231,11 +1236,6 @@ delete (globalThis as any).__kilnDataViewState;
     return res;
   } }.toLocaleString;
 
-  function parallelMap(this: any, callback: any, thisArg?: any): any {
-    requireTypedArray(this, "parallelMap");
-    return this.map(callback, thisArg);
-  }
-
   // --- Method installation ---
 
   // Built-in methods are not constructors, so every one is a method definition (`{ m() {} }.m`)
@@ -1292,12 +1292,6 @@ delete (globalThis as any).__kilnDataViewState;
     defineMethod(Symbol.iterator, values);
   }
 
-  // kiln's own members (ADR 0068): declared in `kiln_builtin_surface::KILN_EXTENSIONS`, installed
-  // only when the realm installs extensions (`extensions.ts`), and non-enumerable like the rest.
-  function defineExtension(name: string, fn: any): void {
-    if (kilnExtensions) {
-      defineMethod(name, fn);
-    }
-  }
-  defineExtension("parallelMap", parallelMap);
+  // kiln's own members on this prototype -- the parallel family, `parallelMap` included -- are
+  // defined once, with the array ones, in `parallel.ts` (ADR 0068, ADR 0069).
 })();

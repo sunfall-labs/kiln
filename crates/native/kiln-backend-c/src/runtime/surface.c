@@ -48,7 +48,10 @@ static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key
  *
  * Which members are extensions is not decided here: each is a surface row marked
  * `kiln_extension`, which the Rust build holds equal to `kiln_builtin_surface::KILN_EXTENSIONS`,
- * and the functions below are the only readers of that mark. Read once per process, like the
+ * and the functions below are the only readers of that mark. Today no row carries it: the whole
+ * parallel family is installed by the TypeScript bootstrap (`kiln-builtins/src/parallel.ts`),
+ * which asks `kilnExtensions` instead, and the mark stays for an extension this table answers.
+ * The switch itself is still read here, by the parallel lowerings. Read once per process, like the
  * interpreter's `kiln_extensions_installed`: a program's surface does not change while it runs. */
 static int kiln_c99_kiln_extensions_state;
 

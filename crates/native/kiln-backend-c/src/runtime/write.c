@@ -423,6 +423,11 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
     kiln_value current = target;
     size_t steps;
     const kiln_string *stable = canonical;
+    /* Whether the receiver refuses a property it does not already have: a write that would
+     * *create* one -- the name is nowhere on the chain, or only an inherited writable data
+     * property has it -- is `OrdinarySet`'s `CreateDataProperty` on the receiver, which a
+     * non-extensible (sealed, frozen, `preventExtensions`) object refuses. */
+    int receiver_closed = 0;
     if (key == NULL) return 0;
     if (stable == NULL) {
         stable = kiln_c99_intern_key(key);
@@ -463,9 +468,13 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
          * a)` then reported false and dropped the element, which is how a vue reactive effect
          * stopped seeing `push`: vue's array instrumentation forwards through the set trap with
          * `Reflect.set`, so the refusal swallowed the write and the dependency never fired. */
-        if (kiln_c99_same_name_key(key, "length") || kiln_c99_key_index_key(key) >= 0.0) {
-            return 1;
+        if (kiln_c99_same_name_key(key, "length")) return 1;
+        if (kiln_c99_key_index_key(key) >= 0.0) {
+            size_t slot = (size_t)kiln_c99_key_index_key(key);
+            return !array->not_extensible ||
+                   (slot < array->count && array->elements[slot] != KILN_VAL_HOLE);
         }
+        receiver_closed = array->not_extensible;
         current = array->properties;
     } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         /* Integer-indexed writes are handled by the view itself. A non-index key belongs to
@@ -487,7 +496,7 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
         if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY ||
             target.tag == KILN_VALUE_TYPED_ARRAY || target.tag == KILN_VALUE_GENERATOR ||
             target.tag == KILN_VALUE_REGEXP) {
-            return 1;
+            return !receiver_closed;
         }
         return 0;
     }
@@ -500,18 +509,21 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
         if (steps == 0 && object->frozen) {
             return 0;
         }
+        if (steps == 0 && object->not_extensible) receiver_closed = 1;
         if (kiln_c99_property_read_own_value(current, key, stable, &property)) {
             if (property.accessor) {
                 return property.setter.tag != KILN_VALUE_UNDEFINED;
             }
-            return property.writable;
+            /* Only the receiver's own writable property takes the value in place; an
+             * inherited one means creating an own property, which a closed receiver refuses. */
+            return property.writable && (steps == 0 || !receiver_closed);
         }
         if (object->prototype.tag != KILN_VALUE_OBJECT) {
             break;
         }
         current = object->prototype;
     }
-    return 1;
+    return !receiver_closed;
 }
 
 static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
@@ -605,10 +617,11 @@ static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
     const kiln_string *name_key = (const kiln_string *)text.ptr;
-    int status =
-        kiln_c99_define_property_key(host, target, name_key, NULL, descriptor, depth, thrown);
+    int refused = 0;
+    int status = kiln_c99_define_property_key_answer(host, target, name_key, NULL, descriptor,
+                                                     depth, thrown, &refused);
     if (status == KILN_C99_OK) {
-        *accepted = 1;
+        *accepted = !refused;
         return KILN_C99_OK;
     }
     if (status == KILN_C99_CONTROL_ERROR && thrown != NULL && thrown->tag != KILN_VALUE_UNDEFINED) {

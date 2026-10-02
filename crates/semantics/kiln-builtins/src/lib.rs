@@ -1779,12 +1779,8 @@ mod web_tests {
     fn bootstrap_extensions_match_the_description() {
         use kiln_builtin_surface::ExtensionInstaller;
         // (owner, the helper that installs on it, the sources that may call it)
-        let installers: [(&str, &str, &[&str]); 3] = [
-            (
-                "%TypedArray%.prototype",
-                "defineExtension(\"",
-                &[TYPEDARRAY_BOOTSTRAP_SOURCE],
-            ),
+        // Every extension is installed by the family's own file; `typedarray.ts` installs none.
+        let installers: [(&str, &str, &[&str]); 2] = [
             (
                 "%TypedArray%.prototype",
                 "defineTypedArrayExtension(\"",
@@ -1838,6 +1834,32 @@ mod web_tests {
         }
         // The family's file installs nothing unless the realm installs extensions.
         assert!(PARALLEL_BOOTSTRAP_SOURCE.contains("if (!kilnExtensions) {\n    return;"));
+        // One definition (ADR 0069): no other bootstrap file defines a member of the family, and
+        // the family looks nothing up when called -- every sequential method is captured once and
+        // applied with the captured `Reflect.apply`, never through `.call` or `this.<method>`.
+        for source in [TYPEDARRAY_BOOTSTRAP_SOURCE, EXTENSIONS_BOOTSTRAP_SOURCE] {
+            assert!(
+                !source.contains("parallelMap("),
+                "a second parallelMap definition"
+            );
+        }
+        let code: String = PARALLEL_BOOTSTRAP_SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for looked_up in [
+            ".call(",
+            "this.map",
+            "this.filter",
+            "this.sort",
+            "this.flatMap",
+        ] {
+            assert!(
+                !code.contains(looked_up),
+                "parallel.ts looks up `{looked_up}` per call"
+            );
+        }
         let common = common_bootstrap_source();
         assert!(common.starts_with(EXTENSIONS_BOOTSTRAP_SOURCE));
     }

@@ -785,7 +785,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // iteration early instead of handing the callback the `undefined` it is owed.
         || matches!(receiver, Value::TypedArray(_));
         let created = match method {
-            CallbackMethod::Map | CallbackMethod::ParallelMap => {
+            CallbackMethod::Map => {
                 Some(self.array_species_create(receiver, length, instruction)?)
             }
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
@@ -814,7 +814,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
             )?;
             match method {
-                CallbackMethod::Map | CallbackMethod::ParallelMap => {
+                CallbackMethod::Map => {
                     self.create_element(
                         created.as_ref().unwrap_or(&Value::Undefined),
                         index,
@@ -876,9 +876,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(match method {
-            CallbackMethod::Map | CallbackMethod::ParallelMap => {
-                created.unwrap_or(Value::Undefined)
-            }
+            CallbackMethod::Map => created.unwrap_or(Value::Undefined),
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
                 let created = created.unwrap_or(Value::Undefined);
                 self.finish_created_array(&created, written)?;
