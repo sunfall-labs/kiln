@@ -1289,11 +1289,8 @@ exports.annotations = function (ast, values) { return values; };
         fs::create_dir_all(&root).expect("create project fixture");
         let root = fs::canonicalize(&root).expect("canonicalize root");
         let _cleanup = TempProject(root.clone());
-        fs::write(
-            root.join("package.json"),
-            r#"{"type":"module"}"#,
-        )
-        .expect("write package metadata");
+        fs::write(root.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
         fs::write(
             root.join("entry.mjs"),
             r#"import { publicName } from "./barrel.mjs"; publicName();"#,
