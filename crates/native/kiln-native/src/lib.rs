@@ -465,8 +465,8 @@ fn dce_release_graph(
 }
 
 fn restore_reexport_imports(
-    previous: &kiln_ir::Program,
-    reparsed: &mut kiln_ir::Program,
+    previous: &kiln_ir::ModuleProgram,
+    reparsed: &mut kiln_ir::ModuleProgram,
 ) -> BTreeSet<(usize, usize)> {
     let mut mapped_imports = BTreeSet::new();
     for export in &reparsed.exports {
