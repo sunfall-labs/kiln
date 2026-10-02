@@ -2976,6 +2976,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     let emit_close = if let Ok(socket_state) = node_net_socket_state(&socket) {
                         let emit = {
                             let mut state = socket_state.borrow_mut();
+                            // Once the close event is observable, later writes/ends on the
+                            // socket must take Node's closed-socket no-op path even if the
+                            // owning stream is retired before that callback runs.
+                            state.destroyed = true;
                             let emit = !state.close_emitted;
                             state.close_emitted = true;
                             emit
