@@ -3095,6 +3095,21 @@ static inline int kiln_c99_collection_intrinsic_method_allowed(const kiln_collec
     return kiln_c99_builtin_member_unmodified_n(prototype, member, member_len);
 }
 
+static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
+                                                         const char *method) {
+    size_t length;
+    if (key == NULL || method == NULL) return 0;
+    length = strlen(method);
+    if (key->unit_len != length ||
+        (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) !=
+            (kiln_c99_fixed_key_flags(method, length) &
+             (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY))) return 0;
+    for (size_t index = 0; index < length; ++index) {
+        if (kiln_string_unit_at(key, (uint32_t)index) != (unsigned char)method[index]) return 0;
+    }
+    return 1;
+}
+
 /* A promise: a value that arrives once, later, and everything waiting for it.
  *
  * `state` is pending, fulfilled or rejected, and only the first settlement counts -- a promise is

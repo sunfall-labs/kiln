@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // A cached collection method is valid only while the receiver still resolves the canonical
 // built-in member. Warm the same call sites on intrinsic collections before using subclasses,
 // own shadows, modified prototypes, and weak collections.
@@ -110,6 +111,69 @@ if (!set.has('x')) throw new Error('intrinsic Set add fast path changed behavior
 if (!throwsTypeError(() => setAt(set, 'y', 4)) ||
 	!throwsTypeError(() => memberAt(set, 'get', 'x'))) {
 	throw new Error('collection method cache crossed Map/Set method surfaces');
+}
+
+function deleteAt(target, key) {
+	return target.delete(key);
+}
+
+function clearSetAt(target) {
+	return target.clear();
+}
+
+class CustomSet extends Set {
+	constructor() {
+		super();
+		this.calls = 0;
+	}
+
+	add(value) {
+		this.calls++;
+		this.customValue = value;
+		return this;
+	}
+
+	has(value) {
+		this.calls++;
+		return true;
+	}
+
+	delete(value) {
+		this.calls++;
+		return value === 'custom';
+	}
+
+	clear() {
+		this.calls++;
+		this.wasCleared = true;
+	}
+
+	get size() {
+		this.calls++;
+		return 41;
+	}
+}
+
+const customSet = new CustomSet();
+addAt(customSet, 'custom');
+if (!hasAt(customSet, 'not-in-native-storage') || !deleteAt(customSet, 'custom')) {
+	throw new Error('Set subclass methods were bypassed');
+}
+clearSetAt(customSet);
+if (sizeOf(customSet) !== 41 || customSet.calls !== 5 ||
+	customSet.customValue !== 'custom' || !customSet.wasCleared ||
+	Set.prototype.has.call(customSet, 'custom')) {
+	throw new Error('Set subclass methods touched the intrinsic backing store');
+}
+
+const ownSet = new Set();
+ownSet.add = function (value) {
+	this.ownValue = value;
+	return this;
+};
+if (addAt(ownSet, 'own') !== ownSet || ownSet.ownValue !== 'own' ||
+	Set.prototype.has.call(ownSet, 'own')) {
+	throw new Error('own Set method shadow was bypassed');
 }
 
 const weakMap = new WeakMap();

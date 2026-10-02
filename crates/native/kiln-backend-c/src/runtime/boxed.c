@@ -1086,21 +1086,6 @@ static inline int kiln_c99_site_member_matches_key(const kiln_c99_site *site,
     return 1;
 }
 
-static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
-                                                        const char *method) {
-    size_t length;
-    if (key == NULL || method == NULL) return 0;
-    length = strlen(method);
-    if (key->unit_len != length ||
-        (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) !=
-            (kiln_c99_fixed_key_flags(method, length) &
-             (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY))) return 0;
-    for (size_t index = 0; index < length; ++index) {
-        if (kiln_string_unit_at(key, (uint32_t)index) != (unsigned char)method[index]) return 0;
-    }
-    return 1;
-}
-
 static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t tag,
                                                   uint64_t method, uint32_t builtin,
                                                   const kiln_string *key) {
