@@ -7120,17 +7120,30 @@ static const kiln_string *kiln_c99_shared_key_insert(kiln_shared_state *process,
     return copy;
 }
 
-const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
+/* Return the exact spelling hash used for this lookup so a dictionary sidecar can reuse it
+ * instead of walking the same UTF-16 units again. The hash is local to the call; no shared or
+ * realm key record is mutated. */
+const kiln_string *kiln_c99_interned_key_with_hash_in(kiln_gc_heap *heap,
+                                                      const kiln_string *string,
+                                                      uint64_t *hash_out) {
     const kiln_key_entry *entry;
     const kiln_string *shared;
     uint64_t hash;
-    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    if (string == NULL || string->unit_len == 0) {
+        if (hash_out != NULL) *hash_out = kiln_c99_key_hash(string);
+        return kiln_c99_key_empty;
+    }
     hash = kiln_c99_key_hash(string);
+    if (hash_out != NULL) *hash_out = hash;
     shared = kiln_c99_shared_key_probe(string, hash);
     if (shared != NULL) return shared;
     if (heap == NULL) return NULL;
     entry = kiln_c99_key_probe(&heap->keys, string, hash);
     return entry == NULL ? NULL : entry->string;
+}
+
+const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
+    return kiln_c99_interned_key_with_hash_in(heap, string, NULL);
 }
 
 const kiln_string *kiln_c99_interned_key(const kiln_string *string) {

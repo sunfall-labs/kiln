@@ -513,13 +513,21 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
         kiln_value getter;
+        uint64_t property_key_hash = 0;
+        int property_key_hash_valid = 0;
         size_t steps;
         int walk;
+        /* The lookup spelling and its key domain remain fixed throughout this prototype walk;
+         * every dictionary sidecar therefore probes with this same hash. */
         /* Canonicalized once for the whole walk (ADR 0047), unless a compiled site already holds
          * the canonical pointer. NULL is a spelling the realm has never stored, so no level of
          * the chain can hold it and the walk is not made at all -- unless the check mode is on,
          * which wants every level's scan run by bytes. */
-        if (ikey == NULL) ikey = kiln_c99_interned_key(key);
+        if (ikey == NULL) {
+            ikey = kiln_c99_interned_key_with_hash_in(kiln_c99_gc_heap(), key,
+                                                       &property_key_hash);
+            property_key_hash_valid = 1;
+        }
         walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index_key(key) >= 0.0 ||
                (kiln_c99_gc_heap() != NULL && kiln_c99_gc_heap()->foreign_dictionary_keys);
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
@@ -540,7 +548,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             getter = kiln_c99_undefined();
             {
                 kiln_property property;
-                if (!kiln_c99_property_read_own_value(current, key, ikey, &property)) {
+                if (!kiln_c99_property_read_own_value_with_hash(
+                        current, key, ikey, &property_key_hash, &property_key_hash_valid,
+                        &property)) {
                     current = kiln_c99_object_prototype_read(current);
                     continue;
                 }

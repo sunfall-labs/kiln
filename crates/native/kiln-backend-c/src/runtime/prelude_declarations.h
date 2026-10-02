@@ -50,6 +50,9 @@ extern int kiln_c99_unit_keys_claim(uint64_t *owner);
 extern void kiln_c99_unit_keys_release(uint64_t *owner, void *heap);
 extern const kiln_string *kiln_c99_interned_key_in(struct kiln_gc_heap *heap,
                                                    const kiln_string *view);
+extern const kiln_string *kiln_c99_interned_key_with_hash_in(struct kiln_gc_heap *heap,
+                                                             const kiln_string *view,
+                                                             uint64_t *hash_out);
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
 #define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)

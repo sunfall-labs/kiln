@@ -172,7 +172,8 @@ static void kiln_c99_dictionary_index_appended(kiln_object *object) {
  * the sender's canonical pointer. Compare bytes after the fast pointer check for that case.
  * `KILN_KEYS_CHECK=1` checks the answer independently by spelling. */
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
-                                     const kiln_string *key) {
+                                     const kiln_string *key,
+                                     uint64_t *key_hash, int *key_hash_valid) {
     size_t index;
     size_t found;
     if (object->shape != NULL) {
@@ -186,7 +187,20 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
         kiln_dictionary_index *lookup =
             kiln_c99_dictionary_index_for((kiln_object *)object);
         if (lookup != NULL) {
-            size_t bucket = (size_t)kiln_c99_key_hash(key != NULL ? key : ikey) &
+            uint64_t hash;
+            /* A get may carry the hash computed while interning through the whole prototype
+             * walk. If its site already supplied the canonical key, compute lazily here so
+             * shape-only reads and dictionary scans without a sidecar stay allocation-free. */
+            if (key_hash != NULL && key_hash_valid != NULL && *key_hash_valid) {
+                hash = *key_hash;
+            } else {
+                hash = kiln_c99_key_hash(key != NULL ? key : ikey);
+                if (key_hash != NULL && key_hash_valid != NULL) {
+                    *key_hash = hash;
+                    *key_hash_valid = 1;
+                }
+            }
+            size_t bucket = (size_t)hash &
                             (lookup->capacity - 1);
             while (lookup->buckets[bucket] != 0) {
                 index = lookup->buckets[bucket] - 1;
@@ -248,8 +262,11 @@ checked:
  * Shape keys precede dense elements in the ordinary read path; integer keys cannot be shape
  * transitions, so the ordering matters only for a mixed store. A list, when present beside a
  * shape, is checked last without calling own_index_key (which would materialize that shape). */
-static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
-                                      const kiln_string *ikey, kiln_property *out) {
+static int kiln_c99_property_read_own_with_hash(const kiln_object *object,
+                                                const kiln_string *key,
+                                                const kiln_string *ikey,
+                                                uint64_t *key_hash, int *key_hash_valid,
+                                                kiln_property *out) {
     size_t index;
     if (object->sealed != NULL) {
         uint32_t *orders = kiln_c99_sealed_orders(object);
@@ -292,7 +309,7 @@ static int kiln_c99_property_read_own(const kiln_object *object, const kiln_stri
     }
     if (object->properties == NULL) return 0;
     if (object->shape == NULL) {
-        index = kiln_c99_own_index_key(object, ikey, key);
+        index = kiln_c99_own_index_key(object, ikey, key, key_hash, key_hash_valid);
         if (index == object->count) return 0;
         *out = object->properties[index];
         return 1;
@@ -308,6 +325,11 @@ static int kiln_c99_property_read_own(const kiln_object *object, const kiln_stri
     return 0;
 }
 
+static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
+                                      const kiln_string *ikey, kiln_property *out) {
+    return kiln_c99_property_read_own_with_hash(object, key, ikey, NULL, NULL, out);
+}
+
 /* Read by language value so a future compact bootstrap object can project a process-sealed
  * descriptor with realm-owned slots without becoming a mutable kiln_object dictionary. The
  * result is always copied, never a borrowed pointer into either representation. */
@@ -315,6 +337,17 @@ static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string 
                                             const kiln_string *ikey, kiln_property *out) {
     if (owner.tag != KILN_VALUE_OBJECT || out == NULL) return 0;
     return kiln_c99_property_read_own(kiln_c99_object_of(owner), key, ikey, out);
+}
+
+static int kiln_c99_property_read_own_value_with_hash(kiln_value owner,
+                                                      const kiln_string *key,
+                                                      const kiln_string *ikey,
+                                                      uint64_t *key_hash,
+                                                      int *key_hash_valid,
+                                                      kiln_property *out) {
+    if (owner.tag != KILN_VALUE_OBJECT || out == NULL) return 0;
+    return kiln_c99_property_read_own_with_hash(kiln_c99_object_of(owner), key, ikey,
+                                                key_hash, key_hash_valid, out);
 }
 
 static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
@@ -405,7 +438,7 @@ static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *i
     view.flags = ikey != NULL ? KILN_STRING_LATIN1 | kiln_c99_key_domain(ikey)
                               : kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
-    return kiln_c99_own_index_key(object, ikey, &view);
+    return kiln_c99_own_index_key(object, ikey, &view, NULL, NULL);
 }
 
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
@@ -463,7 +496,7 @@ static int kiln_c99_level_write_answer(kiln_object *walked, const kiln_string *i
         return (attrs & KILN_C99_ATTR_READONLY) ? KILN_C99_LEVEL_READONLY : KILN_C99_LEVEL_DATA;
     }
     {
-        size_t index = kiln_c99_own_index_key(walked, ikey, key);
+        size_t index = kiln_c99_own_index_key(walked, ikey, key, NULL, NULL);
         if (index == walked->count) return KILN_C99_LEVEL_NONE;
         if (walked->properties[index].accessor) {
             *setter = walked->properties[index].setter;
@@ -666,7 +699,7 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }
-    index = kiln_c99_own_index_key(object, ikey, key);
+    index = kiln_c99_own_index_key(object, ikey, key, NULL, NULL);
     *found = index != object->count;
     if (!*found) return KILN_C99_OK;
     if (!object->properties[index].accessor) {
@@ -1191,7 +1224,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
             return KILN_C99_OUT_OF_MEMORY;
         }
     }
-    index = kiln_c99_own_index_key(object, ikey, key);
+    index = kiln_c99_own_index_key(object, ikey, key, NULL, NULL);
     if (index != object->count) {
         *out = &object->properties[index];
         return KILN_C99_OK;
@@ -1326,7 +1359,7 @@ static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_stri
         *answer = 0;
         return KILN_C99_OK;
     }
-    index = kiln_c99_own_index_key(object, ikey, key);
+    index = kiln_c99_own_index_key(object, ikey, key, NULL, NULL);
     if (index == object->count) return KILN_C99_OK;
     if (!object->properties[index].configurable) {
         *answer = 0;
