@@ -618,16 +618,19 @@ impl DateTimeFormat {
 
     /// `format(temporalValue)`, with the value already placed on the timeline.
     pub fn format_shape(&self, shape: Shape, epoch_milliseconds: f64) -> Result<String, Error> {
-        use writeable::Writeable;
         let shaped = self.shaped(shape)?;
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
+        if !needs_numeric_width_adjustment(&shaped.options) {
+            return Ok(shaped.formatter.format(&at.0).to_string());
+        }
+        use writeable::Writeable;
         let mut sink = PartCollector::default();
         let _ = shaped.formatter.format(&at.0).write_to_parts(&mut sink);
-        Ok(join_parts(adjust_numeric_widths(
-            sink.finish(),
-            &shaped.options,
-            &self.zero_digit,
-        )))
+        Ok(join_parts(
+            adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit)
+                .into_iter()
+                .map(|(_, text)| text),
+        ))
     }
 
     /// `formatToParts(temporalValue)`.
@@ -671,19 +674,22 @@ impl DateTimeFormat {
 
     /// `formatRange(temporalValue, temporalValue)`.
     pub fn format_shape_range(&self, shape: Shape, start: f64, end: f64) -> Result<String, Error> {
-        use writeable::Writeable;
         let shaped = self.shaped(shape)?;
         let (first, second) = self.shaped_range_ends(shape, &shaped, start, end)?;
+        if !needs_numeric_width_adjustment(&shaped.options) {
+            return Ok(shaped.ranges.format(&first.0, &second.0).to_string());
+        }
+        use writeable::Writeable;
         let mut sink = PartCollector::default();
         let _ = shaped
             .ranges
             .format(&first.0, &second.0)
             .write_to_parts(&mut sink);
-        Ok(join_parts(adjust_numeric_widths(
-            sink.finish(),
-            &shaped.options,
-            &self.zero_digit,
-        )))
+        Ok(join_parts(
+            adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit)
+                .into_iter()
+                .map(|(_, text)| text),
+        ))
     }
 
     /// `formatRangeToParts(temporalValue, temporalValue)`.
@@ -707,6 +713,10 @@ impl DateTimeFormat {
 
     /// `format(date)`.
     pub fn format(&self, epoch_milliseconds: f64) -> Result<String, Error> {
+        if !needs_numeric_width_adjustment(&self.options) {
+            let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
+            return Ok(self.formatter.format(&at.0).to_string());
+        }
         self.format_to_parts(epoch_milliseconds)
             .map(|parts| join_parts(parts.into_iter().map(|(_, text)| text)))
     }
@@ -752,6 +762,10 @@ impl DateTimeFormat {
 
     /// `formatRange(start, end)`.
     pub fn format_range(&self, start: f64, end: f64) -> Result<String, Error> {
+        if !needs_numeric_width_adjustment(&self.options) {
+            let (from, to) = self.range_ends(start, end)?;
+            return Ok(self.ranges.format(&from.0, &to.0).to_string());
+        }
         self.format_range_to_parts(start, end)
             .map(|parts| join_parts(parts.into_iter().map(|(_, _, text)| text)))
     }
@@ -920,6 +934,9 @@ impl DateTimeFormat {
     /// pattern, even when only one of them was requested as `2-digit`. ECMA-402 resolves those
     /// widths independently, so restore the explicit request for fields present in the pattern.
     fn restore_requested_numeric_widths(&self, components: &mut [(&'static str, Setting)]) {
+        if !needs_numeric_width_adjustment(&self.options) {
+            return;
+        }
         for (name, setting) in components {
             let requested = match *name {
                 "month" => self.options.month.as_deref(),
@@ -1510,8 +1527,22 @@ fn adjust_numeric_widths(
     parts
 }
 
+/// Whether ICU's global column alignment can pad an explicitly numeric month, day or hour.
+fn needs_numeric_width_adjustment(options: &Options) -> bool {
+    let widths = [
+        options.month.as_deref(),
+        options.day.as_deref(),
+        options.hour.as_deref(),
+    ];
+    widths.contains(&Some("2-digit")) && widths.contains(&Some("numeric"))
+}
+
 fn join_parts(parts: impl IntoIterator<Item = String>) -> String {
-    parts.into_iter().collect()
+    let mut joined = String::new();
+    for part in parts {
+        joined.push_str(&part);
+    }
+    joined
 }
 
 /// Give each run of a formatted range the side of the range it came from.
