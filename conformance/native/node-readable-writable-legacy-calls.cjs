@@ -10,7 +10,10 @@ readable.push(null);
 console.log(readable instanceof Readable, typeof readable.on, readable.read());
 
 function LegacyWritable() {
-  Writable.call(this, { objectMode: true });
+  Writable.call(this, {
+    objectMode: true,
+    write(_chunk, _encoding, callback) { callback(); },
+  });
 }
 Object.setPrototypeOf(LegacyWritable.prototype, Writable.prototype);
 const writable = new LegacyWritable();
@@ -19,7 +22,7 @@ writable.end();
 console.log(writable instanceof Writable, typeof writable.setMaxListeners, writable.writableFinished);
 
 function LegacyDuplex() {
-  Duplex.call(this, { objectMode: true });
+  Duplex.call(this, { objectMode: true, read() {} });
 }
 Object.setPrototypeOf(LegacyDuplex.prototype, Duplex.prototype);
 const duplex = new LegacyDuplex();

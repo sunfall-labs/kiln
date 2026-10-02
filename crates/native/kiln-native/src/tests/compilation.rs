@@ -607,6 +607,15 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         0,
         "crypto bridge is not part of the always-retained core"
     );
+    let global_crypto_mask = mask_for(
+        "main.mjs",
+        &[("main.mjs", "console.log(typeof crypto.subtle.digest);\n")],
+    );
+    assert_ne!(
+        global_crypto_mask & groups::NODE_CRYPTO,
+        0,
+        "the global WebCrypto/JOSE path keeps its crypto capability"
+    );
     let dynamic_mask = mask_for(
         "main.mjs",
         &[

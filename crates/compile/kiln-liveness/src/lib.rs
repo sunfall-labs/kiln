@@ -892,6 +892,13 @@ pub fn retained_method_groups(
         .builtins
         .iter()
         .any(|name| name.as_str() == "Process");
+    // Global WebCrypto is installed by the native Node crypto facade when reachable; JOSE and
+    // similar packages commonly enter through `crypto.subtle` without a `node:crypto` import.
+    // Keep the capability bridge available for that implicit global path as well.
+    let uses_crypto_global = members
+        .globals
+        .iter()
+        .any(|name| matches!(name.as_str(), "crypto" | "CryptoKey"));
     // `process[k]()` and `globalThis[k]()` dynamics resolve through process
     // members (events/streams) and globals (`Buffer`); user objects implicate
     // nothing the router serves.
@@ -1010,6 +1017,9 @@ pub fn retained_method_groups(
     }
     if uses_buffer || dynamic {
         mask |= groups::BUFFER;
+    }
+    if uses_crypto_global {
+        mask |= groups::NODE_CRYPTO;
     }
     if uses_process || dynamic {
         mask |= groups::NODE_EVENT | groups::NODE_STREAM;
