@@ -572,7 +572,15 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
     )
     .unwrap();
     assert!(!hit);
-    assert!(first.generic_only && first.chunks.is_empty());
+    // The generic default is split by bytes too (about a megabyte per unit), so a cold build's
+    // compile is not one eight-megabyte clang invocation; what distinguishes the specialized
+    // entry is its specialization, not its unit count.
+    assert!(first.generic_only);
+    assert!(
+        first.chunks.len() > 1,
+        "generic bootstrap split into units: {}",
+        first.chunks.len()
+    );
     assert!(!specialized.generic_only);
     assert!(
         specialized.chunks.len() > 1,
