@@ -462,6 +462,8 @@ fn run_once(
                     source.text,
                     node,
                     kiln_proto::StepBudget::Unmetered,
+                    // Watch prints each run's output with its own framing after the run.
+                    false,
                 )?;
             *manifest = current_manifest;
             *truncated = current_truncated;

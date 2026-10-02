@@ -60,6 +60,11 @@ impl Output {
 
 /// Compile and execute one file. Program stdout stays byte-for-byte on stdout; compiler and
 /// runtime diagnostics go to stderr and make the command unsuccessful.
+///
+/// `stream` sends the program's output to this process's stdout and stderr as it is written, which
+/// `kiln run` needs for a program that never exits (a server's "listening" line); the returned
+/// `Output` then carries no program text. A caller that reads `Output::text` -- a test, a tool --
+/// passes `false` and gets the whole output in the summary, as before.
 pub fn run(
     backend: &mut dyn Backend,
     path: &Path,
@@ -67,6 +72,7 @@ pub fn run(
     project_root: &Path,
     node: bool,
     steps: StepBudget,
+    stream: bool,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
@@ -79,6 +85,7 @@ pub fn run(
         text,
         node,
         steps,
+        stream,
     )
 }
 
@@ -94,6 +101,7 @@ pub(crate) fn run_source(
     text: String,
     node: bool,
     steps: StepBudget,
+    stream: bool,
 ) -> Result<Output> {
     run_source_with_manifest(
         backend,
@@ -104,6 +112,7 @@ pub(crate) fn run_source(
         text,
         node,
         steps,
+        stream,
     )
     .map(|(output, _, _, _)| output)
 }
@@ -122,6 +131,7 @@ pub(crate) fn run_source_with_manifest(
     text: String,
     node: bool,
     steps: StepBudget,
+    stream: bool,
 ) -> Result<(Output, SourceManifest, bool, SourceView)> {
     let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)), node)?;
@@ -144,7 +154,7 @@ pub(crate) fn run_source_with_manifest(
         node,
         steps,
         source_view,
-        true,
+        stream,
     )? {
         SourceResponse::Ready(summary) => {
             finish_run_summary(path, summary, project_notes, Some(&text))
@@ -163,7 +173,7 @@ pub(crate) fn run_source_with_manifest(
                 node,
                 steps,
                 source_view,
-                true,
+                stream,
             )? {
                 SourceResponse::Ready(summary) => {
                     finish_run_summary(path, summary, project_notes, Some(&text))
@@ -509,6 +519,7 @@ pub fn native_run(
     static_link: bool,
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
+    stream: bool,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
@@ -536,7 +547,7 @@ pub fn native_run(
         pgo_gen.clone(),
         pgo_u.clone(),
         source_view,
-        true,
+        stream,
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
@@ -553,7 +564,7 @@ pub fn native_run(
                 pgo_gen,
                 pgo_u,
                 source_view,
-                true,
+                stream,
             )? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
@@ -1903,6 +1914,7 @@ mod tests {
             &root,
             false,
             StepBudget::Unmetered,
+            false,
         )
         .expect("run graph");
         assert_eq!(output.text, "hello from kiln\n");
@@ -2146,6 +2158,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         )
         .expect("native run keeps its captured entry snapshot");
 
@@ -2696,8 +2709,16 @@ mod tests {
         std::fs::write(&entry, "console.log('node');\n").expect("write fixture");
 
         let mut backend = StaleBackend::with_stale_runs(1);
-        run(&mut backend, &entry, &[], &dir, true, StepBudget::Unmetered)
-            .expect("stale Node run is retried");
+        run(
+            &mut backend,
+            &entry,
+            &[],
+            &dir,
+            true,
+            StepBudget::Unmetered,
+            false,
+        )
+        .expect("stale Node run is retried");
         let runs = backend
             .inner
             .seen
@@ -2734,6 +2755,7 @@ mod tests {
             captured.to_owned(),
             false,
             StepBudget::Unmetered,
+            false,
         )
         .expect("captured snapshot runs");
 

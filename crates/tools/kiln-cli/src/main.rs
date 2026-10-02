@@ -266,7 +266,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     let socket = socket.clone();
                     handles.push(std::thread::spawn(move || {
                         let mut backend = open(one_shot, &socket)?;
-                        commands::run(backend.as_mut(), &path, &args, &root, node, steps)
+                        commands::run(backend.as_mut(), &path, &args, &root, node, steps, true)
                     }));
                 }
                 let mut status = 0;
@@ -292,6 +292,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     &root,
                     node,
                     steps,
+                    true,
                 )?)
             }
         }
@@ -331,6 +332,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                             static_link,
                             pgo_gen.as_deref(),
                             pgo_u.as_deref(),
+                            true,
                         )
                     }));
                 }
@@ -360,6 +362,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     static_link,
                     pgo_generate.as_deref(),
                     pgo_use.as_deref(),
+                    true,
                 )?)
             }
         }

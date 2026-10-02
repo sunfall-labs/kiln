@@ -175,6 +175,7 @@ mod tests {
                 &fixture,
                 false,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run package graph");
             std::fs::write(package.join("index.js"), "export const answer = 43;\n")
@@ -186,6 +187,7 @@ mod tests {
                 &fixture,
                 false,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("rerun updated package graph");
             (output, updated)
@@ -220,6 +222,7 @@ mod tests {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run Node graph")
         };
@@ -263,6 +266,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                false,
             )
             .expect("run native Node graph")
         };
@@ -297,6 +301,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                false,
             )
             .expect("run canonical native Node server roundtrip")
         };
@@ -381,6 +386,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                false,
             )
             .expect("run canonical native Node request-body roundtrip")
         };
@@ -496,6 +502,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run interpreted Node request identity fixture")
         };
@@ -514,6 +521,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                false,
             )
             .expect("run native Node request identity fixture")
         };
@@ -548,6 +556,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run interpreted HTTP half-close fixture")
         };
@@ -566,6 +575,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                false,
             )
             .expect("run native HTTP half-close fixture")
         };
@@ -617,6 +627,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run dual package graph")
         };
@@ -943,6 +954,7 @@ server.listen(0, "127.0.0.1", () => {
             &fixture,
             true,
             StepBudget::Unmetered,
+            true,
         )
         .expect("run the server");
 
