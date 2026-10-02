@@ -218,11 +218,7 @@ fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction()
     )
     .expect("write facade");
     let barrel = project.join("index.mjs");
-    fs::write(
-        &barrel,
-        "export * from './schemas.mjs';",
-    )
-    .expect("write star barrel");
+    fs::write(&barrel, "export * from './schemas.mjs';").expect("write star barrel");
     let schemas = project.join("schemas.mjs");
     fs::write(
         &schemas,
