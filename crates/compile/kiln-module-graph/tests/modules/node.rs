@@ -173,6 +173,16 @@ fn lazy_node_builtin_extension_links_facade_without_making_it_startup_reachable(
             .any(|dependency| dependency.target == http_path)
     );
     assert!(!extended.statically_reachable().contains(&http_path));
+    assert_eq!(
+        extended
+            .with_lazy_node_builtin(
+                graph.entry(),
+                "/kiln/runtime-bootstrap.ts",
+                kiln_module_resolver::NodeBuiltin::Http,
+            )
+            .expect("reusing an already linked facade is cheap and idempotent"),
+        extended
+    );
 }
 
 #[test]

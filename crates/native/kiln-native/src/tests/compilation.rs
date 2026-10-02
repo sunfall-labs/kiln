@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn native_http_facade_demand_accounts_for_dynamic_global_access() {
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.globals.insert("console".into());
+    members.names.insert("log".into());
+    assert!(
+        !needs_native_http_facade(&members),
+        "ordinary hello stays lean"
+    );
+
+    members.globals.insert("fetch".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "direct global fetch is retained"
+    );
+
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.globals.insert("globalThis".into());
+    members.names.insert("fetch".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "static globalThis.fetch is retained"
+    );
+
+    members.names.clear();
+    members.has_computed_access = true;
+    assert!(
+        needs_native_http_facade(&members),
+        "computed global access is open"
+    );
+
+    members.has_computed_access = false;
+    members.globals.insert("Reflect".into());
+    members.names.insert("get".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "reflective global access is retained"
+    );
+
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.has_open_world = true;
+    assert!(
+        needs_native_http_facade(&members),
+        "direct eval/open-world code is retained"
+    );
+}
+
 fn object_single_flight_key(builder: &NativeBuilder, source: &[u8]) -> ArtifactKey {
     let tool = builder.toolchain().identity();
     NativeArtifactFamily::ModuleObject.key(

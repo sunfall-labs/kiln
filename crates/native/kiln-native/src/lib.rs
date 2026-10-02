@@ -82,6 +82,39 @@ const OBJECT_COMPILE_LOCK_BUCKETS: usize = 256;
 static OBJECT_COMPILE_LOCKS: [parking_lot::Mutex<()>; OBJECT_COMPILE_LOCK_BUCKETS] =
     [const { parking_lot::Mutex::new(()) }; OBJECT_COMPILE_LOCK_BUCKETS];
 
+fn needs_native_http_facade(members: &kiln_graph::DemandedMembers) -> bool {
+    if members
+        .globals
+        .iter()
+        .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
+        || members.has_open_world
+    {
+        return true;
+    }
+
+    let uses_global_object = members
+        .globals
+        .iter()
+        .any(|name| matches!(name.as_str(), "globalThis" | "global"));
+    if !uses_global_object {
+        return false;
+    }
+
+    members
+        .names
+        .iter()
+        .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
+        || members.has_computed_access
+        || members
+            .globals
+            .iter()
+            .any(|name| matches!(name.as_str(), "Reflect" | "Object"))
+        || members
+            .names
+            .iter()
+            .any(|name| matches!(name.as_str(), "get" | "getOwnPropertyDescriptor" | "has"))
+}
+
 const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
 
 /// The cache families emitted by this crate. Keeping the family catalogue beside the key
@@ -2650,18 +2683,7 @@ impl NativeBuilder {
             &initial_demand.live,
             &initial_demand.slots,
         );
-        let needs_http_facade = initial_members
-            .globals
-            .iter()
-            .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
-            || (initial_members
-                .globals
-                .iter()
-                .any(|name| matches!(name.as_str(), "globalThis" | "global"))
-                && initial_members
-                    .names
-                    .iter()
-                    .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln")));
+        let needs_http_facade = needs_native_http_facade(&initial_members);
         let (graph, native_plan, selected) = if needs_http_facade {
             // Global fetch is part of the separately compiled web bootstrap, so its dependency
             // is invisible to source-graph discovery. Add the public facade as a lazy runtime

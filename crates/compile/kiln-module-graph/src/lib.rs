@@ -412,6 +412,37 @@ impl ModuleGraph {
         };
         let importer = importer.as_ref().to_path_buf();
         let target = builtin.virtual_path(&self.project_root);
+        if self.module_node(&target).is_some() {
+            let owner_node = self.module_node(&owner).ok_or_else(|| {
+                ModuleGraphError::InternalMissingModule {
+                    path: owner.clone(),
+                }
+            })?;
+            if owner_node.runtime_dependencies.iter().any(|dependency| {
+                dependency.importer == importer
+                    && dependency.specifier == builtin.specifier()
+                    && dependency.target == target
+            }) {
+                return Ok(self.clone());
+            }
+
+            // The linked builtin closure is already validated in this graph. A lazy runtime
+            // edge cannot change static export resolution, so update only the owner overlay
+            // instead of cloning and relinking the whole module table.
+            let mut extended = self.clone();
+            let mut patched_modules = (*self.patched_modules).clone();
+            let mut owner_node = owner_node.clone();
+            owner_node.runtime_dependencies.push(RuntimeDependency {
+                importer,
+                specifier: builtin.specifier().to_owned(),
+                target,
+                source: ModuleSource::NodeBuiltin(builtin),
+                resolve_only: false,
+            });
+            patched_modules.insert(owner, owner_node);
+            extended.patched_modules = Arc::new(patched_modules);
+            return Ok(extended);
+        }
         let mut modules: BTreeMap<PathBuf, ModuleNode> = self
             .order
             .iter()
