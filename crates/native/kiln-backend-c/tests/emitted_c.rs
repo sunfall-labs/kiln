@@ -1145,7 +1145,11 @@ fn runtime_prelude_size() {
     // Object.prototype.toString tags, realm-private host capability storage, and boxed-primitive
     // accessor receiver preservation. The ABI snapshot records the crypto retention macro and
     // relocation of the base realm-slot definitions; no runtime section is duplicated.
-    const CEILING_LINES: usize = 79_500;
+    // Widened again on 2026-10-02 to 79,531 measured: native TextDecoder moved onto the provider's
+    // encoding_rs exports (ADR 0060). The C label whitelist and UTF-8-only decode were replaced by
+    // glue that calls kiln_text_decoder_label/kiln_text_decode and maps their errors, 103 net
+    // source lines for 99 emitted; no runtime section is duplicated. Keep ~120 lines of headroom.
+    const CEILING_LINES: usize = 79_650;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
