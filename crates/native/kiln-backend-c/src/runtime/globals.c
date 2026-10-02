@@ -125,43 +125,43 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&native_modules);
     if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&native_modules);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(*process, "__kilnNativeModules", 19,
+        status = kiln_c99_commit_own_data(*process, "__kilnNativeModules", sizeof("__kilnNativeModules") - 1,
                                           native_modules, 0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleRequireResolve", 30,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleRequireResolve", sizeof("__kilnHostModuleRequireResolve") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE),
                                           0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleCreateRequire", 29,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleCreateRequire", sizeof("__kilnHostModuleCreateRequire") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
                                           0, 1, 1);
 #if KILN_RETAIN_GROUP_NODE_CRYPTO
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyImport", 21,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyImport", sizeof("__kilnCryptoKeyImport") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW),
                                           0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyPublic", 21,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyPublic", sizeof("__kilnCryptoKeyPublic") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW),
                                           0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyInfo", 19,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyInfo", sizeof("__kilnCryptoKeyInfo") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW),
                                           0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyExport", 21,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyExport", sizeof("__kilnCryptoKeyExport") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW),
                                           0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyFree", 20,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyFree", sizeof("__kilnCryptoKeyFree") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW),
                                           0, 1, 1);
 #endif
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnDecorateCommonJsRequire", 29,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1,
                                           kiln_c99_undefined(), 0, 1, 1);
     if (status == KILN_C99_OK)
-        status = kiln_c99_commit_own_data(native_modules, "__kilnNativeImportMeta", 22,
+        status = kiln_c99_commit_own_data(native_modules, "__kilnNativeImportMeta", sizeof("__kilnNativeImportMeta") - 1,
                                           kiln_c99_undefined(), 0, 1, 1);
     /* Demand-driven prelude: `process` is an emitter only in builds that
      * retain the event group (see `retained_method_groups`). Reaching this
