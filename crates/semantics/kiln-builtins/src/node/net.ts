@@ -98,30 +98,80 @@ export function createConnection(...args: any[]): any {
   return connect(...args);
 }
 
-const v4Seg = "(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])";
-const v4Str = `(?:${v4Seg}\\.){3}${v4Seg}`;
-const IPv4Reg = new RegExp(`^${v4Str}$`);
-
-const v6Seg = "(?:[0-9a-fA-F]{1,4})";
-const IPv6Reg = new RegExp(
-  "^(?:" +
-    `(?:${v6Seg}:){7}(?:${v6Seg}|:)|` +
-    `(?:${v6Seg}:){6}(?:${v4Str}|:${v6Seg}|:)|` +
-    `(?:${v6Seg}:){5}(?::${v4Str}|(?::${v6Seg}){1,2}|:)|` +
-    `(?:${v6Seg}:){4}(?:(?::${v6Seg}){0,1}:${v4Str}|(?::${v6Seg}){1,3}|:)|` +
-    `(?:${v6Seg}:){3}(?:(?::${v6Seg}){0,2}:${v4Str}|(?::${v6Seg}){1,4}|:)|` +
-    `(?:${v6Seg}:){2}(?:(?::${v6Seg}){0,3}:${v4Str}|(?::${v6Seg}){1,5}|:)|` +
-    `(?:${v6Seg}:){1}(?:(?::${v6Seg}){0,4}:${v4Str}|(?::${v6Seg}){1,6}|:)|` +
-    `(?::(?:(?::${v6Seg}){0,5}:${v4Str}|(?::${v6Seg}){1,7}|:))` +
-    ")(?:%[0-9a-zA-Z]{1,})?$"
-);
-
 export function isIPv4(s: string): boolean {
-  return typeof s === "string" && IPv4Reg.test(s);
+  if (typeof s !== "string") return false;
+  const parts = s.split(".");
+  if (parts.length !== 4) return false;
+  for (let i = 0; i < 4; i++) {
+    const part = parts[i];
+    if (part.length === 0 || part.length > 3) return false;
+    if (part.length > 1 && part.charCodeAt(0) === 48) return false;
+    let n = 0;
+    for (let j = 0; j < part.length; j++) {
+      const code = part.charCodeAt(j);
+      if (code < 48 || code > 57) return false;
+      n = n * 10 + (code - 48);
+    }
+    if (n > 255) return false;
+  }
+  return true;
 }
 
 export function isIPv6(s: string): boolean {
-  return typeof s === "string" && IPv6Reg.test(s);
+  if (typeof s !== "string") return false;
+  const zoneIndex = s.indexOf("%");
+  if (zoneIndex >= 0) {
+    if (zoneIndex === s.length - 1) return false;
+    s = s.slice(0, zoneIndex);
+  }
+  if (s.length < 2) return false;
+
+  const doubleColon = s.indexOf("::");
+  if (doubleColon >= 0 && s.indexOf("::", doubleColon + 1) >= 0) return false;
+
+  const parts = s.split(":");
+  if (parts.length < 3 || parts.length > 9) return false;
+
+  let hasDouble = false;
+  let head = 0;
+  let tail = parts.length;
+  if (parts[0] === "") {
+    if (parts.length < 2 || parts[1] !== "") return false;
+    head = 2;
+    hasDouble = true;
+  }
+  if (parts[parts.length - 1] === "") {
+    if (parts.length < 2 || parts[parts.length - 2] !== "") return false;
+    tail = parts.length - 2;
+    hasDouble = true;
+  }
+
+  let count = 0;
+  for (let i = head; i < tail; i++) {
+    const part = parts[i];
+    if (part === "") {
+      if (hasDouble) return false;
+      hasDouble = true;
+      continue;
+    }
+    if (i === tail - 1 && part.includes(".")) {
+      if (!isIPv4(part)) return false;
+      count += 2;
+      continue;
+    }
+    if (part.length < 1 || part.length > 4) return false;
+    for (let j = 0; j < part.length; j++) {
+      const c = part.charCodeAt(j);
+      const isHex = (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+      if (!isHex) return false;
+    }
+    count++;
+  }
+
+  if (doubleColon >= 0) {
+    return count < 8;
+  }
+  return count === 8;
 }
 
 export function isIP(s: string): number {

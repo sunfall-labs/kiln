@@ -852,8 +852,9 @@ impl NodePackageResolver {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
+                let decoded = percent_decode_specifier(specifier);
                 let resolution = packages
-                    .resolve(importer_directory, specifier)
+                    .resolve(importer_directory, decoded.as_ref())
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
                     .package_json()
@@ -1405,6 +1406,32 @@ pub fn resolve(
     resolver.resolve(specifier, importer)
 }
 
+fn percent_decode_specifier(specifier: &str) -> std::borrow::Cow<'_, str> {
+    if !specifier.contains('%') {
+        return std::borrow::Cow::Borrowed(specifier);
+    }
+    let bytes = specifier.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h1 = (bytes[i + 1] as char).to_digit(16);
+            let h2 = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                decoded.push(((h1 << 4) | h2) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    match String::from_utf8(decoded) {
+        Ok(s) => std::borrow::Cow::Owned(s),
+        Err(_) => std::borrow::Cow::Borrowed(specifier),
+    }
+}
+
 fn resolve_in_root(
     specifier: &str,
     importer: &Path,
@@ -1415,12 +1442,13 @@ fn resolve_in_root(
     ensure_utf8(project_root, PathRole::ProjectRoot)?;
     let canonical_importer = canonical_importer(importer, project_root)?;
 
+    let decoded = percent_decode_specifier(specifier);
     let candidate = match kind {
         ResolutionKind::Relative => canonical_importer
             .parent()
             .unwrap_or(project_root)
-            .join(specifier),
-        ResolutionKind::Absolute => PathBuf::from(specifier),
+            .join(decoded.as_ref()),
+        ResolutionKind::Absolute => PathBuf::from(decoded.as_ref()),
         ResolutionKind::Package => unreachable!("explicit resolver cannot classify packages"),
         ResolutionKind::Builtin => unreachable!("builtins bypass filesystem resolution"),
     };

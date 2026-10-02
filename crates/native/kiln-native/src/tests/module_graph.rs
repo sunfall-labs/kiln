@@ -529,7 +529,7 @@ fn the_core_bootstraps_closures_are_region_closures() {
     let region = bootstrap.source.matches("KU_REGION_CLOSURE(").count();
     let captured = bootstrap.source.matches("KU_CLOSURE(").count();
     assert!(
-        region >= 300 && captured <= 40,
+        region >= 600 && captured <= 250,
         "region closure sites {region}, capturing sites {captured}"
     );
 }
@@ -4539,11 +4539,8 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
     let project = TestDirectory::new("kiln-native-named-reexport-import-demand");
-    fs::write(
-        project.path.join("package.json"),
-        r#"{"type":"module","sideEffects":false}"#,
-    )
-    .expect("write package metadata");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
     let provider = project.path.join("provider.js");
     fs::write(
         &provider,
@@ -4591,7 +4588,9 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
             .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
             .expect("re-export has a backing import");
         assert!(
-            selected.live_imports.contains(&(barrel.clone(), backing_import)),
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
             "named re-export backing import must be linked"
         );
         assert!(

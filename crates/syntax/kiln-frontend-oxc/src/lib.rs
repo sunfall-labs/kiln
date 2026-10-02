@@ -543,8 +543,18 @@ fn discover_node_runtime_requests_from_semantic(
             _ => None,
         };
         let argument = call.arguments.first().and_then(Argument::as_expression)?;
-        if matches!(argument, Expression::StaticMemberExpression(member) if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+        let is_import_meta_file = |arg: &Expression<'_>| {
+            if let Expression::StaticMemberExpression(member) = arg {
+                (member.property.name == "url" || member.property.name == "filename")
+                    && matches!(member.object, Expression::ImportMeta(_))
+            } else {
+                false
+            }
+        };
+        if is_import_meta_file(argument)
             || matches!(argument, Expression::Identifier(identifier) if identifier.name == "__filename" && identifier.is_global_reference(scoping))
+            || matches!(argument, Expression::NewExpression(expr) if matches!(&expr.callee, Expression::Identifier(id) if id.name == "URL")
+                && expr.arguments.first().and_then(Argument::as_expression).is_some_and(is_import_meta_file))
         {
             return base;
         }

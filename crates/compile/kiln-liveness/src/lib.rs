@@ -241,6 +241,9 @@ fn mark_reexport_import_live(
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     queue: &mut VecDeque<PathBuf>,
 ) {
+    if package_declares_no_side_effects(owner, graph.project_root()) {
+        return;
+    }
     let Some(node) = graph.module(owner) else {
         return;
     };
@@ -1082,9 +1085,10 @@ pub fn retained_provider_capabilities(
         if matches!(node.source, ModuleSource::Json) {
             required = required.with(ProviderCapability::Json);
         }
+        let empty_demanded = BTreeSet::new();
         required = required.union(program_provider_capabilities(
             &node.program,
-            demand.slots.get(&node.path),
+            Some(demand.slots.get(&node.path).unwrap_or(&empty_demanded)),
         ));
         if let ModuleSource::NodeBuiltin(builtin) = &node.source {
             required = match builtin {

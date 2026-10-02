@@ -91,6 +91,7 @@ impl TestDirectory {
             WORK_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).expect("create native test directory");
+        let path = fs::canonicalize(&path).unwrap_or(path);
         Self { path }
     }
 

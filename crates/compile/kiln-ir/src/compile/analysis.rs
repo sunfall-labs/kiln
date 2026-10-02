@@ -458,9 +458,7 @@ pub(super) fn expression_contains_direct_eval(expression: &Expression) -> bool {
                 || expression_contains_direct_eval(callee)
                 || arguments.iter().any(list_element_contains_direct_eval)
         }
-        ExpressionKind::InlineLiteralEval { callee, argument, expression } => {
-            expression_contains_direct_eval(callee) || expression_contains_direct_eval(argument) || expression_contains_direct_eval(expression)
-        }
+        ExpressionKind::InlineLiteralEval { .. } => true,
         ExpressionKind::Function(function) => function_contains_direct_eval(function),
         ExpressionKind::Class(class) => class_contains_direct_eval(class),
         ExpressionKind::ImportCall { specifier, options } => {

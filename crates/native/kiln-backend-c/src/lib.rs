@@ -5593,28 +5593,33 @@ fn render_module_positioned(
         }
 
         let mut chunks = Vec::new();
-        chunks.push(chunk_0);
-        let mut start = chunk_0_funcs;
-        for &end in &chunk_ends[1..] {
-            let referenced =
-                scan_referenced_functions(&function_texts[start..end], unit_symbol, total_funcs);
-            let decl_len: usize = (0..total_funcs)
-                .filter(|&i| (i >= start && i < end) || referenced[i])
-                .map(|i| rendered_funcs.function_declarations[i].len())
-                .sum();
-            let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
-            let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
-            chunk_k.push_str(&chunk_header);
-            for i in 0..total_funcs {
-                if (i >= start && i < end) || referenced[i] {
-                    chunk_k.push_str(&rendered_funcs.function_declarations[i]);
+        if chunk_ends.len() > 1 {
+            chunks.push(chunk_0);
+            let mut start = chunk_0_funcs;
+            for &end in &chunk_ends[1..] {
+                let referenced = scan_referenced_functions(
+                    &function_texts[start..end],
+                    unit_symbol,
+                    total_funcs,
+                );
+                let decl_len: usize = (0..total_funcs)
+                    .filter(|&i| (i >= start && i < end) || referenced[i])
+                    .map(|i| rendered_funcs.function_declarations[i].len())
+                    .sum();
+                let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
+                let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
+                chunk_k.push_str(&chunk_header);
+                for i in 0..total_funcs {
+                    if (i >= start && i < end) || referenced[i] {
+                        chunk_k.push_str(&rendered_funcs.function_declarations[i]);
+                    }
                 }
+                for f in &function_texts[start..end] {
+                    chunk_k.push_str(f);
+                }
+                chunks.push(chunk_k);
+                start = end;
             }
-            for f in &function_texts[start..end] {
-                chunk_k.push_str(f);
-            }
-            chunks.push(chunk_k);
-            start = end;
         }
         Ok(RenderedModule {
             source,

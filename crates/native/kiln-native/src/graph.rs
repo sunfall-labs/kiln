@@ -1020,16 +1020,20 @@ if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
         const pathEncoded = __kilnApply(__kilnReplace, encoded, [__kilnPathEscapePattern, escape => __kilnPathEscapes[escape]]);
         return "file://" + pathEncoded;
     }
-    const __kilnExecPath = globalThis.process.execPath;
+    const __kilnProcess = globalThis.process;
+    const __kilnExecPath = (typeof __kilnProcess !== "undefined" && typeof __kilnProcess.execPath === "string" && __kilnProcess.execPath.length > 0)
+        ? __kilnProcess.execPath
+        : null;
     // Encode the raw filesystem path before assembling its URL. URL construction from
     // `file://` + path treats `#` and `?` as URL syntax instead of path characters.
-    const __kilnExecUrl = __kilnPathToFileURL(__kilnExecPath);
-    const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
+    const __kilnExecUrl = __kilnExecPath ? __kilnPathToFileURL(__kilnExecPath) : null;
+    const __kilnExecDir = __kilnExecPath ? __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/")) : null;
     globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
+        const useExec = isEntry && __kilnExecPath !== null;
         return {
-            url: isEntry ? __kilnExecUrl : __kilnPathToFileURL(sourceFilename),
-            filename: isEntry ? __kilnExecPath : sourceFilename,
-            dirname: isEntry ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
+            url: useExec ? __kilnExecUrl : __kilnPathToFileURL(sourceFilename),
+            filename: useExec ? __kilnExecPath : sourceFilename,
+            dirname: useExec ? __kilnExecDir : sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,
         };
     };
@@ -1926,6 +1930,13 @@ pub(super) fn preinstantiated_module_paths(
     for node in graph.modules() {
         for import in &node.program.imports {
             if import.imported != kiln_ir::NAMESPACE_IMPORT {
+                continue;
+            }
+            let internal_star_table = node.program.exports.iter().any(|export| {
+                export.local_slot == import.local_slot
+                    && export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+            });
+            if internal_star_table {
                 continue;
             }
             if let Some(dependency) = node
@@ -3348,20 +3359,59 @@ static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *pa
     return unit == url->unit_len && byte == path_len;
 }
 
+static int kiln_c99_string_matches_utf8(const kiln_string *s, const char *path, size_t path_len) {
+    if (s == NULL || (path == NULL && path_len != 0)) return 0;
+    size_t unit = 0;
+    size_t byte = 0;
+    while (unit < s->unit_len && byte < path_len) {
+        unsigned char b0 = (unsigned char)path[byte++];
+        uint32_t cp = 0;
+        if (b0 < 0x80) {
+            cp = b0;
+        } else if ((b0 & 0xe0) == 0xc0) {
+            if (byte >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+        } else if ((b0 & 0xf0) == 0xe0) {
+            if (byte + 1 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+        } else if ((b0 & 0xf8) == 0xf0) {
+            if (byte + 2 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            unsigned char b3 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80 || (b3 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+        } else {
+            return 0;
+        }
+
+        if (cp < 0x10000) {
+            if (kiln_string_unit_at(s, unit++) != (uint16_t)cp) return 0;
+        } else {
+            uint32_t sub = cp - 0x10000;
+            uint16_t high = (uint16_t)(0xd800 + (sub >> 10));
+            uint16_t low = (uint16_t)(0xdc00 + (sub & 0x3ff));
+            if (unit + 1 >= s->unit_len) return 0;
+            if (kiln_string_unit_at(s, unit++) != high) return 0;
+            if (kiln_string_unit_at(s, unit++) != low) return 0;
+        }
+    }
+    return unit == s->unit_len && byte == path_len;
+}
+
 static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
     if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
-    if (s->unit_len >= 7 && kiln_string_starts_ascii(value, "file://", 7))
+    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7))
         return kiln_c99_file_url_matches_path(s, path, path_len);
-    uint8_t *encoded = NULL;
-    size_t encoded_len = 0;
-    if (kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len) != KILN_C99_OK) return 0;
-    int matches = encoded_len == path_len &&
-                  (path_len == 0 || memcmp(encoded, path, path_len) == 0);
-    free(encoded);
-    return matches;
+    return kiln_c99_string_matches_utf8(s, path, path_len);
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -3385,6 +3435,7 @@ extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
+extern int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,
@@ -3481,7 +3532,7 @@ extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *mess
 extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
 static int kiln_graph_async_require_error(kiln_host *host, kiln_value *out, kiln_value *thrown) {
     int status = kiln_c99_new_type_error(out, "require() cannot load an ES module with top-level await");
-    if (status != 0) return status;
+    if (status != 0 && status != KILN_C99_THROWN) return status;
     return kiln_c99_put(host, *out, "code", 4, kiln_c99_copy_text("ERR_REQUIRE_ASYNC_MODULE", 24), 0, thrown);
 }
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,

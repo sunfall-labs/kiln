@@ -1822,14 +1822,15 @@ fn provider_capability_demand_is_typed_and_conservative() {
         ProviderCapabilities::REALM,
         "an unreachable function in a live module does not enlarge provider requirements"
     );
-    assert!(
+    assert_eq!(
         selection(
             "main.mjs",
             &[(
                 "main.mjs",
                 "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
             )]
-        ) == ProviderCapabilities::REALM.with(ProviderCapability::Http),
+        ),
+        ProviderCapabilities::REALM.with(ProviderCapability::Http),
         "node:http declares HTTP demand"
     );
     assert!(

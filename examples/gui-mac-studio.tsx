@@ -48,7 +48,7 @@ function StudioApp() {
         </text>
         <spacer />
         <button
-          variant={recording() ? "destructive" : "primary"}
+          variant={() => (recording() ? "destructive" : "primary")}
           onPress={() => setRecording(!recording())}
         >
           {() => (recording() ? "Stop Recording" : "Start Profiling")}
@@ -78,7 +78,7 @@ function StudioApp() {
         <MetricBadge
           title="ENGINE STATUS"
           value={statusText}
-          color={recording() ? "red" : "green"}
+          color={() => (recording() ? "red" : "green")}
         />
       </grid>
 
@@ -118,14 +118,14 @@ function StudioApp() {
       <card>
         <hstack spacing={12}>
           <toggle
-            checked={accelerated()}
+            checked={accelerated}
             onChange={(checked: boolean) => setAccelerated(checked)}
           />
           <text variant="body">
             Metal CoreAnimation Hardware Blending
           </text>
           <spacer />
-          <text variant="badge" color={accelerated() ? "green" : "secondary"}>
+          <text variant="badge" color={() => (accelerated() ? "green" : "secondary")}>
             {() => (accelerated() ? "🟢 ACCELERATED" : "⚪ CPU RENDER")}
           </text>
         </hstack>

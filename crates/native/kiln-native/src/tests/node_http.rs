@@ -291,6 +291,7 @@ fn native_node_net_source_graph_builds_through_the_production_frontend() {
         &entry,
         r#"import { createServer } from "node:net";
 const server = createServer((socket) => {
+  socket.setEncoding("utf8");
   socket.on("data", (chunk) => {
     console.log(chunk);
     socket.end();

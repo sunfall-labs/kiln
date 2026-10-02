@@ -2086,21 +2086,27 @@ run();
 }
 
 #[test]
-fn native_await_promise_resolve_keeps_prototype_define_property_refusal() {
-    let Some(error) = run_native_failure_fixture(
+fn native_await_promise_resolve_honors_prototype_define_property() {
+    let Some(output) = run_native_release_fixture(
         "native-await-promise-resolve-prototype-define-property",
         r#"
 Object.defineProperty(Promise.prototype, "constructor", {
   get() { return Promise; }
 });
+async function run() {
+  const events = [];
+  events.push("before");
+  const value = await Promise.resolve(7);
+  events.push(`after:${value}`);
+  setTimeout(() => console.log(events.join("|")), 0);
+}
+run();
+console.log("outside");
 "#,
     ) else {
         return;
     };
-    assert!(
-        error.contains("property definition on a value with no property store"),
-        "{error}"
-    );
+    assert_eq!(output, "outside\nbefore|after:7\n");
 }
 
 #[test]

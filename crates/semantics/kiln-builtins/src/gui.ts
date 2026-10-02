@@ -1413,9 +1413,14 @@ export class Node {
     if (name.startsWith("on") && typeof value === "function") {
       let eventName = name.slice(2).toLowerCase();
       if (eventName === "press") eventName = "click";
+      if (eventName === "valuechange") eventName = "change";
       this.addEventListener(eventName, value);
       if (eventName === "change") {
         this.addEventListener("input", value);
+        this.addEventListener("toggle", value);
+      }
+      if (eventName === "toggle") {
+        this.addEventListener("change", value);
       }
       return;
     }

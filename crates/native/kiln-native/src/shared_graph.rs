@@ -403,17 +403,53 @@ static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *pa
     }
     return unit == url->unit_len && byte == path_len;
 }
+static int kiln_c99_string_matches_utf8(const kiln_string *s, const char *path, size_t path_len) {
+    if (s == NULL || (path == NULL && path_len != 0)) return 0;
+    size_t unit = 0, byte = 0;
+    while (unit < s->unit_len && byte < path_len) {
+        unsigned char b0 = (unsigned char)path[byte++];
+        uint32_t cp = 0;
+        if (b0 < 0x80) {
+            cp = b0;
+        } else if ((b0 & 0xe0) == 0xc0) {
+            if (byte >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+        } else if ((b0 & 0xf0) == 0xe0) {
+            if (byte + 1 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+        } else if ((b0 & 0xf8) == 0xf0) {
+            if (byte + 2 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            unsigned char b3 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80 || (b3 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+        } else {
+            return 0;
+        }
+        if (cp < 0x10000) {
+            if (kiln_string_unit_at(s, unit++) != (uint16_t)cp) return 0;
+        } else {
+            uint32_t sub = cp - 0x10000;
+            if (unit + 1 >= s->unit_len) return 0;
+            if (kiln_string_unit_at(s, unit++) != (uint16_t)(0xd800 + (sub >> 10))) return 0;
+            if (kiln_string_unit_at(s, unit++) != (uint16_t)(0xdc00 + (sub & 0x3ff))) return 0;
+        }
+    }
+    return unit == s->unit_len && byte == path_len;
+}
 static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
     if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
     if (s->unit_len >= 7 && kiln_c99_string_starts_ascii(value, "file://", 7)) return kiln_c99_file_url_matches_path(s, path, path_len);
-    uint8_t *encoded = NULL; size_t encoded_len = 0;
-    if (kiln_c99_string_to_utf8_lossy(value, &encoded, &encoded_len) != KILN_C99_OK) return 0;
-    int matches = encoded_len == path_len && (path_len == 0 || memcmp(encoded, path, path_len) == 0);
-    free(encoded);
-    return matches;
+    return kiln_c99_string_matches_utf8(s, path, path_len);
 }
 "#,
     );

@@ -1,5 +1,7 @@
 // kiln-builtins: node:stream implementation (Phase 5.2, ADR 0005)
 
+declare const Buffer: any;
+
 class EventEmitter {
   static defaultMaxListeners = 10;
 
@@ -319,8 +321,8 @@ class ReadableImplementation extends Stream {
       state.length = 0;
       if (chunks.length === 1) {
         res = chunks[0];
-      } else if (typeof (globalThis as any).Buffer !== "undefined" && typeof (globalThis as any).Buffer.concat === "function") {
-        res = (globalThis as any).Buffer.concat(chunks);
+      } else if (typeof Buffer !== "undefined" && typeof Buffer.concat === "function") {
+        res = Buffer.concat(chunks);
       } else {
         res = chunks;
       }
@@ -366,8 +368,8 @@ class ReadableImplementation extends Stream {
     if (state.objectMode || (typeof chunk === "string" && state.encoding)) {
       // An object-mode stream carries values as they are; a string stays a string under an
       // encoding.
-    } else if (typeof chunk === "string" && typeof (globalThis as any).Buffer !== "undefined") {
-      chunk = (globalThis as any).Buffer.from(chunk, encoding);
+    } else if (typeof chunk === "string" && typeof Buffer !== "undefined") {
+      chunk = Buffer.from(chunk, encoding);
     }
     if (chunk === "" || (chunk && typeof chunk.length === "number" && chunk.length === 0)) {
       if (!state.ended && this.listeners("readable").length > 0) {

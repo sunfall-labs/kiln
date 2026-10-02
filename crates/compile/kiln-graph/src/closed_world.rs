@@ -386,6 +386,17 @@ pub fn retained_module_size(
             program.functions.len(),
         );
     };
+    if module.link_facts.direct_eval {
+        return (
+            program.code.len()
+                + program
+                    .functions
+                    .iter()
+                    .map(|f| f.code.len())
+                    .sum::<usize>(),
+            program.functions.len(),
+        );
+    }
     let (reachable, dead_pcs, _) = closed_world_function_liveness(
         program,
         demanded,

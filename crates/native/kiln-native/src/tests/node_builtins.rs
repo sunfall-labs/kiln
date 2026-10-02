@@ -239,8 +239,8 @@ module.exports = { loads: globalThis.__loads };"#,
     };
     let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
     let dev_output = root.path.join("program-dev");
-    let run = builder
-        .run_graph(
+    let dev_report = builder
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: dev_output.clone(),
@@ -250,7 +250,10 @@ module.exports = { loads: globalThis.__loads };"#,
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("native escaped createRequire graph builds and runs");
+        .expect("native escaped createRequire graph builds");
+    let run = Command::new(&dev_report.output)
+        .output()
+        .expect("run dev output");
     let expected_url = url::Url::from_file_path(&dev_output)
         .expect("special-character executable path becomes a file URL")
         .to_string();
@@ -267,8 +270,8 @@ module.exports = { loads: globalThis.__loads };"#,
         run.stderr
     );
     let release_output = root.path.join("program-release");
-    let release = builder
-        .run_graph(
+    let release_report = builder
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: release_output.clone(),
@@ -278,7 +281,10 @@ module.exports = { loads: globalThis.__loads };"#,
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("native release createRequire graph builds and runs");
+        .expect("native release createRequire graph builds");
+    let release = Command::new(&release_report.output)
+        .output()
+        .expect("run release output");
     let release_url = url::Url::from_file_path(&release_output)
         .expect("release executable path becomes a file URL")
         .to_string();
@@ -629,9 +635,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
 int main(void) {{
     kiln_host host = {{ host_call, NULL }};
     kiln_value result;
-    int status = {symbol}(&host, &result);
-    fprintf(stderr, "status=%d tag=%u len=%u\\n", status, result.tag, result.len);
-    return status == KILN_C99_OK ? 0 : 1;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
 "#,
             symbol = library.module_symbol,
