@@ -22,6 +22,8 @@ static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_private_object(kiln_value *out);
+
 /* The same names are registered before the first realm in surface.c. A function-local table
  * escaped the prelude's literal-key registration, so each realm made its own 14-shape chain. */
 static const char *const kiln_c99_atomics_names[] = {
@@ -427,12 +429,6 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "exit", 4,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT), 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "__kilnHostProcessStart", 22,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "__kilnHostProcessCancel", 23,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW));
 #if KILN_RETAIN_GROUP_NODE_NET
     /* The public node:net module is a TypeScript facade. Its per-socket pause/resume/read and
      * cork methods reach these private kernels through process.__kilnNativeModules.net; keeping
@@ -570,8 +566,6 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"encodeURIComponent", KILN_C99_METHOD_ENCODE_URI_COMPONENT},
                      {"decodeURI", KILN_C99_METHOD_DECODE_URI},
                      {"decodeURIComponent", KILN_C99_METHOD_DECODE_URI_COMPONENT},
-                     {"__kilnHostProcessStart", KILN_C99_METHOD_PROCESS_START_RAW},
-                     {"__kilnHostProcessCancel", KILN_C99_METHOD_PROCESS_CANCEL_RAW},
                      {"queueMicrotask", KILN_C99_METHOD_QUEUE_MICROTASK},
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},
@@ -594,7 +588,6 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnArrayBufferByteLength", KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW},
                      /* The structured clone's plain-data fast path, captured the same way. */
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
-                     {"__kilnSharedIs", KILN_C99_METHOD_SHARED_IS_RAW},
                      {"__kilnSharedWeak", KILN_C99_METHOD_SHARED_WEAK_RAW},
                      {"__kilnCollectionSize", KILN_C99_METHOD_COLLECTION_SIZE_RAW},
                      {"__kilnJsonSerialize", KILN_C99_METHOD_JSON_STRINGIFY},
@@ -672,6 +665,16 @@ static int kiln_c99_global_object(kiln_value *out) {
                                           kiln_c99_boolean(kiln_c99_kiln_extensions_on()),
                                           0, 1, 1);
     }
+    /* The realm's engine-private object, captured and deleted by `kiln-builtins/src/extensions.ts`
+     * before any program runs. Later it is readable only through the read overlay below. */
+    if (status == KILN_C99_OK) {
+        kiln_value private_object;
+        status = kiln_c99_private_object(&private_object);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_commit_own_data(*globals, "__kilnPrivate", 13, private_object,
+                                              0, 1, 1);
+        }
+    }
     /* `process` too: the bare name loaded it by demand while `globalThis.process` answered
      * `undefined` (2026-09-19). One object, the realm slot's, so the two spellings agree. */
     if (status == KILN_C99_OK) {
@@ -733,41 +736,89 @@ static int kiln_c99_global_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
-/* This flag spans one synchronous `kiln:shared` initializer. A realm never changes lanes in
- * the middle of a turn; the module has no await, so no continuation can inherit the flag. */
-static _Thread_local int kiln_c99_kiln_shared_hooks_active;
+/* The realm's engine-private object (`__kilnPrivate`): the one channel between the engine, the
+ * realm bootstrap and the builtin modules. It holds the engine's own operations -- present only
+ * when kiln's extensions are installed (ADR 0068) -- and whatever one builtin hands another
+ * (the message-port internals, the structured clone's marks). It is a realm slot, so it is a GC
+ * root of its realm like the other slots, and per realm like them (ADR 0071). A program can
+ * never read it: the bootstrap captures it from the global object at realm creation and deletes
+ * the name, and a builtin module reads it only through the overlay below. */
+#define KILN_C99_REALM_SLOT_PRIVATE UINT32_C(13)
 
-/* The read overlay never writes the global. A user-defined property with one of these names
- * therefore keeps its descriptor and slot order across a later dynamic import. */
-static int kiln_c99_kiln_shared_hook_read(kiln_value target, const kiln_string *key,
-                                          kiln_value *out) {
-    kiln_value *global;
-    if (kiln_c99_kiln_shared_hooks_active == 0 || target.tag != KILN_VALUE_OBJECT ||
-        key == NULL || kiln_c99_key_is_reserved(key) || out == NULL) return 0;
-    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) != KILN_C99_OK ||
-        global == NULL || global->tag != KILN_VALUE_OBJECT || global->bits != target.bits) return 0;
-    if (kiln_c99_same_name_key(key, "__kilnShare")) {
-        *out = kiln_c99_kiln_shared_hooks_active > 0
-            ? kiln_c99_method(KILN_C99_METHOD_SHARE_RAW) : kiln_c99_undefined();
-        return 1;
+static int kiln_c99_private_object(kiln_value *out) {
+    kiln_value *slot;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PRIVATE, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot->tag == KILN_VALUE_OBJECT) {
+        *out = *slot;
+        return KILN_C99_OK;
     }
-    if (kiln_c99_same_name_key(key, "__kilnSharedIs")) {
-        *out = kiln_c99_kiln_shared_hooks_active > 0
-            ? kiln_c99_method(KILN_C99_METHOD_SHARED_IS_RAW) : kiln_c99_undefined();
-        return 1;
+    status = kiln_c99_new_object(slot);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_commit_own_data(*slot, "extensions", 10,
+                                      kiln_c99_boolean(kiln_c99_kiln_extensions_on()), 0, 1, 1);
+    /* A developer switch for the conformance probes that drive the actor protocol directly: the
+     * bootstrap then leaves the global name in place. Off unless the process is started with it. */
+    if (status == KILN_C99_OK) {
+        const char *exposed = getenv("KILN_ENGINE_PRIVATE_FOR_TESTS");
+        status = kiln_c99_commit_own_data(*slot, "exposed", 7,
+                                          kiln_c99_boolean(exposed != NULL && exposed[0] == '1' &&
+                                                           exposed[1] == '\0'), 0, 1, 1);
     }
-    return 0;
-}
-
-/* The generated graph wrapper calls this immediately around the module initializer, after
- * the realm bootstrap. It changes only the read overlay above, never global properties. */
-int kiln_realm_kiln_shared_hooks(int begin) {
-    kiln_c99_kiln_shared_hooks_active = begin ? (kiln_c99_kiln_extensions_on() ? 1 : -1) : 0;
+    if (status == KILN_C99_OK && kiln_c99_kiln_extensions_on()) {
+        status = kiln_c99_commit_own_data(*slot, "share", 5,
+                                          kiln_c99_method(KILN_C99_METHOD_SHARE_RAW), 0, 1, 1);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "sharedIs", 8,
+                                              kiln_c99_method(KILN_C99_METHOD_SHARED_IS_RAW),
+                                              0, 1, 1);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "hostProcessStart", 16,
+                                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW),
+                                              0, 1, 1);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "hostProcessCancel", 17,
+                                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
+                                              0, 1, 1);
+    }
+    if (status != KILN_C99_OK) return status;
+    *out = *slot;
     return KILN_C99_OK;
 }
 
-/* The generated graph refuses an engine-owned extension module before entering its body when
- * the runtime switch or the build policy withheld extensions. */
+/* How many engine builtin modules are initializing on this thread right now: the generated graph
+ * wrapper brackets each module's synchronous top-level code with `kiln_realm_private_window`. A
+ * realm never changes lanes in the middle of a turn, and a module body has no await at the
+ * level the overlay answers, so no continuation can inherit the count. */
+static _Thread_local int kiln_c99_private_hooks_active;
+
+/* The read overlay never writes the global. A program's own property of this name therefore
+ * keeps its descriptor and slot order across a later dynamic import, and nothing a builtin
+ * defines on the global object while the window is open is discarded when it closes. */
+static int kiln_c99_private_hook_read(kiln_value target, const kiln_string *key,
+                                      kiln_value *out) {
+    kiln_value *global;
+    if (kiln_c99_private_hooks_active <= 0 || target.tag != KILN_VALUE_OBJECT ||
+        key == NULL || kiln_c99_key_is_reserved(key) || out == NULL) return 0;
+    if (!kiln_c99_same_name_key(key, "__kilnPrivate")) return 0;
+    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) != KILN_C99_OK ||
+        global == NULL || global->tag != KILN_VALUE_OBJECT || global->bits != target.bits) return 0;
+    return kiln_c99_private_object(out) == KILN_C99_OK;
+}
+
+/* The generated graph wrapper calls this immediately around each engine builtin module's
+ * initializer, after the realm bootstrap. It changes only the read overlay above. */
+int kiln_realm_private_window(int begin) {
+    if (begin) {
+        kiln_c99_private_hooks_active += 1;
+    } else if (kiln_c99_private_hooks_active > 0) {
+        kiln_c99_private_hooks_active -= 1;
+    }
+    return KILN_C99_OK;
+}
+
+/* Whether this realm installs kiln's own members (ADR 0068). A kiln module refuses itself without
+ * them, in TypeScript, from the `extensions` entry of the engine-private object. */
 int kiln_realm_kiln_extensions_on(void) {
     return kiln_c99_kiln_extensions_on();
 }

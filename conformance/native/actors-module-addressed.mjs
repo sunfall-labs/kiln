@@ -1,3 +1,6 @@
+// native-env: KILN_ENGINE_PRIVATE_FOR_TESTS=1
+// Drives the actor protocol through the engine-private channel, which a program never sees:
+// the switch above (a developer switch, off by default in both engines) leaves it readable.
 import { spawnActor, connectActor, isolate, transfer } from 'kiln:actors';
 
 const owner = await spawnActor({
@@ -41,8 +44,13 @@ const graphTicketState = Reflect.ownKeys(graphTicket)
   .map(key => Object.getOwnPropertyDescriptor(graphTicket, key)?.value)
   .find(value => value && typeof value === 'object' && 'consumed' in value);
 if (!graphTicketState || graphTicketState.consumed) throw new Error('new graph ticket is unusable');
+// The ticket's mark is a symbol no program can spell; even holding the genuine one, copying the
+// state onto another object must not move or consume the genuine handle.
+const ticketMark = Reflect.ownKeys(graphTicket).find(key => typeof key === 'symbol'
+  && Object.getOwnPropertyDescriptor(graphTicket, key)?.value === graphTicketState);
+if (ticketMark === undefined || Symbol.keyFor(ticketMark) !== undefined) throw new Error('ticket mark is registered');
 const forgedTicket = {};
-Object.defineProperty(forgedTicket, Symbol.for('kiln.actor.ticket'), { value: graphTicketState });
+Object.defineProperty(forgedTicket, ticketMark, { value: graphTicketState });
 let forgedRefused = false;
 try { await owner.ref.call('echo', [forgedTicket]); }
 catch (error) {
@@ -56,7 +64,7 @@ for (const key of Reflect.ownKeys(graphTicket)) {
   const value = Object.getOwnPropertyDescriptor(graphTicket, key)?.value;
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through ticket');
 }
-const actorInternals = MessagePort[Symbol.for('kiln.messagePort')];
+const actorInternals = globalThis.__kilnPrivate.messagePort;
 const statusWorkerOp = actorInternals.workerOp;
 let delayedGraphStatus = false;
 try {

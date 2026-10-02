@@ -60,7 +60,7 @@ export class Counter extends Actor {
     return [count, sum];
   }
   probeMailboxBind(endpoint) {
-    const internals = MessagePort[Symbol.for('kiln.messagePort')];
+    const internals = globalThis.__kilnPrivate.messagePort;
     return internals.workerOp(33, endpoint);
   }
   waitRejected() {

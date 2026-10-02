@@ -717,17 +717,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.self_namespaces = self_namespaces;
         let thrown = match outcome {
             Ok(Ok(_)) => {
-                if let Some(shared) = &self.module_realm {
-                    let pending = shared.borrow().shared_hooks_pending;
-                    if pending && let Value::Object(object) = &global {
-                        let mut shared = shared.borrow_mut();
-                        let mut object = object.borrow_mut();
-                        shared.saved_shared_global = Some(object.properties.clone());
-                        install_kiln_shared_hooks(
-                            &mut object,
-                            realm,
-                            kiln_builtin_surface::kiln_extensions_installed(),
-                        );
+                // An engine module whose run built this realm opened its window before the
+                // global object existed; the bootstrap has since removed the name, so open it.
+                if realm.0 == 0
+                    && let Some(shared) = &self.module_realm
+                    && let Value::Object(object) = &global
+                {
+                    let mut shared = shared.borrow_mut();
+                    if let Some(window @ PrivateWindow::Absent) = shared.private_windows.last_mut()
+                    {
+                        *window = open_private_window(&mut object.borrow_mut());
                     }
                 }
                 return Ok(global);
@@ -824,14 +823,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "FinalizationRegistry",
             Value::Native(Native::FinalizationRegistryConstructor, realm),
         );
-        globals.set_non_enumerable(
-            "__kilnHostProcessStart",
-            Value::Native(Native::ProcessStartRaw, realm),
-        );
-        globals.set_non_enumerable(
-            "__kilnHostProcessCancel",
-            Value::Native(Native::ProcessCancelRaw, realm),
-        );
+        // The realm's engine-private object (`__kilnPrivate`), kept in an internal slot. The
+        // bootstrap captures it from the global name and deletes the name before any program
+        // line runs; a realm that runs no bootstrap never publishes the name at all.
+        let private = new_engine_private(realm);
+        globals.define_value(ENGINE_PRIVATE_SLOT, private.clone(), Attributes::BUILT_IN);
+        if self.realm_bootstrap.is_some() {
+            globals.set_non_enumerable("__kilnPrivate", private);
+        }
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
@@ -915,7 +914,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The structured clone's plain-data fast path: measured for the native backend
             // only, so here it always answers "not handled" and the shared TypeScript clone runs.
             ("__kilnCloneData", Native::CloneDataRaw),
-            ("__kilnSharedIs", Native::SharedIsRaw),
             // Whether a microtask checkpoint would run anything now, which message delivery
             // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
             ("__kilnJobsPending", Native::JobsPendingRaw),

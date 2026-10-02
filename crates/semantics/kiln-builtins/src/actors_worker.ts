@@ -3,6 +3,13 @@
 import { isMainThread, parentPort, workerData, MessagePort } from "node:worker_threads";
 import { Actor, prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
 
+// Internal to kiln:actors, like kiln:actors/core: refused to programs by the resolver, and
+// refused here without kiln's extensions, naming the owner.
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:actors requires enabled Kiln extensions");
+}
+
 export const actorWorkerEntry = "kiln:actors/worker";
 const BIND_RECEIVER = 33;
 const GRAPH_RESERVE = 34;
@@ -93,7 +100,7 @@ function serve(): void {
   inbox = control;
   // Name this inbox's actual provider realm for a future opaque graph request. A failed bind
   // leaves graph requests unavailable; ordinary cloned actor messages keep working.
-  const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
+  const internals: any = enginePrivate.messagePort;
   try { if (internals) internals.workerOp(BIND_RECEIVER, internals.portEndpoint(inbox)); }
   catch { /* An unavailable host leaves cloned actor messages working. */ }
   capacity = init.capacity;
@@ -366,9 +373,10 @@ function serve(): void {
   });
 }
 
-const startedMark = Symbol.for("kiln.actor.worker.started");
-if (!isMainThread && workerData?.__kilnActorVersion === 1 && !(globalThis as any)[startedMark]) {
-  (globalThis as any)[startedMark] = true;
+// Whether this realm's worker entry has already started its mailbox is a fact about the realm,
+// kept on the realm's engine-private object rather than as a mark on its global object.
+if (!isMainThread && workerData?.__kilnActorVersion === 1 && !enginePrivate.actorWorkerStarted) {
+  enginePrivate.actorWorkerStarted = true;
   // An actor yields its lane between mailbox turns. A synchronous wait would keep that lane
   // occupied while the actor that must notify it could be queued behind it.
   if (typeof Atomics === "object" && Atomics !== null) {

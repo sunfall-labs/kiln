@@ -226,7 +226,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         planned: &PlannedModule,
         realm: RealmId,
     ) -> Result<Result<(), Value>, ExecutionError> {
-        let (program, names, kiln_shared) = match &planned.body {
+        let (program, names, engine_private) = match &planned.body {
             PlannedBody::Exports(entries) => {
                 let exports = entries.iter().cloned().collect();
                 self.module_map
@@ -238,8 +238,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             PlannedBody::Source {
                 program,
                 exports,
-                kiln_shared,
-            } => (program, exports, *kiln_shared),
+                engine_private,
+            } => (program, exports, *engine_private),
         };
         let mut locals = vec![Value::Undefined; program.local_count as usize];
         for (slot, binding) in &planned.bindings {
@@ -261,32 +261,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         let module_path = Rc::from(planned.key.as_str());
-        let saved_shared_global = if kiln_shared {
-            if !kiln_builtin_surface::kiln_extensions_installed() {
-                return Ok(Err(self.construct_error(
-                    ErrorKind::Type,
-                    &[Value::String(
-                        "kiln:shared requires enabled Kiln extensions".into(),
-                    )],
-                )));
-            }
-            if let Value::Object(global) = self.global_object_in(realm) {
-                let mut global = global.borrow_mut();
-                let saved = global.properties.clone();
-                install_kiln_shared_hooks(&mut global, realm, true);
-                Some(saved)
-            } else {
-                None
+        // An engine builtin sees the realm's engine-private object while its top-level code
+        // runs, and only then. Whether kiln's extensions are installed is the module's own
+        // question to answer (it names itself in the refusal), so both engines say it once.
+        let private_window = if engine_private {
+            match self.global_object_in(realm) {
+                Value::Object(global) => Some(open_private_window(&mut global.borrow_mut())),
+                _ => None,
             }
         } else {
             None
         };
         self.module_map.borrow_mut().begin(realm, &planned.key);
         let module_result = self.drive_module(Rc::clone(program), locals, Some(module_path));
-        if let Some(saved) = saved_shared_global
+        if let Some(window) = private_window
             && let Value::Object(global) = self.global_object_in(realm)
         {
-            global.borrow_mut().properties = saved;
+            close_private_window(&mut global.borrow_mut(), window);
         }
         let returned = match module_result? {
             Ok(returned) => returned,

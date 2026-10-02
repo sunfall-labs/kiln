@@ -1,10 +1,16 @@
 // State shared by the public actor module and its worker entry within one realm. Keeping it
 // here makes their static dependency graph acyclic while ticket identities stay private.
-// Structured clone owns the shared-value predicate for every message path. Its private bridge
-// is installed by the bootstrap before this module loads. Importing kiln:shared here would make
-// that extension's refusal run before kiln:actors can give its own when extensions are disabled.
-const nativeIsShared: ((value: any) => boolean) | undefined =
-  (globalThis as any).structuredClone?.[Symbol.for("kiln.structuredClone")]?.isShared;
+//
+// This module is internal to kiln:actors: the resolver refuses a program's import of it, and
+// without kiln's extensions it refuses itself, naming its owner (a TypeError, like every kiln:
+// module). Everything it needs from the engine comes through the realm's engine-private object,
+// which is readable only while an engine module initializes, so it is captured here.
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:actors requires enabled Kiln extensions");
+}
+const nativeIsShared: ((value: any) => boolean) | undefined = enginePrivate.sharedIs;
+const messagePort: any = enginePrivate.messagePort;
 
 /** Base class of every actor: `spawnActor` constructs a subclass in its own realm. */
 export abstract class Actor {}
@@ -25,8 +31,10 @@ const graphInMessage = {};
 // instead and never enter this table.
 const preparedSnapshots = new WeakMap<object, any>();
 const hasOwn = Object.prototype.hasOwnProperty;
-const isolatedMark = Symbol.for("kiln.actor.isolated");
-const ticketMark = Symbol.for("kiln.actor.ticket");
+// Unregistered symbols: a program cannot forge a mark by spelling it, and nothing about them is
+// visible to `Symbol.for`.
+const isolatedMark = Symbol("isolated");
+const ticketMark = Symbol("ticket");
 const ISOLATE = 26;
 const ISOLATED_HAS = 27;
 const CANDIDATE_BEGIN = 28;
@@ -35,8 +43,7 @@ const PREPARE = 37;
 const PLAIN_MESSAGE = 38;
 
 function isolatedOp(operation: number, ...args: any[]): any {
-  const port = (globalThis as any).MessagePort;
-  const workerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  const workerOp = messagePort?.workerOp;
   if (typeof workerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
   return workerOp(operation, ...args);
 }
@@ -94,9 +101,8 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
   // Resolve the native operation before opening the candidate allocation stream. Looking
-  // up this symbol, and the rest/spread bridge in `isolatedOp`, allocate unrelated blocks.
-  const port = (globalThis as any).MessagePort;
-  const candidateWorkerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  // it up, and the rest/spread bridge in `isolatedOp`, allocate unrelated blocks.
+  const candidateWorkerOp = messagePort?.workerOp;
   if (typeof candidateWorkerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
   // Native realms put this synchronous factory's nursery allocations into fresh, tagged
   // chunks. A nested factory or a realm without a nursery still works, but cannot claim an

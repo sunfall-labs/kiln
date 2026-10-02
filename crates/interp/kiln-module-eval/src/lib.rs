@@ -507,11 +507,25 @@ impl ModuleLoaderService for GraphModuleLoader {
                     .iter()
                     .find(|dependency| dependency.specifier == request.specifier)
             });
+        // An engine-internal module (`kiln:actors/core`) is addressable only from an engine
+        // builtin: a computed specifier cannot slip past the resolver that refuses the literal.
+        let is_engine_importer = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        if !is_engine_importer
+            && let Some(owner) =
+                NodeBuiltin::parse(&request.specifier).and_then(NodeBuiltin::internal_owner)
+        {
+            return Err(ModuleLoadError::Unsupported(format!(
+                "`{}` is internal to {owner}",
+                request.specifier
+            )));
+        }
         let target = dependency
             .map(|dependency| dependency.target.clone())
             .or_else(|| graph.declared_target_for_runtime_specifier(&request.specifier))
             .or_else(|| {
-                if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
+                if let Some(builtin) = NodeBuiltin::parse(&request.specifier)
+                    .filter(|builtin| !builtin.is_engine_internal() || is_engine_importer)
+                {
                     graph.module_map().iter().find_map(|(path, node)| {
                         (node.source == ModuleSource::NodeBuiltin(builtin)).then(|| path.clone())
                     })
@@ -848,12 +862,7 @@ impl GraphExecutor<'_> {
                         PlannedBody::Source {
                             program: std::rc::Rc::new(program),
                             exports: own.into_iter().map(|(name, _)| name).collect(),
-                            kiln_shared: matches!(
-                                node.source,
-                                ModuleSource::NodeBuiltin(
-                                    NodeBuiltin::Shared | NodeBuiltin::Actors
-                                )
-                            ),
+                            engine_private: matches!(node.source, ModuleSource::NodeBuiltin(_)),
                         },
                         bindings,
                         reexports,
@@ -1568,16 +1577,13 @@ impl GraphExecutor<'_> {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let shared_builtin = matches!(
-                module_node.source,
-                ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-            );
+            let shared_builtin = matches!(module_node.source, ModuleSource::NodeBuiltin(_));
             records.begin(path);
             if shared_builtin {
                 node_session
                     .as_mut()
                     .expect("the graph owns a session")
-                    .begin_kiln_shared();
+                    .begin_engine_module();
             }
             let result = execute_node_module_in_session_with_loader(
                 &module_node.program,
@@ -1597,7 +1603,7 @@ impl GraphExecutor<'_> {
                 node_session
                     .as_mut()
                     .expect("the graph owns a session")
-                    .end_kiln_shared();
+                    .end_engine_module();
             }
             let result = result.map_err(|error| {
                 let error = match error {
@@ -1783,17 +1789,14 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     })?,
             );
         }
-        let shared_builtin = matches!(
-            module_node.source,
-            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-        );
+        let shared_builtin = matches!(module_node.source, ModuleSource::NodeBuiltin(_));
         self.records.begin(target);
         if shared_builtin {
             unsafe {
                 (&mut *self.node_session)
                     .as_mut()
                     .expect("the graph owns a realm session")
-                    .begin_kiln_shared();
+                    .begin_engine_module();
             }
         }
         let result = unsafe {
@@ -1819,7 +1822,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 (&mut *self.node_session)
                     .as_mut()
                     .expect("the graph owns a realm session")
-                    .end_kiln_shared();
+                    .end_engine_module();
             }
         }
         let result = result?;
@@ -2099,6 +2102,10 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
             instruction,
             message: format!("unknown builtin module `{specifier}`"),
         })?;
+        // Engine-internal modules are not part of any program's builtin surface.
+        if builtin.is_engine_internal() {
+            return Ok(None);
+        }
         let path = self.graph.module_map().iter().find_map(|(path, node)| {
             (node.source == ModuleSource::NodeBuiltin(builtin)).then_some(path)
         });
@@ -2210,6 +2217,14 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                 }
                 if let Some(target) = self.graph.declared_target_for_runtime_specifier(specifier) {
                     return self.ensure_target_value(&target, instruction);
+                }
+                if let Some(owner) =
+                    NodeBuiltin::parse(specifier).and_then(NodeBuiltin::internal_owner)
+                {
+                    return Err(ExecutionError::ModuleNotFound {
+                        instruction,
+                        message: format!("`{specifier}` is internal to {owner}"),
+                    });
                 }
                 if NodeBuiltin::parse(specifier).is_some() {
                     return self.get_builtin(specifier, instruction)?.ok_or_else(|| {

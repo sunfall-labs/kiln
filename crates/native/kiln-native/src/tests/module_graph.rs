@@ -2048,7 +2048,7 @@ fn native_module_addressed_actor_calls_and_transfers() {
     assert!(!disabled.status.success());
     assert!(
         String::from_utf8_lossy(&disabled.stderr)
-            .contains("kiln:actors requires enabled Kiln extensions"),
+            .contains("TypeError: kiln:actors requires enabled Kiln extensions"),
         "{}",
         String::from_utf8_lossy(&disabled.stderr)
     );

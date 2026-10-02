@@ -2266,6 +2266,24 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
         decided_by: "ADR 0069",
         installed_by: ExtensionInstaller::Bootstrap,
     },
+    // The two global names a kiln program serves HTTP through (`Kiln.serve`, and `Bun.serve` for
+    // programs written against Bun). Defined by the web bootstrap (`kiln-builtins/src/web.ts`)
+    // only when the realm installs extensions, non-enumerable, so a Node-only program neither
+    // finds them nor sees them walking `globalThis`.
+    KilnExtension {
+        owner: "globalThis",
+        key: MemberKey::Named("Kiln"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0068",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "globalThis",
+        key: MemberKey::Named("Bun"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0068",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
 ];
 
 /// The leaf of `parallelReduce`'s combining tree (ADR 0069): the input's indices are cut into

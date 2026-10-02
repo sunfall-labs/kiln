@@ -3334,7 +3334,7 @@ enum kiln_value_tag {
  * those writes back out of the prelude's process-wide summary of modified built-ins, before any
  * user module can observe or mutate the realm (`kiln_c99_builtin_store_epoch`). */
 extern void kiln_c99_builtin_bootstrap_done(void) __attribute__((visibility("hidden")));
-extern int kiln_realm_kiln_shared_hooks(int begin);
+extern int kiln_realm_private_window(int begin);
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
@@ -4871,23 +4871,17 @@ static int kiln_graph_enter_inner(void *opaque) {
             export_count
         )
         .unwrap();
-        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Actors) {
-            evaluation.push_str("            if (!kiln_realm_kiln_extensions_on()) return kiln_c99_throw_error(result, UINT64_C(10), \"kiln:actors requires enabled Kiln extensions\");\n");
-        }
-        if matches!(
-            node.source,
-            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-        ) {
-            evaluation.push_str("            status = kiln_realm_kiln_shared_hooks(1);\n            if (status != 0) return status;\n");
+        // Every engine builtin module's top-level code runs inside the engine-private window:
+        // `globalThis.__kilnPrivate` reads the realm's private object there and nowhere else.
+        let engine_module = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        if engine_module {
+            evaluation.push_str("            status = kiln_realm_private_window(1);\n            if (status != 0) return status;\n");
         }
         evaluation.push_str(
             "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
-        if matches!(
-            node.source,
-            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-        ) {
-            evaluation.push_str("            { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == 0) status = hook_status; }\n");
+        if engine_module {
+            evaluation.push_str("            { int hook_status = kiln_realm_private_window(0); if (status == 0) status = hook_status; }\n");
         }
         if node.path == graph.entry() && !is_async {
             // The whole graph evaluates inside one job (a dependency's body runs synchronously

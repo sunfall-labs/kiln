@@ -1639,7 +1639,6 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         (family::ARRAY_BUFFER, "__kilnSharedBuffer"),
         (family::ATOMICS, "__kilnAtomics"),
         (family::STRUCTURED_CLONE, "__kilnCloneData"),
-        (family::STRUCTURED_CLONE, "__kilnSharedIs"),
         (family::MAP_UPSERT, "__kilnCollectionSize"),
         (family::OBJECT_REFLECT, "__kilnSetPrototypeOf"),
         (family::OBJECT_REFLECT, "__kilnPreventExtensions"),

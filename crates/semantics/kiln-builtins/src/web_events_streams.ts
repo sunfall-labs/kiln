@@ -1074,21 +1074,18 @@ delete (globalThis as any).__kilnPortWait;
         }
         return { message: data };
       };
-      Object.defineProperty(MessagePort, Symbol.for("kiln.messagePort"), {
-        value: {
-          receive,
-          workerOp: __kilnWorkerOp,
-          encodeMessage,
-          decodeMessage,
-          internalPort: (endpoint: number, kinds: any, target: any, broadcast: boolean) =>
-            internalPort(endpoint, kinds, target, broadcast),
-          portEndpoint: (port: MessagePort) => portEndpoint(port),
-          worker: () => workerState,
-        },
-        writable: false,
-        enumerable: false,
-        configurable: false,
-      });
+      // The engine's own modules (node:worker_threads, kiln:actors, kiln:gui) reach the ports'
+      // internals through the engine-private object, never through a property of `MessagePort`.
+      kilnPrivate.messagePort = {
+        receive,
+        workerOp: __kilnWorkerOp,
+        encodeMessage,
+        decodeMessage,
+        internalPort: (endpoint: number, kinds: any, target: any, broadcast: boolean) =>
+          internalPort(endpoint, kinds, target, broadcast),
+        portEndpoint: (port: MessagePort) => portEndpoint(port),
+        worker: () => workerState,
+      };
       deliverNext = (port: MessagePort) => {
         port.#scheduled = false;
         port.#hops = 0;

@@ -73,12 +73,12 @@ function serializeQuery(list: [string, string][]): string {
   return out;
 }
 
-// Instance state lives under one registry symbol rather than in named fields, so `Object.keys`
-// and enumeration see nothing, as node's do. The request fast path's object is built in C with
-// own `_input`/`_base` (and `_query` on its `searchParams`) instead -- the C side spells this
-// symbol as `@@symbol-for:kiln.url` and could carry the state itself, but then every request
-// would allocate it; `state()` builds it on the first read that needs it.
-const STATE = Symbol.for("kiln.url");
+// Instance state lives under one unregistered symbol rather than in named fields, so `Object.keys`
+// and enumeration see nothing, as node's do (node keeps its own under symbols too). The request
+// fast path's object is built in C with own `_input`/`_base` (and `_query` on its
+// `searchParams`) instead; `state()` builds this on the first read that needs it. It is not a
+// `Symbol.for` key: no program can name it, and nothing about it says "kiln".
+const STATE = Symbol("state");
 
 type ParamsState = { list: [string, string][] | undefined; url: any; query: any };
 type UrlState = { c: string[] | undefined; sp: any; input: any; base: any };

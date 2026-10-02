@@ -22,8 +22,10 @@
 // nothing it reads can run program code, so answering `undefined` half way leaves nothing to undo.
 const __kilnCloneData: (value: any, mode?: number) => any = (globalThis as any).__kilnCloneData;
 delete (globalThis as any).__kilnCloneData;
-const __kilnSharedIs: (value: any) => boolean = (globalThis as any).__kilnSharedIs;
-delete (globalThis as any).__kilnSharedIs;
+// The shared-value predicate is an extension's (kiln:shared), lent through the engine-private
+// object only when extensions are installed; without it no value is ever shared.
+const __kilnSharedIs: (value: any) => boolean =
+  typeof kilnPrivate.sharedIs === "function" ? kilnPrivate.sharedIs : () => false;
 
 const __kilnStructuredClone = (function installStructuredClone() {
   const G = globalThis as any;
@@ -433,8 +435,9 @@ const __kilnStructuredClone = (function installStructuredClone() {
       return value !== null && (typeof value === "object" || typeof value === "function") && untransferable.has(value);
     },
   };
-  // `node:worker_threads` is a module, not part of this script, and reaches the marks here.
-  defineProperty(structuredClone, Symbol.for("kiln.structuredClone"), { value: internal, writable: false, enumerable: false, configurable: false });
+  // `node:worker_threads` is a module, not part of this script, and reaches the marks here
+  // through the engine-private object, never through a property of `structuredClone`.
+  kilnPrivate.structuredClone = internal;
   defineProperty(G, "structuredClone", { value: structuredClone, writable: true, enumerable: true, configurable: true });
   return internal;
 })();

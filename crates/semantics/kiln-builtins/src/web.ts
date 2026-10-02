@@ -1445,13 +1445,23 @@ function serve(
   return server;
 }
 
-if (typeof (globalThis as any).Kiln === "undefined") {
-  (globalThis as any).Kiln = { serve };
-} else {
-  (globalThis as any).Kiln.serve = serve;
+// `Kiln` and `Bun` are kiln's own globals (ADR 0068): declared in `KILN_EXTENSIONS`, installed only
+// when the realm installs extensions, and non-enumerable like every built-in, so a Node-only
+// program neither finds them nor sees them in `for...in` over `globalThis`.
+function defineServeGlobal(name: string): void {
+  const G = globalThis as any;
+  if (typeof G[name] === "undefined") {
+    Object.defineProperty(G, name, {
+      value: { serve },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  } else if (!G[name].serve) {
+    G[name].serve = serve;
+  }
 }
-if (typeof (globalThis as any).Bun === "undefined") {
-  (globalThis as any).Bun = { serve };
-} else if (!(globalThis as any).Bun.serve) {
-  (globalThis as any).Bun.serve = serve;
+if (kilnExtensions) {
+  defineServeGlobal("Kiln");
+  defineServeGlobal("Bun");
 }

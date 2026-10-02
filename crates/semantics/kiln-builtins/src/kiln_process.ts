@@ -2,6 +2,16 @@
 // the global `process` object and nothing more. The private host hooks are the only
 // engine-specific part; validation, framing, cancellation and public result shape stay here.
 
+// The host's process hooks are on the realm's engine-private object, which is readable only while
+// this module initializes and exists with kiln's extensions only: without them this module
+// refuses (a TypeError naming it, like every kiln: module in both engines).
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:process requires enabled Kiln extensions");
+}
+const hostProcessStart: (frame: Uint8Array) => any = enginePrivate.hostProcessStart;
+const hostProcessCancel: (id: any) => void = enginePrivate.hostProcessCancel;
+
 function bytes(value: any): Uint8Array {
   if (typeof value === "string") return new TextEncoder().encode(value);
   if (value instanceof Uint8Array) return value;
@@ -63,12 +73,12 @@ export async function run(command: string, args: string[] = [], options: RunOpti
   const signal = signalOption === null ? undefined : signalOption;
   if (signal !== undefined && (typeof signal !== "object" || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) throw new TypeError("process.run signal must be an AbortSignal");
   if (signal && signal.aborted) throw signal.reason;
-  const pending = __kilnHostProcessStart(frame(command, args, options.input));
+  const pending = hostProcessStart(frame(command, args, options.input));
   let onAbort: any;
   let abortPromise: Promise<any> | undefined;
   if (signal) {
     abortPromise = new Promise((_resolve, reject) => {
-      onAbort = () => { __kilnHostProcessCancel(pending.requestId); reject(signal.reason); };
+      onAbort = () => { hostProcessCancel(pending.requestId); reject(signal.reason); };
     });
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();

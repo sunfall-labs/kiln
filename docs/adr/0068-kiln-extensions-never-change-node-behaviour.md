@@ -72,8 +72,32 @@ properties and the emitter methods inherited, as in Node; host hooks are not enu
 (`ModuleSpecifier::virtual_path` and its inverse, `builtin`). Before, `node:process` and
 `kiln:process` shared a path.
 
-**Internal modules.** A `kiln:` module that exists only to share code between other builtins
-(`kiln:actors/core`, `kiln:actors/worker`) is not importable from a program.
+## Amendment 2026-10-02: modules, globals and private channels
+
+Rule 4's switch removes every kiln extension, and an audit found four places it did not:
+
+- **Modules.** With extensions off, every `kiln:` module refuses, internal ones included, with one
+  error in both engines and for static and dynamic imports alike: a `TypeError` naming the module
+  (`kiln:actors requires enabled Kiln extensions`; `kiln:actors/core` and `kiln:actors/worker` name
+  their owner). The refusal is the module's own first statement, so nothing about it is engine
+  specific. `kiln:actors/core` and `kiln:actors/worker` are engine-internal: only an engine builtin
+  may import them (the resolver and the interpreter's dynamic loader refuse any other importer with
+  `` `kiln:actors/core` is internal to kiln:actors ``), and `new Worker("kiln:actors/worker")` from a
+  program is a `ERR_WORKER_PATH` like any string that is not a path.
+- **Globals.** `Kiln` and `Bun` are declared extensions (`owner: "globalThis"`), installed only
+  when extensions are, and non-enumerable.
+- **Private channels.** Nothing the engine passes between its own modules is a property a program
+  can find. There is one channel, a realm-private object, `__kilnPrivate`. The bootstrap captures it
+  from the global object and deletes the name before any program line runs; each builtin module
+  can read `globalThis.__kilnPrivate` only while its own top-level code runs, in a window the
+  engine opens and closes around that code (native: a read overlay and a per-realm GC-rooted slot;
+  interpreter: one global property added and removed again). It carries `extensions`, the
+  engine's operations that exist only with extensions (`share`, `sharedIs`, `hostProcessStart`,
+  `hostProcessCancel`), and what bootstrap pieces publish for modules (`messagePort`,
+  `structuredClone`, `senderEndpoint`, `spawnActorWorker`). No `Symbol.for("kiln...")` key remains
+  on any built-in, and a program cannot forge an actor mark, which is an unregistered symbol.
+- `KILN_ENGINE_PRIVATE_FOR_TESTS=1` leaves the name readable. It exists for the conformance probes
+  that drive the actor protocol directly and is off in both engines unless a developer sets it.
 
 ## Consequences
 

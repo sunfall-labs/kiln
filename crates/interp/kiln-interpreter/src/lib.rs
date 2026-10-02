@@ -1752,8 +1752,10 @@ pub enum PlannedBody {
     Source {
         program: Rc<Program>,
         exports: Vec<String>,
-        /// The `kiln:shared` initializer alone captures temporary realm-local engine hooks.
-        kiln_shared: bool,
+        /// An engine builtin module: while its top-level initialization runs, the realm's
+        /// engine-private object is readable as the global `__kilnPrivate` (see
+        /// [`open_private_window`]). No program module ever sees it.
+        engine_private: bool,
     },
     /// Exports the host computed without running anything (a file asset's path).
     Exports(Vec<(String, Value)>),
@@ -1970,20 +1972,18 @@ impl ModuleRealmSession {
         }
     }
 
-    /// Temporarily publish the engine hooks while `kiln:shared` captures them. The module
-    /// evaluator calls `end_kiln_shared` on both normal and throwing exits.
-    pub fn begin_kiln_shared(&mut self) {
+    /// Open the engine-private window for one engine builtin module's top-level initialization.
+    /// The module evaluator calls `end_engine_module` on both normal and throwing exits; windows
+    /// nest, as a lazily loaded builtin may initialize inside another's window.
+    pub fn begin_engine_module(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        shared.shared_hooks_pending = true;
-        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
-            let mut global = global.borrow_mut();
-            shared.saved_shared_global = Some(global.properties.clone());
-            install_kiln_shared_hooks(
-                &mut global,
-                RealmId(0),
-                kiln_builtin_surface::kiln_extensions_installed(),
-            );
-        }
+        let window = match shared.global_objects.first().cloned().flatten() {
+            Some(Value::Object(global)) => open_private_window(&mut global.borrow_mut()),
+            // The realm is built lazily inside this module's own run, after the window opens;
+            // `realize_realm` finishes opening it once the realm's bootstrap has returned.
+            _ => PrivateWindow::Absent,
+        };
+        shared.private_windows.push(window);
     }
 
     /// The realm's module map, which the graph executor evaluates its modules into.
@@ -1991,36 +1991,92 @@ impl ModuleRealmSession {
         Rc::clone(&self.shared.borrow().module_map)
     }
 
-    pub fn end_kiln_shared(&mut self) {
+    pub fn end_engine_module(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        shared.shared_hooks_pending = false;
-        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
-            let mut global = global.borrow_mut();
-            if let Some(saved) = shared.saved_shared_global.take() {
-                global.properties = saved;
-            }
+        let window = shared.private_windows.pop();
+        if let (Some(window), Some(Value::Object(global))) =
+            (window, shared.global_objects.first().cloned().flatten())
+        {
+            close_private_window(&mut global.borrow_mut(), window);
         }
     }
 }
 
-fn install_kiln_shared_hooks(global: &mut ObjectData, realm: RealmId, available: bool) {
-    for (name, native) in [
-        ("__kilnShare", Native::ShareRaw),
-        ("__kilnSharedIs", Native::SharedIsRaw),
-    ] {
-        let value = if available {
-            Value::Native(native, realm)
-        } else {
-            Value::Undefined
-        };
-        if let Some(slot) = global
-            .properties
-            .iter_mut()
-            .find(|slot| PropertyKeyRef::Utf8(name).matches_slot(slot))
-        {
-            slot.property = Property::Value(value);
-        } else {
-            global.set_non_enumerable(name, value);
+/// The internal slot of a realm's global object that holds its engine-private object. Not a
+/// property: reflection never lists it and a program's own string key cannot reach it.
+pub(crate) const ENGINE_PRIVATE_SLOT: &str = "@@kiln:engine-private";
+/// The one global name that exposes the engine-private object, and only inside a window.
+const ENGINE_PRIVATE_GLOBAL: &str = "__kilnPrivate";
+const ENGINE_PRIVATE_FOR_TESTS_ENV: &str = "KILN_ENGINE_PRIVATE_FOR_TESTS";
+
+/// The realm's engine-private object: the one channel between the engine, the realm bootstrap and
+/// the builtin modules (ADR 0068). It carries the engine's own operations -- present only when
+/// kiln's extensions are -- and whatever one builtin hands another (the message-port internals,
+/// the structured clone's marks). A program can never read it: the bootstrap captures it from
+/// `globalThis` and deletes the name, and each builtin module sees it only while its top-level
+/// initialization runs, in a window the evaluator opens and closes around that code alone.
+pub(crate) fn new_engine_private(realm: RealmId) -> Value {
+    let mut private = ObjectData::default();
+    let extensions = kiln_builtin_surface::kiln_extensions_installed();
+    private.set_non_enumerable("extensions", Value::Boolean(extensions));
+    // A developer switch for the conformance probes that drive the actor protocol directly: the
+    // bootstrap then leaves the global name in place. Off unless the process is started with it.
+    let exposed = std::env::var(ENGINE_PRIVATE_FOR_TESTS_ENV).is_ok_and(|value| value == "1");
+    private.set_non_enumerable("exposed", Value::Boolean(exposed));
+    if extensions {
+        for (name, native) in [
+            ("share", Native::ShareRaw),
+            ("sharedIs", Native::SharedIsRaw),
+            ("hostProcessStart", Native::ProcessStartRaw),
+            ("hostProcessCancel", Native::ProcessCancelRaw),
+        ] {
+            private.set_non_enumerable(name, Value::Native(native, realm));
+        }
+    }
+    Value::Object(Rc::new(RefCell::new(private)))
+}
+
+/// What closing a window has to undo.
+pub(crate) enum PrivateWindow {
+    /// No window was opened: the realm has no engine-private object yet.
+    Absent,
+    /// The name was already reading the engine-private object (an enclosing window).
+    Nested,
+    /// This window set the name, over `prior` when a program had defined one.
+    Open(Option<Slot>),
+}
+
+/// Make the realm's engine-private object readable as `globalThis.__kilnPrivate`.
+///
+/// Only this one property is added and removed again: nothing else a builtin defines on the
+/// global object during its initialization is touched, and a program's own property of that name
+/// is put back as it was.
+pub(crate) fn open_private_window(global: &mut ObjectData) -> PrivateWindow {
+    let Some(Value::Object(private)) = global.get_own(ENGINE_PRIVATE_SLOT).cloned() else {
+        return PrivateWindow::Absent;
+    };
+    let existing = global
+        .properties
+        .iter()
+        .position(|slot| PropertyKeyRef::Utf8(ENGINE_PRIVATE_GLOBAL).matches_slot(slot));
+    if let Some(index) = existing
+        && matches!(
+            &global.properties[index].property,
+            Property::Value(Value::Object(current)) if Rc::ptr_eq(current, &private)
+        )
+    {
+        return PrivateWindow::Nested;
+    }
+    let prior = existing.map(|index| global.properties[index].clone());
+    global.set_non_enumerable(ENGINE_PRIVATE_GLOBAL, Value::Object(private));
+    PrivateWindow::Open(prior)
+}
+
+pub(crate) fn close_private_window(global: &mut ObjectData, window: PrivateWindow) {
+    if let PrivateWindow::Open(prior) = window {
+        global.remove(ENGINE_PRIVATE_GLOBAL);
+        if let Some(slot) = prior {
+            global.properties.push(slot);
         }
     }
 }
@@ -2035,8 +2091,8 @@ struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
     global_objects: Vec<Option<Value>>,
     regexp_legacy_captures: Vec<[StringUnits; 9]>,
-    shared_hooks_pending: bool,
-    saved_shared_global: Option<Vec<Slot>>,
+    /// One entry per engine module initializing right now, innermost last.
+    private_windows: Vec<PrivateWindow>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     rejections: Rejections,
@@ -2070,8 +2126,7 @@ impl Default for ModuleRealmSession {
                 realm: Realm::new(),
                 global_objects: vec![None],
                 regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
-                shared_hooks_pending: false,
-                saved_shared_global: None,
+                private_windows: Vec::new(),
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 rejections: Rejections::default(),

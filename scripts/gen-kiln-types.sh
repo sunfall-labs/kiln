@@ -28,13 +28,13 @@ cat >"$work/in/env.d.ts" <<'ENV'
 declare var process: any;
 declare var console: any;
 declare var kilnExtensions: boolean;
+// The engine-private channel (readable only while an engine module initializes).
+declare var __kilnPrivate: any;
 declare function setTimeout(fn: (...args: any[]) => void, ms?: number): any;
 declare function setInterval(fn: () => void, ms?: number): any;
 declare function clearInterval(id: any): void;
 declare function queueMicrotask(fn: () => void): void;
 declare function structuredClone<T>(value: T): T;
-declare function __kilnHostProcessStart(frame: Uint8Array): any;
-declare function __kilnHostProcessCancel(id: any): void;
 declare class TextDecoder { decode(b: Uint8Array): string }
 declare class TextEncoder { encode(s: string): Uint8Array }
 declare class URL { readonly href: string; constructor(url: string, base?: string | URL) }

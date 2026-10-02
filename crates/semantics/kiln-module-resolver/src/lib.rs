@@ -278,6 +278,23 @@ impl NodeBuiltin {
         }
     }
 
+    /// The module that owns this one when it is an implementation detail of an engine module
+    /// (`kiln:actors/core` belongs to `kiln:actors`), or `None` for a module programs may import.
+    ///
+    /// An internal module exposes helpers (`prepareActorMessage`, ticket marks) that exist for the
+    /// engine's other modules; only an engine builtin may import one.
+    pub const fn internal_owner(self) -> Option<&'static str> {
+        match self {
+            Self::ActorsCore | Self::ActorsWorker => Some("kiln:actors"),
+            _ => None,
+        }
+    }
+
+    /// Whether only engine modules may import this one.
+    pub const fn is_engine_internal(self) -> bool {
+        self.internal_owner().is_some()
+    }
+
     /// Where the module graph records this builtin: `.kiln/builtins/<scheme>/<name>.builtin`.
     /// The scheme is part of the path because `node:process` and `kiln:process` are different
     /// modules and must not share a node in the graph.
@@ -308,6 +325,32 @@ fn engine_builtin_dependency(
             .iter()
             .any(|builtin| importer == builtin.virtual_path(project_root)))
     .then_some(dependency)
+}
+
+/// Whether `importer` is an engine builtin's virtual identity rather than a source file.
+fn is_engine_builtin_importer(importer: &Path, project_root: &Path) -> bool {
+    !importer.exists()
+        && NodeBuiltin::ALL
+            .iter()
+            .any(|builtin| importer == builtin.virtual_path(project_root))
+}
+
+/// The refusal for an import of an engine-internal module (`kiln:actors/core`) from anything but
+/// an engine builtin. It names the module and the one that owns it.
+fn refuse_internal_builtin(
+    specifier: &str,
+    importer: &Path,
+    project_root: &Path,
+) -> Result<(), ResolveError> {
+    match NodeBuiltin::parse(specifier).and_then(NodeBuiltin::internal_owner) {
+        Some(owner) if !is_engine_builtin_importer(importer, project_root) => {
+            Err(ResolveError::InternalBuiltin {
+                specifier: specifier.to_owned(),
+                owner,
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 impl ResolvedModule {
@@ -460,6 +503,11 @@ pub enum ResolveError {
         specifier: String,
         reason: InvalidSpecifierReason,
     },
+    /// An engine-internal module imported by something that is not an engine builtin.
+    InternalBuiltin {
+        specifier: String,
+        owner: &'static str,
+    },
     NonAbsolutePath {
         role: PathRole,
         path: PathBuf,
@@ -521,6 +569,9 @@ impl fmt::Display for ResolveError {
                     formatter,
                     "invalid module specifier `{specifier}`: {reason}"
                 )
+            }
+            Self::InternalBuiltin { specifier, owner } => {
+                write!(formatter, "`{specifier}` is internal to {owner}")
             }
             Self::NonAbsolutePath { role, path } => {
                 write!(
@@ -661,6 +712,7 @@ impl ModuleResolver {
                 ResolutionKind::Builtin,
             ));
         }
+        refuse_internal_builtin(specifier, importer.as_ref(), self.project_root())?;
         if matches!(
             specifier,
             "kiln:shared"
@@ -1061,6 +1113,7 @@ impl NodeRuntimeResolver {
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
+        refuse_internal_builtin(specifier, importer.as_ref(), self.project_root())?;
         if let Some(builtin) = NodeBuiltin::parse(specifier) {
             return Ok(ResolvedModule::new(
                 builtin.virtual_path(self.project_root()),
@@ -1092,6 +1145,7 @@ impl ResolutionPolicy for NodeRuntimeResolver {
         importer: &Path,
         request: NodeRequestKind,
     ) -> Result<ResolvedModule, ResolveError> {
+        refuse_internal_builtin(specifier, importer, self.project_root())?;
         if let Some(builtin) = NodeBuiltin::parse(specifier) {
             return Ok(ResolvedModule::new(
                 builtin.virtual_path(self.project_root()),
@@ -1315,6 +1369,7 @@ impl PinnedPackageResolver {
                 ResolutionKind::Builtin,
             ));
         }
+        refuse_internal_builtin(specifier, importer, self.project_root())?;
         if (self.node_builtins || specifier.starts_with("kiln:"))
             && let Some(builtin) = NodeBuiltin::parse(specifier)
         {
@@ -2703,6 +2758,48 @@ mod tests {
         );
         let fake = project.write(".kiln/builtins/actors.builtin", "");
         assert!(pinned.resolve("node:worker_threads", &fake).is_err());
+    }
+
+    #[test]
+    fn engine_internal_modules_resolve_only_for_engine_importers() {
+        let project = TempProject::new();
+        let source = project.write("main.ts", "");
+        let runtime = NodeRuntimeResolver::new(&project.root).expect("runtime resolver");
+        let explicit = ModuleResolver::new(&project.root).expect("explicit resolver");
+        let pinned = PinnedPackageResolver::new(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+        )
+        .expect("pinned resolver");
+        let actors = NodeBuiltin::Actors.virtual_path(&project.root);
+        for specifier in ["kiln:actors/core", "kiln:actors/worker"] {
+            for resolved in [
+                runtime.resolve(specifier, &source),
+                explicit.resolve(specifier, &source),
+                pinned.resolve(specifier, &source),
+            ] {
+                let error = resolved.expect_err("a user import of an internal module");
+                assert_eq!(
+                    error.to_string(),
+                    format!("`{specifier}` is internal to kiln:actors")
+                );
+            }
+            for resolved in [
+                runtime.resolve(specifier, &actors),
+                explicit.resolve(specifier, &actors),
+                pinned.resolve(specifier, &actors),
+            ] {
+                assert!(resolved.expect("engine importer").builtin().is_some());
+            }
+        }
+        // The public module stays importable from user code.
+        assert_eq!(
+            runtime
+                .resolve("kiln:actors", &source)
+                .expect("kiln:actors")
+                .builtin(),
+            Some(NodeBuiltin::Actors)
+        );
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use super::*;
-use kiln_module_resolver::NodeBuiltin;
 
 pub(super) fn graph_shared_header(wrapper_symbol: &str) -> Result<String, NativeError> {
     // The graph wrapper has the same public two-argument signature as a scalar embedded module,
@@ -475,7 +474,7 @@ extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_HINT_STRING 1
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 extern int kiln_realm_is_active(void);
-extern int kiln_realm_kiln_shared_hooks(int begin);
+extern int kiln_realm_private_window(int begin);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     const kiln_value *imports, size_t import_count,
@@ -1158,9 +1157,9 @@ typedef struct {wrapper_symbol}_realm_context {{
             }
             continue;
         }
-        let shared_builtin = node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+        let shared_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
         if shared_builtin {
-            output.push_str("    status = kiln_realm_kiln_shared_hooks(1);\n    if (status != KILN_C99_OK) goto cleanup;\n");
+            output.push_str("    status = kiln_realm_private_window(1);\n    if (status != KILN_C99_OK) goto cleanup;\n");
         }
         writeln!(
             output,
@@ -1169,7 +1168,7 @@ typedef struct {wrapper_symbol}_realm_context {{
         )
         .unwrap();
         if shared_builtin {
-            output.push_str("    { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == KILN_C99_OK) status = hook_status; }\n");
+            output.push_str("    { int hook_status = kiln_realm_private_window(0); if (status == KILN_C99_OK) status = hook_status; }\n");
         }
         output.push_str(
             "    if (status != KILN_C99_OK) { *result = module_result; goto cleanup; }\n",

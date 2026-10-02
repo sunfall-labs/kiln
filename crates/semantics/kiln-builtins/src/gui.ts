@@ -11,6 +11,14 @@
 //   6. Event loop    drains host events in batches between bounded native waits
 //   7. OS services   dialogs, clipboard, appearance, notifications, menus, tray, shortcuts
 
+// kiln:gui is one of kiln's own modules: without kiln's extensions it refuses (a TypeError naming
+// it, like every kiln: module in both engines). The realm's engine-private object is readable
+// only while this module initializes, so what the event loop needs from it is captured here.
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:gui requires enabled Kiln extensions");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // 1. Reactivity
 //
@@ -2526,8 +2534,7 @@ const ACTIVE_WINDOW_MS = 500;
 const OP_CHANNEL = 1;
 
 function portInternals(): any {
-  const MessagePort = (globalThis as any).MessagePort;
-  return MessagePort ? MessagePort[Symbol.for("kiln.messagePort")] : undefined;
+  return enginePrivate.messagePort;
 }
 
 const eventLoop = {

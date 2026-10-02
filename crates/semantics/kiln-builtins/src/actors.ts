@@ -1,20 +1,24 @@
-import { Worker, MessageChannel, MessagePort } from "node:worker_threads";
+import { MessageChannel, MessagePort } from "node:worker_threads";
 import { Actor, prepareActorMessage, consumeActorTickets, type Ticket } from "kiln:actors/core";
 import { actorWorkerEntry } from "kiln:actors/worker";
 
 export { Actor, isolate, prepareTransfer, transfer } from "kiln:actors/core";
 export type { Isolated, TransferTicket } from "kiln:actors/core";
 
-// The evaluator lends these hooks only while the engine-owned module initializes. Capture
-// them just as kiln:shared does; the actor module gives its own unavailable-module diagnostic.
-const G = globalThis as any;
-const share: (value: any) => any = G.__kilnShare;
-const isShared: (value: any) => boolean = G.__kilnSharedIs;
-if (typeof share !== "function" || typeof isShared !== "function") {
-  throw new Error("kiln:actors requires enabled Kiln extensions");
+// The engine lends the realm's engine-private object only while an engine-owned module
+// initializes, so everything this module needs from it is captured now. Without extensions the
+// object carries no `share`: this check is then the one refusal, a TypeError naming kiln:actors,
+// for a static and a dynamic import in either engine alike (kiln:actors/core and
+// kiln:actors/worker, evaluated first, name their owner the same way).
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:actors requires enabled Kiln extensions");
 }
-
-const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
+const share: (value: any) => any = enginePrivate.share;
+const isShared: (value: any) => boolean = enginePrivate.sharedIs;
+const internals: any = enginePrivate.messagePort;
+const senderEndpoint: (worker: any) => number = enginePrivate.senderEndpoint;
+const spawnActorWorker: (entry: string, options: any) => any = enginePrivate.spawnActorWorker;
 const REGISTER = 22;
 const LOOKUP = 23;
 const CLOSE = 24;
@@ -319,10 +323,10 @@ export async function spawnActor<T extends Actor>(options: {
   const address = share({}) as ActorAddress<T>;
   const ownerKey = share({});
   // The realm loads the class; its constructor's arguments are the mailbox's first call.
-  const worker = new Worker(actorWorkerEntry, {
+  const worker = spawnActorWorker(actorWorkerEntry, {
     workerData: { __kilnActorVersion: 1, module, exportName: options.export, capacity },
   });
-  const endpoint = (worker as any)[Symbol.for("kiln.actor.senderEndpoint")]();
+  const endpoint = senderEndpoint(worker);
   if (!endpoint || !internals.workerOp(REGISTER, address, endpoint, ownerKey)) {
     void worker.terminate();
     throw new Error("actor mailbox registration failed");
