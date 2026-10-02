@@ -1468,11 +1468,41 @@ fn return_outside_a_function_is_refused() {
 }
 
 #[test]
-fn duplicate_parameters_are_refused() {
-    let messages = errors(vec![function("dup", &["a", "a"], Vec::new())]);
+fn duplicate_simple_parameters_are_allowed_only_in_sloppy_functions() {
+    let sloppy = function(
+        "dup",
+        &["a", "a"],
+        vec![statement(StatementKind::Return(Some(identifier("a"))))],
+    );
+    let program = compile(&module(vec![sloppy.clone()]))
+        .expect("simple duplicate parameters are legal in sloppy functions");
+    assert_eq!(program.functions.len(), 1);
+    assert_eq!(program.functions[0].parameter_count, 2);
+
+    let mut strict = sloppy.clone();
+    let StatementKind::Function(function) = &mut strict.kind else {
+        unreachable!();
+    };
+    function.strict = true;
+    let messages = errors(vec![strict]);
     assert!(
         messages.iter().any(|m| m.contains("duplicate parameter")),
-        "got: {messages:?}"
+        "strict functions must still reject duplicate parameters: {messages:?}"
+    );
+
+    let StatementKind::Function(base) = &sloppy.kind else {
+        unreachable!();
+    };
+    let mut defaulted_function = (**base).clone();
+    defaulted_function.parameters[1].pattern = Pattern::WithDefault {
+        inner: Box::new(Pattern::Identifier("a".to_owned())),
+        value: number(0.0),
+    };
+    let defaulted = statement(StatementKind::Function(Box::new(defaulted_function)));
+    let messages = errors(vec![defaulted]);
+    assert!(
+        messages.iter().any(|m| m.contains("duplicate parameter")),
+        "non-simple functions must still reject duplicate parameters: {messages:?}"
     );
 }
 

@@ -2377,3 +2377,14 @@ true false true
 true true 4 7
 true
 """
+
+[[test]]
+id = "regress/r56-sloppy-function-duplicate-parameters"
+group = "regress"
+source = "regress/r56-sloppy-function-duplicate-parameters.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Function constructor bodies inherit strictness from their own directive, not the caller; duplicate names remain legal for simple sloppy parameter lists and bind the final position."
+expected_stdout = """
+2 2 4
+"""

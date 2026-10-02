@@ -946,6 +946,18 @@ impl super::Compiler {
         // A direct `eval` anywhere in this function -- including inside one nested in it -- means
         // the eval'd source may name any binding here, so every one of them has to be a cell.
         let cell_everything = function_contains_direct_eval(function);
+        let inherited_strict = self.strict || function.strict;
+
+        // Duplicate formal names are permitted only for a non-strict function with a simple
+        // parameter list. In particular, Function constructor source is parsed as a Script even
+        // when its caller is strict; the body decides whether its own formal list is strict.
+        let duplicate_parameters_allowed = !function.arrow
+            && !inherited_strict
+            && function.rest.is_none()
+            && function
+                .parameters
+                .iter()
+                .all(|parameter| matches!(parameter.pattern, Pattern::Identifier(_)));
 
         // Every parameter owns a positional slot, whether or not it binds a name there. A plain
         // identifier binds the slot itself, which keeps the common call free of any prologue; a
@@ -980,11 +992,13 @@ impl super::Compiler {
                 continue;
             };
             if parameters.contains_key(name) {
-                self.error(
-                    Some(parameter.span),
-                    format!("duplicate parameter `{name}`"),
-                );
-                return None;
+                if !duplicate_parameters_allowed {
+                    self.error(
+                        Some(parameter.span),
+                        format!("duplicate parameter `{name}`"),
+                    );
+                    return None;
+                }
             }
             let celled = captured.contains(name) || cell_everything;
             if celled {
@@ -1051,7 +1065,6 @@ impl super::Compiler {
         // strict whether or not it says so, and a `"use strict"` of its own turns it on for
         // this body and everything nested in it. Restored on the way out, because a sibling
         // written after a strict function is not strict because of it.
-        let inherited_strict = self.strict || function.strict;
         let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
         // `IsSimpleParameterList`, and the strictness beside it: together they are the
         // specification's own test for which of the two `arguments` objects this function gets.
