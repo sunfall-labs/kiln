@@ -1050,21 +1050,15 @@
                 }
                 return kiln_c99_new_iterator(result, snapshot, 0);
             }
-            /* A string's `@@iterator` is this same method, and it walks *characters*: an astral
-             * pair is one step, which is the difference between iterating a string and indexing
-             * it. Without this a string receiver fell to the refusal below, so
-             * `for (const c of text)` refused where `[...text]` worked -- the two differ only in
-             * that spread reaches `kiln_c99_iterate` directly while `for...of` is compiled as
-             * `text[@@iterator]()` and so arrives here. A bundled `marked` refuses on exactly
-             * that, tokenising a list item. The walk is `kiln_c99_iterate`'s rather than a second
-             * one written out here, so the two spellings of one loop cannot come to disagree
-             * about where a surrogate pair ends. */
+            /* A saved canonical String iterator can be called after the prototype has been
+             * overridden. Walk code points directly here: routing back through `iterate` would
+             * re-read the now-custom @@iterator and recurse through the override. */
             if (receiver.tag == KILN_VALUE_STRING) {
                 status = kiln_c99_new_array(&snapshot);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                status = kiln_c99_iterate(host, snapshot, receiver, depth, thrown);
+                status = kiln_c99_string_iterator_append(snapshot, receiver);
                 if (status != KILN_C99_OK) {
                     return status;
                 }

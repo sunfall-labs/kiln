@@ -2,6 +2,29 @@
 /* Append everything source yields to target, which is what array spread, for...of and
  * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
  * the observable @@iterator lookup proves that the canonical method is still selected. */
+static int kiln_c99_string_iterator_append(kiln_value target, kiln_value source) {
+    uint16_t *units = NULL;
+    size_t count = 0;
+    size_t index;
+    int status = kiln_c99_to_units(source, &units, &count);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < count; ++index) {
+        size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                        index + 1 < count && units[index + 1] >= 0xDC00 &&
+                        units[index + 1] <= 0xDFFF)
+                           ? 2
+                           : 1;
+        status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
+        if (status != KILN_C99_OK) {
+            free(units);
+            return status;
+        }
+        index += width - 1;
+    }
+    free(units);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
@@ -93,31 +116,14 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
-        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_STRING) {
-        /* A string iterates as its *characters*, not its code units: an astral character is one
-         * step, which is the difference between iterating a string and indexing it. */
-        uint16_t *units = NULL;
-        size_t count = 0;
-        status = kiln_c99_to_units(source, &units, &count);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        for (index = 0; index < count; ++index) {
-            size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
-                            index + 1 < count && units[index + 1] >= 0xDC00 &&
-                            units[index + 1] <= 0xDFFF)
-                               ? 2
-                               : 1;
-            status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
-            if (status != KILN_C99_OK) {
-                free(units);
-                return status;
-            }
-            index += width - 1;
-        }
-        free(units);
-        return KILN_C99_OK;
+    if (method.tag == KILN_VALUE_METHOD && method.bits == KILN_C99_METHOD_ARRAY_VALUES &&
+        source.tag == KILN_VALUE_STRING &&
+        kiln_c99_builtin_member_unmodified_n(KILN_C99_BUILTIN_STRING_PROTOTYPE,
+                                              "@@iterator", sizeof("@@iterator") - 1)) {
+        /* The consumer already performed the observable iterator lookup. The private string
+         * walk must not re-probe @@iterator, or a saved intrinsic delegated by a custom override
+         * recurses through that override. */
+        return kiln_c99_string_iterator_append(target, source);
     }
     /* A generator's intrinsic @@iterator just returns itself; replaced methods still use the
      * ordinary call path. */

@@ -683,6 +683,7 @@ static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t 
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown);
+static int kiln_c99_string_iterator_append(kiln_value target, kiln_value source);
 static kiln_value kiln_c99_hole(void);
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, int *answer, int depth, kiln_value *thrown);
