@@ -77,8 +77,8 @@ archive_url=$(asset_url "$archive") || die "release $tag has no archive for $tar
 sums_url=$(asset_url SHA256SUMS) || die "release $tag has no SHA256SUMS"
 
 say "downloading kiln $version for $target"
-fetch "$archive_url" "$work/$archive" application/octet-stream
-fetch "$sums_url" "$work/SHA256SUMS" application/octet-stream
+fetch "$archive_url" "$work/$archive" application/octet-stream || die "could not download $archive from $archive_url"
+fetch "$sums_url" "$work/SHA256SUMS" application/octet-stream || die "could not download SHA256SUMS from $sums_url"
 expected=$(grep " $archive\$" "$work/SHA256SUMS" | cut -d' ' -f1)
 [ -n "$expected" ] || die "SHA256SUMS does not list $archive"
 actual=$(sha "$work/$archive")
