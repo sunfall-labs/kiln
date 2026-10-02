@@ -1202,6 +1202,99 @@ pub struct WorkerContext {
     /// The parent's end of the worker's channel, where the runtime's own messages go.
     parent: u64,
     terminate: Arc<AtomicBool>,
+    /// Whether this worker may still produce a wake for another realm on its own.
+    liveness: Arc<Liveness>,
+}
+
+/// Whether a realm can still make progress, or cause a wake in another realm, without being
+/// woken itself (ADR 0012, ADR 0070).
+///
+/// A virtual-clock realm parked on a timer may jump its clock to the deadline only when no other
+/// realm in the process is `active`: a worker thread that has not yet run its module body, or is
+/// mid-turn, is wall-clock time away from posting the message or closing the port the parked
+/// realm would otherwise have heard first. An `idle` realm is parked with nothing runnable (it
+/// waits on a host wake, a timer, or a synchronous wait) and cannot do that until something
+/// wakes it. Two realms that are both idle do not wait on each other, so timers on both sides
+/// still run.
+#[derive(Debug)]
+pub struct Liveness {
+    active: AtomicBool,
+}
+
+static ACTIVE_REALMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Liveness {
+    /// A realm that has work to do: it counts as active until it parks.
+    pub fn new_active() -> Arc<Self> {
+        ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
+        Arc::new(Self {
+            active: AtomicBool::new(true),
+        })
+    }
+
+    pub fn set_active(&self) {
+        if !self.active.swap(true, Ordering::AcqRel) {
+            ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn set_idle(&self) {
+        if self.active.swap(false, Ordering::AcqRel) {
+            ACTIVE_REALMS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether any realm other than this one is active.
+    pub fn others_active(&self) -> bool {
+        let mine = usize::from(self.active.load(Ordering::Acquire));
+        ACTIVE_REALMS.load(Ordering::Acquire) > mine
+    }
+}
+
+impl Drop for Liveness {
+    fn drop(&mut self) {
+        self.set_idle();
+    }
+}
+
+/// Marks the worker on this thread idle for the life of the guard: a synchronous wait cannot
+/// post anything, and another realm's timer may be what ends it.
+pub struct BlockedGuard(Option<Arc<Liveness>>);
+
+impl BlockedGuard {
+    pub fn enter() -> Self {
+        let liveness = CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|context| Arc::clone(&context.liveness))
+        });
+        let was_active = liveness
+            .as_ref()
+            .is_some_and(|l| l.active.load(Ordering::Acquire));
+        if was_active && let Some(l) = &liveness {
+            l.set_idle();
+        }
+        Self(liveness.filter(|_| was_active))
+    }
+}
+
+impl Drop for BlockedGuard {
+    fn drop(&mut self) {
+        if let Some(l) = &self.0 {
+            l.set_active();
+        }
+    }
+}
+
+/// The liveness of the worker running on this thread, if any.
+pub fn current_liveness() -> Option<Arc<Liveness>> {
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|context| Arc::clone(&context.liveness))
+    })
 }
 
 impl WorkerContext {
@@ -1527,6 +1620,7 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
         spec,
         parent,
         terminate: Arc::clone(&terminate),
+        liveness: Liveness::new_active(),
     });
     workers().insert(
         key,
@@ -1790,6 +1884,9 @@ fn complete_worker(context: &WorkerContext, code: i32) {
     };
     finish_children();
     RUNNING.fetch_sub(1, Ordering::AcqRel);
+    // The exit messages below are the last thing this worker does; once they are queued the
+    // parent's wake is pending and the worker can no longer cause one.
+    let exit_liveness = Arc::clone(&context.liveness);
     enqueue(
         context.parent,
         Message::new(kind::EXIT, value_tokens(Token::Number(f64::from(code)))),
@@ -1805,6 +1902,7 @@ fn complete_worker(context: &WorkerContext, code: i32) {
         }
     }
     close(context.spec.control);
+    exit_liveness.set_idle();
 }
 
 /// Ask worker `key` to stop: raise its flag, wake it where it may be waiting, and tell its
@@ -1937,6 +2035,7 @@ pub fn wait(
     if !still_expected() {
         return WaitOutcome::NotEqual;
     }
+    let _blocked = BlockedGuard::enter();
     let waiter = Arc::new(Waiter {
         thread: current_key(),
         woken: Cell::new(false),
@@ -2406,6 +2505,7 @@ mod tests {
             },
             parent: 0,
             terminate: Arc::clone(&terminate),
+            liveness: Liveness::new_active(),
         });
         let worker = Rc::new(RefCell::new(RealmScopeState::for_worker(
             Arc::clone(&context),

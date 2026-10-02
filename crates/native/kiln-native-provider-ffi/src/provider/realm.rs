@@ -845,6 +845,11 @@ struct NativeRealm {
     affinity: Cell<u32>,
     /// Program identity, children and exit state follow this realm across scheduler lanes.
     worker_scope: Rc<RefCell<kiln_runtime::workers::RealmScopeState>>,
+    /// Whether this realm can still cause a wake in another without being woken itself. A
+    /// worker shares its liveness with the worker protocol, which counts it from the moment
+    /// it is spawned; any other realm joins when its first turn runs. Virtual time never
+    /// jumps while another realm is active (ADR 0012, ADR 0070).
+    liveness: std::cell::OnceCell<Arc<kiln_runtime::workers::Liveness>>,
     /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
     /// released at teardown before the heap their callbacks name is torn down.
     #[cfg(feature = "ffi")]
@@ -1338,6 +1343,7 @@ impl NativeRealm {
             dedicated_gate: RefCell::new(None),
             dedicated_registration: RefCell::new(None),
             affinity: Cell::new(0),
+            liveness: std::cell::OnceCell::new(),
             worker_scope: Rc::new(RefCell::new(
                 kiln_runtime::workers::RealmScopeState::capture_current(),
             )),
@@ -1873,6 +1879,7 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
     // held across an await here.
     realm.drive_context.set((host, thrown));
     let status = realm.runtime.executor().block_on(drive_async(realm));
+    realm.liveness().set_idle();
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1890,6 +1897,9 @@ fn drive_scheduled(
 ) -> ScheduledStep {
     realm.drive_context.set((host, thrown));
     let step = drive_scheduled_inner(realm, waker);
+    if matches!(step, ScheduledStep::Done(_)) {
+        realm.liveness().set_idle();
+    }
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1912,6 +1922,7 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
         if wait.wake.get().is_none()
             && !wait.advanced
             && wait.timer_armed.get()
+            && !realm.virtual_clock_held()
             && let Some(delay) = wait.virtual_delay
         {
             // The waiter has polled its timer after the preceding yield. Advancing earlier
@@ -2043,6 +2054,13 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                         })
                         .await
                     }
+                    None if matches!(realm.clock.get(), NativeClock::Virtual) => {
+                        let liveness = Arc::clone(realm.liveness());
+                        kiln_runtime::wait_for_turn_quiescent(signal, delay, move || {
+                            liveness.others_active()
+                        })
+                        .await
+                    }
                     None => kiln_runtime::wait_for_turn(signal, delay).await,
                 };
                 drop(parked);
@@ -2073,6 +2091,20 @@ enum DriveStep {
     Done(i32),
 }
 
+impl NativeRealm {
+    fn liveness(&self) -> &Arc<kiln_runtime::workers::Liveness> {
+        self.liveness.get_or_init(|| {
+            kiln_runtime::workers::current_liveness()
+                .unwrap_or_else(kiln_runtime::workers::Liveness::new_active)
+        })
+    }
+
+    /// Whether a virtual clock must hold still because another realm has runnable work.
+    fn virtual_clock_held(&self) -> bool {
+        matches!(self.clock.get(), NativeClock::Virtual) && self.liveness().others_active()
+    }
+}
+
 fn run_one_timer(realm: &NativeRealm) -> i32 {
     let timer = take_next_timer(realm);
     if let Some(WorkItem::Timer { work, .. }) = timer {
@@ -2090,6 +2122,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     if realm.http_callback_failure.get() != 0 {
         return DriveStep::Done(realm.http_callback_failure.get());
     }
+    realm.liveness().set_active();
     // A turn boundary: no generated frame is on this thread's stack.
     reclaim::quiescent();
     if let Some(gate) = realm.dedicated_gate.borrow().clone() {
@@ -2199,10 +2232,23 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             let Some(signal) = signal else {
                 return DriveStep::Done(RUNTIME_ERROR);
             };
+            realm.liveness().set_idle();
             return DriveStep::Parked {
                 signal,
                 delay: Some(deadline.saturating_sub(now)),
                 yield_first: false,
+            };
+        }
+        // Another realm with runnable work may post before this one's timer: wait, with the
+        // clock held, until it parks or wakes this realm (`wait_for_turn_quiescent`).
+        if realm.virtual_clock_held()
+            && let Some(signal) = signal
+        {
+            realm.liveness().set_idle();
+            return DriveStep::Parked {
+                signal,
+                delay: Some(deadline.saturating_sub(now)),
+                yield_first: true,
             };
         }
         let status = run_one_timer(realm);
@@ -2215,6 +2261,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     let Some(signal) = signal else {
         return DriveStep::Done(RUNTIME_ERROR);
     };
+    realm.liveness().set_idle();
     // A wall-clock timer wake may be an introspection poll rather than the deadline. A
     // virtual timer wake consumes one timer after the executor returns from its wait.
     DriveStep::Parked {

@@ -1055,6 +1055,43 @@ pub async fn wait_for_turn(signal: Arc<tokio::sync::Notify>, delay: Option<Durat
     }
 }
 
+/// [`wait_for_turn`] for a virtual-clock realm that may be about to jump its clock to `delay`.
+///
+/// While `others_active` holds -- another realm in the process has runnable work and so may post
+/// a message, close a port or exit within wall-clock moments -- the clock stays where it is and
+/// the wait is a real, short, repeated one that the completion signal ends at once. Only when
+/// every other realm is idle does the sleep run against the paused clock and jump to the
+/// deadline, which is what keeps a lone program's timers free (ADR 0012) without letting a
+/// timer outrun a worker that has not yet been scheduled (ADR 0070).
+pub async fn wait_for_turn_quiescent(
+    signal: Arc<tokio::sync::Notify>,
+    delay: Option<Duration>,
+    others_active: impl Fn() -> bool,
+) -> DriveWake {
+    let Some(delay) = delay else {
+        return wait_for_turn(signal, None).await;
+    };
+    // Created first so a wake sent between the checks below is kept as a permit, not lost.
+    let mut notified = std::pin::pin!(signal.notified());
+    let noop = std::task::Waker::noop();
+    while others_active() {
+        yield_to_tasks().await;
+        if notified
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(noop))
+            .is_ready()
+        {
+            return DriveWake::Completion;
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    tokio::select! {
+        biased;
+        _ = notified => DriveWake::Completion,
+        _ = tokio::time::sleep(delay) => DriveWake::Timer,
+    }
+}
+
 /// A foreign event loop the main-thread realm parks inside (ADR 0074): the GUI's run loop.
 ///
 /// `wait` blocks in that loop for up to `timeout_ms` (negative: until something happens) and
