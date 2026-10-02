@@ -4868,7 +4868,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
             kiln_object *obj = kiln_c99_object_of(built);\n\
             obj->shape = (kiln_shape *)shape;\n\
             for (size_t i = 0; i < count; ++i) {\n\
-                obj->inline_slots[i] = pairs[i * 2 + 1];\n\
+                kiln_c99_heap_store_val(obj, &obj->inline_slots[i], pairs[i * 2 + 1]);\n\
             }\n\
             *out = kiln_val_from_boundary(built);\n\
             return KILN_C99_OK;\n\
