@@ -1296,7 +1296,7 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         // program feature-detects it apart from `transfer`.
         N::Uint8Text(ByteText::ToBase64 | ByteText::ToHex)
         | N::ArrayBufferTransferToImmutable => 0.0,
-        N::Uint8Text(ByteText::SetFromBase64) => 2.0,
+        N::Uint8Text(ByteText::SetFromBase64) => 1.0,
 
         // Everything left takes exactly one required argument.
         _ => 1.0,

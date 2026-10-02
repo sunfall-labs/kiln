@@ -47,6 +47,8 @@ delete (globalThis as any).__kilnDataViewHasInternalSlot;
 
   const getUint16 = DataView.prototype.getUint16;
   const setUint16 = DataView.prototype.setUint16;
+  const viewBufferGetter = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer")!.get!;
+  const immutableBufferGetter = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "immutable")?.get;
   const floatScratch = new Float16(1);
   const bitsScratch = new Uint16(floatScratch.buffer);
   const maxSafeInteger = 9007199254740991;
@@ -76,6 +78,12 @@ delete (globalThis as any).__kilnDataViewHasInternalSlot;
     },
     setFloat16(this: any, byteOffset: any, value: any): void {
       requireDataViewReceiver(this);
+      // SetViewValue checks mutability before either argument is coerced. Captured getters read
+      // internal slots even when user code replaces a view's public buffer/immutable properties.
+      if (immutableBufferGetter !== undefined &&
+          immutableBufferGetter.call(viewBufferGetter.call(this))) {
+        throw new TypeError("ArrayBuffer is immutable");
+      }
       const offset = toIndex(byteOffset);
       floatScratch[0] = +value;
       const bits = bitsScratch[0];
