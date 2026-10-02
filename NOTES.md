@@ -5979,3 +5979,48 @@ kiln prints nothing. The suite's first runner gated readiness on that line with 
 unbounded `readline()` and hung forever on the kiln row; readiness is now the open port
 (with a deadline), the missing line is a reported note, and every driven body is still
 verified. The dropped callback itself is engine work, not part of this change.
+
+## The GUI bridge is linked into the provider; cold native builds split by bytes (2026-10-02)
+
+Branch `gui/static-link`. Two things, one measured consequence each.
+
+**The compiled GUI binary no longer needs `libkiln_host_gui.dylib`.** `kiln:gui` used to
+`dlopen` it from `target/release/` relative to the *current directory*, so a GUI program ran only
+inside the checkout that built the cdylib and died three frames from the cause anywhere else. The
+bridge is now a feature of the one provider archive (`gui = ["ffi", "dep:kiln-host-gui"]`),
+carried by the `gui` and new `full-gui` variants, and `kiln_ffi_open("kiln:host-gui")` resolves
+from a table the archive carries (`kiln_host_gui::ffi::exports`). `full` stops short of `gui` so
+a headless `hello.ts` still links only `libSystem`; `examples/gui-mac-demo.ts` built natively
+runs from an unrelated directory and links Cocoa, AppKit, Foundation, CoreFoundation,
+CoreGraphics, Carbon, libobjc and libiconv directly (`otool -L`). Schema 5 manifests carry
+`link_arguments`; the contract owns the list and the packager proves it. Details in AGENTS.md
+("The host GUI bridge is linked in") and the ADR 0074 amendment.
+
+Two dead ends worth not repeating. A Rust staticlib does **not** export an upstream crate's
+`#[no_mangle]` functions, and whole-archive LTO then drops the crate entirely: the first archive
+built with the `gui` feature had zero `kiln_gui_*` symbols and `native-static-libs` named no
+framework, because nothing referenced them. The export table is what references them. And
+rustc's `--print native-static-libs` note is printed only by a compiler that actually runs; a
+rebuild that mbx or cargo serves fresh prints nothing, so it cannot be the source of the link
+line. It is a cross-check in the packager instead.
+
+Three pre-existing failures fixed on the way, all omissions from the `date`/`key`/`casemap`
+commits: the `date` group had no owner row, the registry count test said 176 for 179 exports,
+and `provider-sources.txt` was missing eleven files the packager's dep-info check names.
+
+**Cold native builds: 12.4 s -> 4.0-4.5 s for hello, 14.8-17 s -> 7.9-9.6 s for a GUI
+program** (compile phase 11.5 s -> 3.0-3.5 s and 12.8-15 s -> 6.0-6.4 s), on an 18-core box, idle. The generic-only runtime bootstrap was split by *function count* (1000 per
+unit), which for a hello world is one 6.9 MB unit (8.9 MB + 0.9 MB for a GUI program) that clang
+takes 11.8 s over at -O0 while every other unit finishes in under 2 s. The whole cold compile
+phase *was* that unit. Its own text is 75 KB; the rest is functions, so it now splits by bytes
+(about 1 MiB per unit, `GENERIC_BUILTIN_UNIT_BYTES` in `kiln-native/src/graph.rs`) and compiles
+as eight units side by side. Builtin modules get the same budget, for the same reason
+(`kiln:gui`'s module is 1.9 MB of C). Warm builds are unchanged: every unit is still cached by
+content, and a second GUI program after the first costs about 1.5 s. Measure cold builds with an
+empty project cache (`rm -rf .kiln` in a scratch project), never in a checkout that has built
+anything, and never while a provider LTO build is running beside it -- the same build read
+6.2 s of emission under load and 1.1 s idle.
+
+Not done: `examples/gui-mac-studio.tsx` fails resolution on both engines with "could not find
+package `kiln`" (the `@jsxImportSource kiln` pragma); it did before this branch too, and it is a
+resolver question, not a linking one.

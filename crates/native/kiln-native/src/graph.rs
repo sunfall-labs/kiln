@@ -845,6 +845,11 @@ pub(super) fn emit_native_graph_module_with_policy(
     emit_native_graph_module_with_policy_and_instantiation(node, logical_path, policy, false)
 }
 
+/// About this many bytes of C per unit of engine code emitted generic-only: the runtime bootstrap
+/// and the builtin modules. Small enough that a cold build's units fill the cores; large enough
+/// that the per-unit header does not dominate, and that a module this size stays one unit.
+const GENERIC_BUILTIN_UNIT_BYTES: usize = 1 << 20;
+
 pub(super) fn emit_native_graph_module_with_policy_and_instantiation(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
@@ -852,11 +857,20 @@ pub(super) fn emit_native_graph_module_with_policy_and_instantiation(
     instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
-        ModuleSource::NodeBuiltin(_builtin) => Ok(emit_module_with_logical_path_and_policy(
-            &node.program,
-            logical_path,
-            policy.clone(),
-        )?),
+        ModuleSource::NodeBuiltin(_builtin) => {
+            // Engine code, like the bootstrap: split by bytes so a large builtin (`kiln:gui` is
+            // 1.9 MB of C) compiles as parallel units instead of being a cold build's critical
+            // path. A builtin smaller than one unit renders as a single unit as before.
+            let mut builtin_policy = policy.clone();
+            if builtin_policy.unit_chunk_bytes.is_none() {
+                builtin_policy.unit_chunk_bytes = Some(GENERIC_BUILTIN_UNIT_BYTES);
+            }
+            Ok(emit_module_with_logical_path_and_policy(
+                &node.program,
+                logical_path,
+                builtin_policy,
+            )?)
+        }
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
@@ -1304,9 +1318,17 @@ pub(super) fn native_builtin_bootstrap_module(
     // instead -- the `%TypedArray%` and `Date` methods are hot loops, 4-12x slower generic at
     // -O0 -- with its C split into units of about this many bytes, so the one-time -O2 compile
     // runs as parallel units rather than one minute-long one.
+    //
+    // The generic-only default is split by bytes too. Split by function count it came out as one
+    // unit of 6.9 MB (a hello world; 8.9 MB plus 0.9 MB for a GUI program) that took clang 11.8 s
+    // at -O0 on its own while every other unit finished in under 2 s: the cold compile of *every*
+    // program was that one unit, 11.5-16.8 s of a 12-17 s build. Its own text -- body, key table,
+    // constants -- is only 75 KB; the rest is 774 or more functions, so units of about a megabyte
+    // compile side by side on the ordinary pool instead.
     let mut bootstrap_policy = policy.clone();
     bootstrap_policy.generic_only = specialized_unit_bytes.is_none();
-    bootstrap_policy.unit_chunk_bytes = specialized_unit_bytes;
+    bootstrap_policy.unit_chunk_bytes =
+        Some(specialized_unit_bytes.unwrap_or(GENERIC_BUILTIN_UNIT_BYTES));
     if !bootstrap_policy.decoupled_prelude {
         let module =
             emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
