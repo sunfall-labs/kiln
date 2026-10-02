@@ -11,6 +11,8 @@ This is an **informational benchmark, not a gate**. `run.sh` exits 0 even when
 packages fail, and nothing here is wired into `mise run gate` or CI. The
 committed baselines in `results/` are the record to compare against, not a
 threshold to enforce.
+For acceptance, invoke `runner.py` with `--require-pass`; it retains the complete
+selected inventory before exiting nonzero on any package non-pass.
 
 ## Layout
 
@@ -58,6 +60,21 @@ instead of a small tmpfs `/tmp`. This short path also keeps daemon sockets
 below Unix path limits in deeply nested worktrees; override with `KILN_NPM_TMPDIR`.
 
 `mise run npm-compat` does the same from the repo root.
+
+For explicit profile acceptance, use the Python runner directly with a frozen CLI:
+
+```sh
+env -u NODE_ENV python3 conformance/npm-compat/runner.py \
+  --kiln /absolute/path/to/kiln --raw /absolute/path/to/fresh-results \
+  --profile native-dev --require-pass
+```
+
+Omit package filters for full coverage, and require 361 selected, completed and
+discovered cases with zero deferred in `results.json`. `native-release` aligns
+Node, compilation and binary execution with `NODE_ENV=production`. The original
+`warning` smoke assumes development logging and fails its Node oracle in production;
+it remains visible as `node-baseline-failed` and makes `--require-pass` fail. A
+Release inventory with that result is not complete passing acceptance.
 
 ## Baseline (2026-09-30)
 

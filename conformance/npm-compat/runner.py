@@ -64,6 +64,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=600)
     parser.add_argument('--profile', choices=('native-dev', 'native-release'), default='native-dev',
                         help='native build profile; release uses NODE_ENV=production for every phase')
+    parser.add_argument('--require-pass', action='store_true',
+                        help='exit nonzero if any selected package does not pass; retain all evidence')
     parser.add_argument('packages', nargs='*')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -106,6 +108,7 @@ def main():
                 'host': 'node',
                 'execution_engine': 'native',
                 'native_profile': args.profile,
+                'require_pass': args.require_pass,
                 'node_env': environment.get('NODE_ENV'),
                 'environment_policy': 'release production mode; otherwise inherited environment',
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
@@ -181,11 +184,13 @@ def main():
     (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(f'coverage: selected={len(selected)}, deferred={len(rows)-len(selected)}, discovered={len(rows)}')
     print(f'{counts.get("pass", 0)}/{len(selected)} pass; evidence: {args.raw}')
-    # Package failures remain informational; malformed inventories fail before execution.
+    # Inventory runs remain informational by default. Acceptance runs still collect every
+    # selected package, then fail on any non-pass, including an invalid Node oracle.
+    return int(args.require_pass and counts.get('pass', 0) != len(selected))
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except KeyboardInterrupt:
         raise SystemExit(130)
