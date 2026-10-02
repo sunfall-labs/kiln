@@ -552,8 +552,10 @@ static int kiln_dyn_with_has_binding(kiln_host *host, kiln_value object, const c
         return status;
     }
     kiln_value symbol = kiln_c99_undefined();
-    status = kiln_c99_symbol_of_key("@@unscopables", 13, &symbol);
-    if (status != KILN_C99_OK) return status;
+    /* The key lookup reports membership, not a runtime status. A recognized well-known
+     * symbol returns 1; forwarding that boolean would stop every resolved with binding. */
+    if (!kiln_c99_symbol_of_key("@@unscopables", 13, &symbol))
+        return KILN_C99_INVALID_ARGUMENT;
     kiln_value unscopables = kiln_c99_undefined();
     status = kiln_c99_get_computed(host, object, symbol, &unscopables, depth, thrown);
     kiln_c99_gc_keep_alive(kiln_c99_gc_value_pointer(object));
@@ -3790,11 +3792,6 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                             "Expected ']' in assignment reference");
             kiln_dyn_lexer_next(lex);
-            kiln_value property_key;
-            status = kiln_c99_reduce_key(host, target, key, &property_key, depth, thrown);
-            kiln_c99_gc_keep_alive(&target);
-            if (status != KILN_C99_OK) return status;
-            key = property_key;
         } else {
             key = kiln_c99_copy_text(lex->curr.start, lex->curr.len);
             kiln_c99_gc_keep_alive(&target);
@@ -3803,6 +3800,8 @@ static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
         }
         if (lex->curr.kind == KILN_DYN_DOT || lex->curr.kind == KILN_DYN_LBRACKET) {
             kiln_value next;
+            /* Intermediate components are read now, so their keys are coerced by Get. Keep the
+             * final component raw as a Reference key: PutValue must coerce it after the RHS. */
             status = kiln_c99_get_computed(host, target, key, &next, depth, thrown);
             kiln_c99_gc_keep_alive(&target);
             kiln_c99_gc_keep_alive(&key);
@@ -4125,22 +4124,26 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
     if (lex->curr.kind == KILN_DYN_IDENT) {
         const char *name = lex->curr.start;
         size_t name_len = lex->curr.len;
-        size_t saved_pos = lex->pos;
-        kiln_dyn_token saved_tok = lex->curr;
-
-        kiln_dyn_lexer_next(lex);
-        if (lex->curr.kind == KILN_DYN_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_PLUS_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_MINUS_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_STAR_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_SLASH_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_PERCENT_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_LSHIFT_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_RSHIFT_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_URSHIFT_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_BIT_AND_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_BIT_OR_ASSIGN ||
-                   lex->curr.kind == KILN_DYN_BIT_XOR_ASSIGN) {
+        /* Assignment recognition must be observationally inert. In particular, don't parse
+         * `object[key()]` speculatively here: its key expression belongs to the normal expression
+         * path unless the member-reference scanner above proved that an assignment follows. */
+        kiln_dyn_lexer look = *lex;
+        kiln_dyn_lexer_next(&look);
+        kiln_dyn_token_kind next_kind = look.curr.kind;
+        kiln_dyn_token_free(&look.curr);
+        if (next_kind == KILN_DYN_ASSIGN ||
+            next_kind == KILN_DYN_PLUS_ASSIGN ||
+            next_kind == KILN_DYN_MINUS_ASSIGN ||
+            next_kind == KILN_DYN_STAR_ASSIGN ||
+            next_kind == KILN_DYN_SLASH_ASSIGN ||
+            next_kind == KILN_DYN_PERCENT_ASSIGN ||
+            next_kind == KILN_DYN_LSHIFT_ASSIGN ||
+            next_kind == KILN_DYN_RSHIFT_ASSIGN ||
+            next_kind == KILN_DYN_URSHIFT_ASSIGN ||
+            next_kind == KILN_DYN_BIT_AND_ASSIGN ||
+            next_kind == KILN_DYN_BIT_OR_ASSIGN ||
+            next_kind == KILN_DYN_BIT_XOR_ASSIGN) {
+            kiln_dyn_lexer_next(lex);
             kiln_dyn_token_kind assignment = lex->curr.kind;
             kiln_dyn_lexer_next(lex);
             kiln_value current = kiln_c99_undefined();
@@ -4199,70 +4202,7 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
             }
             *out = rhs;
             return KILN_C99_OK;
-        } else if (lex->curr.kind == KILN_DYN_DOT) {
-            kiln_dyn_lexer_next(lex);
-            if (kiln_dyn_is_ident_name(lex->curr.kind)) {
-                const char *prop = lex->curr.start;
-                size_t prop_len = lex->curr.len;
-                kiln_dyn_lexer_next(lex);
-                if (lex->curr.kind == KILN_DYN_ASSIGN) {
-                    kiln_dyn_lexer_next(lex);
-                    kiln_value rhs;
-                    int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    kiln_value target;
-                    int scope_found = 0;
-                    status = kiln_dyn_scope_get(host, scope, name, name_len, depth, &target,
-                                                &scope_found, NULL, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    if (!scope_found) {
-                        kiln_value globals = kiln_c99_undefined();
-                        status = kiln_c99_global_object(&globals);
-                        if (status != KILN_C99_OK) return status;
-                        status = kiln_c99_get(host, globals, name, name_len, &target, depth,
-                                              thrown);
-                        if (status != KILN_C99_OK) return status;
-                    }
-                    status = kiln_c99_put(host, target, prop, prop_len, rhs, 0, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    *out = rhs;
-                    return KILN_C99_OK;
-                }
-            }
-        } else if (lex->curr.kind == KILN_DYN_LBRACKET) {
-            kiln_dyn_lexer_next(lex);
-            kiln_value idx;
-            int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &idx, thrown);
-            if (status != KILN_C99_OK) return status;
-            if (lex->curr.kind == KILN_DYN_RBRACKET) {
-                kiln_dyn_lexer_next(lex);
-                if (lex->curr.kind == KILN_DYN_ASSIGN) {
-                    kiln_dyn_lexer_next(lex);
-                    kiln_value rhs;
-                    status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    kiln_value target;
-                    int scope_found = 0;
-                        status = kiln_dyn_scope_get(host, scope, name, name_len, depth,
-                                                    &target, &scope_found, NULL, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    if (!scope_found) {
-                        kiln_value globals = kiln_c99_undefined();
-                        status = kiln_c99_global_object(&globals);
-                        if (status != KILN_C99_OK) return status;
-                        status = kiln_c99_get(host, globals, name, name_len, &target, depth,
-                                              thrown);
-                        if (status != KILN_C99_OK) return status;
-                    }
-                    status = kiln_c99_set_computed(host, target, idx, rhs, depth, thrown);
-                    if (status != KILN_C99_OK) return status;
-                    *out = rhs;
-                    return KILN_C99_OK;
-                }
-            }
         }
-        lex->pos = saved_pos;
-        lex->curr = saved_tok;
     }
     return kiln_dyn_eval_ternary(host, lex, scope, receiver, args, argc, depth, out, thrown);
 }

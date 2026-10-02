@@ -507,6 +507,7 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                         'W' => return None,
+                        'b' => 0x0008,
                         't' => 0x0009,
                         'n' => 0x000A,
                         'r' => 0x000D,
@@ -539,6 +540,7 @@ impl<'a> Parser<'a> {
                 self.next(); // consume '-'
                 let end_char = match self.next()? {
                     '\\' => match self.next()? {
+                        'b' => 0x0008,
                         't' => 0x0009,
                         'n' => 0x000A,
                         'r' => 0x000D,
@@ -700,20 +702,24 @@ pub fn try_compile_regex(pattern: &str, flags_str: &str) -> Option<CompiledRegex
         return None;
     }
 
-    // Flatten group terms into sequence of terms with GroupStart and GroupEnd
+    // Lower every nesting level while retaining capture start/end ordering. The
+    // emitter and simulator consume flat sequences, including for nested captures.
+    // An explicit worklist avoids adding recursion or repeatedly cloning subtrees.
     for branch in &mut branches {
-        let mut flattened = Vec::new();
-        for term in &branch.terms {
+        let mut pending = std::mem::take(&mut branch.terms)
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        while let Some(term) = pending.pop() {
             match term {
                 RegexTerm::Group { group_index, terms } => {
-                    flattened.push(RegexTerm::GroupStart(*group_index));
-                    flattened.extend(terms.clone());
-                    flattened.push(RegexTerm::GroupEnd(*group_index));
+                    branch.terms.push(RegexTerm::GroupStart(group_index));
+                    pending.push(RegexTerm::GroupEnd(group_index));
+                    pending.extend(terms.into_iter().rev());
                 }
-                other => flattened.push(other.clone()),
+                other => branch.terms.push(other),
             }
         }
-        branch.terms = flattened;
     }
 
     for branch in &branches {
@@ -1331,6 +1337,28 @@ mod tests {
     }
 
     #[test]
+    fn bracket_backspace_matches_provider_for_all_ascii() {
+        for pattern in [
+            r"[\b]",
+            r"[\0-\b]",
+            r"[\b-\t]",
+            r"[^\b]",
+            r#"^[^"\\\0-\b\n-\x1F\x7F]"#,
+        ] {
+            let compiled = try_compile_regex(pattern, "").unwrap();
+            let provider = regress::Regex::new(pattern).unwrap();
+            for code in 0..=127u16 {
+                let input = [code];
+                assert_eq!(
+                    compiled.exec_simulated(&input, 0).is_some(),
+                    provider.find_from_utf16(&input, 0).next().is_some(),
+                    "/{pattern}/ on U+{code:04X}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[allow(clippy::needless_range_loop)]
     fn parity_benchmark_sample() {
         let pattern = r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\]\s+([A-Z]+)\s+([a-zA-Z0-9_\-\.]+):\s+(.*)";
@@ -1363,6 +1391,10 @@ mod tests {
     #[allow(clippy::needless_range_loop)]
     fn parity_various_patterns() {
         let test_cases = vec![
+            ("^((a(b)?))$", "", "a"),
+            ("^((a(b)?))$", "", "ab"),
+            ("^((()))$", "", ""),
+            ("(a(b))(c)", "", "zabc"),
             ("a(b)?c", "", "abc"),
             ("a(b)?c", "", "ac"),
             ("a(b)?c", "", "abbc"),
@@ -1383,6 +1415,13 @@ mod tests {
 
         for (pat, flags, input) in test_cases {
             let compiled = try_compile_regex(pat, flags).unwrap();
+            // Exercise both emission layouts as well as the simulator. Nested
+            // groups used to survive lowering and panic in each emitter layout.
+            for should_chunk in [false, true] {
+                let mut output = String::new();
+                emit_regex_matcher(&mut output, "parity_regex", &compiled, should_chunk);
+                assert!(!output.is_empty());
+            }
             let mut reg_flags = regress::Flags::default();
             if flags.contains('i') {
                 reg_flags.icase = true;

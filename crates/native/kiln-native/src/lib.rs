@@ -433,6 +433,13 @@ fn dce_release_graph(
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
 
+        // Source-level DCE can renumber the compiler-generated locals used to represent
+        // indirect exports. Reconcile those links by public export name, just as the later
+        // import.meta reparse does, rather than relying on a generated local name surviving
+        // the reparse. Otherwise a barrel can retain the export row while losing the import
+        // that supplies its value, which leaves the slot uninitialized in release builds.
+        let _ = restore_reexport_imports(&node.program, &mut program);
+
         let replacement_slots = export_slots_for_names(&program.exports, &demanded_names);
         let replacement_names = program
             .exports
@@ -455,6 +462,55 @@ fn dce_release_graph(
         // reduced graph and its original slot numbering.
         Err(_) => (graph.clone(), demand.clone()),
     }
+}
+
+fn restore_reexport_imports(
+    previous: &kiln_ir::ModuleProgram,
+    reparsed: &mut kiln_ir::ModuleProgram,
+) -> BTreeSet<(usize, usize)> {
+    let mut mapped_imports = BTreeSet::new();
+    for export in &reparsed.exports {
+        let Some(previous_export) = previous
+            .exports
+            .iter()
+            .find(|previous| previous.exported == export.exported)
+        else {
+            continue;
+        };
+        let Some((previous_index, previous_import)) = previous
+            .imports
+            .iter()
+            .enumerate()
+            .find(|(_, import)| import.local_slot == previous_export.local_slot)
+        else {
+            continue;
+        };
+
+        let new_index = if let Some(index) = reparsed
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export.local_slot)
+        {
+            let import = &mut reparsed.imports[index];
+            import.source.clone_from(&previous_import.source);
+            import.imported.clone_from(&previous_import.imported);
+            index
+        } else {
+            reparsed.imports.push(kiln_ir::ImportBinding {
+                source: previous_import.source.clone(),
+                imported: previous_import.imported.clone(),
+                local: format!(
+                    "{}reparsed-reexport-{}*",
+                    kiln_ir::REEXPORT_LOCAL_PREFIX,
+                    reparsed.imports.len()
+                ),
+                local_slot: export.local_slot,
+            });
+            reparsed.imports.len() - 1
+        };
+        mapped_imports.insert((previous_index, new_index));
+    }
+    mapped_imports
 }
 
 /// Re-parse modules with native `import.meta` (Node SEA semantics), preserving their
@@ -531,6 +587,22 @@ fn native_import_meta_reparse(
             imports.push(import);
         }
         program.imports = imports;
+
+        // DCE may lower an imported local export as a fresh local binding, while the previous
+        // graph represented it as an indirect export backed by a synthetic import slot. Preserve
+        // that link relation by public export name; matching only the generated local name is
+        // insufficient because the synthetic `*reexportN*` names are renumbered when exports are
+        // removed. Without this edge, relinking silently turns the export into an uninitialized
+        // local in the barrel and imports resolve to that slot instead of the original provider.
+        let reexport_imports = restore_reexport_imports(&node.program, &mut program);
+        for (previous_index, new_index) in reexport_imports {
+            if demand
+                .live_imports
+                .contains(&(node.path.clone(), previous_index))
+            {
+                remapped_imports.insert((node.path.clone(), new_index));
+            }
+        }
         program.dependencies.clone_from(&node.program.dependencies);
         let demanded_names = demand
             .slots
@@ -601,6 +673,28 @@ fn debug_module_demands(stage: &str, graph: &ModuleGraph, demand: &kiln_module_g
             demand.slots.get(&node.path),
             exports
         );
+        for (index, import) in node.program.imports.iter().enumerate() {
+            let resolved = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .and_then(|dependency| {
+                    graph
+                        .resolved_export(&dependency.target, &import.imported)
+                        .map(|export| format!("{:?}", export))
+                })
+                .unwrap_or_else(|| "<unresolved-or-namespace>".to_owned());
+            eprintln!(
+                "kiln: module-demand-import stage={stage} path={} index={index} local={} local_slot={} source={} imported={} resolved={} live={}",
+                node.path.display(),
+                import.local,
+                import.local_slot,
+                import.source,
+                import.imported,
+                resolved,
+                demand.live_imports.contains(&(node.path.clone(), index)),
+            );
+        }
     }
 }
 

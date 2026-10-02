@@ -1966,6 +1966,21 @@ fn render_functions(
             break;
         }
     }
+    // A typed recursive call normally reaches its typed entry. When that entry can fall back
+    // because one of its guarded built-ins was changed earlier in the call, the fallback calls
+    // the generic body using this closure's upvalue table. That table can be needed by the
+    // generic body even when the typed fast path itself emitted no upvalue read, so carry it in
+    // the typed signature whenever the guarded self-call can take that edge.
+    for index in 0..typed_callees.len() {
+        if needs[index].runtime
+            && typed_callees[index].contains(&index)
+            && !relies[index].is_empty()
+            && !program.functions[index].upvalues.is_empty()
+        {
+            needs[index].upvalues = true;
+        }
+    }
+    direct.set_typed_needs(&needs);
     let guards: Vec<String> = relies
         .iter()
         .map(|terms| terms.iter().cloned().collect::<Vec<_>>().join(" && "))
@@ -4413,6 +4428,22 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         size_t source = order[index];
         kiln_property *slot;
         kiln_value value = values[source];
+        const kiln_string *key = kiln_c99_intern(names[source], name_lengths[source]);
+        size_t existing;
+        if (key == NULL) {{
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto namespace_failure;
+        }}
+        /* An instantiated namespace is first created empty, then filled with its export cells.
+         * After evaluation the launcher publishes the same export names again. Treat that as a
+         * value refresh, not a second property insertion: namespace [[OwnPropertyKeys]] is
+         * unique, and existing export descriptors remain writable/non-configurable. */
+        for (existing = 0; existing < data->count; ++existing) {{
+            if (data->properties[existing].key == key) {{
+                kiln_c99_heap_store_value(data, &data->properties[existing].value, value);
+                goto namespace_entry_done;
+            }}
+        }}
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
         if (status != KILN_C99_OK) {{
@@ -4432,11 +4463,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot = &data->properties[insert_at];
         /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
          * the launcher's names are its own, and this seam promises nothing about their life. */
-        slot->key = kiln_c99_intern(names[source], name_lengths[source]);
-        if (slot->key == NULL) {{
-            status = KILN_C99_OUT_OF_MEMORY;
-            goto namespace_failure;
-        }}
+        slot->key = key;
         data->count += 1;
         kiln_c99_heap_store_value(data, &slot->value, value);
         slot->symbol_hidden = 0;
@@ -4445,6 +4472,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot->configurable = 0;
         slot->accessor = 0;
         slot->refused = 0;
+namespace_entry_done:;
     }}
     if (!extending) {{
         kiln_property *tag;
@@ -4455,6 +4483,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             tag->writable = 0;
             kiln_c99_object_of(object)->read_only_seen = 1;
             tag->enumerable = 0;
+            tag->symbol_hidden = 1;
             tag->configurable = 0;
             tag->accessor = 0;
         }}
@@ -4731,7 +4760,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);\n\
         if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;\n\
-            if (KILN_UNLIKELY(!plain->arrow && !plain->strict)) (void)kiln_c99_global_object_val(&recv);\n\
+            kiln_c99_normalize_closure_receiver(&recv, plain);\n\
             kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
             kiln_val res = KILN_VAL_UNDEFINED;\n\
             kiln_js_frame call_frame;\n\
@@ -4788,9 +4817,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn);\n\
                 if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
                     kiln_val vreceiver = plain->arrow ? plain->captured_this : ku_recv;\n\
-                    if (KILN_UNLIKELY(!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL))) {\n\
-                        (void)kiln_c99_global_object_val(&vreceiver);\n\
-                    }\n\
+                    kiln_c99_normalize_closure_receiver(&vreceiver, plain);\n\
                     kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
                     kiln_val res = KILN_VAL_UNDEFINED;\n\
                     kiln_js_frame call_frame;\n\
@@ -4854,7 +4881,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
             kiln_object *obj = kiln_c99_object_of(built);\n\
             obj->shape = (kiln_shape *)shape;\n\
             for (size_t i = 0; i < count; ++i) {\n\
-                obj->inline_slots[i] = pairs[i * 2 + 1];\n\
+                kiln_c99_heap_store_val(obj, &obj->inline_slots[i], pairs[i * 2 + 1]);\n\
             }\n\
             *out = kiln_val_from_boundary(built);\n\
             return KILN_C99_OK;\n\

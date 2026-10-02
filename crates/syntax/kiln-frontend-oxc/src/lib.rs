@@ -466,18 +466,33 @@ fn discover_node_runtime_requests_from_semantic(
             continue;
         };
         for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                continue;
-            };
-            let imported = match &specifier.imported {
-                oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::IdentifierReference(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
-            };
-            if imported == "createRequire"
-                && let Some(symbol) = specifier.local.symbol_id.get()
-            {
-                create_symbols.insert(symbol);
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = match &specifier.imported {
+                        oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
+                        oxc_ast::ast::ModuleExportName::IdentifierReference(name) => {
+                            name.name.as_str()
+                        }
+                        oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
+                    };
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        if imported == "createRequire" {
+                            create_symbols.insert(symbol);
+                        } else if matches!(imported, "Module" | "default") {
+                            module_symbols.insert(symbol, path.to_owned());
+                        }
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
             }
         }
     }
@@ -542,19 +557,39 @@ fn discover_node_runtime_requests_from_semantic(
             }
             _ => None,
         };
+        // A plausible path argument does not prove this is the Node loader factory. In
+        // particular, arbitrary local functions (or shadowed `createRequire` identifiers) must
+        // not manufacture captured graph loader capabilities.
+        base.as_ref()?;
         let argument = call.arguments.first().and_then(Argument::as_expression)?;
-        let is_import_meta_file = |arg: &Expression<'_>| {
-            if let Expression::StaticMemberExpression(member) = arg {
-                (member.property.name == "url" || member.property.name == "filename")
-                    && matches!(member.object, Expression::ImportMeta(_))
-            } else {
-                false
+        fn is_import_meta_member(expression: &Expression<'_>, property: &str) -> bool {
+            matches!(expression, Expression::StaticMemberExpression(member)
+                if member.property.name == property && matches!(member.object, Expression::ImportMeta(_)))
+        }
+        fn is_current_module_url(
+            expression: &Expression<'_>,
+            scoping: &oxc_semantic::Scoping,
+        ) -> bool {
+            if is_import_meta_member(expression, "url") {
+                return true;
             }
-        };
-        if is_import_meta_file(argument)
+            let Expression::NewExpression(new_expression) = expression else {
+                return false;
+            };
+            let Expression::Identifier(callee) = &new_expression.callee else {
+                return false;
+            };
+            callee.name == "URL"
+                && callee.is_global_reference(scoping)
+                && new_expression
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .is_some_and(|argument| is_import_meta_member(argument, "url"))
+        }
+        if is_current_module_url(argument, scoping)
+            || is_import_meta_member(argument, "filename")
             || matches!(argument, Expression::Identifier(identifier) if identifier.name == "__filename" && identifier.is_global_reference(scoping))
-            || matches!(argument, Expression::NewExpression(expr) if matches!(&expr.callee, Expression::Identifier(id) if id.name == "URL")
-                && expr.arguments.first().and_then(Argument::as_expression).is_some_and(is_import_meta_file))
         {
             return base;
         }
@@ -567,6 +602,7 @@ fn discover_node_runtime_requests_from_semantic(
     }
 
     create_symbols.retain(|symbol| !scoping.symbol_is_mutated(*symbol));
+    module_symbols.retain(|symbol, _| !scoping.symbol_is_mutated(*symbol));
     let mut require_symbols = HashMap::new();
     // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
     // pass because semantic node order is an AST walk detail, not a source-order contract.
@@ -5277,6 +5313,87 @@ mod tests {
                 .map(|request| request.specifier)
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
+        );
+    }
+
+    #[test]
+    fn create_require_accepts_url_and_filename_bases_without_shadowed_factories() {
+        let requests = discover_node_runtime_requests(
+            "fixture #.mjs",
+            r#"
+                import { createRequire } from "node:module";
+                const fromUrl = createRequire(new URL(import.meta.url));
+                const fromFilename = createRequire(import.meta.filename);
+                fromUrl("./from-url.cjs");
+                fromFilename("./from-filename.cjs");
+                function shadow(createRequire) {
+                    const fake = createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                const unrelated = value => value;
+                const fakeLoader = unrelated("/virtual/unrelated.cjs");
+                fakeLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./from-filename.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./from-url.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn create_require_tracks_module_namespace_and_default_imports() {
+        let requests = discover_node_runtime_requests(
+            "fixture.mjs",
+            r#"
+                import * as moduleNamespace from "node:module";
+                import Module, { Module as NamedModule } from "node:module";
+                const fromNamespace = moduleNamespace.createRequire(import.meta.url);
+                const fromDefault = Module.createRequire(import.meta.filename);
+                const fromNamed = NamedModule.createRequire(new URL(import.meta.url));
+                fromNamespace("./namespace.cjs");
+                fromDefault("./default.cjs");
+                fromNamed("./named.cjs");
+                function shadow(moduleNamespace) {
+                    const fake = moduleNamespace.createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                let changed = moduleNamespace;
+                changed = {};
+                const notLoader = changed.createRequire("/virtual/changed.cjs");
+                notLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./default.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./named.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./namespace.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
         );
     }
 

@@ -101,6 +101,43 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
             current = kiln_c99_object_prototype_read(current);
         }
     }
+    if (target.tag == KILN_VALUE_FUNCTION &&
+        !(receiver.tag == target.tag && receiver.bits == target.bits) &&
+        name.tag == KILN_VALUE_STRING) {
+        /* A class constructor's [[Prototype]] is another constructor. When an inherited static
+         * accessor is found there, [[Get]] must still call it with the original derived
+         * constructor as receiver. The ordinary function reader starts a fresh read at each
+         * constructor in the chain, which loses that receiver (for example, an inherited
+         * `static get constraints() { return this.min; }`). Walk only to find accessors here;
+         * data reads and missing names continue through the normal authoritative reader below. */
+        kiln_value current = target;
+        size_t steps;
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_value store;
+            kiln_value parent;
+            kiln_property property;
+            if (current.tag != KILN_VALUE_FUNCTION ||
+                kiln_c99_callable_store(current, &store, 0) != KILN_C99_OK ||
+                store.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            if (kiln_c99_property_read_own_value(store, (const kiln_string *)name.ptr,
+                                                 NULL, &property)) {
+                if (property.accessor && property.getter.tag != KILN_VALUE_UNDEFINED) {
+                    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0,
+                                         depth, thrown);
+                }
+                if (property.accessor) {
+                    KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                    "definition", out);
+                }
+                break;
+            }
+            parent = kiln_c99_object_prototype_read(store);
+            if (parent.tag != KILN_VALUE_FUNCTION) break;
+            current = parent;
+        }
+    }
     /* The keyed fast path is for ordinary objects: elemented targets
      * (arrays above all) read through `get_computed`, which is also what
      * this function did for every target before the headed-key migration

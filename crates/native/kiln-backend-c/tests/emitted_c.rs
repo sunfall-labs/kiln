@@ -681,8 +681,15 @@ fn every_global_reports_the_name_it_is_published_under() {
         }
     }
     for (published, constant) in &functions {
+        // The TypeScript JSON bootstrap captures these existing native methods, then deletes
+        // their private global aliases. The function retains its canonical JSON method name.
+        let expected = match (published.as_str(), constant.as_str()) {
+            ("__kilnJsonSerialize", "KILN_C99_METHOD_JSON_STRINGIFY") => "stringify",
+            ("__kilnJsonParse", "KILN_C99_METHOD_JSON_PARSE") => "parse",
+            _ => published.as_str(),
+        };
         match method_names.get(constant) {
-            Some(reported) if reported == published => {}
+            Some(reported) if reported == expected => {}
             Some(reported) => wrong.push(format!(
                 "  globalThis.{published} is {constant}, which kiln_c99_method_name calls \
                  \"{reported}\""
@@ -817,16 +824,26 @@ fn emitted_http_socket_close_is_runtime_owned_and_modeled() {
     );
 
     let branch_start = source
-        .find("if (socket->server != NULL && socket->server->protocol_http)")
+        .find("if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded)")
         .expect("HTTP socket close branch is emitted");
-    let generic_start = source[branch_start..]
-        .find("    kiln_c99_node_cancel_request(&socket->write_request")
+    let client_start = source[branch_start..]
+        .find("    if (socket->http_client_owned && !socket->http_upgraded)")
         .map(|offset| branch_start + offset)
-        .expect("generic node:net close branch follows HTTP branch");
-    let http_branch = &source[branch_start..generic_start];
+        .expect("HTTP client close branch follows server branch");
+    let http_branch = &source[branch_start..client_start];
     assert!(http_branch.contains("kiln_realm_http_server_close_active("));
     assert!(http_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
     assert!(!http_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
+
+    let generic_start = source[client_start..]
+        .find("    if (socket->write_request != 0) {")
+        .map(|offset| client_start + offset)
+        .expect("generic socket close follows the HTTP client branch");
+    let client_branch = &source[client_start..generic_start];
+    assert!(client_branch.contains("kiln_realm_http_server_close_active("));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_GRACEFUL"));
+    assert!(!client_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
 
     let server_close = source
         .find("static int kiln_c99_node_server_maybe_emit_close(")
@@ -1106,7 +1123,19 @@ fn runtime_prelude_size() {
     // Independent context witnesses and canonical-key ownership enable candidate-scaled
     // admission (66,653 lines before the symbol change). Sum both branches' ceiling growth.
     // Function/constructor parity repairs and custom-species map authority, intrinsic identity, and species walk: 66,858 measured.
-    const CEILING_LINES: usize = 66_880;
+    // Reviewed against d21d39e4c: runtime/header sources grew by 12,076 lines, chiefly
+    // dynamic Function syntax/environments (+5,720) and Node transport lifecycle (+2,247).
+    // Current emission is 79,010 lines; the remaining growth is generated metadata.
+    // The compiled runtime fixtures verify that sections are not emitted twice.
+    // Shared exotic spread snapshots, named array deletion and live namespace enumeration
+    // bring the inspected prelude to 79,082 lines; runtime sections are still emitted once.
+    // Typed-array indexed descriptor projection and array deletion invariants add 43 lines.
+    // Reviewed realm-private dictionary index: 104 runtime/header lines for ordinal hashing,
+    // malloc ownership, mutation invalidation and profile accounting. No built-in is added;
+    // each section is emitted once. The inspected total is 79,165 lines.
+    // Reviewed shared closure-receiver normalization and guarded iterator selection:
+    // 79,165 -> 79,182 lines, with each runtime section emitted once.
+    const CEILING_LINES: usize = 79_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

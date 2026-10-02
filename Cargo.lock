@@ -2170,6 +2170,7 @@ version = "0.1.0"
 dependencies = [
  "oxc_resolver",
  "serde_json",
+ "url",
 ]
 
 [[package]]

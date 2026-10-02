@@ -245,6 +245,7 @@ extern int kiln_c99_val_new_array_literal(kiln_val *out, const kiln_val *element
 extern int kiln_c99_val_new_object_literal(kiln_val *out, const kiln_val *pairs, size_t count);
 extern int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result, kiln_closure *closure, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame, int inherit_new_target);
 extern int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result, kiln_closure *closure, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame, int inherit_new_target);
+extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);
 extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_number(double value);
 extern kiln_value kiln_c99_number_bits(uint64_t bits);
@@ -309,6 +310,9 @@ extern int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
 extern int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
                                         kiln_value getter, kiln_value setter, int enumerable);
 extern int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value *out, int *found, int depth, kiln_value *thrown);
+extern int kiln_c99_describe_property_value(kiln_host *host, kiln_value target, kiln_value key,
+                                            kiln_value *out, int *found, int depth,
+                                            kiln_value *thrown);
 extern int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix);
 extern int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len, kiln_value function, int kind);
 extern int kiln_c99_define_private_key(kiln_value target, const kiln_string *key,

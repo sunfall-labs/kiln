@@ -448,8 +448,8 @@ static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t 
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
-    if (s->unit_len >= 7 && kiln_c99_string_starts_ascii(value, "file://", 7)) return kiln_c99_file_url_matches_path(s, path, path_len);
-    return kiln_c99_string_matches_utf8(s, path, path_len);
+    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7)) return kiln_c99_file_url_matches_path(s, path, path_len);
+    return kiln_string_equals_utf8(s, path, path_len);
 }
 "#,
     );

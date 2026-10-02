@@ -169,16 +169,11 @@ pub unsafe extern "C" fn kiln_regexp_compile(
     let Some(pattern) = pattern else {
         return INVALID_ARGUMENT;
     };
-    // regress 0.12's UnicodeSets parser rejects any adjacent pair of characters drawn from its
-    // reserved-double-punctuation alphabet, even when the pair itself is not reserved by
-    // ECMAScript. `[:;]` is a valid v-mode class (ansi-styles uses it to split SGR parameters),
-    // but the parser treats `:;` as an invalid double punctuator. Escaping the first literal in
-    // such a pair preserves its class meaning while leaving real syntax tokens (`&&`, `::`,
-    // `;;`, etc.) untouched so their original validation remains in force.
-    let pattern = if flags.contains('v') {
-        kiln_regexp::normalize_unicode_sets_pattern(&pattern)
-    } else {
-        pattern
+    // Share Unicode identity-escape validation and UnicodeSets normalization with the
+    // interpreter. Regress accepts a raw lone-surrogate identity escape in v mode; validation
+    // here keeps every constructor path on the same grammar authority.
+    let Some(pattern) = kiln_regexp::normalize_pattern_for_flags(pattern, flags.as_str()) else {
+        return INVALID_ARGUMENT;
     };
     let Some(compiled) = compile_pattern(pattern, flags.as_str()) else {
         return INVALID_ARGUMENT;
@@ -564,6 +559,48 @@ mod tests {
         assert_eq!(ranges, [0, 1]);
         // SAFETY: a successful compile returned the live handle owned by this test.
         unsafe { kiln_regexp_free(handle) };
+    }
+
+    #[test]
+    fn unicode_identity_escape_lone_surrogates_use_shared_grammar_gate() {
+        let flags_units = [b'v'];
+        let flags = super::super::KilnString {
+            unit_len: flags_units.len() as u32,
+            flags: 0,
+            data: flags_units.as_ptr().cast(),
+        };
+        let rejected_units = [b'\\' as u16, 0xD800];
+        let rejected = super::super::KilnString {
+            unit_len: rejected_units.len() as u32,
+            flags: 1,
+            data: rejected_units.as_ptr().cast(),
+        };
+        let mut handle = core::ptr::null_mut();
+        // SAFETY: views point at live arrays for this compile call; the output slot is writable.
+        assert_eq!(
+            unsafe { kiln_regexp_compile(&rejected, &flags, &mut handle) },
+            INVALID_ARGUMENT
+        );
+        assert!(handle.is_null());
+
+        let accepted_cases = [[b'\\' as u16, b'\\' as u16, 0xD800], [0xD83D, 0xDE00, 0]];
+        for (index, units) in accepted_cases.iter().enumerate() {
+            let unit_count = if index == 0 { 3 } else { 2 };
+            let pattern = super::super::KilnString {
+                unit_len: unit_count,
+                flags: 1,
+                data: units.as_ptr().cast(),
+            };
+            handle = core::ptr::null_mut();
+            // SAFETY: the selected prefix of the unit array and flags view remain live; handle is writable.
+            assert_eq!(
+                unsafe { kiln_regexp_compile(&pattern, &flags, &mut handle) },
+                0
+            );
+            assert!(!handle.is_null());
+            // SAFETY: the preceding successful compile produced this owned live handle.
+            unsafe { kiln_regexp_free(handle) };
+        }
     }
 }
 

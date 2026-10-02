@@ -49,6 +49,28 @@ for (const flags of ["u", "v"]) {
   }
 }
 
+const escapedBackslashRaw = Function(`return /${slash}${slash}${lone}/v;`)();
+if (!escapedBackslashRaw.test(`${slash}${lone}`)) {
+  throw new Error("an escaped backslash does not consume a following raw surrogate under v");
+}
+const directEscapedBackslashRaw = new RegExp(`${slash}${slash}${lone}`, "v");
+if (!directEscapedBackslashRaw.test(`${slash}${lone}`)) {
+  throw new Error("direct v-mode construction preserves even escape parity");
+}
+let directVRejected = false;
+try {
+  new RegExp(`${slash}${lone}`, "v");
+} catch (error) {
+  directVRejected = error instanceof SyntaxError;
+}
+if (!directVRejected) throw new Error("direct v-mode construction rejects lone identity escapes");
+const pair = String.fromCharCode(0xd83d, 0xde00);
+for (const flags of ["u", "v"]) {
+  if (!new RegExp(pair, flags).test(pair)) {
+    throw new Error(`raw surrogate pair remains valid pattern text under ${flags}`);
+  }
+}
+
 // In a string literal, the same backslash/lone-surrogate pair is a valid identity escape.
 const stringValue = Function(`return "${slash}${lone}";`)();
 if (stringValue !== lone) throw new Error("string literal transport preserves its identity escape");

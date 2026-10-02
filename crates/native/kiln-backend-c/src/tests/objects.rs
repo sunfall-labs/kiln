@@ -67,6 +67,104 @@ int main(void) {
 }
 
 #[test]
+fn large_dictionary_lookup_cache_is_private_and_gc_owned() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value source = kiln_c99_undefined(), readonly = kiln_c99_undefined(), value, keys;
+    kiln_object *source_object, *readonly_object;
+    kiln_c99_no_write_frame frame;
+    kiln_c99_clone_arena arena = {0};
+    kiln_dictionary_index *index;
+    size_t slot;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 0;
+    kiln_c99_gc_heap_register(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    if (kiln_c99_new_object(&source) != KILN_C99_OK ||
+        kiln_c99_new_object(&readonly) != KILN_C99_OK) return 1;
+    for (size_t i = 0; i < 40; ++i) {
+        char key[16];
+        int len = snprintf(key, sizeof key, "key%02zu", i);
+        if (len <= 0 || (size_t)len >= sizeof key ||
+            kiln_c99_put(NULL, source, key, (size_t)len,
+                         kiln_c99_number((double)i), 0, NULL) != KILN_C99_OK ||
+            kiln_c99_put(NULL, readonly, key, (size_t)len,
+                         kiln_c99_number((double)(i + 100)), 0, NULL) != KILN_C99_OK)
+            return 2;
+    }
+    source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
+    if (kiln_c99_all_own_keys(NULL, source, &keys, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 40) return 21;
+    kiln_c99_dictionary_index_reset(source_object);
+    kiln_c99_dictionary_index_reset(readonly_object);
+    if (source_object->count != 40 || source_object->dictionary_index != NULL ||
+        readonly_object->dictionary_index != NULL) return 3;
+    slot = kiln_c99_own_index(source_object, NULL, "key39", 5);
+    if (slot != 39 || source_object->dictionary_index == NULL) return 4;
+    index = source_object->dictionary_index;
+    if (kiln_c99_own_index(source_object, NULL, "key17", 5) != 17 ||
+        source_object->dictionary_index != index) return 5;
+
+    /* Read-only workers get the same answer without publishing a mutable side index. */
+    kiln_c99_no_write_enter(&heap, &frame);
+    slot = kiln_c99_own_index(readonly_object, NULL, "key39", 5);
+    kiln_c99_no_write_leave(&frame);
+    if (slot != 39 || readonly_object->dictionary_index != NULL) return 6;
+
+    /* The object remains valid through collection, and its cache remains attached to the
+     * owning object rather than becoming an untraced pointer edge. */
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
+    heap.enabled = 1;
+    kiln_c99_gc_collect_mid_turn(&heap);
+    heap.enabled = 0;
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
+    source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
+    if (source_object == NULL) return 71;
+    if (source_object->dictionary_index != index) return 72;
+    if (kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK) return 73;
+    if (kiln_c99_as_number(value) != 39.0) return 74;
+
+    /* A prepared cross-region clone owns fresh object storage and never aliases the source
+     * cache; arena discard frees its own side storage without relying on object finalizers. */
+    {
+        int status = kiln_c99_clone_arena_prepare(&arena, &heap, source,
+                                                   2 * heap.nursery.capacity);
+        if (status != KILN_C99_OK) return 81;
+    }
+    if (!arena.certified) return 82;
+    if (arena.capsule.root.tag != KILN_VALUE_OBJECT) return 83;
+    {
+        kiln_object *copy = kiln_c99_object_of(arena.capsule.root);
+        if (copy == NULL || copy == source_object || copy->dictionary_index != NULL ||
+            copy->count != source_object->count) {
+            kiln_c99_clone_arena_dispose(&arena);
+            return 9;
+        }
+    }
+    kiln_c99_clone_arena_dispose(&arena);
+    if (source_object->dictionary_index != index ||
+        kiln_c99_own_index(readonly_object, NULL, "key17", 5) != 17) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "dictionary-index-ownership");
+    assert!(
+        run.status.success(),
+        "dictionary index ownership failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn compact_property_records_trace_the_live_data_or_accessor_arm() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
     let wrapper = r#"
@@ -1532,7 +1630,8 @@ int main(void) {
         read.tag != KILN_VALUE_METHOD || read.bits != KILN_C99_METHOD_NODE_READABLE) return 4;
     if (kiln_c99_get(NULL, buffer, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_OBJECT || read.bits != constants.bits) return 5;
-    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) == KILN_C99_OK) return 6;
+    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 6;
     return 0;
 }
 "#;
@@ -1565,9 +1664,11 @@ int main(void) {
     if (kiln_c99_get(NULL, first, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "first", 5))
         return 3;
-    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 4;
-    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 5;
     return 0;
 }

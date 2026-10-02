@@ -150,7 +150,7 @@ int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
     require->resolve = resolve;
-    require->properties = kiln_c99_undefined();
+    kiln_c99_heap_store_value(require, &require->properties, kiln_c99_undefined());
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
     kiln_c99_heap_store_pointer(require, &require->root_context, root_context);
@@ -255,6 +255,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_SHARED_WEAK_RAW: return "__kilnSharedWeak";
     case KILN_C99_METHOD_COLLECTION_SIZE_RAW: return "__kilnCollectionSize";
     case KILN_C99_METHOD_JSON_UNBOX_RAW: return "__kilnJsonUnbox";
+    case KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE: return "__kilnFunctionKindPrototype";
+    case KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR: return "__kilnFunctionKindConstructor";
     case KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW: return "__kilnRegExpLegacyCapture";
     case KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW: return "__kilnTypedArrayCopy";
     case KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW: return "__kilnTypedArraySort";

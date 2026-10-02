@@ -2422,9 +2422,8 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
         if (!plain->generator && !kiln_c99_inheriting_new_target &&
             depth < KILN_C99_MAX_CALL_DEPTH) {
             kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
-            if (!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL)) {
-                (void)kiln_c99_global_object_val(&vreceiver);
-            }
+            status = kiln_c99_normalize_closure_receiver(&vreceiver, plain);
+            if (status != KILN_C99_OK) goto done;
             *out = KILN_VAL_UNDEFINED;
             status = kiln_c99_invoke_closure(host, out, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
             goto done;
@@ -2502,7 +2501,8 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
         kiln_val call_result = KILN_VAL_UNDEFINED;
         kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
         int status;
-        if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv);
+        status = kiln_c99_normalize_closure_receiver(&recv, plain);
+        if (status != KILN_C99_OK) return status;
         status = kiln_c99_invoke_closure(host, &call_result, plain, recv, args, argc, depth, thrown, NULL, 0);
         if (status == KILN_C99_CONTROL_ERROR && (call_result & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
             return status;

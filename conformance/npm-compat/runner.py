@@ -15,10 +15,19 @@ import time
 HERE = Path(__file__).resolve().parent
 
 
-def command(argv, prefix, timeout):
+def profile_environment(profile, inherited):
+    environment = dict(inherited)
+    # Release graph selection and KILN_NODE_ENV_PRODUCTION both select production.
+    # The oracle and build must see that same mode, including .env file selection.
+    if profile == 'native-release':
+        environment['NODE_ENV'] = 'production'
+    return environment
+
+
+def command(argv, prefix, timeout, environment=None):
     started = time.perf_counter()
     with prefix.with_suffix('.stdout').open('wb') as out, prefix.with_suffix('.stderr').open('wb') as err:
-        process = subprocess.Popen(argv, cwd=HERE, stdout=out, stderr=err, start_new_session=True)
+        process = subprocess.Popen(argv, cwd=HERE, stdout=out, stderr=err, start_new_session=True, env=environment)
         timed_out = False
         try:
             code = process.wait(timeout=timeout)
@@ -54,7 +63,9 @@ def main():
     parser.add_argument('--raw', type=Path, required=True)
     parser.add_argument('--timeout', type=float, default=600)
     parser.add_argument('--profile', choices=('native-dev', 'native-release'), default='native-dev',
-                        help='native build profile; phase timings retain this policy explicitly')
+                        help='native build profile; release uses NODE_ENV=production for every phase')
+    parser.add_argument('--require-pass', action='store_true',
+                        help='exit nonzero if any selected package does not pass; retain all evidence')
     parser.add_argument('packages', nargs='*')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -62,6 +73,7 @@ def main():
     kiln = str(Path(args.kiln).resolve())
     # Commands execute from the corpus directory; keep artifacts anchored to the caller.
     args.raw = args.raw.resolve()
+    environment = profile_environment(args.profile, os.environ)
     rows = []
     with (HERE / 'packages.tsv').open() as f:
         for row in csv.reader(f, delimiter='\t'):
@@ -96,6 +108,9 @@ def main():
                 'host': 'node',
                 'execution_engine': 'native',
                 'native_profile': args.profile,
+                'require_pass': args.require_pass,
+                'node_env': environment.get('NODE_ENV'),
+                'environment_policy': 'release production mode; otherwise inherited environment',
                 'kiln_jobs': os.environ.get('KILN_JOBS'),
                 'timing_kind': 'phase wall time including startup; not warmed workload throughput',
                 'results': []}
@@ -118,11 +133,11 @@ def main():
             result = {'name': name, 'version': version, 'porffor_status': porffor,
                       'test_sha256': hashlib.sha256(tests[name].read_bytes()).hexdigest(), 'phases': {}}
             phases = result['phases']
-            phases['node'] = command(['node', test], node, 60)
+            phases['node'] = command(['node', test], node, 60, environment)
             if phases['node']['exit'] != 0 or phases['node']['timeout']:
                 status = 'node-baseline-failed'
             else:
-                phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--profile', args.profile, '--output', str(binary)], build, args.timeout)
+                phases['build'] = command([kiln, '--one-shot', 'build', test, '--node', '--profile', args.profile, '--output', str(binary)], build, args.timeout, environment)
                 summary = build.with_suffix('.stdout').read_text(errors='replace')
                 timing = re.search(r'emit (\d+)ms, compile (\d+)ms, link (\d+)ms', summary)
                 if timing:
@@ -133,7 +148,7 @@ def main():
                     status = 'compile-error'
                 else:
                     result['binary_bytes'] = binary.stat().st_size
-                    phases['native'] = command([str(binary)], native, args.timeout)
+                    phases['native'] = command([str(binary)], native, args.timeout, environment)
                     if phases['native']['timeout']:
                         status = 'runtime-timeout'
                     elif phases['native']['exit'] != 0:
@@ -169,11 +184,13 @@ def main():
     (args.raw / 'results.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(f'coverage: selected={len(selected)}, deferred={len(rows)-len(selected)}, discovered={len(rows)}')
     print(f'{counts.get("pass", 0)}/{len(selected)} pass; evidence: {args.raw}')
-    # Package failures remain informational; malformed inventories fail before execution.
+    # Inventory runs remain informational by default. Acceptance runs still collect every
+    # selected package, then fail on any non-pass, including an invalid Node oracle.
+    return int(args.require_pass and counts.get('pass', 0) != len(selected))
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except KeyboardInterrupt:
         raise SystemExit(130)

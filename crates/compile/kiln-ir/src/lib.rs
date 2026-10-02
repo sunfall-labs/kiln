@@ -157,11 +157,10 @@ pub enum Instruction {
     /// many `xs` yields.
     SpreadInto,
     /// `ToPropertyKey` of the key on top of the stack, replacing it. Stack is object, then key.
-    ///
-    /// This is the memoisation the specification performs on a Reference Record: a compound
-    /// assignment reads and writes through *one* reference, and `GetValue` stores the converted
-    /// key back into it so `PutValue` does not convert again. Without it a key object's
-    /// `toString` runs twice, which the program can see.
+    /// Computed property References retain their raw property-name value: `GetComputed` and
+    /// `SetComputed` each coerce it when performing GetValue and PutValue. This explicit
+    /// conversion is for bytecode sites that must materialize a property key before the property
+    /// operation (for example, a computed property definition).
     ///
     /// It reads the object beneath the key without consuming it, because the order is fixed:
     /// a nullish object throws *before* the key converts, so `null[k] += 1` never runs `k`'s

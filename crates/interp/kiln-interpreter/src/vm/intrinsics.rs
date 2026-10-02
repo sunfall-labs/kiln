@@ -1183,6 +1183,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             converted[index] = coerced;
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
+        // `String.prototype.concat` performs ordinary ToString on each argument. That rejects
+        // Symbols and invokes user conversion methods, unlike String(symbol). Keep the converted
+        // text as UTF-16 units so lone surrogates survive the trip through the VM.
+        if native == Native::StringConcat
+            && arguments
+                .iter()
+                .any(|value| matches!(value, Value::Symbol(_)) || is_reflect_target(value))
+        {
+            let mut converted = arguments.to_vec();
+            for (index, value) in arguments.iter().enumerate() {
+                if matches!(value, Value::Symbol(_)) || is_reflect_target(value) {
+                    converted[index] = Value::String(self.as_text_units(value, instruction)?);
+                }
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
         // `ToString` for every argument a built-in reads as text, on the same terms and in the
         // same place as the numeric pass above: after the receiver, because that is the order a
         // `toString` counting its calls can see.
@@ -1228,6 +1244,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 converted[index] = Value::Number(number);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
+        }
+        // Padding reads ToLength(targetLength) before ToString(fillString), and never converts
+        // fillString if the receiver is already long enough. Do the observable conversion only
+        // after the numeric-argument pass above has completed.
+        if matches!(native, Native::StringPadStart | Native::StringPadEnd) {
+            let target = arguments.first().map_or(0.0, Value::as_number);
+            let target = if target.is_nan() || target <= 0.0 {
+                0.0
+            } else {
+                target.trunc()
+            };
+            let current = match receiver {
+                Value::String(text) => text.len(),
+                _ => 0,
+            };
+            let needs_fill = target.is_infinite() && target.is_sign_positive()
+                || (target.is_finite() && target > current as f64);
+            if needs_fill
+                && let Some(fill) = arguments.get(1)
+                && (matches!(fill, Value::Symbol(_)) || is_reflect_target(fill))
+            {
+                let mut converted = arguments.to_vec();
+                converted[1] = Value::String(self.as_text_units(fill, instruction)?);
+                return self.dispatch_native(native, receiver, &converted, instruction);
+            }
         }
         // A prototype is stored rather than read, so the only two things it may be are an object
         // and the explicit absence of one.
@@ -1973,15 +2014,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
+                let module_namespace = matches!(
+                    &source,
+                    Value::Object(object) if object.borrow().is_module_namespace()
+                );
                 for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
-                    let value = match property {
-                        Property::Value(value) => value,
-                        Property::Accessor { get, .. } => match get {
-                            Some(getter) => {
-                                self.call_value(&getter, source.clone(), Vec::new(), instruction)?
-                            }
-                            None => Value::Undefined,
-                        },
+                    let value = if module_namespace {
+                        // Namespace slots are snapshots of export cells for reflection. The
+                        // language-visible value operation is [[Get]], which refreshes that
+                        // snapshot from the live cell before returning it.
+                        self.read_property_key(&source, PropertyKeyRef::Units(&key), instruction)?
+                    } else {
+                        match property {
+                            Property::Value(value) => value,
+                            Property::Accessor { get, .. } => match get {
+                                Some(getter) => self.call_value(
+                                    &getter,
+                                    source.clone(),
+                                    Vec::new(),
+                                    instruction,
+                                )?,
+                                None => Value::Undefined,
+                            },
+                        }
                     };
                     items.push(if matches!(native, Native::ObjectValues) {
                         value
@@ -2793,17 +2848,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A string method whose argument the specification passes through `ToString`, given
             // an object to convert.
             //
-            // `ToString` on an object *calls* its `toString`, and the implementations of these
-            // ten live in the machine-free table, which has no machine to call it with -- it
-            // reads arguments through a helper that can only ask for the display spelling. So
-            // `"abc".indexOf({ toString: () => "b" })` answered -1, `split` did not split, and
-            // `concat` appended the literal text "[object Object]". Every one of them a plausible
-            // wrong answer in ordinary code rather than a failure.
+            // `ToString` on an object *calls* its `toString`, and these implementations live in
+            // the machine-free table, which has no machine to call it with. It reads arguments
+            // through a helper that can only ask for the display spelling. So
+            // `"abc".indexOf({ toString: () => "b" })` answered -1 and `split` did not split.
             //
             // The conversion happens here, where there is a machine, and the pure implementation
             // is then handed the string it always assumed it had. Which arguments convert is per
             // method and not guessable: `split`'s second argument is a *length*, and `replace`'s
-            // second is a replacement that may be a function and must reach it uncalled.
+            // second is a replacement that may be a function and must reach it uncalled. Concat
+            // and padding use separate paths to preserve their conversion semantics.
             Native::StringSplit
             | Native::StringReplace
             | Native::StringReplaceAll
@@ -2812,15 +2866,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::StringIncludes
             | Native::StringStartsWith
             | Native::StringEndsWith
-            | Native::StringConcat
-            | Native::StringPadStart
-            | Native::StringPadEnd
                 if arguments.iter().enumerate().any(|(index, argument)| {
                     (string_coerced_argument(native, index)
                         || (matches!(native, Native::StringSplit) && index == 1))
                         && is_an_object(argument)
                         && !is_callable(argument)
                         && !matches!(argument, Value::RegExp(_))
+                        && !matches!(native, Native::StringPadStart | Native::StringPadEnd)
                 }) =>
             {
                 let mut converted = Vec::with_capacity(arguments.len());
@@ -2835,7 +2887,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         convertible && matches!(native, Native::StringSplit) && index == 1;
                     converted.push(if numeric {
                         Value::Number(self.as_number_argument(Some(argument), instruction)?)
-                    } else if convertible && string_coerced_argument(native, index) {
+                    } else if convertible
+                        && string_coerced_argument(native, index)
+                        && !matches!(native, Native::StringPadStart | Native::StringPadEnd)
+                    {
                         Value::String(self.as_text_units(argument, instruction)?)
                     } else {
                         argument.clone()

@@ -1,0 +1,425 @@
+{
+  "coverage_note": "These are three selected workloads only. The CLI68 full npm inventory is still pending; no overall npm performance or completion claim follows.",
+  "date": "2026-10-01",
+  "full_raw_records": {
+    "batch_status": "target/npm-compat-evidence/cli68-throughput-batch-status.json",
+    "bcryptjs": "target/npm-compat-evidence/cli68-bcryptjs-warmed.json",
+    "capture": "target/npm-compat-evidence/cli68-capture-warmed.json",
+    "numeric_bitwise": "target/npm-compat-evidence/cli68-numeric-warmed.json"
+  },
+  "method": {
+    "host": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "node": "v26.8.1",
+    "paired_controls_alternate_order": true,
+    "timed_runs_per_binary": 4,
+    "timing_unit": "milliseconds per in-process workload call; Uglify warmed24Ms covers 24 minify calls",
+    "warmups_per_binary": 2
+  },
+  "readiness": {
+    "bcrypt_numeric": {
+      "build_driver": "mbx",
+      "control_cli": {
+        "path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/kiln-cli68-control",
+        "sha256": "24022e54f3b7e1227803c636ba61ac7ca3ba5ce970c8cfff26d338d6cf6909fc"
+      },
+      "control_tree": {
+        "build_base": "a2f8d85e",
+        "current_head_includes_evidence_only_commit": "3fd94a20",
+        "head": "3fd94a206734dd87fb2374ccca66bd5e905e7a4d",
+        "path": "/var/tmp/kiln/kiln-bcrypt-cli68-control"
+      },
+      "jobs": 2,
+      "production_tree": {
+        "cli_artifact_build_source_commit": "6fcb1358",
+        "head": "26b6fa3e420fe2f83be044938ff773f58c38ddd4",
+        "path": "/var/tmp/kiln/kiln-npm-managed"
+      },
+      "record": "target/npm-compat-evidence/cli68-throughput-build-readiness.json",
+      "record_sha256": "7f06246fc6cea311d887e93dafa9b7cb340bb390a8992d5b8d785e9b7cc4da45",
+      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+      "workload_builds": {
+        "control_bcrypt": {
+          "artifact": {
+            "path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/bcryptjs-control",
+            "sha256": "fdc31f94d4fd160f488e7458c7452073274fc2faef0c15810d865697d8e63217"
+          },
+          "cli_sha256": "24022e54f3b7e1227803c636ba61ac7ca3ba5ce970c8cfff26d338d6cf6909fc",
+          "log_path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/bcryptjs-control-final-build.log",
+          "log_sha256": "d7e1bba4b0a152c50642b853ecc4790bb20a77270fe85bf9f94bdbd3326c488d"
+        },
+        "production_bcrypt": {
+          "artifact": {
+            "path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/bcryptjs-production",
+            "sha256": "218da8c79cdd37d9886bdd95969cbcd992694d868e244da98658d25dd5235341"
+          },
+          "cli_sha256": "b5db3599e0e535470ba752125df87f3ff6660e58a04f0bcfef7206025d0b940b",
+          "log_path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/bcryptjs-production-build.log",
+          "log_sha256": "bc75213b661b7b49014fc16401236112604b097d8d84c10d5de096253c456ec3"
+        },
+        "production_numeric": {
+          "artifact": {
+            "path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/numeric-bitwise-production",
+            "sha256": "22eb5ab8292173c241d001d03cd87431870b8afcb90adbb739fa835ff8d41829"
+          },
+          "cli_sha256": "b5db3599e0e535470ba752125df87f3ff6660e58a04f0bcfef7206025d0b940b",
+          "log_path": "/var/tmp/kiln/kiln-bcrypt-cli68-control/target/npm-compat-evidence/numeric-bitwise-production-build.log",
+          "log_sha256": "ab80e59b2485c1b3ea7bb514e0728920dae287455c2c4b197410804214ceb618"
+        }
+      }
+    },
+    "capture": {
+      "control_cli_sha256": "b6cd1023e185870477cfc1556f06f81397997e9994bf0170b025c4771f964a6a",
+      "control_cli_source": "f2248776ac64b4f4ab50d10751982f134f5d9b1c",
+      "control_workload_sha256": "79c431f4bbac81f064ca43b008af42e74ca94ef73e3905d6b768610c02cee0ef",
+      "gc_stress": "4 matched, 0 refused, 0 diverged, 0 stress probes skipped",
+      "production_cli_sha256": "b5db3599e0e535470ba752125df87f3ff6660e58a04f0bcfef7206025d0b940b",
+      "production_cli_source": "6fcb1358d40eef53295d3a1411e9b1053492081b",
+      "production_workload_sha256": "5149a2e54f25a0965401ea35e5a62847ba5916c5d81def58c91bf185638eea42",
+      "record": "target/npm-compat-evidence/uglify-control-readiness.json",
+      "record_sha256": "54bb27beb187802460d31ddaf28d2c144376b284b2a75613a100f6f57399d93d"
+    }
+  },
+  "results": {
+    "bcryptjs": {
+      "binaries": {
+        "candidate": {
+          "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/b0be902570cbe51523d207334a5e755bf0da124666a184d737010bb48cdcd069/npm-compat-evidence/bcryptjs-production",
+          "sha256": "218da8c79cdd37d9886bdd95969cbcd992694d868e244da98658d25dd5235341"
+        },
+        "control": {
+          "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/b0be902570cbe51523d207334a5e755bf0da124666a184d737010bb48cdcd069/npm-compat-evidence/bcryptjs-control",
+          "sha256": "fdc31f94d4fd160f488e7458c7452073274fc2faef0c15810d865697d8e63217"
+        }
+      },
+      "build_readiness": "readiness.bcrypt_numeric",
+      "deterministic_hash_oracle": {
+        "hash": "$2a$08$N9qo8uLOickgx2ZMRZoMyeoxUxJ05MRWm4bW3Giar6lxjRF5NYzvS",
+        "match": true,
+        "reject": true,
+        "rounds": 8
+      },
+      "node": {
+        "batch": 2,
+        "checksum": "163286659",
+        "mode": "in-process",
+        "name": "npm-bcryptjs-fixed-salt",
+        "samples": 23,
+        "wall_seconds_including_harness": 2.266024332959205,
+        "warm_best": 44,
+        "warm_median": 44
+      },
+      "raw_logs": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/cli68-bcryptjs-warmed-logs",
+      "runs": {
+        "candidate": [
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 13.592684389092028,
+            "samples": 1,
+            "warm_best": 4504,
+            "warm_median": 4504
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 13.484836460906081,
+            "samples": 1,
+            "warm_best": 4475,
+            "warm_median": 4475
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 13.593215400003828,
+            "samples": 1,
+            "warm_best": 4499,
+            "warm_median": 4499
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 13.631134464056231,
+            "samples": 1,
+            "warm_best": 4523,
+            "warm_median": 4523
+          }
+        ],
+        "control": [
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 17.450725201051682,
+            "samples": 1,
+            "warm_best": 5789,
+            "warm_median": 5789
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 17.5942508490989,
+            "samples": 1,
+            "warm_best": 5837,
+            "warm_median": 5837
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 17.61675506096799,
+            "samples": 1,
+            "warm_best": 5853,
+            "warm_median": 5853
+          },
+          {
+            "batch": 1,
+            "checksum": "163286659",
+            "mode": "in-process",
+            "process_wall_seconds": 17.786514273029752,
+            "samples": 1,
+            "warm_best": 5904,
+            "warm_median": 5904
+          }
+        ]
+      },
+      "source": {
+        "allowed_source_differences": {
+          "crates/native/kiln-backend-c/src/runtime/boxed.c": {
+            "control_sha256": "7c8ff400d7c4291a9b53501816422b189472d4e3e73c9695e14fea5ef450bc4b",
+            "production_sha256": "0cda4d5bd0cad42f30a6d657c7afca09ea630a187e9f1a91d533fc85e8daa5d1"
+          }
+        },
+        "control_head": "3fd94a206734dd87fb2374ccca66bd5e905e7a4d",
+        "control_tracked_tree_sha256": "8eddd9093734fc794ce31c3b6c3c38e8f412870b40bdf76d1b0b90b51e19a109",
+        "harness_inputs_sha256": {
+          "bench/harness.mjs": "b041101125e8f8e789321983bd5ec1579c3a8a8d63abf584adaae43afdcaf827",
+          "conformance/npm-compat/package-lock.json": "3b03faa7c97402e5e01e2f52eb2f73c7317faf178318c065c6fcd38af3249680",
+          "conformance/npm-compat/probes/bcryptjs-throughput.mjs": "53ee6f986b133e2664ecbd0f09e831efdd1ad518f6759626778a7d86e274dc4f"
+        },
+        "matched_source_sha256": "58bf5f1af7f9d9c90bdd3c7deb8ec3678680fd00d3ebdb68ea244effe8509262",
+        "production_head": "26b6fa3e420fe2f83be044938ff773f58c38ddd4",
+        "production_tracked_tree_sha256": "85ad600f8c995a583400741c75107fa1271aae026dec12d578bf4519c7aca279",
+        "reviewed_source_delta_sha256": "8fbf0e53320ec39b17b9a63e25f22aeaca3b06c4d1280e2ad6b347fa36d45c84",
+        "tracked_file_count": 2875,
+        "tracked_path_inventory_sha256": "609b3ba42ee74c239462673964e3e1f99c9eea650bbc696e46f67485f4b4cfb2"
+      },
+      "summary": {
+        "control_over_candidate_speedup": 1.2984560701988226,
+        "warm_median_ms_per_call": {
+          "candidate": 4501.5,
+          "control": 5845.0
+        }
+      }
+    },
+    "numeric_bitwise": {
+      "binaries": {
+        "candidate": {
+          "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/b0be902570cbe51523d207334a5e755bf0da124666a184d737010bb48cdcd069/npm-compat-evidence/numeric-bitwise-production",
+          "sha256": "22eb5ab8292173c241d001d03cd87431870b8afcb90adbb739fa835ff8d41829"
+        }
+      },
+      "build_readiness": "readiness.bcrypt_numeric",
+      "node": {
+        "batch": 1024,
+        "checksum": "1756632504",
+        "mode": "in-process",
+        "name": "npm-numeric-bitwise-loop",
+        "samples": 24,
+        "wall_seconds_including_harness": 2.2313558380119503,
+        "warm_best": 0.0810546875,
+        "warm_median": 0.08203125
+      },
+      "raw_logs": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/cli68-numeric-warmed-logs",
+      "runs": {
+        "candidate": [
+          {
+            "batch": 1024,
+            "checksum": "1756632504",
+            "mode": "in-process",
+            "process_wall_seconds": 2.327449509059079,
+            "samples": 23,
+            "warm_best": 0.0869140625,
+            "warm_median": 0.087890625
+          },
+          {
+            "batch": 1024,
+            "checksum": "1756632504",
+            "mode": "in-process",
+            "process_wall_seconds": 2.3231761179631576,
+            "samples": 23,
+            "warm_best": 0.0869140625,
+            "warm_median": 0.087890625
+          },
+          {
+            "batch": 1024,
+            "checksum": "1756632504",
+            "mode": "in-process",
+            "process_wall_seconds": 2.3193139439681545,
+            "samples": 23,
+            "warm_best": 0.0869140625,
+            "warm_median": 0.087890625
+          },
+          {
+            "batch": 1024,
+            "checksum": "1756632504",
+            "mode": "in-process",
+            "process_wall_seconds": 2.324259013053961,
+            "samples": 23,
+            "warm_best": 0.0869140625,
+            "warm_median": 0.087890625
+          }
+        ]
+      },
+      "source": {
+        "comparison_scope": "candidate-vs-Node; no optimization control or gain claim",
+        "head": "26b6fa3e420fe2f83be044938ff773f58c38ddd4",
+        "package_lock_sha256": "3b03faa7c97402e5e01e2f52eb2f73c7317faf178318c065c6fcd38af3249680",
+        "tracked_file_count": 2875,
+        "tracked_path_inventory_sha256": "52284e38d929c51aa889959902a2757080ca25a6e1aa8d72049a4f41efe912b8",
+        "tracked_tree_sha256": "85ad600f8c995a583400741c75107fa1271aae026dec12d578bf4519c7aca279",
+        "workload_sha256": "aa1639c184c3ba53e5d7c7f3e23b4f1c580787d4a37902a5416974287fc34889"
+      },
+      "summary": {
+        "gain_claim": "none; candidate correctness and warmed runtime measured against Node only",
+        "warm_median_ms_per_call": {
+          "candidate": 0.087890625
+        }
+      }
+    },
+    "uglify_capture": {
+      "binaries": {
+        "control": {
+          "path": "/var/tmp/kiln/kiln-uglify-cli66-control/conformance/npm-compat/target/npm-compat-evidence/uglify-capture-control",
+          "sha256": "79c431f4bbac81f064ca43b008af42e74ca94ef73e3905d6b768610c02cee0ef"
+        },
+        "production": {
+          "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/uglify-production-cli68",
+          "sha256": "5149a2e54f25a0965401ea35e5a62847ba5916c5d81def58c91bf185638eea42"
+        }
+      },
+      "build_readiness": "readiness.capture",
+      "node": {
+        "calls": 25,
+        "checksum": 2612876640,
+        "firstCallMs": 17.728284000000002,
+        "moduleInitMs": 24.444034000000002,
+        "wall_seconds": 0.15532629005610943,
+        "warmed24Ms": 47.47657799999999
+      },
+      "raw_logs": "target/npm-compat-evidence/cli68-capture-warmed-raw",
+      "runs": {
+        "control": [
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 1845.7128089999997,
+            "moduleInitMs": 677.7864589999999,
+            "wallSeconds": 51.77143005293328,
+            "warmed24Ms": 49182.299929
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 1843.5724420000001,
+            "moduleInitMs": 679.470181,
+            "wallSeconds": 51.81553823093418,
+            "warmed24Ms": 49226.981959000004
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 1844.0506289999998,
+            "moduleInitMs": 683.5291930000001,
+            "wallSeconds": 51.749996738974005,
+            "warmed24Ms": 49157.957258
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 1845.047332,
+            "moduleInitMs": 679.3767859999999,
+            "wallSeconds": 51.621884527034126,
+            "warmed24Ms": 49028.60219799999
+          }
+        ],
+        "production": [
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 835.43284,
+            "moduleInitMs": 458.64625499999994,
+            "wallSeconds": 23.41960249899421,
+            "warmed24Ms": 22097.508637
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 840.2935309999998,
+            "moduleInitMs": 457.893164,
+            "wallSeconds": 23.467304729041643,
+            "warmed24Ms": 22141.175621000002
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 835.875824,
+            "moduleInitMs": 459.02680399999997,
+            "wallSeconds": 23.332085376023315,
+            "warmed24Ms": 22008.765218
+          },
+          {
+            "calls": 25,
+            "checksum": 2612876640,
+            "firstCallMs": 841.222933,
+            "moduleInitMs": 456.647605,
+            "wallSeconds": 23.477897956967354,
+            "warmed24Ms": 22150.524768
+          }
+        ]
+      },
+      "source": {
+        "control_head": "a864b501b9b9769c1024fd57b6c4234a7dde8fa8",
+        "control_tracked_tree_sha256": "a5977f91f1c653a819ece4a2cfd53b6102b6b86ab97469d1418e2ea509281221",
+        "dynamic_c_sha256": {
+          "control": "86c0616fb4d23763bd356ec93e97a678be9e0b83d879c02eafb8b3b43c4b274a",
+          "production": "e41b342d6359ee9434ec705707d44f9215d72a8644d244d829bec2554ac3e397"
+        },
+        "matched_source_sha256": "7f813ed871b54e7bdd3fd9473d4051ed07945bfd09defacc42cff11130c2e814",
+        "only_allowed_source_difference": "crates/native/kiln-backend-c/src/runtime/dynamic.c",
+        "package_lock_sha256": "3b03faa7c97402e5e01e2f52eb2f73c7317faf178318c065c6fcd38af3249680",
+        "production_head": "26b6fa3e420fe2f83be044938ff773f58c38ddd4",
+        "production_tracked_tree_sha256": "85ad600f8c995a583400741c75107fa1271aae026dec12d578bf4519c7aca279",
+        "tracked_file_count": 2875,
+        "tracked_path_inventory_sha256": "609b3ba42ee74c239462673964e3e1f99c9eea650bbc696e46f67485f4b4cfb2",
+        "workload_sha256": "659885c6171511cbe4335e39625119b133b6034f3f692b7478c4b8ae15bbf1d0"
+      },
+      "summary": {
+        "firstCallMs": {
+          "control_median": 1844.5489805,
+          "production_median": 838.0846774999999
+        },
+        "moduleInitMs": {
+          "control_median": 679.4234835,
+          "production_median": 458.2697095
+        },
+        "wallSeconds": {
+          "control_median": 51.760713395953644,
+          "production_median": 23.443453614017926
+        },
+        "warmed24Ms": {
+          "control_median": 49170.128593500005,
+          "production_median": 22119.342129
+        },
+        "warmed24_speedup": 2.2229471521684423
+      }
+    }
+  },
+  "schema": 1,
+  "scope": "Three focused in-process native-release --node workload comparisons; no whole-corpus speedup claim.",
+  "state": "complete"
+}

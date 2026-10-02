@@ -412,7 +412,7 @@ impl super::Compiler {
     }
 
     pub(super) fn delete_binding_lexically(&mut self, name: &str) {
-        match self.resolve(name) {
+        match self.resolve_or_capture(name) {
             // Anything a scope declared is undeletable -- `var`, `let`, a parameter, a
             // function declaration, an import -- so the answer is known here and nothing
             // needs to run.

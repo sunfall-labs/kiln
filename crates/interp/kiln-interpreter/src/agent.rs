@@ -1119,7 +1119,7 @@ mod tests {
                 guard.mailboxes.push(None);
             }
         }
-        let refused = group.start("$262.agent.leaving();".to_owned());
+        let refused = group.start("$262.agent.leaving();".into());
         let Err(ExecutionError::TypeErrorMessage { message }) = refused else {
             panic!("the cap must refuse rather than start a ninth agent");
         };

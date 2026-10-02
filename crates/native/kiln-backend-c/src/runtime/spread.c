@@ -1038,6 +1038,54 @@ static void kiln_c99_prepared_graph_drop(void *payload) {
     free(arena);
 }
 
+/* Arrays, typed arrays and builtin callables/namespaces combine indexed or intrinsic
+ * properties with a separate named store. CopyDataProperties takes their full own-key snapshot first, then checks each
+ * current descriptor and performs [[Get]]. */
+static int kiln_c99_spread_snapshot_keys(kiln_host *host, kiln_value target, kiln_value source,
+                                         int depth, kiln_value *thrown) {
+    kiln_value keys;
+    size_t index;
+    size_t length;
+    int status = kiln_c99_all_own_keys(host, source, &keys, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    length = kiln_c99_array_of(keys)->count;
+    for (index = 0; index < length; ++index) {
+        kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]);
+        kiln_value descriptor;
+        kiln_value enumerable;
+        kiln_value copied;
+        int found = 0;
+
+        status = kiln_c99_describe_property_value(host, source, key, &descriptor, &found,
+                                                  depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
+        if (status != KILN_C99_OK) return status;
+        if (!found) continue;
+        status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_truthy(enumerable)) continue;
+
+        /* CopyDataProperties performs Get after its descriptor check. Besides preserving live
+         * namespace bindings, this invokes any accessor with the builtin itself as receiver. */
+        status = kiln_c99_get_computed(host, source, key, &copied, depth, thrown);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&keys);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
+        kiln_c99_gc_keep_alive(&keys);
+        if (status != KILN_C99_OK) return status;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_spread_builtin(kiln_host *host, kiln_value target, kiln_value source,
+                                   int depth, kiln_value *thrown) {
+    return kiln_c99_spread_snapshot_keys(host, target, source, depth, thrown);
+}
+
 /* The JavaScript handle is only a weak key. It contains no graph pointer, and its collection
  * releases an abandoned arena before the handle's block is swept. */
 static int kiln_c99_prepared_graph_create(kiln_gc_heap *heap, kiln_value handle,
@@ -1199,8 +1247,8 @@ static int kiln_c99_worker_post_plain(uint64_t port, kiln_value value, kiln_valu
     return KILN_C99_OK;
 }
 
-static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
-                                  int depth, kiln_value *thrown) {
+static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln_value source,
+                                        int depth, kiln_value *thrown) {
     kiln_value named = kiln_c99_undefined();
     kiln_object *object;
     size_t index;
@@ -1224,11 +1272,16 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             kiln_value value;
             status = kiln_c99_get_computed(host, source, key, &value, depth, thrown);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)key.ptr, NULL,
-                                           value, 0, depth, thrown);
+            status = kiln_c99_create_data_property(host, target, key, value, depth, thrown);
             if (status != KILN_C99_OK) return status;
         }
         return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_BUILTIN) {
+        return kiln_c99_spread_builtin(host, target, source, depth, thrown);
+    }
+    if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_TYPED_ARRAY) {
+        return kiln_c99_spread_snapshot_keys(host, target, source, depth, thrown);
     }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
      * `{...5}` is `{}`, not an error. A string is the exception and is handled below, because
@@ -1237,8 +1290,7 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         source.tag == KILN_VALUE_SYMBOL || source.tag == KILN_VALUE_BIGINT) {
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_TYPED_ARRAY ||
-        source.tag == KILN_VALUE_STRING) {
+    if (source.tag == KILN_VALUE_STRING) {
         /* An indexed value spreads as its own enumerable properties, and those are its indices:
          * `{...[7, 8]}` is `{"0": 7, "1": 8}` and `{..."hi"}` is `{"0": "h", "1": "i"}`.
          *
@@ -1247,27 +1299,16 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
          * elements and `{...[1, , 3]}` has two properties. */
         size_t count = 0;
         size_t at;
-        if (source.tag == KILN_VALUE_ARRAY) {
-            kiln_array *elements = kiln_c99_array_of(source);
-            count = elements->count;
-        } else if (source.tag == KILN_VALUE_TYPED_ARRAY) {
-            count = kiln_c99_typed_array_of(source)->length;
-        } else {
-            uint16_t *units = NULL;
-            int status = kiln_c99_to_units(source, &units, &count);
-            free(units);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        uint16_t *units = NULL;
+        int status = kiln_c99_to_units(source, &units, &count);
+        free(units);
+        if (status != KILN_C99_OK) {
+            return status;
         }
         for (at = 0; at < count; ++at) {
             kiln_value element;
             kiln_value name;
             int status;
-            if (source.tag == KILN_VALUE_ARRAY &&
-                kiln_c99_array_of(source)->elements[at] == KILN_VAL_HOLE) {
-                continue;
-            }
             status = kiln_c99_get_computed(host, source, kiln_c99_number((double)at), &element,
                                            depth, thrown);
             if (status != KILN_C99_OK) {
@@ -1280,21 +1321,15 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             if (name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            /* The headed form, as in the computed write above: the byte adapter would read
-             * the header's words as key bytes. */
-            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr, NULL,
-                                           element, 0, depth, thrown);
+            /* Formatting the index may collect: retain the just-read value until it is
+             * published. */
+            kiln_c99_gc_keep_alive(&element);
+            /* CreateDataProperty keeps object spread from invoking an inherited setter on the
+             * fresh target for a numeric index key. */
+            status = kiln_c99_create_data_property(host, target, name, element, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
-        }
-        /* ...and then whatever the program hung on the value by name, which is own and
-         * enumerable like any other property: `a.total = 1` belongs in the result, and
-         * `Object.keys` already reported it while the spread beside it dropped it. `length` is
-         * not among them, because it is not enumerable. A string and a typed array have no
-         * named store to walk, so for those this falls straight through. */
-        if (source.tag == KILN_VALUE_ARRAY) {
-            named = kiln_c99_array_of(source)->properties;
         }
     } else if (source.tag == KILN_VALUE_OBJECT) {
         named = source;
@@ -1311,11 +1346,46 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             return stored;
         }
     } else {
-        /* Deliberately not `KILN_VALUE_BUILTIN`, even though it has a store: a Node builtin
-         * namespace publishes *enumerable* exports, which live in the interpreter's ABI table
-         * and not in the store a program writes into. Reading only the store would answer `{}`
-         * where the interpreter answers seventeen names -- a silent divergence, which is worse
-         * than the refusal it would replace. */
+        /* Builtin values are handled above through their own-key and descriptor authority. */
+        const char *debug = getenv("KILN_DEBUG_SPREAD");
+        if (debug != NULL && debug[0] != '\0') {
+            const char *tag_name;
+            switch (source.tag) {
+            case KILN_VALUE_UNDEFINED: tag_name = "UNDEFINED"; break;
+            case KILN_VALUE_NULL: tag_name = "NULL"; break;
+            case KILN_VALUE_BOOLEAN: tag_name = "BOOLEAN"; break;
+            case KILN_VALUE_NUMBER: tag_name = "NUMBER"; break;
+            case KILN_VALUE_STRING: tag_name = "STRING"; break;
+            case KILN_VALUE_FUNCTION: tag_name = "FUNCTION"; break;
+            case KILN_VALUE_CELL: tag_name = "CELL"; break;
+            case KILN_VALUE_UNINITIALIZED: tag_name = "UNINITIALIZED"; break;
+            case KILN_VALUE_BUILTIN: tag_name = "BUILTIN"; break;
+            case KILN_VALUE_OBJECT: tag_name = "OBJECT"; break;
+            case KILN_VALUE_ARRAY: tag_name = "ARRAY"; break;
+            case KILN_VALUE_METHOD: tag_name = "METHOD"; break;
+            case KILN_VALUE_GENERATOR: tag_name = "GENERATOR"; break;
+            case KILN_VALUE_DATE: tag_name = "DATE"; break;
+            case KILN_VALUE_HOLE: tag_name = "HOLE"; break;
+            case KILN_VALUE_COLLECTION: tag_name = "COLLECTION"; break;
+            case KILN_VALUE_PROMISE: tag_name = "PROMISE"; break;
+            case KILN_VALUE_SETTLER: tag_name = "SETTLER"; break;
+            case KILN_VALUE_BOUND: tag_name = "BOUND"; break;
+            case KILN_VALUE_SYMBOL: tag_name = "SYMBOL"; break;
+            case KILN_VALUE_REGEXP: tag_name = "REGEXP"; break;
+            case KILN_VALUE_BIGINT: tag_name = "BIGINT"; break;
+            case KILN_VALUE_ARRAY_BUFFER: tag_name = "ARRAY_BUFFER"; break;
+            case KILN_VALUE_TYPED_ARRAY: tag_name = "TYPED_ARRAY"; break;
+            case KILN_VALUE_PROXY: tag_name = "PROXY"; break;
+            case KILN_VALUE_TEMPORAL: tag_name = "TEMPORAL"; break;
+            case KILN_VALUE_COMMONJS_REQUIRE: tag_name = "COMMONJS_REQUIRE"; break;
+            case KILN_VALUE_DATA_VIEW: tag_name = "DATA_VIEW"; break;
+            case KILN_VALUE_RETURN_SIGNAL: tag_name = "RETURN_SIGNAL"; break;
+            case KILN_VALUE_SHARED: tag_name = "SHARED"; break;
+            default: tag_name = "UNKNOWN"; break;
+            }
+            fprintf(stderr, "kiln: debug spread unsupported receiver tag=%d (%s)\n",
+                    (int)source.tag, tag_name);
+        }
         KILN_C99_REFUSE("an object spread of a value with no enumerable property store");
     }
     /* Both stores are created on first use, so a function that never carried a property and an
@@ -1440,9 +1510,12 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         if (object->elements != NULL) {
             for (index = 0; index < object->element_count; ++index) {
                 if (object->elements[index] == KILN_VAL_HOLE) continue;
-                char num_buf[32];
-                size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
-                int status = kiln_c99_put(host, target, num_buf, nlen, kiln_val_to_boundary(object->elements[index]), depth, thrown);
+                kiln_value element = kiln_val_to_boundary(object->elements[index]);
+                kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                kiln_c99_gc_keep_alive(&element);
+                int status = kiln_c99_create_data_property(
+                    host, target, key, element, depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
         }
@@ -1461,7 +1534,14 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             sval = (object->slots != NULL && index < object->slot_capacity)
                        ? kiln_val_to_boundary(object->slots[index])
                        : kiln_c99_undefined();
-            status = kiln_c99_put_mode_key(host, target, skey, skey, sval, 0, depth, thrown);
+            kiln_value key_value;
+            if (!kiln_c99_symbol_of_key_view(skey, &key_value)) {
+                key_value = kiln_c99_stable_key_value(skey);
+            }
+            if (key_value.tag != KILN_VALUE_STRING && key_value.tag != KILN_VALUE_SYMBOL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            status = kiln_c99_create_data_property(host, target, key_value, sval, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -1482,26 +1562,13 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             const kiln_string *key = (const kiln_string *)
                 kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
             kiln_property property;
+            kiln_value key_value;
             kiln_value copied;
-            kiln_value symbol;
             if (!kiln_c99_property_read_own(object, key, key, &property)) continue;
-            if (!property.enumerable) {
-                /* A symbol-keyed property is stored non-enumerable here whatever the program
-                 * asked for: `kiln_c99_own_slot` marks every `@@` key that way, in one place, so
-                 * that none of the walks over own *string* keys has to know about the prefix.
-                 * That rule cannot tell a key the program made enumerable -- `{ [s]: 1 }` --
-                 * from one it hid with a descriptor, and a spread is the one enumeration that
-                 * has to tell them apart, because it is the one that carries symbol keys across.
-                 *
-                 * So this says it cannot. Copying every symbol would take the hidden ones too,
-                 * and skipping them silently drops what the interpreter kept -- which is the
-                 * failure this whole helper exists to stop. A machine slot is not a symbol and
-                 * is not affected: it is skipped, as it should be. */
-                if (!kiln_c99_symbol_of_key_view(property.key, &symbol) ||
-                    property.symbol_hidden) {
-                    continue;
-                }
-            }
+            /* The backing record stores every `@@` key as non-enumerable so ordinary string-key
+             * walks can skip it. `symbol_hidden` carries the language-visible enumerable bit for
+             * symbols; consult that descriptor authority for both strings and symbols here. */
+            if (!kiln_c99_property_is_enumerable(&property)) continue;
             if (property.accessor) {
                 if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                     /* Setter-only: reading it answers `undefined`, and `undefined` is what a
@@ -1509,9 +1576,12 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                      * `"gone" in { ...source }` said false where node says true, because
                      * `CopyDataProperties` creates a property for every enumerable own key it
                      * was given, whatever the read produced. */
-                    status = kiln_c99_put_mode_key(host, target, property.key,
-                                                   property.key,
-                                                   kiln_c99_undefined(), 0, depth, thrown);
+                    kiln_value key_value;
+                    if (!kiln_c99_symbol_of_key_view(property.key, &key_value)) {
+                        key_value = kiln_c99_stable_key_value(property.key);
+                    }
+                    status = kiln_c99_create_data_property(host, target, key_value,
+                                                          kiln_c99_undefined(), depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -1539,15 +1609,28 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             } else {
                 copied = property.value;
             }
-            status = kiln_c99_put_mode_key(host, target, property.key,
-                                           property.key, copied, 0, depth,
-                                           thrown);
+            if (!kiln_c99_symbol_of_key_view(property.key, &key_value)) {
+                key_value = kiln_c99_stable_key_value(property.key);
+            }
+            status = kiln_c99_create_data_property(host, target, key_value, copied, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
         }
     }
     return KILN_C99_OK;
+}
+
+/* Keep both operands live through the entire CopyDataProperties walk, including getter calls,
+ * proxy traps and key allocations. Placing the barriers after the implementation also covers
+ * every early return without relying on the optimizer to keep a last-used input across a later
+ * allocation inside one of the many branch-specific paths. */
+static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+                                  int depth, kiln_value *thrown) {
+    int status = kiln_c99_spread_object_inner(host, target, source, depth, thrown);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&source);
+    return status;
 }
 
 /* ---- Tier 3 of the parallel built-ins: building values on a pool thread (parallel issue 08) --
@@ -1605,6 +1688,7 @@ static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     object->candidate_slots = 0;
     object->candidate_elements = 0;
     object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    object->dictionary_index = NULL;
     kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;

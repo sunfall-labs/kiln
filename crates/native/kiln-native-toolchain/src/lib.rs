@@ -664,7 +664,7 @@ pub struct CompilerProbeFailure {
 }
 
 /// Details from a compile or link process that returned a non-zero status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProcessFailure {
     pub stage: BuildStage,
     pub command: CommandSpec,
@@ -672,6 +672,22 @@ pub struct ProcessFailure {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
+}
+
+// Keep process streams losslessly available as byte fields while making the derived-error
+// diagnostic useful in panic messages and logs that expect text.
+impl fmt::Debug for ProcessFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessFailure")
+            .field("stage", &self.stage)
+            .field("command", &self.command)
+            .field("status", &self.status)
+            .field("stdout", &String::from_utf8_lossy(&self.stdout))
+            .field("stderr", &String::from_utf8_lossy(&self.stderr))
+            .field("elapsed", &self.elapsed)
+            .finish()
+    }
 }
 
 /// Details retained when the compiler process could not be started or collected.
@@ -2157,7 +2173,11 @@ mod tests {
             [
                 ProcessOutput::success("cc version\n", ""),
                 ProcessOutput::success("arm64-apple-darwin24.0.0\n", ""),
-                ProcessOutput::failure(Some(2), "compiler output", "syntax error"),
+                ProcessOutput::failure(
+                    Some(2),
+                    b"compiler output\xff".to_vec(),
+                    b"syntax error\xfe".to_vec(),
+                ),
             ],
             false,
         ));
@@ -2166,12 +2186,17 @@ mod tests {
         let error = toolchain
             .compile_c(&source, directory.join("bad.o"), &CompileOptions::default())
             .expect_err("compile should fail");
+        let display = error.to_string();
+        assert!(display.contains("syntax error�"));
         match error {
             ToolchainError::ProcessFailed(failure) => {
                 assert_eq!(failure.stage, BuildStage::Compile);
                 assert_eq!(failure.status.code, Some(2));
-                assert_eq!(failure.stdout, b"compiler output");
-                assert_eq!(failure.stderr, b"syntax error");
+                assert_eq!(failure.stdout, b"compiler output\xff");
+                assert_eq!(failure.stderr, b"syntax error\xfe");
+                let debug = format!("{failure:?}");
+                assert!(debug.contains("compiler output�"), "{debug}");
+                assert!(debug.contains("syntax error�"), "{debug}");
             }
             other => panic!("unexpected error: {other:?}"),
         }

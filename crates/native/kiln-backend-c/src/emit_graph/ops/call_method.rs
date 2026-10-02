@@ -1249,7 +1249,7 @@ fn emit_map_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
@@ -1373,7 +1373,7 @@ fn emit_filter_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
@@ -1467,7 +1467,7 @@ fn emit_reduce_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      double dacc = {init_dacc}; \
                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
@@ -2765,7 +2765,7 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < count0; ++idx) {{ \
                                  if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
                                      kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
@@ -2844,7 +2844,7 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                  kiln_val elem = arr->elements[idx]; \
@@ -2905,7 +2905,7 @@ pub(super) fn emit_call_method(
                          if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
@@ -3622,7 +3622,14 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int sw = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int sw = s_recv->unit_len >= s_ndl->unit_len; \
+                                 if (sw && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     sw = memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (sw) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, index) != kiln_string_unit_at(s_ndl, index)) {{ sw = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = sw ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -3644,7 +3651,15 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int ew = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv) + (s_recv->unit_len - s_ndl->unit_len), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int ew = s_recv->unit_len >= s_ndl->unit_len; \
+                                 size_t start = ew ? s_recv->unit_len - s_ndl->unit_len : 0; \
+                                 if (ew && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     ew = memcmp(kiln_string_latin1(s_recv) + start, kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (ew) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, start + index) != kiln_string_unit_at(s_ndl, index)) {{ ew = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = ew ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -4142,7 +4157,7 @@ pub(super) fn emit_call_method(
                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
                             {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                 kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
-                                if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
+                                kiln_c99_normalize_closure_receiver(&vreceiver, plain); \
                                 v{v} = KILN_VAL_UNDEFINED; \
                                 int status; \
                                 if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \

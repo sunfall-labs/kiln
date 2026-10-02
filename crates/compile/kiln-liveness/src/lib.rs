@@ -177,6 +177,18 @@ fn demand_namespace_members(
                 }
             }
             Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                // The resolved property points at the final CommonJS provider, but an ESM
+                // barrel still owns the import slot that supplies this re-export. Preserve that
+                // edge just as for ESM-backed exports before demanding the provider itself.
+                mark_reexport_import_live(
+                    graph,
+                    namespace,
+                    name,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                );
                 let newly_live = live.insert(module.clone());
                 let newly_demanded = live_export_slots
                     .entry(module.clone())
@@ -228,6 +240,84 @@ fn demand_namespace_members(
     Ok(())
 }
 
+/// Carry a consumer's member reads through a named export whose value is an imported namespace.
+/// A local export can be the namespace object itself (for example `export { ns }` where `ns` is
+/// `import * as ns`). Looking only at reads in that intermediate module incorrectly concludes
+/// that its namespace import is unused, even when a downstream consumer reads `ns.member`.
+fn demand_exported_namespace_members(
+    graph: &ModuleGraph,
+    origin: &Path,
+    local_slot: u32,
+    consumer_program: &kiln_ir::Program,
+    consumer_slot: u32,
+    consumer_direct_eval: bool,
+    live: &mut BTreeSet<PathBuf>,
+    live_imports: &mut BTreeSet<(PathBuf, usize)>,
+    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
+    namespace_demands: &mut BTreeSet<PathBuf>,
+    partial_namespace_members: &mut BTreeMap<PathBuf, BTreeSet<String>>,
+    queue: &mut VecDeque<PathBuf>,
+) -> Result<(), ModuleGraphError> {
+    let Some(node) = graph.module(origin) else {
+        return Ok(());
+    };
+    let Some((import_index, namespace_import)) =
+        node.program.imports.iter().enumerate().find(|(_, import)| {
+            import.local_slot == local_slot && import.imported == kiln_ir::NAMESPACE_IMPORT
+        })
+    else {
+        return Ok(());
+    };
+    let dependency = node
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == namespace_import.source)
+        .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+            importer: node.path.clone(),
+            source: namespace_import.source.clone(),
+        })?;
+    let target = dependency.target.clone();
+    let newly_live_owner = live.insert(node.path.clone());
+    let newly_demanded_owner = live_export_slots
+        .entry(node.path.clone())
+        .or_default()
+        .insert(local_slot);
+    let newly_imported = live_imports.insert((node.path.clone(), import_index));
+    if newly_live_owner || newly_demanded_owner || newly_imported {
+        queue.push_back(node.path.clone());
+    }
+
+    if let Some(members) =
+        closed_world_namespace_members(consumer_program, consumer_slot, consumer_direct_eval)
+    {
+        partial_namespace_members
+            .entry(target.clone())
+            .or_default()
+            .extend(members.iter().cloned());
+        let newly_live = live.insert(target.clone());
+        if newly_live {
+            queue.push_back(target.clone());
+        }
+        demand_namespace_members(
+            graph,
+            &target,
+            &members,
+            live,
+            live_imports,
+            live_export_slots,
+            namespace_demands,
+            queue,
+        )?;
+    } else {
+        let newly_live = live.insert(target.clone());
+        let newly_demanded = namespace_demands.insert(target.clone());
+        if newly_live || newly_demanded {
+            queue.push_back(target);
+        }
+    }
+    Ok(())
+}
+
 /// A re-export is represented in the resolved export table by its final provider, while the
 /// executable graph still needs the import slot behind the re-export wired into its local binding.
 /// This applies to namespace and named re-exports, including chains of barrels. Follow the
@@ -241,34 +331,137 @@ fn mark_reexport_import_live(
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     queue: &mut VecDeque<PathBuf>,
 ) {
-    if package_declares_no_side_effects(owner, graph.project_root()) {
+    let Some(resolved) = graph.resolved_export(owner, exported_name).cloned() else {
+        return;
+    };
+    mark_resolved_export_path_live(
+        graph,
+        owner,
+        exported_name,
+        &resolved,
+        live,
+        live_imports,
+        live_export_slots,
+        queue,
+        &mut BTreeSet::new(),
+    );
+}
+
+/// Keep the intermediate export slots that make a public name resolve. The graph's resolved
+/// export table flattens a chain of barrels to its final provider, but release DCE must retain
+/// named re-export rows below any live `export *` barrels as well.
+fn mark_resolved_export_path_live(
+    graph: &ModuleGraph,
+    owner: &Path,
+    exported_name: &str,
+    resolved: &ResolvedExport,
+    live: &mut BTreeSet<PathBuf>,
+    live_imports: &mut BTreeSet<(PathBuf, usize)>,
+    live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
+    queue: &mut VecDeque<PathBuf>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) {
+    if !visited.insert((owner.to_path_buf(), exported_name.to_owned())) {
         return;
     }
     let Some(node) = graph.module(owner) else {
         return;
     };
-    let Some(export) = node.program.exports.iter().find(|export| {
+
+    if node.source == ModuleSource::CommonJs {
+        if matches!(resolved, ResolvedExport::CommonJsNamed { module, .. } if module == owner)
+            || matches!(resolved, ResolvedExport::Local { module, local_slot: 0 } if module == owner)
+        {
+            let newly_live = live.insert(owner.to_path_buf());
+            let newly_demanded = live_export_slots
+                .entry(owner.to_path_buf())
+                .or_default()
+                .insert(0);
+            if newly_live || newly_demanded {
+                queue.push_back(owner.to_path_buf());
+            }
+        }
+        return;
+    }
+
+    if let Some(export) = node.program.exports.iter().find(|export| {
         !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
             && export.exported == exported_name
-    }) else {
+    }) {
+        let newly_live = live.insert(node.path.clone());
+        let newly_demanded = live_export_slots
+            .entry(node.path.clone())
+            .or_default()
+            .insert(export.local_slot);
+        if newly_live || newly_demanded {
+            queue.push_back(node.path.clone());
+        }
+        if let Some((index, import)) = node
+            .program
+            .imports
+            .iter()
+            .enumerate()
+            .find(|(_, import)| import.local_slot == export.local_slot)
+        {
+            let newly_imported = live_imports.insert((node.path.clone(), index));
+            if newly_imported {
+                queue.push_back(node.path.clone());
+            }
+            if import.imported != kiln_ir::NAMESPACE_IMPORT
+                && let Some(dependency) = node
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == import.source)
+                && graph.resolved_export(&dependency.target, &import.imported) == Some(resolved)
+            {
+                mark_resolved_export_path_live(
+                    graph,
+                    &dependency.target,
+                    &import.imported,
+                    resolved,
+                    live,
+                    live_imports,
+                    live_export_slots,
+                    queue,
+                    visited,
+                );
+            }
+        }
         return;
-    };
-    let Some(import_index) = node
+    }
+
+    // An export-star has no per-name import slot. Walk the star edge(s) which resolve to the
+    // same canonical origin; this also handles arbitrarily nested barrel chains and cycles.
+    for star in node
         .program
-        .imports
+        .exports
         .iter()
-        .position(|import| import.local_slot == export.local_slot)
-    else {
-        return;
-    };
-    let newly_imported = live_imports.insert((node.path.clone(), import_index));
-    let newly_live = live.insert(node.path.clone());
-    let newly_demanded = live_export_slots
-        .entry(node.path.clone())
-        .or_default()
-        .insert(export.local_slot);
-    if newly_live || newly_demanded || newly_imported {
-        queue.push_back(node.path.clone());
+        .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+    {
+        let Some(dependency) = node
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.specifier == star)
+        else {
+            continue;
+        };
+        if graph.resolved_export(&dependency.target, exported_name) != Some(resolved) {
+            continue;
+        }
+        if live.insert(node.path.clone()) {
+            queue.push_back(node.path.clone());
+        }
+        mark_resolved_export_path_live(
+            graph,
+            &dependency.target,
+            exported_name,
+            resolved,
+            live,
+            live_imports,
+            live_export_slots,
+            queue,
+            visited,
+        );
     }
 }
 
@@ -459,8 +652,31 @@ pub fn select_executable_modules<'a>(
                     if newly_demanded {
                         queue.push_back(module.clone());
                     }
+                    demand_exported_namespace_members(
+                        graph,
+                        module,
+                        *local_slot,
+                        &node.program.program,
+                        import.local_slot,
+                        direct_eval,
+                        &mut live,
+                        &mut live_imports,
+                        &mut live_export_slots,
+                        &mut namespace_demands,
+                        &mut partial_namespace_members,
+                        &mut queue,
+                    )?;
                 }
                 Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                    mark_reexport_import_live(
+                        graph,
+                        &dependency.target,
+                        &import.imported,
+                        &mut live,
+                        &mut live_imports,
+                        &mut live_export_slots,
+                        &mut queue,
+                    );
                     let newly_demanded = live_export_slots
                         .entry(module.clone())
                         .or_default()
@@ -555,6 +771,15 @@ pub fn select_executable_modules<'a>(
                         }
                     }
                     Some(ResolvedExport::CommonJsNamed { module, .. }) => {
+                        mark_reexport_import_live(
+                            graph,
+                            &path,
+                            &name,
+                            &mut live,
+                            &mut live_imports,
+                            &mut live_export_slots,
+                            &mut queue,
+                        );
                         let newly_demanded = live_export_slots
                             .entry(module.clone())
                             .or_default()
@@ -932,6 +1157,240 @@ exports.annotations = function (ast, values) { return values; };
                 .get(&child)
                 .is_some_and(|slots| slots.contains(&0))
         );
+    }
+
+    #[test]
+    fn named_exported_namespace_carries_consumer_member_demands_through_barrels() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-namespace-alias-{stamp}"));
+        fs::create_dir_all(&root).expect("create project fixture");
+        let root = fs::canonicalize(&root).expect("canonicalize root");
+        let _cleanup = TempProject(root.clone());
+        fs::write(root.join("package.json"), r#"{"type":"module"}"#).expect("write package format");
+        fs::write(
+            root.join("entry.mjs"),
+            r#"import { ns } from "./barrel.mjs"; console.log(ns.answer);"#,
+        )
+        .expect("write consumer");
+        fs::write(
+            root.join("barrel.mjs"),
+            r#"export { ns } from "./holder.mjs";"#,
+        )
+        .expect("write barrel");
+        fs::write(
+            root.join("holder.mjs"),
+            r#"import * as ns from "./provider.mjs"; export { ns };"#,
+        )
+        .expect("write namespace holder");
+        fs::write(
+            root.join("provider.mjs"),
+            r#"export const answer = 42; export const unused = 7;"#,
+        )
+        .expect("write namespace provider");
+
+        let entry = root.join("entry.mjs");
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = kiln_module_graph::ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build namespace alias graph");
+        let holder = fs::canonicalize(root.join("holder.mjs")).expect("canonical holder path");
+        let provider =
+            fs::canonicalize(root.join("provider.mjs")).expect("canonical provider path");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("select namespace alias");
+
+        assert!(selection.live_imports.contains(&(holder.clone(), 0)));
+        assert_eq!(
+            selection.partial_namespace_members.get(&provider),
+            Some(&BTreeSet::from(["answer".to_owned()]))
+        );
+        let answer_slot = match graph.resolved_export(&provider, "answer") {
+            Some(ResolvedExport::Local { local_slot, .. }) => *local_slot,
+            other => panic!("expected local provider export, got {other:?}"),
+        };
+        assert!(
+            selection
+                .live_export_slots
+                .get(&provider)
+                .is_some_and(|slots| slots.contains(&answer_slot))
+        );
+
+        fs::write(
+            root.join("entry.mjs"),
+            r#"import { ns } from "./barrel.mjs"; consume(ns); function consume(value) { console.log(value.answer); }"#,
+        )
+        .expect("write escaping consumer");
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = kiln_module_graph::ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build escaping namespace alias graph");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("select escaping namespace alias");
+        let unused_slot = match graph.resolved_export(&provider, "unused") {
+            Some(ResolvedExport::Local { local_slot, .. }) => *local_slot,
+            other => panic!("expected local provider export, got {other:?}"),
+        };
+        assert!(!selection.partial_namespace_members.contains_key(&provider));
+        assert!(
+            selection
+                .live_export_slots
+                .get(&provider)
+                .is_some_and(|slots| slots.contains(&answer_slot) && slots.contains(&unused_slot))
+        );
+    }
+
+    #[test]
+    fn named_reexport_chain_keeps_each_import_edge_live() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-named-reexport-{stamp}"));
+        fs::create_dir_all(&root).expect("create project fixture");
+        let root = fs::canonicalize(&root).expect("canonicalize root");
+        let _cleanup = TempProject(root.clone());
+        fs::write(
+            root.join("package.json"),
+            r#"{"type":"module","sideEffects":false}"#,
+        )
+        .expect("write package metadata");
+        fs::write(
+            root.join("entry.mjs"),
+            r#"import { publicName } from "./barrel.mjs"; publicName();"#,
+        )
+        .expect("write entry");
+        fs::write(
+            root.join("barrel.mjs"),
+            r#"import { implementation as localName } from "./provider.mjs"; export { localName as publicName };"#,
+        )
+        .expect("write barrel");
+        fs::write(
+            root.join("provider.mjs"),
+            r#"export function implementation() { return 42; }"#,
+        )
+        .expect("write provider");
+
+        let entry = root.join("entry.mjs");
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(&root).expect("Node resolver");
+        let graph = kiln_module_graph::ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build ESM graph");
+        let selection = select_executable_modules(&graph, &SelectionOptions::development())
+            .expect("select executable modules");
+        let demand = selection.demand();
+        let (reduced, reduced_demand) = graph
+            .reduce_to_live(&demand)
+            .expect("reduce graph with reexports");
+        let entry = fs::canonicalize(root.join("entry.mjs")).expect("entry path");
+        let entry_node = graph.module(&entry).expect("entry module");
+        let entry_import = entry_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local == "publicName")
+            .expect("entry named import");
+        assert!(demand.live_imports.contains(&(entry.clone(), entry_import)));
+        let reduced_entry = reduced.module(&entry).expect("reduced entry");
+        let reduced_entry_import = reduced_entry
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local == "publicName")
+            .expect("reduced entry named import");
+        assert!(
+            reduced_demand
+                .live_imports
+                .contains(&(entry.clone(), reduced_entry_import))
+        );
+
+        let barrel = fs::canonicalize(root.join("barrel.mjs")).expect("barrel path");
+        let provider = fs::canonicalize(root.join("provider.mjs")).expect("provider path");
+        let resolved = graph
+            .resolved_export(&barrel, "publicName")
+            .expect("resolve barrel export");
+        let ResolvedExport::Local {
+            module: resolved_provider,
+            local_slot,
+        } = resolved
+        else {
+            panic!("named barrel export should resolve to a local provider slot");
+        };
+        assert_eq!(resolved_provider, &provider);
+        assert!(
+            demand
+                .slots
+                .get(&provider)
+                .is_some_and(|slots| slots.contains(local_slot))
+        );
+
+        // Imported-local exports are lowered to a dedicated synthetic import slot. That is the
+        // row liveness must retain for graph linkage; the original source import can remain dead.
+        let barrel_node = graph.module(&barrel).expect("barrel module");
+        let export = barrel_node
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == "publicName")
+            .expect("barrel export");
+        let synthetic_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export.local_slot)
+            .expect("synthetic reexport import");
+        assert!(
+            demand
+                .live_imports
+                .contains(&(barrel.clone(), synthetic_import))
+        );
+        let reduced_barrel = reduced.module(&barrel).expect("reduced barrel");
+        let reduced_export = reduced_barrel
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == "publicName")
+            .expect("reduced barrel export");
+        let reduced_synthetic_import = reduced_barrel
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == reduced_export.local_slot)
+            .expect("reduced synthetic reexport import");
+        assert!(
+            reduced_demand
+                .live_imports
+                .contains(&(barrel.clone(), reduced_synthetic_import))
+        );
+        assert!(
+            !reduced_barrel
+                .program
+                .imports
+                .iter()
+                .any(|import| import.local == "localName")
+        );
+        assert!(reduced.module(&provider).is_some());
     }
 }
 

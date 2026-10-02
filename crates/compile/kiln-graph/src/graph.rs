@@ -1077,8 +1077,10 @@ pub fn build_function_graph(
     // pre-branch value after the join. Stack merges (`c ? a : b`) get their phis when the first
     // frame arrives, because only then is the depth known.
     let mut static_preds: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+    let mut static_succs: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
     if jumps_to_zero {
         static_preds[1].push(BlockId(0));
+        static_succs[0].push(BlockId(1));
     }
     for (i, &(start, end)) in block_ranges.iter().enumerate() {
         let b_idx = i + block_offset;
@@ -1119,7 +1121,32 @@ pub fn build_function_graph(
             if !list.contains(&this) {
                 list.push(this);
             }
+            let list = &mut static_succs[this.0 as usize];
+            if !list.contains(&succ) {
+                list.push(succ);
+            }
         }
+    }
+    // Frame lowering must distinguish a reachable block whose incoming frame has not yet been
+    // visited (for example, a loop back-edge) from a syntactically present but unreachable
+    // block. A dead block after `Throw` can contain a jump into a live join; allowing that edge
+    // into `static_preds` creates a stack phi from the dead block's empty fallback frame, which
+    // may become the first frame observed by the join. Compute reachability from CFG edges before
+    // allocating merge frames, retaining conservative handler and suspension edges above.
+    let mut reachable = vec![false; num_blocks];
+    let mut pending = vec![BlockId(0)];
+    reachable[0] = true;
+    while let Some(from) = pending.pop() {
+        for &to in &static_succs[from.0 as usize] {
+            let index = to.0 as usize;
+            if !reachable[index] {
+                reachable[index] = true;
+                pending.push(to);
+            }
+        }
+    }
+    for preds in &mut static_preds {
+        preds.retain(|pred| reachable[pred.0 as usize]);
     }
     // A suspending body keeps its locals in the frame, where the runtime and every later call
     // find them, and reads them back at the start of every block: no local crosses a block in
@@ -1176,6 +1203,9 @@ pub fn build_function_graph(
         // A handler block merges nothing: a throw can happen mid-block, when the locals are
         // half stored, so its locals come from the array and its stack is fixed at the push.
         let this = BlockId(b_idx as u32);
+        if !reachable[b_idx] {
+            continue;
+        }
         let resume_depth = resume_depths.get(&this).copied();
         if handler_targets.contains(&this) || (preds.len() < 2 && resume_depth.is_none()) {
             continue;
@@ -1254,6 +1284,19 @@ pub fn build_function_graph(
     for (i, &(start, end)) in block_ranges.iter().enumerate() {
         let b_idx = i + block_offset;
         let block_id = BlockId(b_idx as u32);
+        if !reachable[b_idx] {
+            // Keep block ids dense until graph pruning runs, but do not interpret dead bytecode
+            // from an empty frame or let it manufacture CFG edges into reachable joins.
+            basic_blocks.push(BasicBlock {
+                id: block_id,
+                operations: Vec::new(),
+                terminator: Terminator::Unreachable,
+                predecessors: Vec::new(),
+                successors: Vec::new(),
+                exception_handler: None,
+            });
+            continue;
+        }
         let mut frame = block_entry_frames
             .get(&block_id)
             .cloned()
@@ -3058,9 +3101,10 @@ mod dead_phi_tests {
 
     #[test]
     fn delegate_resume_and_completion_edges_supply_phi_inputs() {
-        // The post-YieldStar loop is intentionally tiny: block 3 is the ordinary resume path,
-        // while block 8 is both the ordinary done path and the delegate-completion path. Both
-        // targets must have complete phis before C emission is allowed to run.
+        // The post-YieldStar loop is intentionally tiny: the resume path stores and tests the
+        // sent value, looping back to the delegate when false. Its true path reaches pc 9 through
+        // an ordinary done edge, while YieldStar also has a synthetic completion edge to pc 9.
+        // Both targets must have complete phis before C emission is allowed to run.
         let proto = FunctionProto {
             inferred_name: None,
             span: Span::default(),
@@ -3077,14 +3121,15 @@ mod dead_phi_tests {
             mapped_arguments: false,
             local_count: 1,
             code: vec![
-                Instruction::Const(0),      // wrapped flag placeholder
-                Instruction::Const(0),      // iterator placeholder
-                Instruction::Const(0),      // yielded value
-                Instruction::YieldStar(8),  // synthetic edges to pc 4 and pc 8
-                Instruction::StoreLocal(0), // resume sent value
-                Instruction::Jump(0),       // loop back to the delegate
-                Instruction::Const(0),      // ordinary done value
-                Instruction::Jump(8),       // ordinary predecessor of the exit
+                Instruction::Const(0),       // wrapped flag placeholder
+                Instruction::Const(0),       // iterator placeholder
+                Instruction::Const(0),       // yielded value
+                Instruction::YieldStar(9),   // synthetic edges to pc 4 and pc 9
+                Instruction::StoreLocal(0),  // resume sent value
+                Instruction::LoadLocal(0),   // sent value controls completion
+                Instruction::JumpIfFalse(0), // loop back while the delegate is incomplete
+                Instruction::Const(0),       // ordinary done value
+                Instruction::Jump(9),        // ordinary predecessor of the exit
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
@@ -3118,6 +3163,64 @@ mod dead_phi_tests {
             "ordinary and delegate completion edges"
         );
         assert!(exit.operations.iter().any(|(_, op)| matches!(op, GraphOp::Phi { inputs } if inputs.len() == exit.predecessors.len())));
+    }
+
+    #[test]
+    fn unreachable_post_throw_jump_does_not_supply_a_join_frame() {
+        // The false branch throws, so the jump immediately after Throw has no frame. If that
+        // dead block is included in the static predecessor count, it can seed the return block
+        // with an empty stack before the live edge supplies the return value.
+        let proto = FunctionProto {
+            inferred_name: None,
+            span: Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("dead_throw_edge".into()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![
+                Instruction::Const(0),
+                Instruction::JumpIfTruthy(5),
+                Instruction::Const(1),
+                Instruction::Throw,
+                Instruction::Jump(9),
+                Instruction::Const(2),
+                Instruction::Jump(9),
+                Instruction::Nop,
+                Instruction::Nop,
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        };
+        let mut program = Program::default();
+        program.constants.extend([
+            Constant::Boolean(true),
+            Constant::String("unreachable".into()),
+            Constant::Number(42.0f64.to_bits()),
+        ]);
+
+        let graph = build_function_graph(&proto, &program).expect("graph builds");
+        verify_function_graph(&graph).expect("reachable join has complete frame inputs");
+        let returned = graph
+            .blocks
+            .iter()
+            .find_map(|block| match block.terminator {
+                Terminator::Return(value) => value,
+                _ => None,
+            })
+            .expect("live branch returns a value");
+        assert!(
+            proven_numbers(&graph).contains(&returned),
+            "constant true branch must return 42, not an empty-frame undefined"
+        );
     }
 
     #[test]

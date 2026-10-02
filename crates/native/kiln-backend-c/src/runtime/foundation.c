@@ -3,6 +3,8 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
                                                                kiln_val value);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
+int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key,
+                                  kiln_value value, int depth, kiln_value *thrown);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
@@ -410,6 +412,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                                     kiln_value *thrown);
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
                                       int depth, kiln_value *thrown);
+int kiln_c99_describe_property_value(kiln_host *host, kiln_value target, kiln_value key,
+                                     kiln_value *out, int *found, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
                                       size_t key_len, kiln_value *out, int *found, int depth,
                                       kiln_value *thrown);
@@ -632,6 +637,10 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create);
+static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
+                                             const kiln_string *canonical,
+                                             kiln_property *out);
+static kiln_value kiln_c99_object_prototype_read(kiln_value owner);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message);
 static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,

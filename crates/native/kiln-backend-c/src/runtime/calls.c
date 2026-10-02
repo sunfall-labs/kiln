@@ -776,6 +776,15 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     return KILN_C99_OK;
 }
 
+int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure) {
+    if (receiver == NULL || closure == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (!closure->arrow && !closure->strict &&
+        (*receiver == KILN_VAL_UNDEFINED || *receiver == KILN_VAL_NULL)) {
+        return kiln_c99_global_object_val(receiver);
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
                              kiln_val receiver, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown) {
@@ -783,9 +792,8 @@ static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);
         if (KILN_LIKELY(!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {
             kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
-            if (!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL)) {
-                (void)kiln_c99_global_object_val(&vreceiver);
-            }
+            int receiver_status = kiln_c99_normalize_closure_receiver(&vreceiver, plain);
+            if (receiver_status != KILN_C99_OK) return receiver_status;
             *result = KILN_VAL_UNDEFINED;
             return kiln_c99_invoke_closure(host, result, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
         }

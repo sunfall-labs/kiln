@@ -1606,3 +1606,42 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn split_instantiation_call_sites_use_declared_shared_receiver_helper() {
+    let mut module = super::module(
+        super::program(
+            vec![
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("toString".into()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::CallMethod { name: 1, argc: 0 },
+                Instruction::Return,
+            ],
+            0,
+        ),
+        Vec::new(),
+        Vec::new(),
+    );
+    module.link_facts.module_instantiation_end = 2;
+
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture/instantiate-method.js",
+        EmissionPolicy::default(),
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation entry emitted");
+
+    assert!(
+        instantiation
+            .source
+            .contains("kiln_c99_normalize_closure_receiver")
+    );
+    assert!(runtime_prelude_header().contains(
+        "extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);"
+    ));
+}

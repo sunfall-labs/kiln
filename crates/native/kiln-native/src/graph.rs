@@ -3411,7 +3411,7 @@ static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t 
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
     if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7))
         return kiln_c99_file_url_matches_path(s, path, path_len);
-    return kiln_c99_string_matches_utf8(s, path, path_len);
+    return kiln_string_equals_utf8(s, path, path_len);
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -3435,7 +3435,7 @@ extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
-extern int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
+extern int kiln_realm_argv_at(uint64_t index, const uint8_t **bytes, uint64_t *length);
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,

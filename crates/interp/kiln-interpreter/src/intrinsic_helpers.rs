@@ -1294,9 +1294,6 @@ pub(super) fn delete_property_key(
             if key.matches_ascii("length") {
                 return false;
             }
-            if items.properties.borrow().is_frozen() {
-                return false;
-            }
             let Some(index) = array_index_key(key) else {
                 // Not an index, so it is an ordinary named property of the array and it lives in
                 // the store beside the elements. Reporting `true` without reaching that store
@@ -1305,10 +1302,11 @@ pub(super) fn delete_property_key(
                 // property and restores it and had been restoring one that never left.
                 return remove_exotic_property_key(&items.properties, key);
             };
+            let frozen = items.properties.borrow().is_frozen();
             // An element a program locked down will not go, and `delete` reports that
             // rather than leaving `length` describing an array that no longer matches it.
             if let Some(entry) = array_exotic_element(items, index) {
-                if !entry.attributes.configurable {
+                if frozen || !entry.attributes.configurable {
                     return false;
                 }
                 items
@@ -1317,6 +1315,12 @@ pub(super) fn delete_property_key(
                     .retain(|other| other.index != index);
             }
             if let Some(slot) = items.borrow_mut().get_mut(index) {
+                // A frozen dense element is present even though it has no per-element entry in
+                // the exotic-property list. Check presence before the frozen state so deleting a
+                // hole in a frozen array still correctly reports success.
+                if frozen && !matches!(slot, Value::Native(Native::Hole, _)) {
+                    return false;
+                }
                 items.sparse.set(true);
                 *slot = Value::Native(Native::Hole, RealmId::PRIMARY);
             }
@@ -2393,11 +2397,7 @@ pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> 
                 index += 1;
             }
         }
-        let normalized = if flags.contains('v') {
-            kiln_regexp::normalize_unicode_sets_pattern(&codepoints)
-        } else {
-            codepoints.clone()
-        };
+        let normalized = kiln_regexp::normalize_pattern_for_flags(codepoints, flags)?;
         let compiled = Arc::new(regress::Regex::from_unicode(normalized.into_iter(), flags).ok()?);
         if cacheable {
             compiled_regexp_cache()

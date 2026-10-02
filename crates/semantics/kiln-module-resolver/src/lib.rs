@@ -421,6 +421,8 @@ pub enum InvalidSpecifierReason {
     UrlScheme,
     BarePackage,
     EmbeddedNul,
+    InvalidPercentEncoding,
+    EncodedPathSeparator,
 }
 
 impl InvalidSpecifierReason {
@@ -431,6 +433,8 @@ impl InvalidSpecifierReason {
             Self::UrlScheme => "URL schemes are not supported",
             Self::BarePackage => "bare package specifiers are not supported",
             Self::EmbeddedNul => "embedded NUL is not supported",
+            Self::InvalidPercentEncoding => "invalid percent encoding in file URL path",
+            Self::EncodedPathSeparator => "encoded path separators are not supported",
         }
     }
 }
@@ -850,6 +854,29 @@ impl NodePackageResolver {
             })
         ) {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
+                // Only percent-escaped ESM file URLs need URL decoding. Keep the package
+                // resolver's established extension aliases and package metadata path for all
+                // ordinary relative requests, and preserve CommonJS's raw-path behavior.
+                if request == NodeRequestKind::Import && specifier.contains('%') {
+                    let canonical_importer = canonical_importer(importer, self.project_root())?;
+                    // The decoded path may legitimately contain `?` or `#`, which are filename
+                    // bytes here rather than URL query/fragment delimiters. Do not feed it back
+                    // through a specifier parser; validate the exact file URL target directly.
+                    let target = decode_esm_relative_specifier(specifier, &canonical_importer)?;
+                    let canonical_target =
+                        fs::canonicalize(&target).map_err(|error| ResolveError::Io {
+                            role: PathRole::Target,
+                            path: target.clone(),
+                            kind: error.kind(),
+                        })?;
+                    let package_json = nearest_package_json(&canonical_target);
+                    return validate_node_target(
+                        canonical_target,
+                        ResolutionKind::Relative,
+                        package_json,
+                        self.project_root(),
+                    );
+                }
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
                 let decoded = percent_decode_specifier(specifier);
@@ -892,6 +919,60 @@ impl NodePackageResolver {
             self.project_root(),
         )
     }
+}
+
+fn nearest_package_json(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            return Some(manifest);
+        }
+        directory = current.parent();
+    }
+    None
+}
+
+/// Decode a relative ESM URL path for filesystem resolution. Encoded path separators are
+/// rejected, matching file-URL module loading, while escaped `#`, `?`, `%`, and UTF-8 bytes are
+/// ordinary filename characters after URL decoding.
+fn decode_esm_relative_specifier(
+    specifier: &str,
+    importer: &Path,
+) -> Result<PathBuf, ResolveError> {
+    let invalid = |reason| ResolveError::InvalidSpecifier {
+        specifier: specifier.to_owned(),
+        reason,
+    };
+    let bytes = specifier.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            }
+            let hex = |byte: u8| (byte as char).to_digit(16);
+            let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) else {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            };
+            let escaped = ((high << 4) | low) as u8;
+            if matches!(escaped, b'/' | b'\\') {
+                return Err(invalid(InvalidSpecifierReason::EncodedPathSeparator));
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    let base = url::Url::from_file_path(importer)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let target = base
+        .join(specifier)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let path = target
+        .to_file_path()
+        .map_err(|_| invalid(InvalidSpecifierReason::EncodedPathSeparator))?;
+    Ok(path)
 }
 
 fn validate_node_target(
@@ -1041,15 +1122,8 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
     ) {
         return node_module_format(path, None);
     }
-    let mut directory = path.parent();
-    while let Some(current) = directory {
-        let manifest = current.join("package.json");
-        if manifest.is_file() {
-            return node_module_format(path, Some(&manifest));
-        }
-        directory = current.parent();
-    }
-    node_module_format(path, None)
+    let manifest = nearest_package_json(path);
+    node_module_format(path, manifest.as_deref())
 }
 
 /// Whether Node leaves this path's module format to syntax detection.
@@ -1828,6 +1902,12 @@ mod tests {
         assert_eq!(resolved_tsx.kind, ResolutionKind::Relative);
         assert_eq!(resolved_tsx.path, fs::canonicalize(target_tsx).unwrap());
 
+        let node_resolver = NodeRuntimeResolver::new(&project.root).expect("valid node resolver");
+        let node_alias = node_resolver
+            .resolve_for_request("./dep.js", &importer, NodeRequestKind::Import)
+            .expect("ordinary ESM imports retain the .js to .ts alias");
+        assert_eq!(node_alias.path, resolved_ts.path);
+
         // A missing relative module reports as module resolution failure, not package not found
         let err = resolver
             .resolve("./nonexistent.js", &importer)
@@ -2376,6 +2456,83 @@ mod tests {
             .expect("Node require resolves the .js extension");
 
         assert_eq!(resolved.path, target);
+    }
+
+    #[test]
+    fn esm_relative_specifiers_decode_file_url_escapes_but_require_does_not() {
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        let importer = project.write("main.mjs", "");
+        let decoded_target = project.write("identity #%? ü 😀.js", "export {};");
+        let raw_target = project.write(
+            "identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js",
+            "module.exports = {};",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let encoded = "./identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js";
+
+        let imported = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("ESM URL escapes resolve to filename bytes");
+        assert_eq!(imported.path, fs::canonicalize(decoded_target).unwrap());
+        assert_eq!(
+            node_module_format_for_path(&imported.path).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("decoded JS target retains package metadata");
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("package.json"))
+        );
+
+        let required = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Require)
+            .expect("CommonJS keeps literal percent escapes in its path");
+        assert_eq!(required.path, fs::canonicalize(raw_target).unwrap());
+
+        for invalid in ["./bad%2Fname.mjs", "./bad%5cname.mjs", "./bad%XZ.mjs"] {
+            assert!(matches!(
+                resolver.resolve_for_request(invalid, &importer, NodeRequestKind::Import),
+                Err(ResolveError::InvalidSpecifier { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoded_esm_symlink_uses_canonical_target_package_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        let importer = project.write("main.mjs", "");
+        project.write("provider/package.json", r#"{"type":"commonjs"}"#);
+        let target = project.write("provider/real.js", "module.exports = {};\n");
+        let alias = project.root.join("entry #%?.js");
+        symlink(&target, &alias).expect("create encoded-path alias");
+
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(
+                "./entry%20%23%25%3F.js",
+                &importer,
+                NodeRequestKind::Import,
+            )
+            .expect("resolve URL-escaped symlink");
+
+        assert_eq!(metadata.module.path, fs::canonicalize(target).unwrap());
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("provider/package.json"))
+        );
+        assert_eq!(
+            node_module_format_for_path(&metadata.module.path).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
     }
 
     #[test]

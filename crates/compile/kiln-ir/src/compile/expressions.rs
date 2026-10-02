@@ -996,27 +996,27 @@ impl super::Compiler {
             // `a ??= b` reads `a`, and assigns only if it is the wrong one -- so `b` may never
             // be evaluated and the store may never happen. The current value is left on the
             // stack as the expression's result when the store is skipped.
-            self.code.push(load.clone());
+            self.code.extend(load.clone());
             let skip = self.emit_jump(short_circuit_jump(operator));
             self.expression(value);
             self.code.push(Instruction::Dup);
-            self.code.push(store);
+            self.code.extend(store);
             let done = self.emit_jump(Instruction::Jump(0));
             self.patch_jump(skip);
-            self.code.push(load);
+            self.code.extend(load);
             self.patch_jump(done);
             return;
         }
         if operator == AssignmentOperator::Assign {
             self.expression(value);
         } else {
-            self.code.push(load);
+            self.code.extend(load);
             self.expression(value);
             self.code
                 .push(Instruction::Binary(compound_operator(operator)));
         }
         self.code.push(Instruction::Dup);
-        self.code.push(store);
+        self.code.extend(store);
     }
 
     /// Store the value on top of the stack into an existing binding, consuming it.
@@ -1025,20 +1025,19 @@ impl super::Compiler {
     /// operator and no result to leave behind: the pattern walk already holds what it needs.
     pub(super) fn store_existing(&mut self, name: &str, span: Span) {
         if let Some((_, store)) = self.assignment_place(name, span) {
-            self.code.push(store);
+            self.code.extend(store);
         }
     }
 
     /// How to read and write `target`, or `None` when it names nothing.
     ///
-    /// Reports const and imported-binding assignments, and compiles an unresolved name to a
-    /// `ReferenceError` raised where the assignment happens -- so a caller that gets `None` has
-    /// already had its diagnostic or its throw emitted and should emit nothing more.
+    /// Resolves the read and PutValue sequence, preserving runtime errors for immutable
+    /// bindings. An unresolved strict name is checked before RHS evaluation.
     pub(super) fn assignment_place(
         &mut self,
         target: &str,
         span: Span,
-    ) -> Option<(Instruction, Instruction)> {
+    ) -> Option<(Vec<Instruction>, Vec<Instruction>)> {
         // Whether the target is a frame local or a module slot decides the store instruction,
         // so it has to be carried alongside the slot rather than assumed.
         enum Place {
@@ -1047,15 +1046,27 @@ impl super::Compiler {
             Upvalue(u32),
             Global(u32),
         }
-        let (place, kind, imported) = match self.resolve_or_capture(target) {
+        let (place, kind, imported, needs_tdz_check) = match self.resolve_or_capture(target) {
             Resolution::Local(local) if local.celled => {
-                (Place::Cell(local.slot), local.kind, local.imported)
+                (Place::Cell(local.slot), local.kind, local.imported, false)
             }
-            Resolution::Local(local) => (Place::Local(local.slot), local.kind, local.imported),
+            Resolution::Local(local) => (
+                Place::Local(local.slot),
+                local.kind,
+                local.imported,
+                !local.initialized,
+            ),
             Resolution::Upvalue(index) => {
-                // The owning declaration decides const-ness, and it was checked where the name
-                // was captured; an upvalue carries no separate mutability of its own.
-                (Place::Upvalue(index), VariableKind::Let, false)
+                // Capture addresses do not carry declaration kind. Consult the same nearest
+                // enclosing declaration that resolve_or_capture selected for this upvalue.
+                let owner = self
+                    .enclosing
+                    .iter()
+                    .rev()
+                    .flat_map(|level| level.scopes.iter().rev())
+                    .find_map(|scope| scope.get(target))
+                    .expect("captured assignment has an owning declaration");
+                (Place::Upvalue(index), owner.kind, owner.imported, false)
             }
             Resolution::Global(slot) => {
                 let module = &self.enclosing[0].scopes[0];
@@ -1063,7 +1074,16 @@ impl super::Compiler {
                     .get(target)
                     .copied()
                     .expect("Global resolution just found this name in module scope");
-                (Place::Global(slot), local.kind, local.imported)
+                (
+                    Place::Global(slot),
+                    local.kind,
+                    local.imported,
+                    // Module slots retain their own uninitialized state, and LoadGlobal reads
+                    // that cell at call time. The function may be compiled before the module
+                    // declaration but invoked after its initializer, so compiler-order state
+                    // cannot stand in for the actual runtime TDZ check here.
+                    false,
+                )
             }
             // A `var` this program declared on the global object. `ThrowReference` reads it and
             // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
@@ -1072,8 +1092,8 @@ impl super::Compiler {
             Resolution::GlobalObject => {
                 let name = self.constant_index(Constant::String(target.to_owned().into()));
                 return Some((
-                    Instruction::ThrowReference(name),
-                    Instruction::StoreGlobalBinding(name),
+                    vec![Instruction::ThrowReference(name)],
+                    vec![Instruction::StoreGlobalBinding(name)],
                 ));
             }
             Resolution::Unresolved => {
@@ -1096,48 +1116,68 @@ impl super::Compiler {
                     self.code.push(Instruction::RequireGlobalBinding(name));
                 }
                 return Some((
-                    Instruction::ThrowReference(name),
-                    if self.strict {
+                    vec![Instruction::ThrowReference(name)],
+                    vec![if self.strict {
                         Instruction::StoreGlobalBindingStrict(name)
                     } else {
                         Instruction::StoreGlobalBinding(name)
-                    },
+                    }],
                 ));
             }
         };
-        let (load, store): (Instruction, Instruction) = match place {
-            Place::Local(slot) => (Instruction::LoadLocal(slot), Instruction::StoreLocal(slot)),
-            Place::Cell(slot) => (Instruction::LoadCell(slot), Instruction::StoreCell(slot)),
+        let is_upvalue = matches!(&place, Place::Upvalue(_));
+        let (load, store): (Vec<Instruction>, Instruction) = match place {
+            Place::Local(slot) => (
+                vec![Instruction::LoadLocal(slot)],
+                Instruction::StoreLocal(slot),
+            ),
+            Place::Cell(slot) => (
+                vec![Instruction::LoadCell(slot)],
+                Instruction::StoreCell(slot),
+            ),
             Place::Upvalue(index) => (
-                Instruction::LoadUpvalue(index),
+                vec![Instruction::LoadUpvalue(index)],
                 Instruction::StoreUpvalue(index),
             ),
             Place::Global(slot) => (
-                Instruction::LoadGlobal(slot),
+                vec![Instruction::LoadGlobal(slot)],
                 Instruction::StoreGlobal(slot),
             ),
         };
-        // Assignment is also a read of the binding's state: `x = 1; let x;` is a ReferenceError,
-        // not a write that makes the later declaration appear to have run. A switch shares one
-        // scope between its cases, so compiler-time `initialized` can be true here after another
-        // case's declaration even when this path reaches the assignment first. Probe the
-        // run-time slot before every lexical write; initialized bindings pay only a load/pop.
-        if kind != VariableKind::Var || matches!(&load, Instruction::LoadUpvalue(_)) {
-            self.code.push(load.clone());
-            self.code.push(Instruction::Pop);
+        let load = if needs_tdz_check {
+            self.uninitialized_read_check()
+        } else {
+            load
+        };
+        // PutValue checks TDZ after the RHS has completed. Compound/update forms already
+        // check their GetValue first; a simple assignment still observes RHS effects before
+        // throwing for an uninitialized lexical binding.
+        let mut prefix = Vec::new();
+        if kind != VariableKind::Var || is_upvalue {
+            prefix.extend(load.iter().cloned());
+            prefix.push(Instruction::Pop);
         }
-        if imported {
-            self.error(
-                Some(span),
-                format!("assignment to imported binding `{target}` is not allowed"),
-            );
-        } else if kind == VariableKind::Const {
-            self.error(
-                Some(span),
-                format!("assignment to const local `{target}` is not supported"),
-            );
-        }
-        Some((load, store))
+        let store = if imported
+            || matches!(
+                kind,
+                VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing
+            ) {
+            // Reaching PutValue is a runtime TypeError, after RHS evaluation. A dead write
+            // must not reject compilation, and a logical assignment may skip PutValue entirely.
+            let message =
+                self.constant_index(Constant::String("Assignment to constant variable.".into()));
+            vec![
+                Instruction::Pop,
+                Instruction::LoadBuiltin(Builtin::TypeError),
+                Instruction::Const(message),
+                Instruction::New { argc: 1 },
+                Instruction::Throw,
+            ]
+        } else {
+            vec![store]
+        };
+        prefix.extend(store);
+        Some((load, prefix))
     }
 
     pub(super) fn return_statement(&mut self, value: Option<&Expression>, span: Span) {
@@ -1279,50 +1319,11 @@ impl super::Compiler {
         target: &str,
         span: Span,
     ) {
-        let (load, store) = match self.resolve_or_capture(target) {
-            Resolution::Local(local) if local.celled => (
-                Instruction::LoadCell(local.slot),
-                Instruction::StoreCell(local.slot),
-            ),
-            Resolution::Local(local) => (
-                Instruction::LoadLocal(local.slot),
-                Instruction::StoreLocal(local.slot),
-            ),
-            Resolution::Upvalue(index) => (
-                Instruction::LoadUpvalue(index),
-                Instruction::StoreUpvalue(index),
-            ),
-            Resolution::Global(slot) => (
-                Instruction::LoadGlobal(slot),
-                Instruction::StoreGlobal(slot),
-            ),
-            Resolution::GlobalObject => {
-                let name = self.constant_index(Constant::String(target.to_owned().into()));
-                (
-                    Instruction::ThrowReference(name),
-                    Instruction::StoreGlobalBinding(name),
-                )
-            }
-            // `x++` on a name nothing bound is settled against the global object, exactly as a
-            // read and a write of it separately would be. The read comes first and is
-            // `ThrowReference`, so an unresolvable name is the `ReferenceError` the language
-            // promises without the compiler having to decide it -- which it cannot: a global the
-            // program installed earlier, or one global code declared with `var`, is resolvable.
-            Resolution::Unresolved => {
-                let _ = span;
-                let name = self.constant_index(Constant::String(target.to_owned().into()));
-                (
-                    Instruction::ThrowReference(name),
-                    if self.strict {
-                        Instruction::StoreGlobalBindingStrict(name)
-                    } else {
-                        Instruction::StoreGlobalBinding(name)
-                    },
-                )
-            }
+        let Some((load, store)) = self.assignment_place(target, span) else {
+            return;
         };
 
-        self.code.push(load);
+        self.code.extend(load);
         // `ToNumeric` first: `x++` where `x` is "5" is 5 then 6, not "5" then "51". Without a
         // conversion the `+ 1` below concatenates, which is the trap the member form fell into --
         // and `ToNumber` is not the conversion an update applies: it narrows a BigInt, so `1n++`
@@ -1340,7 +1341,7 @@ impl super::Compiler {
         if prefix {
             self.code.push(Instruction::Dup);
         }
-        self.code.push(store);
+        self.code.extend(store);
     }
 
     /// An array literal, which may contain spreads.
@@ -1418,10 +1419,10 @@ impl super::Compiler {
     /// language specifies and the one a reader assumes. A compound form has to re-read through
     /// the same pair rather than re-evaluating either, so both are duplicated on the stack.
     ///
-    /// Evaluating the key once is not enough on its own: `ToPropertyKey` is the visible half,
-    /// and leaving it to `GetComputed` and `SetComputed` ran it twice. The compound form converts
-    /// once up front, which is what the specification's Reference Record memoises. The plain form
-    /// must not: there the key converts in `PutValue`, after the right-hand side has run.
+    /// The reference retains the raw key value after evaluating its expression once. `GetComputed`
+    /// and `SetComputed` each perform their own `ToPropertyKey`, as `GetValue` and `PutValue` do
+    /// for a property reference; a key object's coercion can therefore run twice. For a plain
+    /// assignment, only `PutValue` converts, after the right-hand side has run.
     pub(super) fn computed_assignment(
         &mut self,
         operator: AssignmentOperator,
@@ -1437,7 +1438,6 @@ impl super::Compiler {
         self.expression(property);
 
         if operator != AssignmentOperator::Assign {
-            self.code.push(Instruction::ToPropertyKey);
             self.code.push(Instruction::Dup2);
             self.code.push(Instruction::GetComputed);
             self.expression(value);
@@ -1482,12 +1482,9 @@ impl super::Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
-                // The key converts once and the binding keeps the converted one, so the write
-                // below reads the same key the read did rather than running `toString` again.
+                // Keep the raw Reference key in its hidden binding. GetValue and PutValue each
+                // convert it, while the key expression itself still runs only once.
                 self.load_hidden(&key_binding);
-                self.code.push(Instruction::ToPropertyKey);
-                self.code.push(Instruction::Dup);
-                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }
@@ -1595,12 +1592,9 @@ impl super::Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
-                // The key converts once and the binding keeps the converted one, so the write
-                // below reads the same key the read did rather than running `toString` again.
+                // Preserve the raw Reference key: GetValue and PutValue each convert it, but
+                // the key expression is evaluated once.
                 self.load_hidden(&key_binding);
-                self.code.push(Instruction::ToPropertyKey);
-                self.code.push(Instruction::Dup);
-                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }
@@ -2050,6 +2044,42 @@ impl super::Compiler {
                 blocked_var_names: self.parameter_scope.clone().unwrap_or_default(),
             })));
             return;
+        }
+
+        /* An identifier resolved through a `with` object is a Reference whose base is the
+         * first object environment that has the name. A plain `with_scoped_load` correctly
+         * reads the value, but discards that base; calling the resulting value with `undefined`
+         * changes `this` for `with (o) { method() }`. Keep the selected object under the
+         * callee for Apply, and leave argument evaluation until after resolution, as ordinary
+         * call evaluation requires. Parentheses preserve the Identifier AST and use this same
+         * path; comma expressions are values and intentionally take the ordinary path below.
+         */
+        if let ExpressionKind::Identifier(name) = &callee.kind {
+            let scopes = self.with_scopes_for(name);
+            if !scopes.is_empty() {
+                let key = self.constant_index(Constant::String(name.to_owned().into()));
+                let mut found = Vec::with_capacity(scopes.len());
+                for with in &scopes {
+                    self.load_with_object(with);
+                    self.code.push(Instruction::WithHas(key));
+                    let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+                    self.load_with_object(with);
+                    self.code.push(Instruction::Dup);
+                    self.code.push(Instruction::GetProperty(key));
+                    self.array_literal(arguments, span);
+                    self.code.push(Instruction::Apply);
+                    found.push(self.emit_jump(Instruction::Jump(0)));
+                    self.patch_jump(miss);
+                }
+                self.push_constant(Constant::Undefined);
+                self.load_lexically(name);
+                self.array_literal(arguments, span);
+                self.code.push(Instruction::Apply);
+                for jump in found {
+                    self.patch_jump(jump);
+                }
+                return;
+            }
         }
         match &callee.kind {
             // `super.m(...)` resolves the method on the home object's prototype but runs it

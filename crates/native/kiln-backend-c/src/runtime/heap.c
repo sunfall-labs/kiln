@@ -2380,6 +2380,9 @@ static void kiln_c99_heap_profile_count(const kiln_gc_block *block,
         if (detail_serial != 0) kiln_c99_heap_profile_object(block, detail_serial);
         if (object->properties != NULL && !kiln_c99_object_properties_in_block(object))
             side[KILN_PROFILE_PROPERTIES] += object->capacity * sizeof(kiln_property);
+        if (object->dictionary_index != NULL)
+            side[KILN_PROFILE_PROPERTIES] += sizeof(kiln_dictionary_index) +
+                object->dictionary_index->capacity * sizeof(size_t);
         if (object->sealed != NULL) {
             side[KILN_PROFILE_SEALED_VALUES] += sizeof(kiln_sealed_values) +
                 object->slot_capacity * (sizeof(kiln_val) + sizeof(uint32_t));

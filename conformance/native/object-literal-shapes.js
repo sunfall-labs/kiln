@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // Object literals with static keys are built straight into the shape their site learned the
 // first time, instead of one transition per member. Every literal below runs several times from
 // one site, so the later iterations take the remembered shape; the forms the remembered shape
@@ -64,3 +65,24 @@ for (let i = 0; i < 120; i++) {
 let total = 0;
 for (const o of many) total += o.second + o[Object.keys(o)[0]];
 console.log("many first keys", total, "first7" in many[7], JSON.stringify(many[119]));
+
+// The remembered-shape path must publish references through the collector's write barrier too.
+// Each invocation returns fresh nested state and fresh method closures, as in response objects
+// whose methods read and update `this.headers`.
+function makeResponse() {
+  return {
+    headers: {},
+    getHeader(name) { return this.headers[name]; },
+    setHeader(name, value) { this.headers[name] = value; },
+  };
+}
+for (let i = 0; i < 20; i++) {
+  const response = makeResponse();
+  response.setHeader("x-index", i);
+  // Keep allocating between publication and read so stress collection observes the edge.
+  const churn = { marker: i, nested: { keep: response.headers } };
+  if (response.getHeader("x-index") !== i || churn.nested.keep !== response.headers) {
+    throw new Error("remembered literal shape lost a per-instance reference");
+  }
+}
+console.log("remembered literal references", "ok");

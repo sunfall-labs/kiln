@@ -1,33 +1,54 @@
 
-/* Append everything `source` yields to `target`, which is what array spread, `for...of` and
- * destructuring all reduce to.
- *
- * An array and a string are walked directly rather than through their iterators. That is a
- * shortcut the specification does not take, and it is visible to a program that replaces
- * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
- * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+/* Append everything source yields to target, which is what array spread, for...of and
+ * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
+ * the observable @@iterator lookup proves that the canonical method is still selected. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
+    kiln_value method;
     size_t index;
     int status;
-    if (source.tag == KILN_VALUE_ARRAY) {
+    /* Nullish has a distinct not-iterable failure from the property-read error the lookup
+     * would produce. */
+    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+        return kiln_c99_throw_not_iterable(thrown, source);
+    }
+    status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (!kiln_c99_is_callable(method)) {
+        return kiln_c99_throw_not_iterable(thrown, source);
+    }
+
+    /* Exact method identity handles own and subclass overrides; the realm guard protects the
+     * iterator machinery (including its next method) from builtin mutation. The property lookup
+     * above still runs first, so an accessor override keeps its specified side effects. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_ARRAY &&
+        source.bits != target.bits) {
         kiln_array *array = kiln_c99_array_of(source);
         size_t length = array->count;
-        for (index = 0; index < length && index < array->count; ++index) {
-            /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
-             * That is what makes `[...[1, , 3]]` a dense three-element array where `map` over
-             * the same input leaves the hole alone. */
-            status = kiln_c99_array_push(target, array->elements[index] == KILN_VAL_HOLE
-                                                     ? kiln_c99_undefined()
-                                                     : kiln_val_to_boundary(array->elements[index]));
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        int dense = array->properties.tag == KILN_VALUE_UNDEFINED;
+        for (index = 0; dense && index < length; ++index) {
+            dense = array->elements[index] != KILN_VAL_HOLE;
         }
-        return KILN_C99_OK;
+        /* A hole observes inherited indexed properties under the iterator protocol. Keep that
+         * case on the generic path; dense arrays have no such lookup to perform. */
+        if (dense) {
+            for (index = 0; index < length && index < array->count; ++index) {
+                status = kiln_c99_array_push(target,
+                                             kiln_val_to_boundary(array->elements[index]));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            return KILN_C99_OK;
+        }
     }
-    if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES &&
+        source.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(source);
         /* Read each element at the moment it is visited: a view is live over its shared buffer. */
         for (index = 0; index < view->length; ++index) {
@@ -40,7 +61,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_COLLECTION) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_COLLECTION_SELF &&
+        source.tag == KILN_VALUE_COLLECTION) {
         /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
          * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
         kiln_collection *collection = kiln_c99_collection_of(source);
@@ -70,7 +93,8 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_STRING) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_STRING) {
         /* A string iterates as its *characters*, not its code units: an astral character is one
          * step, which is the difference between iterating a string and indexing it. */
         uint16_t *units = NULL;
@@ -95,28 +119,13 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         free(units);
         return KILN_C99_OK;
     }
-    /* Nullish is answered here rather than by the `@@iterator` lookup below, because the two
-     * faults are reported differently: reading a property off null is "Cannot read properties of
-     * null", but *iterating* it is "null is not iterable", and `[...null]` is the second one. */
-    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
-        return kiln_c99_throw_not_iterable(thrown, source);
-    }
-    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
-    if (source.tag == KILN_VALUE_GENERATOR) {
+    /* A generator's intrinsic @@iterator just returns itself; replaced methods still use the
+     * ordinary call path. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_GENERATOR_SELF &&
+        source.tag == KILN_VALUE_GENERATOR) {
         iterator = source;
     } else {
-        kiln_value method;
-        status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        /* No `@@iterator` at all is the ordinary case -- `for (const x of 5)` and `[...null]` --
-         * and the language ends the program there with a TypeError the program may catch, rather
-         * than a fault. The lookup above already answered undefined for a missing `@@` name, so
-         * reaching here means the value genuinely has nothing to iterate with. */
-        if (!kiln_c99_is_callable(method)) {
-            return kiln_c99_throw_not_iterable(thrown, source);
-        }
         status = kiln_c99_call(host, &iterator, method, source, NULL, 0, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
@@ -672,13 +681,32 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
          * slot reads as undefined, `length` is unchanged, and `in` says the element is gone. */
         double slot = kiln_c99_key_index_key(key);
         kiln_array *array = kiln_c99_array_of(target);
-        if (array->frozen) {
+        /* `length` is an own, non-configurable property even though it is stored on the array
+         * header rather than in the named-property store. */
+        if (kiln_c99_same_name_key(key, "length")) {
             *answer = 0;
             return KILN_C99_OK;
         }
-        if (slot >= 0.0 && (size_t)slot < array->count) {
+        if (slot >= 0.0 && (size_t)slot < array->count &&
+            array->elements[(size_t)slot] != KILN_VAL_HOLE) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
             kiln_c99_heap_store_val(array, &array->elements[(size_t)slot], KILN_VAL_HOLE);
             array->is_numeric = 0;
+            return KILN_C99_OK;
+        }
+        /* Named and symbol properties live beside the indexed elements. Deleting one must
+         * reach that ordinary store; otherwise getters that delete a later key leave it visible
+         * to the fresh descriptor check performed by object spread. */
+        if (slot < 0.0 && array->properties.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_store_has(array->properties, key, ikey)) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
+            return kiln_c99_delete_key(host, array->properties, key, ikey, answer, depth, thrown);
         }
         return KILN_C99_OK;
     }
@@ -1173,7 +1201,6 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         kiln_value descriptor;
         kiln_value enumerable;
         kiln_value copied;
-        kiln_value name;
         int found;
         status = kiln_c99_proxy_describe(host, source, key, &descriptor, &found, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -1193,14 +1220,10 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* A symbol is stored under the reserved name it carries, the same spelling every other
-         * write of one uses -- and that name lives on the symbol, so it outlives this frame. */
-        name = kiln_c99_property_key(key);
-        if (name.tag != KILN_VALUE_STRING) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr,
-                                       (const kiln_string *)name.ptr, copied, 0, depth, thrown);
+        /* CopyDataProperties uses CreateDataProperty on its fresh target. Preserve the original
+         * string or symbol key instead of assigning through [[Set]], which could invoke an
+         * inherited setter on Object.prototype. */
+        status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }

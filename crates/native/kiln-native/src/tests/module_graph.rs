@@ -77,6 +77,247 @@ fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
 }
 
 #[test]
+fn native_import_meta_reparse_preserves_indirect_export_origin() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-reexport-origin");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { publicName, aliasName, namespaceName } from './barrel.mjs'; console.log(publicName(), aliasName(), namespaceName.implementation());",
+    )
+    .expect("write entry");
+    let barrel = project.join("barrel.mjs");
+    fs::write(
+        &barrel,
+        "import { implementation as localName } from './provider.mjs'; export { localName as publicName, localName as aliasName }; export * as namespaceName from './provider.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write barrel");
+    let provider = project.join("provider.mjs");
+    fs::write(&provider, "export function implementation() { return 42; }")
+        .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute demand");
+    let old_exports = ["publicName", "aliasName", "namespaceName"].map(|name| {
+        graph
+            .resolved_export(&barrel, name)
+            .expect("original reexport origin")
+            .clone()
+    });
+    assert!(matches!(
+        &old_exports[0],
+        ResolvedExport::Local { module, .. } if module == &provider
+    ));
+    assert_eq!(
+        old_exports[0], old_exports[1],
+        "aliases share provider identity"
+    );
+    assert_eq!(
+        old_exports[2],
+        ResolvedExport::Namespace {
+            module: provider.clone()
+        }
+    );
+
+    let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
+    for (name, old_export) in ["publicName", "aliasName", "namespaceName"]
+        .into_iter()
+        .zip(old_exports.iter())
+    {
+        assert_eq!(
+            reparsed.resolved_export(&barrel, name),
+            Some(old_export),
+            "reparsed origin for {name}"
+        );
+    }
+    let reparsed_barrel = reparsed.module(&barrel).expect("reparsed barrel");
+    for name in ["publicName", "aliasName", "namespaceName"] {
+        let export_slot = reparsed_barrel
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == name)
+            .expect("reparsed export row")
+            .local_slot;
+        let import_index = reparsed_barrel
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export_slot)
+            .expect("reparsed synthetic import row");
+        let import = &reparsed_barrel.program.imports[import_index];
+        assert_eq!(import.source, "./provider.mjs", "source for {name}");
+        assert_eq!(
+            import.imported,
+            if name == "namespaceName" {
+                kiln_ir::NAMESPACE_IMPORT
+            } else {
+                "implementation"
+            },
+            "imported binding for {name}"
+        );
+        assert!(
+            remapped
+                .live_imports
+                .contains(&(barrel.clone(), import_index)),
+            "demand retained for {name}"
+        );
+    }
+
+    let reparsed_entry = reparsed.module(&entry).expect("reparsed entry");
+    let entry_import_index = reparsed_entry
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local == "publicName")
+        .expect("entry import row");
+    let entry_import = &reparsed_entry.program.imports[entry_import_index];
+    let barrel_target = reparsed_entry
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == entry_import.source)
+        .expect("entry barrel dependency")
+        .target
+        .clone();
+    assert_eq!(
+        reparsed
+            .resolved_export(&barrel_target, &entry_import.imported)
+            .expect("reparsed entry resolution"),
+        &old_exports[0]
+    );
+}
+
+#[test]
+fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-release-reexport-origin");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    fs::write(
+        project.join("package.json"),
+        r#"{"type":"module","sideEffects":["./compile.mjs"]}"#,
+    )
+    .expect("write side-effect metadata");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { publicName } from './facade.mjs'; console.log(publicName());",
+    )
+    .expect("write entry");
+    let facade = project.join("facade.mjs");
+    fs::write(
+        &facade,
+        "export * from './index.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write outer star barrel");
+    let barrel = project.join("index.mjs");
+    fs::write(&barrel, "export * from './schemas.mjs';").expect("write star barrel");
+    let schemas = project.join("schemas.mjs");
+    fs::write(
+        &schemas,
+        "export { implementation as deadA } from './provider.mjs'; export { implementation as deadB } from './provider.mjs'; export { implementation as deadC } from './provider.mjs'; export { implementation as publicName } from './provider.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write named re-export barrel");
+    let provider = project.join("provider.mjs");
+    fs::write(
+        &provider,
+        "export function implementation() { return 42; } export function unused() { return 0; }",
+    )
+    .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::production())
+            .expect("compute release demand");
+    let schemas_node = graph.module(&schemas).expect("schemas module node");
+    let schemas_export = schemas_node
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("schemas named re-export");
+    assert!(
+        demand
+            .slots
+            .get(&schemas)
+            .is_some_and(|slots| slots.contains(&schemas_export.local_slot)),
+        "demand through export-star barrels must reach the named re-export slot"
+    );
+    let schemas_import = schemas_node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local_slot == schemas_export.local_slot)
+        .expect("named re-export backing import");
+    assert!(
+        demand
+            .live_imports
+            .contains(&(schemas.clone(), schemas_import))
+    );
+    assert!(demand.live.contains(&barrel));
+    let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
+    let previous = reduced
+        .resolved_export(&barrel, "publicName")
+        .expect("initial indirect export")
+        .clone();
+    assert!(matches!(
+        &previous,
+        ResolvedExport::Local { module, .. } if module == &provider
+    ));
+    assert_eq!(
+        reduced.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "star barrels must retain the public name's ultimate origin"
+    );
+
+    let (specialized, _) = dce_release_graph(&reduced, &demand);
+    assert_eq!(
+        specialized.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "release DCE must keep the public export wired to its original provider"
+    );
+    assert!(matches!(
+        specialized.resolved_export(&facade, "publicName"),
+        Some(ResolvedExport::Local { module, .. }) if module == &provider
+    ));
+    let specialized_schemas = specialized
+        .module(&schemas)
+        .expect("specialized named re-export barrel");
+    let export = specialized_schemas
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("retained public export");
+    let backing_import = specialized_schemas
+        .program
+        .imports
+        .iter()
+        .find(|import| import.local_slot == export.local_slot)
+        .expect("re-export import row remains linked");
+    assert_eq!(backing_import.source, "./provider.mjs");
+    assert_eq!(backing_import.imported, "implementation");
+}
+
+#[test]
 fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
     let root = TestDirectory::new("kiln-native-loader-path");
     let real = root.path.join("real");
@@ -4611,6 +4852,95 @@ fn executable_graph_named_reexport_demand_keeps_backing_imports() {
         .find(|export| export.exported == "used")
         .expect("used export");
     assert!(demanded.contains(&used.local_slot));
+}
+
+#[test]
+fn executable_graph_commonjs_named_reexport_keeps_chained_backing_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-commonjs-named-reexport-demand");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write side-effect-free root package metadata");
+    fs::create_dir(project.path.join("provider")).expect("create CommonJS provider directory");
+    fs::write(
+        project.path.join("provider/package.json"),
+        r#"{"type":"commonjs"}"#,
+    )
+    .expect("write CommonJS package metadata");
+    fs::write(
+        project.path.join("provider/index.js"),
+        "module.exports = { answer: 42 };",
+    )
+    .expect("write CommonJS provider");
+    let first_barrel = project.path.join("first.mjs");
+    fs::write(
+        &first_barrel,
+        "export { answer as first } from './provider/index.js';",
+    )
+    .expect("write first ESM barrel");
+    let second_barrel = project.path.join("second.mjs");
+    fs::write(
+        &second_barrel,
+        "export { first as selected } from './first.mjs';",
+    )
+    .expect("write second ESM barrel");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { selected } from './second.mjs'; console.log(selected);",
+    )
+    .expect("write named CommonJS re-export consumer");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+
+    for barrel in [first_barrel, second_barrel] {
+        let barrel = fs::canonicalize(barrel).expect("canonical barrel");
+        let barrel_node = graph.module(&barrel).expect("barrel node");
+        let backing_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
+            .expect("re-export has a backing import");
+        assert!(
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
+            "CommonJS named re-export backing import must be linked"
+        );
+        assert!(
+            selected.modules.iter().any(|module| module.path == barrel),
+            "CommonJS named re-export owner must stay in the selected graph"
+        );
+    }
+    let provider = fs::canonicalize(project.path.join("provider/index.js"))
+        .expect("canonical CommonJS provider");
+    assert!(
+        selected
+            .modules
+            .iter()
+            .any(|module| module.path == provider)
+    );
+    assert!(
+        selected
+            .live_export_slots
+            .get(&provider)
+            .is_some_and(|slots| slots.contains(&0))
+    );
 }
 
 #[test]

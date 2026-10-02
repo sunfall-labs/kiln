@@ -902,6 +902,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             }
         }
     }
+    kiln_c99_dictionary_index_reset(object);
     total_properties = shape->property_count + active_elements;
     if (total_properties > object->capacity) {
         status = kiln_c99_object_reserve_properties(object, total_properties);
@@ -1407,6 +1408,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->candidate_slots = 0;
     object->candidate_elements = 0;
     object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    object->dictionary_index = NULL;
     kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;
@@ -1753,6 +1755,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->candidate_slots = 0;
     object->candidate_elements = 0;
     object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
+    object->dictionary_index = NULL;
     kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
     object->accessor_count = 0;
     object->read_only_seen = 0;

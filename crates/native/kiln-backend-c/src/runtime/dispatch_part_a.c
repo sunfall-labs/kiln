@@ -3977,7 +3977,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             } else {
                 KILN_C99_REFUSE("an own-key listing of a value with no property store");
             }
-            if (object->properties == NULL && object->shape != NULL &&
+            if (!object->module_namespace && object->properties == NULL && object->shape != NULL &&
                 object->shape->accessor_mask == 0) {
                 status = kiln_c99_new_array(&built);
                 if (object->elements != NULL) {
@@ -4068,6 +4068,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                                    NULL, 0, depth, thrown);
                             if (status != KILN_C99_OK) return status;
                         }
+                    } else if (object->module_namespace) {
+                        /* Namespace slots hold live-binding cells. Object.values/entries perform
+                         * [[Get]] for each enumerable key; exposing the backing slot here would
+                         * leak an internal CELL into ordinary user code. */
+                        status = kiln_c99_get_computed(host, args[0], key, &value, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
                     } else {
                         value = property.value;
                     }
