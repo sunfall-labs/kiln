@@ -515,6 +515,11 @@ class ReadableImplementation extends Stream {
   }
 }
 
+// EventEmitter's `on` is intentionally an alias of its base `addListener`. Readable adds
+// scheduling behavior when a listener is attached to `readable`, so it needs its own alias;
+// delegating from the base alias would recurse for legacy subclasses that wrap addListener.
+ReadableImplementation.prototype.on = ReadableImplementation.prototype.addListener;
+
 export interface Readable extends ReadableImplementation {}
 export const Readable: any = legacyStreamConstructor(ReadableImplementation, "Readable");
 
