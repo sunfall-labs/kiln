@@ -1280,7 +1280,16 @@ pub struct Liveness {
     /// it after going idle ([`Liveness::wake_pending`]), so a wake landing between "going idle"
     /// and "parking" is never lost: the realm declines to park and runs the turn.
     wake_pending: std::sync::atomic::AtomicBool,
+    /// Nanoseconds until the virtual timer this realm is parked on, `u64::MAX` when it waits on
+    /// no timer. Meaningful while the realm is `idle`: it is the wake this realm will cause
+    /// without anything else running first ([`Liveness::others_hold`]).
+    timer_ns: std::sync::atomic::AtomicU64,
 }
+
+/// Every realm's liveness, so a parked clock can ask whether another idle realm's timer is due
+/// before its own.
+static REGISTRY: std::sync::Mutex<Vec<std::sync::Weak<Liveness>>> =
+    std::sync::Mutex::new(Vec::new());
 
 const IDLE: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -1292,10 +1301,47 @@ impl Liveness {
     /// A realm that has work to do: it counts as active until it parks.
     pub fn new_active() -> Arc<Self> {
         ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
-        Arc::new(Self {
+        let live = Arc::new(Self {
             state: std::sync::atomic::AtomicU8::new(ACTIVE),
             wake_pending: std::sync::atomic::AtomicBool::new(false),
-        })
+            timer_ns: std::sync::atomic::AtomicU64::new(u64::MAX),
+        });
+        let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        registry.retain(|other| other.strong_count() > 0);
+        registry.push(Arc::downgrade(&live));
+        live
+    }
+
+    /// Publish the virtual timer this realm is about to park on (`None`: no timer). Call before
+    /// `set_idle`, so no moment exists when the realm is idle and its timer unpublished.
+    pub fn publish_timer(&self, delay: Option<std::time::Duration>) {
+        let ns = delay.map_or(u64::MAX, |d| {
+            u64::try_from(d.as_nanos()).unwrap_or(u64::MAX - 1)
+        });
+        self.timer_ns.store(ns, Ordering::SeqCst);
+    }
+
+    /// Whether a virtual clock about to jump `delay` ahead must hold still: another realm is
+    /// active, or is idle on a virtual timer due strictly sooner, whose firing may post a
+    /// message or close a port before this realm's timer. Two idle realms waiting on timers do
+    /// not wait on each other unless one is due first, so this cannot cycle.
+    pub fn others_hold(&self, delay: Option<std::time::Duration>) -> bool {
+        if self.others_active() {
+            return true;
+        }
+        let Some(delay) = delay else {
+            return false;
+        };
+        let mine = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX - 1);
+        let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        registry
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .any(|other| {
+                !std::ptr::eq(Arc::as_ptr(&other), self)
+                    && other.state.load(Ordering::SeqCst) == IDLE
+                    && other.timer_ns.load(Ordering::SeqCst) < mine
+            })
     }
 
     /// The realm has work: it runs, or a wake is on its way to it. A finished realm stays so.

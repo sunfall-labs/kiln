@@ -1934,7 +1934,7 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
         if wait.wake.get().is_none()
             && !wait.advanced
             && wait.timer_armed.get()
-            && !realm.virtual_clock_held()
+            && !realm.virtual_clock_held(wait.virtual_delay)
             && wait.virtual_delay.is_some()
             && wait.quiet_ticks < VIRTUAL_QUIET_TICKS
         {
@@ -1942,7 +1942,7 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
         } else if wait.wake.get().is_none()
             && !wait.advanced
             && wait.timer_armed.get()
-            && !realm.virtual_clock_held()
+            && !realm.virtual_clock_held(wait.virtual_delay)
             && let Some(delay) = wait.virtual_delay
         {
             // The waiter has polled its timer after the preceding yield. Advancing earlier
@@ -2081,7 +2081,7 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                         kiln_runtime::wait_for_turn_quiescent(
                             signal,
                             delay,
-                            move || liveness.others_active(),
+                            move || liveness.others_hold(delay),
                             io_pending,
                         )
                         .await
@@ -2125,8 +2125,8 @@ impl NativeRealm {
     }
 
     /// Whether a virtual clock must hold still because another realm has runnable work.
-    fn virtual_clock_held(&self) -> bool {
-        matches!(self.clock.get(), NativeClock::Virtual) && self.liveness().others_active()
+    fn virtual_clock_held(&self, delay: Option<std::time::Duration>) -> bool {
+        matches!(self.clock.get(), NativeClock::Virtual) && self.liveness().others_hold(delay)
     }
 }
 
@@ -2149,7 +2149,12 @@ fn drive_ended(realm: &NativeRealm) {
 /// clock could then jump to its next timer before the worker's next turn processed the stop.
 /// Checking the flag after going idle closes the race in either order. Returns `true` when the
 /// realm must not park; it is active again and the next turn ends it.
-fn park_idle(realm: &NativeRealm) -> bool {
+fn park_idle(realm: &NativeRealm, timer: Option<std::time::Duration>) -> bool {
+    // A virtual realm parked on a timer is idle but not inert: that timer may post a message or
+    // close a port, so it is published before going idle for other realms' clocks to respect.
+    realm
+        .liveness()
+        .publish_timer(timer.filter(|_| matches!(realm.clock.get(), NativeClock::Virtual)));
     realm.liveness().set_idle();
     // A wake sent to this realm (a post, a close, a notify) marked it active when it was sent,
     // but a wake that landed before `set_idle` above was undone by it: the realm must run that
@@ -2298,7 +2303,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             let Some(signal) = signal else {
                 return DriveStep::Done(RUNTIME_ERROR);
             };
-            if park_idle(realm) {
+            if park_idle(realm, None) {
                 return DriveStep::Ready;
             }
             return DriveStep::Parked {
@@ -2309,10 +2314,10 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
         }
         // Another realm with runnable work may post before this one's timer: wait, with the
         // clock held, until it parks or wakes this realm (`wait_for_turn_quiescent`).
-        if realm.virtual_clock_held()
+        if realm.virtual_clock_held(Some(deadline.saturating_sub(now)))
             && let Some(signal) = signal
         {
-            if park_idle(realm) {
+            if park_idle(realm, Some(deadline.saturating_sub(now))) {
                 return DriveStep::Ready;
             }
             return DriveStep::Parked {
@@ -2331,7 +2336,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     let Some(signal) = signal else {
         return DriveStep::Done(RUNTIME_ERROR);
     };
-    if park_idle(realm) {
+    if park_idle(realm, deadline.map(|deadline| deadline.saturating_sub(now))) {
         return DriveStep::Ready;
     }
     // A wall-clock timer wake may be an introspection poll rather than the deadline. A
