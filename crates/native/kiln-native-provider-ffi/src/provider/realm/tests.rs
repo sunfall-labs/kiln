@@ -13,6 +13,114 @@ unsafe extern "C" fn record_callable_store_drop(_pointer: *mut c_void) {
 }
 
 use super::*;
+
+#[test]
+fn text_decoder_state_preserves_chunks_bom_and_resets_after_flush_error() {
+    let mut state = ptr::null_mut();
+    let mut out = [0u8; 128];
+    let mut out_len = 0u64;
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_create(
+                b"utf-8".as_ptr(),
+                5,
+                0,
+                &mut state,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    for (bytes, stream, expected) in [
+        (&[0xEF][..], 1, ""),
+        (&[0xBB, 0xBF, 0xF0, 0x9F][..], 1, ""),
+        (&[0x98, 0x80][..], 0, "😀"),
+        (&[0xEF, 0xBB, 0xBF, b'B'][..], 0, "B"),
+    ] {
+        assert_eq!(
+            unsafe {
+                kiln_text_decoder_state_decode(
+                    state,
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    stream,
+                    out.as_mut_ptr(),
+                    out.len() as u64,
+                    &mut out_len,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            std::str::from_utf8(&out[..out_len as usize]).unwrap(),
+            expected
+        );
+    }
+    unsafe { kiln_text_decoder_state_free(state) };
+
+    state = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_create(
+                b"utf-8".as_ptr(),
+                5,
+                kiln_encoding::FLAG_FATAL,
+                &mut state,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    let partial = [0xE2];
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                partial.as_ptr(),
+                partial.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                ptr::null(),
+                0,
+                0,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        TEXT_DATA_INVALID
+    );
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                b"A".as_ptr(),
+                1,
+                0,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(&out[..out_len as usize], b"A");
+    unsafe { kiln_text_decoder_state_free(state) };
+}
 use std::fs;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};

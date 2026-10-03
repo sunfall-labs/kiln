@@ -1492,6 +1492,9 @@ int kiln_url_parse(const uint8_t *input, uint64_t input_len, const uint8_t *base
 int kiln_url_set(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_text_decoder_label(const uint8_t *label, uint64_t label_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_text_decode(const uint8_t *name, uint64_t name_len, const uint8_t *bytes, uint64_t bytes_len, uint32_t flags, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_text_decoder_state_create(const uint8_t *label, uint64_t label_len, uint32_t flags, void **out_state, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_text_decoder_state_decode(void *state, const uint8_t *bytes, uint64_t bytes_len, uint32_t stream, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+void kiln_text_decoder_state_free(void *state);
 int kiln_string_case(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const kiln_string *key, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, kiln_string *out_key);
@@ -2793,6 +2796,13 @@ static int kiln_c99_new_abort_controller(kiln_value *out) {
 static int kiln_c99_new_text_encoder(kiln_value *out) {
 static int kiln_c99_ascii_iequals(const char *a, const char *b, size_t len) {
 static int kiln_c99_text_decoder_provider(kiln_value *out, int decode, const uint8_t *name,
+typedef struct {
+static const char kiln_c99_text_decoder_owner_brand;
+static int kiln_c99_text_decoder_visit(void *context, kiln_gc_visit_root_fn visit,
+static void kiln_c99_text_decoder_release(void *context) {
+static int kiln_c99_text_decoder_state_provider(void **out_state, const uint8_t *label,
+static int kiln_c99_text_decoder_state_decode_provider(kiln_value *out, void *state,
+static void *kiln_c99_text_decoder_state(kiln_value receiver) {
 static int kiln_c99_text_decoder_utf8(kiln_value value, uint8_t **owned, size_t *len) {
 static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int depth,
 static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,

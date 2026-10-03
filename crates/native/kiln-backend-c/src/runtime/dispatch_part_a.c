@@ -2978,7 +2978,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             /* The decoding itself -- label, BOM, `fatal` -- is `kiln-encoding`'s, through the
              * provider (ADR 0060); an absent or detached buffer decodes as no bytes. */
             return kiln_c99_text_decoder_decode(host, result, receiver, bytes, byte_len, depth,
-                                                thrown);
+                                                args, argc, thrown);
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL:

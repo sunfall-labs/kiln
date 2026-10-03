@@ -446,6 +446,23 @@ int kiln_text_decode(const uint8_t *name, uint64_t name_len, const uint8_t *byte
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_text_decoder_state_create(const uint8_t *label, uint64_t label_len, uint32_t flags,
+                                   void **out_state, uint8_t *out, uint64_t capacity,
+                                   uint64_t *out_len) {
+    (void)label; (void)label_len; (void)flags; (void)out_state; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_text_decoder_state_decode(void *state, const uint8_t *bytes, uint64_t bytes_len,
+                                   uint32_t stream, uint8_t *out, uint64_t capacity,
+                                   uint64_t *out_len) {
+    (void)state; (void)bytes; (void)bytes_len; (void)stream; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+void kiln_text_decoder_state_free(void *state) { (void)state; }
 int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
                             uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
     (void)from; (void)from_len; (void)to; (void)to_len; (void)out; (void)capacity;

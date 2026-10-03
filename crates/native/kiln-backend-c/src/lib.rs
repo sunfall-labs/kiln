@@ -191,6 +191,15 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, text_decode) => {
         concat!("int ", stringify!($name), "(const uint8_t *name, uint64_t name_len, const uint8_t *bytes, uint64_t bytes_len, uint32_t flags, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, text_decoder_state_create) => {
+        concat!("int ", stringify!($name), "(const uint8_t *label, uint64_t label_len, uint32_t flags, void **out_state, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decoder_state_decode) => {
+        concat!("int ", stringify!($name), "(void *state, const uint8_t *bytes, uint64_t bytes_len, uint32_t stream, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decoder_state_free) => {
+        concat!("void ", stringify!($name), "(void *state);\n")
+    };
     ($group:ident, $name:ident, string_case) => {
         concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };

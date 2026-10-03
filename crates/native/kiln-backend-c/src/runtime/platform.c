@@ -128,6 +128,99 @@ static int kiln_c99_text_decoder_provider(kiln_value *out, int decode, const uin
     return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
 }
 
+typedef struct {
+    const void *brand;
+    void *decoder;
+} kiln_c99_text_decoder_owner_context;
+
+static const char kiln_c99_text_decoder_owner_brand;
+
+static int kiln_c99_text_decoder_visit(void *context, kiln_gc_visit_root_fn visit,
+                                       void *visit_context) {
+    (void)context;
+    (void)visit;
+    (void)visit_context;
+    return 0;
+}
+
+static void kiln_c99_text_decoder_release(void *context) {
+    kiln_c99_text_decoder_owner_context *owner =
+        (kiln_c99_text_decoder_owner_context *)context;
+    if (owner == NULL) return;
+    kiln_text_decoder_state_free(owner->decoder);
+    free(owner);
+}
+
+static int kiln_c99_text_decoder_state_provider(void **out_state, const uint8_t *label,
+                                                size_t label_len, uint32_t flags,
+                                                kiln_value *thrown) {
+    uint64_t capacity = (uint64_t)label_len + 128;
+    uint64_t len = 0;
+    uint8_t *buffer = (uint8_t *)malloc((size_t)capacity + 1);
+    int status;
+    if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_text_decoder_state_create(label, (uint64_t)label_len, flags, out_state, buffer,
+                                            capacity, &len);
+    if (status == KILN_C99_INVALID_ARGUMENT && len > capacity) {
+        uint8_t *bigger = (uint8_t *)realloc(buffer, (size_t)len + 1);
+        if (bigger == NULL) { free(buffer); return KILN_C99_OUT_OF_MEMORY; }
+        buffer = bigger;
+        capacity = len;
+        status = kiln_text_decoder_state_create(label, (uint64_t)label_len, flags, out_state,
+                                               buffer, capacity, &len);
+    }
+    if (status == 3) {
+        buffer[len] = 0;
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, (const char *)buffer);
+    }
+    free(buffer);
+    return status;
+}
+
+static int kiln_c99_text_decoder_state_decode_provider(kiln_value *out, void *state,
+                                                       const uint8_t *bytes, size_t bytes_len,
+                                                       int stream, kiln_value *thrown) {
+    uint64_t capacity = (uint64_t)bytes_len * 3 + 128;
+    uint64_t len = 0;
+    uint8_t *buffer = (uint8_t *)malloc((size_t)capacity + 1);
+    int status;
+    if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_text_decoder_state_decode(state, bytes, (uint64_t)bytes_len, (uint32_t)stream,
+                                            buffer, capacity, &len);
+    if (status == KILN_C99_INVALID_ARGUMENT && len > capacity) {
+        uint8_t *bigger = (uint8_t *)realloc(buffer, (size_t)len + 1);
+        if (bigger == NULL) { free(buffer); return KILN_C99_OUT_OF_MEMORY; }
+        buffer = bigger;
+        capacity = len;
+        status = kiln_text_decoder_state_decode(state, bytes, (uint64_t)bytes_len,
+                                                (uint32_t)stream, buffer, capacity, &len);
+    }
+    if (status == 4) {
+        buffer[len] = 0;
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, (const char *)buffer);
+        free(buffer);
+        return status;
+    }
+    if (status != KILN_C99_OK) { free(buffer); return status; }
+    *out = kiln_c99_copy_text((const char *)buffer, (size_t)len);
+    free(buffer);
+    return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+
+static void *kiln_c99_text_decoder_state(kiln_value receiver) {
+    kiln_object *object;
+    kiln_gc_external_owner *owner;
+    kiln_c99_text_decoder_owner_context *context;
+    if (receiver.tag != KILN_VALUE_OBJECT || receiver.bits == 0) return NULL;
+    object = kiln_c99_object_of(receiver);
+    if (object == NULL || object->external_owner == NULL) return NULL;
+    owner = (kiln_gc_external_owner *)object->external_owner;
+    if (kiln_c99_gc_payload_kind(owner) != KILN_GC_EXTERNAL_OWNER || owner->context == NULL)
+        return NULL;
+    context = (kiln_c99_text_decoder_owner_context *)owner->context;
+    return context->brand == &kiln_c99_text_decoder_owner_brand ? context->decoder : NULL;
+}
+
 /* A string value as owned UTF-8 (NULL and 0 for the empty string). */
 static int kiln_c99_text_decoder_utf8(kiln_value value, uint8_t **owned, size_t *len) {
     kiln_value text = kiln_c99_text(value);
@@ -162,6 +255,9 @@ static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kil
     uint32_t flags = 0;
     uint8_t *label = NULL;
     size_t label_len = 5;
+    void *decoder_state = NULL;
+    kiln_c99_text_decoder_owner_context *owner_context = NULL;
+    void *external_owner;
     int status;
     if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_text_decoder_utf8(args[0], &label, &label_len);
@@ -170,12 +266,16 @@ static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kil
     status = kiln_c99_text_decoder_provider(&encoding, 0,
                                             label != NULL ? label : (const uint8_t *)"utf-8",
                                             label != NULL ? label_len : 5, NULL, 0, 0, thrown);
-    free(label);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) { free(label); return status; }
     if (argc > 1) {
         status = kiln_c99_text_decoder_flags(host, args[1], depth, thrown, &flags);
-        if (status != KILN_C99_OK) return status;
+        if (status != KILN_C99_OK) { free(label); return status; }
     }
+    status = kiln_c99_text_decoder_state_provider(
+        &decoder_state, label != NULL ? label : (const uint8_t *)"utf-8",
+        label != NULL ? label_len : 5, flags, thrown);
+    free(label);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_new_object(out);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *out, "encoding", 8, encoding, 0, NULL);
@@ -195,6 +295,24 @@ static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kil
         }
         for (index = 0; index < object->count; ++index) object->properties[index].enumerable = 0;
     }
+    if (status != KILN_C99_OK) {
+        kiln_text_decoder_state_free(decoder_state);
+        return status;
+    }
+    owner_context = (kiln_c99_text_decoder_owner_context *)malloc(sizeof *owner_context);
+    if (owner_context == NULL) {
+        kiln_text_decoder_state_free(decoder_state);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    owner_context->brand = &kiln_c99_text_decoder_owner_brand;
+    owner_context->decoder = decoder_state;
+    external_owner = kiln_c99_external_owner_create(owner_context, kiln_c99_text_decoder_visit,
+                                                    kiln_c99_text_decoder_release);
+    if (external_owner == NULL) {
+        kiln_c99_text_decoder_release(owner_context);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_object_set_external_owner(*out, external_owner);
     return status;
 }
 
@@ -203,27 +321,24 @@ static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kil
  * the provider decodes with, exactly as the interpreter reads them off the receiver. */
 static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
                                         const uint8_t *bytes, size_t bytes_len, int depth,
-                                        kiln_value *thrown) {
-    kiln_value encoding;
-    uint32_t flags = 0;
-    uint8_t *name = NULL;
-    size_t name_len = 0;
+                                        const kiln_value *args, size_t argc, kiln_value *thrown) {
+    void *decoder_state = kiln_c99_text_decoder_state(receiver);
+    kiln_value options = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_value stream_value = kiln_c99_undefined();
+    int stream = 0;
     int status = KILN_C99_OK;
-    /* A receiver that is not an object has no attributes: the defaults, as in the interpreter. */
-    if (receiver.tag == KILN_VALUE_OBJECT) {
-        status = kiln_c99_get(host, receiver, "encoding", 8, &encoding, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-        status = kiln_c99_text_decoder_utf8(encoding, &name, &name_len);
-        if (status != KILN_C99_OK) return status;
+    if (decoder_state == NULL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "TextDecoder.decode called on an incompatible receiver");
     }
-    status = kiln_c99_text_decoder_flags(host, receiver, depth, thrown, &flags);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_text_decoder_provider(result, 1,
-                                                name != NULL ? name : (const uint8_t *)"utf-8",
-                                                name != NULL ? name_len : 5, bytes, bytes_len,
-                                                flags, thrown);
-    free(name);
-    return status;
+    if (options.tag == KILN_VALUE_OBJECT || options.tag == KILN_VALUE_FUNCTION ||
+        options.tag == KILN_VALUE_ARRAY) {
+        status = kiln_c99_get(host, options, "stream", 6, &stream_value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        stream = kiln_c99_truthy(stream_value);
+    }
+    return kiln_c99_text_decoder_state_decode_provider(result, decoder_state, bytes, bytes_len,
+                                                       stream, thrown);
 }
 
 /* A platform exception, as node raises one: an `Error` named `name` whose prototype is the

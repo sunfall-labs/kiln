@@ -2846,6 +2846,99 @@ pub unsafe extern "C" fn kiln_text_decode(
     })
 }
 
+/// Construct one owned incremental decoder. `flags` carries `FLAG_FATAL` and `FLAG_IGNORE_BOM`;
+/// the caller releases the returned opaque state with `kiln_text_decoder_state_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_create(
+    label: *const u8,
+    label_len: u64,
+    flags: u32,
+    out_state: *mut *mut c_void,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if out_state.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(label) = (unsafe { borrowed_str(label, label_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let decoder = match kiln_encoding::StreamingDecoder::new(
+            label,
+            flags & kiln_encoding::FLAG_FATAL != 0,
+            flags & kiln_encoding::FLAG_IGNORE_BOM != 0,
+        ) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                return if status == 0 {
+                    TEXT_LABEL_INVALID
+                } else {
+                    status
+                };
+            }
+        };
+        unsafe { *out_state = Box::into_raw(Box::new(decoder)).cast() };
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        0
+    })
+}
+
+/// Decode one segment on a state returned by `kiln_text_decoder_state_create`. Nonzero `stream`
+/// keeps incomplete byte and legacy encoding state for the next call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_decode(
+    state: *mut c_void,
+    bytes: *const u8,
+    bytes_len: u64,
+    stream: u32,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if state.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Ok(bytes_len) = usize::try_from(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        let bytes = if bytes.is_null() {
+            if bytes_len != 0 {
+                return INVALID_ARGUMENT;
+            }
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
+        };
+        let decoder = unsafe { &mut *state.cast::<kiln_encoding::StreamingDecoder>() };
+        match decoder.decode(bytes, stream != 0) {
+            Ok(text) => unsafe { spill(text.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_DATA_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// # Safety
+/// `state` must be null or a pointer returned exactly once by `kiln_text_decoder_state_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_free(state: *mut c_void) {
+    if !state.is_null() {
+        drop(unsafe { Box::from_raw(state.cast::<kiln_encoding::StreamingDecoder>()) });
+    }
+}
+
 /// The status a `TextDecoder` export answers for a label that names no encoding (`RangeError`).
 pub const TEXT_LABEL_INVALID: i32 = 3;
 /// The status `kiln_text_decode` answers for invalid input under `fatal` (`TypeError`).
@@ -7012,6 +7105,15 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_text_decode, text_decode) => {
             const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, u32, *mut u8, u64, *mut u64) -> i32 = kiln_text_decode;
+        };
+        (realm, kiln_text_decoder_state_create, text_decoder_state_create) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u32, *mut *mut c_void, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_state_create;
+        };
+        (realm, kiln_text_decoder_state_decode, text_decoder_state_decode) => {
+            const _: unsafe extern "C" fn(*mut c_void, *const u8, u64, u32, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_state_decode;
+        };
+        (realm, kiln_text_decoder_state_free, text_decoder_state_free) => {
+            const _: unsafe extern "C" fn(*mut c_void) = kiln_text_decoder_state_free;
         };
         (realm, kiln_string_case, string_case) => {
             const _: unsafe extern "C" fn(*const u16, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_string_case;

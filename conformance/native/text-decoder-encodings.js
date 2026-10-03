@@ -46,13 +46,33 @@ show('utf-8 bom stripped', () => decode('utf-8', bytes(0xef, 0xbb, 0xbf, 0x41)))
 show('utf-8 ignoreBOM', () => decode('utf-8', bytes(0xef, 0xbb, 0xbf, 0x41), { ignoreBOM: true }));
 show('shift_jis fatal', () => decode('shift_jis', bytes(0x82), { fatal: true }));
 
-// Streaming: both engines decode every call on its own, so a sequence split across two calls
-// is malformed in each half.
+// Streaming preserves an incomplete BOM, UTF-8 scalar, and legacy shift sequence across calls.
 show('stream split', () => {
   const decoder = new TextDecoder();
-  const first = decoder.decode(bytes(0xe2, 0x82), { stream: true });
-  const second = decoder.decode(bytes(0xac), { stream: true });
-  return hex(first) + ' | ' + hex(second);
+  const first = decoder.decode(bytes(0xef), { stream: true });
+  const second = decoder.decode(bytes(0xbb, 0xbf, 0xf0, 0x9f), { stream: true });
+  const third = decoder.decode(bytes(0x98, 0x80));
+  const next = decoder.decode(bytes(0xef, 0xbb, 0xbf, 0x42));
+  return [hex(first), hex(second), hex(third), hex(next)].join(' | ');
+});
+show('stream fatal flush and reset', () => {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const partial = decoder.decode(bytes(0xe2), { stream: true });
+  let flush;
+  try {
+    decoder.decode(bytes());
+    flush = 'no error';
+  } catch (error) {
+    flush = error.name;
+  }
+  return [hex(partial), flush, hex(decoder.decode(bytes(0x41)))].join(' | ');
+});
+show('stream iso-2022-jp shift', () => {
+  const decoder = new TextDecoder('iso-2022-jp');
+  const first = decoder.decode(bytes(0x1b, 0x24), { stream: true });
+  const second = decoder.decode(bytes(0x42, 0x24), { stream: true });
+  const third = decoder.decode(bytes(0x22, 0x1b, 0x28, 0x42));
+  return [hex(first), hex(second), hex(third)].join(' | ');
 });
 
 // Labels: trimmed, case-folded, and reported by their canonical lowercase name.
