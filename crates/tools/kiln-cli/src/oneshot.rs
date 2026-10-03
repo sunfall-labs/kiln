@@ -866,7 +866,10 @@ server.listen(0, "127.0.0.1", () => {
              let controlBodies = false;\n\
              try { indirectEval('(function(){ do { mutation++; } while (false); let malformed = ; })'); } catch (error) { controlBodies = error instanceof SyntaxError; }\n\
              console.log(controlBodies, mutation);\n\
-             const validControl = indirectEval('(function(){ let n = 0; while (n < 1) { n++; } do { n++; } while (false); for (let i = 0; i < 1; i++) { n++; } switch (n) { case 3: n++; break; default: n = 99; } try { throw 1; } catch (error) { n += error; } finally { n++; } return n; })');\n\
+             let parameterGrammar = false;\n\
+             try { indirectEval('(function(a,,b){ mutation++; })'); } catch (error) { parameterGrammar = error instanceof SyntaxError; }\n\
+             console.log(parameterGrammar, mutation);\n\
+             const validControl = indirectEval('(function(){ let n = 0; function bump() { n++; } while (n < 1) { n++; } do { n++; } while (false); for (let i = 0; i < 1; i++) { n++; } bump(); switch (n) { case 4: n++; break; default: n = 99; } try { throw 1; } catch (error) { n += error; } finally { n++; } return n; })');\n\
              console.log(validControl());\n",
         )
         .expect("write source");
@@ -902,7 +905,7 @@ server.listen(0, "127.0.0.1", () => {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "true 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\n6\n"
+            "true 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\n7\n"
         );
         let _ = std::fs::remove_dir_all(&fixture);
     }
