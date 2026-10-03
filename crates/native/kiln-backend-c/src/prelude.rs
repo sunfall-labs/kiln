@@ -1114,7 +1114,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ASSERT_OK, 385, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR, 386, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE, 387, Direct; 0, 0),
-    (KILN_C99_METHOD_MODULE_LOADER_RAW, 574, Direct; 0, 0),
+    (KILN_C99_METHOD_MODULE_LOADER_RAW, 577, Direct; 0, 0),
     // `require("node:module")`, which node answers with the `Module` class rather than with a
     // namespace. It gets a code of its own rather than borrowing the unmaterialized placeholder
     // above: two values sharing a code are `===` in this runtime, and `require("node:module")`

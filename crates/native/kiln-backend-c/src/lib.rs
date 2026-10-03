@@ -4006,7 +4006,7 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
     let linkage = if should_chunk { "" } else { "static " };
     writeln!(
         output,
-        "{linkage}int {symbol}_materialize_template_site(size_t site) {{"
+        "{linkage}int {symbol}_materialize_template_site(kiln_host *host, size_t site) {{"
     )
     .unwrap();
     writeln!(output, "    switch (site) {{").unwrap();
@@ -5649,7 +5649,7 @@ fn render_module_positioned(
         if !emitted_program.template_sites.is_empty() {
             writeln!(
                 chunk_header,
-                "extern int {unit_symbol}_materialize_template_site(size_t site);"
+                "extern int {unit_symbol}_materialize_template_site(kiln_host *host, size_t site);"
             )
             .unwrap();
         }

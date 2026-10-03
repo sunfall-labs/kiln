@@ -609,7 +609,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::LoadTemplateObject(site) => {
             writeln!(
                 output,
-                "    if ({symbol}_template_sites[{site}] == 0) {{ int status = {symbol}_materialize_template_site({site}); if (status != KILN_C99_OK) return status; }} stack[sp++] = {symbol}_template_sites[{site}];"
+                "    if ({symbol}_template_sites[{site}] == 0) {{ int status = {symbol}_materialize_template_site(host, {site}); if (status != KILN_C99_OK) return status; }} stack[sp++] = {symbol}_template_sites[{site}];"
             )
             .unwrap();
         }
