@@ -53,6 +53,9 @@ pub fn normalize_unicode_sets_pattern(pattern: &[u32]) -> Vec<u32> {
 /// must reject it before parsing. Keeping this beside the `v` normalization gives construction
 /// one shared grammar gate.
 pub fn normalize_pattern_for_flags(pattern: Vec<u32>, flags: &str) -> Option<Vec<u32>> {
+    if !validate_flags(flags) {
+        return None;
+    }
     let unicode = flags.contains('u') || flags.contains('v');
     if unicode {
         let mut escaped = false;
@@ -72,6 +75,32 @@ pub fn normalize_pattern_for_flags(pattern: Vec<u32>, flags: &str) -> Option<Vec
     } else {
         pattern
     })
+}
+
+/// Check the ECMAScript RegExp flag grammar independently of the pattern parser.
+///
+/// The parser accepts extension flags, so every construction path must reject unknown,
+/// duplicate, and mutually exclusive Unicode mode flags before asking it to compile.
+pub fn validate_flags(flags: &str) -> bool {
+    let mut seen = 0u8;
+    for flag in flags.chars() {
+        let bit = match flag {
+            'd' => 1 << 0,
+            'g' => 1 << 1,
+            'i' => 1 << 2,
+            'm' => 1 << 3,
+            's' => 1 << 4,
+            'u' => 1 << 5,
+            'v' => 1 << 6,
+            'y' => 1 << 7,
+            _ => return false,
+        };
+        if seen & bit != 0 {
+            return false;
+        }
+        seen |= bit;
+    }
+    seen & (1 << 5) == 0 || seen & (1 << 6) == 0
 }
 
 fn is_regress_double_punctuation(character: u32) -> bool {
@@ -126,7 +155,19 @@ fn is_ecmascript_reserved_double_punctuation(first: u32, second: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_pattern_for_flags, normalize_unicode_sets_pattern};
+    use super::{normalize_pattern_for_flags, normalize_unicode_sets_pattern, validate_flags};
+
+    #[test]
+    fn validates_ecmascript_flags_before_parser_extensions() {
+        for flags in ["", "d", "gimsuy", "ygimsud"] {
+            assert!(validate_flags(flags), "{flags:?}");
+        }
+        for flags in ["x", "gg", "ii", "mm", "ss", "uu", "vv", "yy", "uv", "vu"] {
+            assert!(!validate_flags(flags), "{flags:?}");
+            assert!(normalize_pattern_for_flags(vec![u32::from('a')], flags).is_none());
+        }
+        assert!(validate_flags("ygimsud"));
+    }
 
     #[test]
     fn escapes_only_non_reserved_adjacent_punctuation_inside_classes() {

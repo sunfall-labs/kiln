@@ -42,6 +42,10 @@ console.log(/^\d{2,3}$/.test("12"), /^\d{2,3}$/.test("1"), /[^a-z]/.test("A"), /
 console.log(new RegExp("a+", "g").source, new RegExp(/x/i).flags, new RegExp(/x/i, "g").flags);
 console.log(new RegExp("").source === "(?:)" || new RegExp("").source === "", RegExp("b").test("abc"));
 try { new RegExp("("); console.log("no throw"); } catch (error: any) { console.log("bad", error.constructor.name); }
+for (const invalidFlags of ["x", "gg", "uv", "vu"]) {
+  try { new RegExp("a", invalidFlags); console.log("invalid-flags", invalidFlags, "accepted"); }
+  catch (error: any) { console.log("invalid-flags", invalidFlags, error.constructor.name); }
+}
 
 // is-regex's robust brand check uses both the own data descriptor and RegExpExec's ToString.
 // The marker conversion throws; a non-RegExp must not accidentally pass this test.
