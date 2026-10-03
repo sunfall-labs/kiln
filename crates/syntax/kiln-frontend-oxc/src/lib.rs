@@ -2673,7 +2673,7 @@ fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -
     match &declaration.body {
         NamespaceBody::TSNamespaceDeclaration(nested) => type_only_namespace(nested),
         TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            !block.body.is_empty() && block.body.iter().all(type_only_namespace_statement)
+            block.body.iter().all(type_only_namespace_statement)
         }
     }
 }
@@ -2682,18 +2682,47 @@ fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
     match statement {
         Statement::EmptyStatement(_) => true,
+        Statement::VariableDeclaration(declaration) => declaration.declare,
+        Statement::FunctionDeclaration(declaration) => {
+            declaration.declare || declaration.body.is_none()
+        }
+        Statement::ClassDeclaration(declaration) => declaration.declare,
+        Statement::TSImportEqualsDeclaration(declaration) => declaration.import_kind.is_type(),
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSGlobalDeclaration(_)
         | Statement::TSNamespaceExportDeclaration(_) => true,
         Statement::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
-        Statement::ImportDeclaration(import) => import.import_kind.is_type(),
+        Statement::ImportDeclaration(import) => {
+            import.import_kind.is_type()
+                || import.specifiers.as_ref().is_some_and(|specifiers| {
+                    !specifiers.is_empty()
+                        && specifiers.iter().all(|specifier| match specifier {
+                            oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(
+                                specifier,
+                            ) => specifier.import_kind.is_type(),
+                            _ => false,
+                        })
+                })
+        }
         Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => true,
+            Declaration::VariableDeclaration(declaration) => declaration.declare,
+            Declaration::FunctionDeclaration(declaration) => {
+                declaration.declare || declaration.body.is_none()
+            }
+            Declaration::ClassDeclaration(declaration) => declaration.declare,
             Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
             _ => false,
         },
-        Statement::ExportNamedDeclaration(export) => export.export_kind.is_type(),
+        Statement::ExportNamedDeclaration(export) => {
+            export.export_kind.is_type()
+                || (!export.specifiers.is_empty()
+                    && export
+                        .specifiers
+                        .iter()
+                        .all(|specifier| specifier.export_kind.is_type()))
+        }
         Statement::ExportDefaultDeclaration(export) => matches!(
             export.declaration,
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
@@ -6794,6 +6823,7 @@ mod tests {
         let module = parse(
             "namespace.ts",
             r#"
+                export namespace Empty {}
                 export namespace Vitest {
                     export interface TestContext { name: string }
                     export type Hook = (context: TestContext) => void;
