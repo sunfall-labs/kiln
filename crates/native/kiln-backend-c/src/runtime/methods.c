@@ -230,6 +230,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_NODE_SERVER_IS_LISTENING: return "__serverIsListening";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER: return "createFetchServer";
     case KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND: return "fetchRespond";
     case KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN: return "__kilnNodeClientSocketAssign";

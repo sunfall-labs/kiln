@@ -3,9 +3,11 @@ import "node:net";
 
 import { Readable, Writable } from "node:stream";
 
+const privateProcess = (globalThis as any).__kilnPrivate?.process ||
+  (typeof process !== "undefined" ? (process as any) : null);
 const nativeModule =
-  typeof process !== "undefined"
-    ? (process as any).__kilnNativeModules?.http || null
+  privateProcess
+    ? privateProcess.__kilnNativeModules?.http || null
     : null;
 
 export const METHODS = [
@@ -145,15 +147,31 @@ if (IncomingMessage.prototype && typeof IncomingMessage.prototype.unpipe !== "fu
   };
 }
 
-export const Server: any =
-  nativeModule && typeof nativeModule.Server === "function"
-    ? nativeModule.Server
-    : function Server(...args: any[]) {
-        if (nativeModule && typeof nativeModule.createServer === "function") {
-          return nativeModule.createServer(...args);
-        }
-        throw new Error("node:http requires an HTTP host capability that this realm does not provide");
-      };
+const decorateServer = privateProcess
+  ? privateProcess.__kilnServerDecorator
+  : undefined;
+
+function serverListening(this: any): boolean {
+  const netModule = privateProcess
+    ? privateProcess.__kilnNativeModules?.net
+    : null;
+  if (!netModule || typeof netModule.__serverIsListening !== "function") {
+    throw new Error("node:http server listening state requires a host capability");
+  }
+  return !!netModule.__serverIsListening(this);
+}
+
+export const Server: any = function Server(...args: any[]) {
+  return createServer(...args);
+};
+Server.prototype = Object.create(Object.prototype);
+Object.defineProperty(Server.prototype, "constructor", {
+  value: Server, writable: true, configurable: true,
+});
+Object.defineProperty(Server.prototype, "listening", {
+  configurable: true,
+  get: serverListening,
+});
 
 const NativeServerResponse: any =
   nativeModule && typeof nativeModule.ServerResponse === "function"
@@ -293,7 +311,10 @@ export function createServer(...args: any[]): any {
         return listener.apply(this, requestArgs);
       };
     }
-    return nativeModule.createServer(...args);
+    const server = nativeModule.createServer(...args);
+    return typeof decorateServer === "function"
+      ? decorateServer(server, Server.prototype)
+      : server;
   }
   throw new Error("node:http requires an HTTP host capability that this realm does not provide");
 }

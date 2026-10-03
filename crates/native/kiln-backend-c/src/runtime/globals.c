@@ -448,6 +448,9 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_define_method(net_module, "createServer", 12,
                                         kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER));
     if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__serverIsListening", 19,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SERVER_IS_LISTENING));
+    if (status == KILN_C99_OK)
         status = kiln_c99_define_method(net_module, "connect", 7,
                                         kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT));
     if (status == KILN_C99_OK)

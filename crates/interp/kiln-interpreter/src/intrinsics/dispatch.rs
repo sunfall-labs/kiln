@@ -2952,6 +2952,7 @@ pub(crate) fn call_native(
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
+        | Native::NodeServerIsListening
         | Native::NodeServerSetTimeout
         | Native::NodeResponseSetHeader
         | Native::NodeResponseGetHeader

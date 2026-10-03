@@ -744,17 +744,19 @@ const fn validate_method_ids(ids: &[MethodId]) {
     // provider built against the old table would read a reused number as the old member. 494 was
     // `Array.prototype.parallelMap`, now defined once in TypeScript (`kiln-builtins/src/parallel.ts`).
     const RETIRED_METHOD_IDS: [u16; 1] = [494];
+    // Build a compact presence table once. Scanning the entire method table for every value
+    // makes this const assertion quadratic in the append-only range and crosses rustc's const
+    // evaluation limit as the method inventory grows.
+    let mut present = [0u64; 1024];
+    index = 0;
+    while index < ids.len() {
+        let value = ids[index].value as usize;
+        present[value / 64] |= 1u64 << (value % 64);
+        index += 1;
+    }
     let mut value = APPEND_ONLY_BASE;
     while value <= tail_high {
-        let mut found = false;
-        index = 0;
-        while index < ids.len() {
-            if ids[index].value == value {
-                found = true;
-                break;
-            }
-            index += 1;
-        }
+        let mut found = present[value as usize / 64] & (1u64 << (value as usize % 64)) != 0;
         let mut reserved = 0;
         while !found && reserved < RESERVED_METHOD_IDS.len() {
             if RESERVED_METHOD_IDS[reserved] == value {
@@ -1330,6 +1332,7 @@ method_ids! {
     (KILN_C99_METHOD_SHARE_RAW, 544, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_IS_RAW, 545, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_WEAK_RAW, 546, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_SERVER_IS_LISTENING, 579, NodeNet, NodeServer; 0, 0),
     /* Existing primitive-wrapper valueOf methods need identities distinct from Object's. */
     (KILN_C99_METHOD_BOOLEAN_VALUE_OF, 549, Generic; 0, 0),
     (KILN_C99_METHOD_SYMBOL_VALUE_OF, 550, Generic; 0, 0),

@@ -1,8 +1,10 @@
 // kiln-builtins: node:net implementation (Phase 5.2, ADR 0005)
 
+const privateProcess = (globalThis as any).__kilnPrivate?.process ||
+  (typeof process !== "undefined" ? (process as any) : null);
 const nativeModule =
-  typeof process !== "undefined"
-    ? (process as any).__kilnNativeModules?.net || null
+  privateProcess
+    ? privateProcess.__kilnNativeModules?.net || null
     : null;
 
 // Public Socket methods are TypeScript facades. The native capability only provides the
@@ -44,6 +46,48 @@ function socketRead(this: any, size?: number): any {
   return nativeModule.__readSocket.call(this, Number.isNaN(parsedSize) ? undefined : parsedSize);
 }
 
+const serverPrototypes = new WeakMap<object, object>();
+const decoratedServers = new WeakSet<object>();
+
+function serverListening(this: any): boolean {
+  if (!nativeModule || typeof nativeModule.__serverIsListening !== "function") {
+    throw new Error("node:net server listening state requires a host capability");
+  }
+  return !!nativeModule.__serverIsListening(this);
+}
+
+function decorateServer(server: any, preferredPrototype?: object): any {
+  if ((typeof server !== "object" && typeof server !== "function") || server === null) {
+    return server;
+  }
+  if (decoratedServers.has(server) && preferredPrototype === undefined) return server;
+  const base = Object.getPrototypeOf(server);
+  let prototype = preferredPrototype || serverPrototypes.get(base);
+  if (!prototype) {
+    prototype = Object.create(base);
+    Object.defineProperty(prototype, "listening", {
+      configurable: true,
+      get: serverListening,
+    });
+    serverPrototypes.set(base, prototype);
+  } else if (!Object.getOwnPropertyDescriptor(prototype, "listening")) {
+    Object.defineProperty(prototype, "listening", {
+      configurable: true,
+      get: serverListening,
+    });
+  }
+  Object.setPrototypeOf(server, prototype);
+  decoratedServers.add(server);
+  return server;
+}
+
+if (privateProcess && typeof privateProcess.__kilnServerDecorator !== "function") {
+  Object.defineProperty(privateProcess, "__kilnServerDecorator", {
+    configurable: false,
+    value: decorateServer,
+  });
+}
+
 const socketPrototypes = new WeakMap<object, object>();
 const decoratedSockets = new WeakSet<object>();
 
@@ -82,7 +126,7 @@ export function createServer(...args: any[]): any {
     // The host decorates accepted sockets before it emits `connection`, regardless of whether
     // listeners are installed here or later with on()/prependListener(). Preserve listener
     // identity and native argument handling by forwarding the original arguments unchanged.
-    return nativeModule.createServer(...args);
+    return decorateServer(nativeModule.createServer(...args));
   }
   throw new Error("node:net requires a net host capability that this realm does not provide");
 }

@@ -393,6 +393,7 @@ pub enum Native {
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
+    NodeServerIsListening,
     NodeServerSetTimeout,
     NodeResponseSetHeader,
     NodeResponseGetHeader,

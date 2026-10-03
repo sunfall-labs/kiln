@@ -2173,6 +2173,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 );
                 Ok(Value::Object(Rc::new(RefCell::new(address))))
             }
+            Native::NodeServerIsListening => {
+                let Some(server) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Server method called on an incompatible receiver".into(),
+                    });
+                };
+                let state = node_http_server(server)?;
+                Ok(Value::Boolean(state.borrow().driver.listening()))
+            }
             Native::NodeServerSetTimeout => {
                 let state = node_http_server(receiver)?;
                 let timeout = arguments.first().map_or(0.0, Value::as_number);

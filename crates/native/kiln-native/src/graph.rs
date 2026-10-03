@@ -4431,6 +4431,7 @@ static int kiln_install_native_modules(kiln_host *host) {
     if (status != KILN_C99_OK) return status;
     kiln_value net_connect = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ };
     kiln_value net_create_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ };
+    kiln_value net_server_is_listening = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 579 /* KILN_C99_METHOD_NODE_SERVER_IS_LISTENING */ };
     kiln_value net_cork_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 565 /* KILN_C99_METHOD_NODE_SOCKET_CORK_KERNEL */ };
     kiln_value net_uncork_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 566 /* KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL */ };
     kiln_value net_pause_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 567 /* KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL */ };
@@ -4441,6 +4442,8 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "createServer", 12, net_create_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__serverIsListening", 19, net_server_is_listening, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "__corkSocket", 12, net_cork_socket, 0, NULL);
     if (status != KILN_C99_OK) return status;

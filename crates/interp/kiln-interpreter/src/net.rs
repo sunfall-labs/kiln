@@ -360,6 +360,10 @@ pub(crate) fn node_listen_arguments(
 pub(crate) fn property(prop: &str) -> Option<Value> {
     match prop {
         "createServer" => Some(Value::Native(Native::NodeNetCreateServer, RealmId::PRIMARY)),
+        "__serverIsListening" => Some(Value::Native(
+            Native::NodeServerIsListening,
+            RealmId::PRIMARY,
+        )),
         "connect" | "createConnection" => {
             Some(Value::Native(Native::NodeNetConnect, RealmId::PRIMARY))
         }
@@ -392,6 +396,7 @@ pub(crate) fn native_capabilities() -> Value {
         "__pauseSocket",
         "__resumeSocket",
         "__readSocket",
+        "__serverIsListening",
     ] {
         if let Some(value) = property(name) {
             module.set_non_enumerable(name, value);
@@ -413,6 +418,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeServerListen => Some("listen"),
         Native::NodeServerClose => Some("close"),
         Native::NodeServerAddress => Some("address"),
+        Native::NodeServerIsListening => Some("__serverIsListening"),
         Native::NodeServerSetTimeout => Some("setTimeout"),
         _ => None,
     }

@@ -5636,6 +5636,16 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         return KILN_C99_OK;
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_SERVER)) {
+        if (code == KILN_C99_METHOD_NODE_SERVER_IS_LISTENING) {
+            kiln_value server_object = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_node_server *server = (kiln_node_server *)kiln_c99_node_hidden_pointer(
+                server_object, "@@node:server", 13);
+            if (server == NULL)
+                return kiln_c99_throw_not_a(thrown, server_object, "Server");
+            *result = kiln_c99_boolean(server->listener != 0 && !server->closing &&
+                                       !server->closed);
+            return KILN_C99_OK;
+        }
         kiln_node_server *server = (kiln_node_server *)kiln_c99_node_hidden_pointer(
             receiver, "@@node:server", 13);
         if (server == NULL) return kiln_c99_throw_not_a(thrown, receiver, "Server");

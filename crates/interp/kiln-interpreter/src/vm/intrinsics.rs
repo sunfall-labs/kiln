@@ -1024,6 +1024,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeServerListen
                 | Native::NodeServerClose
                 | Native::NodeServerAddress
+                | Native::NodeServerIsListening
                 | Native::NodeServerSetTimeout
                 | Native::NodeResponseSetHeader
                 | Native::NodeResponseGetHeader
