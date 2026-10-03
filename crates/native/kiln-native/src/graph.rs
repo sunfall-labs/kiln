@@ -4141,7 +4141,7 @@ static void kiln_graph_free_unit_stores(kiln_graph_module_instance *instance) {
     while (store != NULL) { kiln_graph_unit_store *next = store->next; free(store->values); free(store); store = next; }
 }
 "#);
-    output.push_str("static int kiln_graph_declared_require(kiln_graph_context *graph, kiln_value specifier, kiln_value *result, kiln_value *thrown, int *matched) {\n    *matched = 0;\n");
+    output.push_str("static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\nstatic int kiln_graph_declared_require(kiln_graph_context *graph, kiln_value specifier, kiln_value *result, kiln_value *thrown, int *matched) {\n    *matched = 0;\n");
     for path in graph.declared_includes() {
         let Some(&provider_index) = indices.get(path) else {
             continue;
@@ -4157,7 +4157,18 @@ static void kiln_graph_free_unit_stores(kiln_graph_module_instance *instance) {
             })
             .collect::<Vec<_>>()
             .join(" || ");
-        writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
+        match modules[provider_index].0.source {
+            ModuleSource::CommonJs => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
+            }
+            ModuleSource::Source if synchronous_require_async[provider_index] => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_async_require_error(&graph->host, result, thrown); }}").unwrap();
+            }
+            ModuleSource::Source => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = graph->instance->namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+            }
+            _ => {}
+        }
     }
     output.push_str("    (void)graph; (void)specifier; (void)result; (void)thrown;\n    return KILN_C99_OK;\n}\n");
     output.push_str(
