@@ -3100,6 +3100,11 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
              const url = 'file://' + path;\n\
              const first = await import(url);\n\
              const second = await import(url);\n\
+             const queried = await import(url + '?version=1#part');\n\
+             const queriedAgain = await import(url + '?version=1#part');\n\
+             const otherQuery = await import(url + '?version=2#part');\n\
+             const otherFragment = await import(url + '?version=1#other');\n\
+             console.log(queried === queriedAgain, queried === first, queried === otherQuery, queried === otherFragment, queried.bump(), queriedAgain.count, otherQuery.count, otherFragment.count);\n\
              const descriptor = Object.getOwnPropertyDescriptor(first, 'count');\n\
              const directWrite = Reflect.set(first, 'count', 99);\n\
              const proxyWrite = Reflect.set(new Proxy(first, {{}}), 'count', 99);\n\
@@ -3141,7 +3146,7 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
     );
     assert_eq!(
         output.stdout,
-        b"42 42 true 0 true true false false false 1 1\nSyntaxError\n",
+        b"true false false false 1 1 0 0\n42 42 true 0 true true false false false 1 1\nSyntaxError\n",
         "stderr={}, exit={:?}",
         String::from_utf8_lossy(&output.stderr),
         output.status.code()

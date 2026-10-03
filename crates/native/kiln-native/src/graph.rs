@@ -4058,7 +4058,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     let context = format!(
         "typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
-         typedef struct kiln_graph_runtime_module {{ char *path; uint64_t generation; kiln_value namespace_value; kiln_value failure; int state; struct kiln_graph_runtime_module *next; }} kiln_graph_runtime_module;\n\
+         typedef struct kiln_graph_runtime_module {{ char *path; size_t suffix_len; uint64_t generation; kiln_value namespace_value; kiln_value failure; int state; struct kiln_graph_runtime_module *next; }} kiln_graph_runtime_module;\n\
          typedef struct kiln_graph_unit_store {{ const kiln_c99_unit *unit; kiln_val *values; struct kiln_graph_unit_store *next; }} kiln_graph_unit_store;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
          typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    kiln_graph_runtime_module *runtime_modules;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
@@ -4624,6 +4624,7 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
     size_t url_len = 0;
     char *path = NULL;
     size_t path_len = 0;
+    size_t suffix_start = 0, suffix_len = 0;
     kiln_value path_value = kiln_c99_undefined();
     kiln_value canonical = kiln_c99_undefined();
     kiln_value source = kiln_c99_undefined();
@@ -4645,6 +4646,7 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
     }
     path = (char *)malloc(url_len + 1);
     if (path == NULL) return KILN_C99_OUT_OF_MEMORY;
+    suffix_start = url_len;
     for (size_t index = 7; index < url_len; ++index) {
         if (url[index] == '%') {
             if (index + 2 >= url_len) { status = KILN_C99_INVALID_ARGUMENT; goto done; }
@@ -4655,19 +4657,22 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
             int low = lo >= '0' && lo <= '9' ? lo - '0' :
                       lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 :
                       lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
-            if (high < 0 || low < 0 || (high == 0 && low == 0)) {
+            if (high < 0 || low < 0 || (high == 0 && low == 0) ||
+                ((high << 4) | low) == '/') {
                 status = KILN_C99_INVALID_ARGUMENT; goto done;
             }
             path[path_len++] = (char)((high << 4) | low);
             index += 2;
         } else {
             if (url[index] == '?' || url[index] == '#') {
-                status = KILN_C99_INVALID_ARGUMENT; goto done;
+                suffix_start = index;
+                break;
             }
             path[path_len++] = (char)url[index];
         }
     }
     path[path_len] = '\0';
+    suffix_len = url_len - suffix_start;
     if (kiln_node_fs_realpath_sync((const uint8_t *)path, path_len, &canonical_bytes,
                                    &canonical_len, &fs_error) != 0 || fs_error != 0) {
         if (thrown != NULL) (void)kiln_c99_new_type_error(thrown, "cannot resolve runtime module path");
@@ -4678,7 +4683,9 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
          module != NULL; module = module->next) {
         if (module->generation == graph->instance->instance_id &&
             strlen(module->path) == canonical_len &&
-            memcmp(module->path, canonical_bytes, canonical_len) == 0) {
+            memcmp(module->path, canonical_bytes, canonical_len) == 0 &&
+            module->suffix_len == suffix_len &&
+            memcmp(module->path + canonical_len + 1, url + suffix_start, suffix_len) == 0) {
             kiln_node_fs_free_bytes(canonical_bytes, canonical_len);
             canonical_bytes = NULL;
             if (module->state == 3) {
@@ -4695,10 +4702,18 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
     }
     kiln_graph_runtime_module *module = (kiln_graph_runtime_module *)calloc(1, sizeof *module);
     if (module == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-    module->path = (char *)malloc((size_t)canonical_len + 1);
+    if (suffix_len > SIZE_MAX - 2 || canonical_len > SIZE_MAX - suffix_len - 2) {
+        free(module); status = KILN_C99_OUT_OF_MEMORY; goto done;
+    }
+    // One allocation owns the canonical filesystem path and its URL identity suffix.
+    // Queries/fragments select distinct module instances without changing file reads.
+    module->path = (char *)malloc((size_t)canonical_len + suffix_len + 2);
     if (module->path == NULL) { free(module); status = KILN_C99_OUT_OF_MEMORY; goto done; }
     memcpy(module->path, canonical_bytes, canonical_len);
     module->path[canonical_len] = '\0';
+    memcpy(module->path + canonical_len + 1, url + suffix_start, suffix_len);
+    module->path[canonical_len + 1 + suffix_len] = '\0';
+    module->suffix_len = suffix_len;
     path_value = kiln_c99_copy_text(module->path, (size_t)canonical_len);
     canonical = path_value;
     if (canonical.tag != KILN_VALUE_STRING) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
