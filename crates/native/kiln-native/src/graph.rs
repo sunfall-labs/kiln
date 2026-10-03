@@ -4055,7 +4055,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
          typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    kiln_graph_runtime_module *runtime_modules;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
          typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
-         struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    int is_builtin_graph;\n}};\n{linkage_names}",
+         struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    kiln_graph_context *runtime_module_generation;\n    int runtime_module_reset_requested;\n    int is_builtin_graph;\n}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
     );
@@ -4560,6 +4560,55 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     return KILN_C99_THROWN;
 }
 
+static int kiln_graph_runtime_module_generation(kiln_graph_context **graph_ref) {
+    kiln_graph_context *graph, *generation;
+    kiln_graph_realm_state *realm;
+    if (graph_ref == NULL || (graph = *graph_ref) == NULL || graph->realm == NULL)
+        return KILN_C99_CONTROL_ERROR;
+    realm = graph->realm;
+    generation = graph->runtime_module_generation != NULL
+                     ? graph->runtime_module_generation
+                     : graph;
+    if (!graph->runtime_module_reset_requested) {
+        *graph_ref = generation;
+        return KILN_C99_OK;
+    }
+    if (graph->runtime_module_reset_requested) {
+        kiln_graph_context *fresh = (kiln_graph_context *)calloc(1, sizeof *fresh);
+        int status;
+        if (fresh == NULL) return KILN_C99_OUT_OF_MEMORY;
+        fresh->instance = (kiln_graph_module_instance *)calloc(1, sizeof *fresh->instance);
+        if (fresh->instance == NULL) { free(fresh); return KILN_C99_OUT_OF_MEMORY; }
+        fresh->realm = realm;
+        fresh->runtime_module_generation = fresh;
+        fresh->host = graph->host;
+        fresh->host.context = fresh;
+        fresh->host.module_context = fresh;
+        fresh->host.module_owner = NULL;
+        fresh->host.module_unit_values = kiln_graph_unit_values;
+        fresh->instance->instance_id = realm->next_module_instance_id++;
+        fresh->host.module_instance_id = fresh->instance->instance_id;
+        fresh->instance->result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->entry_result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->defer_startup = 1;
+        fresh->next_instance = realm->instances;
+        realm->instances = fresh;
+        realm->current_graph = fresh;
+        status = kiln_graph_enter(fresh);
+        if (status != KILN_C99_OK) {
+            realm->current_graph = graph;
+            return status;
+        }
+        fresh->instance->defer_startup = 0;
+        realm->reset_requested = 0;
+        graph->runtime_module_generation = fresh;
+        graph->runtime_module_reset_requested = 0;
+        *graph_ref = fresh;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
                                         kiln_value *namespace_value, kiln_value *thrown,
                                         int depth) {
@@ -4577,6 +4626,8 @@ static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value sp
     int status;
     if (graph == NULL || graph->instance == NULL || namespace_value == NULL ||
         specifier.tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_graph_runtime_module_generation(&graph);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_dynamic_module_text(specifier, &url, &url_len);
     if (status != KILN_C99_OK) return status;
     if (url_len < 8 || memcmp(url, "file://", 7) != 0 || url[7] != '/') {
@@ -5699,7 +5750,7 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
 "#
     );
     output.push_str("\n/* Detach callbacks while the heap is live, but keep every registered root context alive\n * through kiln_realm_destroy: roots marked KILN_GC_ROOT_SURVIVES_TEARDOWN are invoked there. */\nstatic void kiln_graph_detach_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    for (graph = realm->instances; graph != NULL; graph = graph->next_instance)\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n}\nstatic void kiln_graph_free_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
-    output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    int spy_authorized = 0;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    int spy_authorized = 0;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; graph->runtime_module_reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
     if needs_runner_policy {
         for (index, (node, _)) in modules.iter().enumerate() {
             if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {

@@ -9133,19 +9133,21 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
         status = kiln_dyn_throw_parse_error(lex, thrown, "expected module specifier string");
         goto done;
     }
-    arguments[0] = kiln_c99_copy_text(lex->curr.str_val, lex->curr.str_len);
-    arguments[1] = importer;
-    kiln_c99_gc_keep_alive(&arguments[0]);
-    kiln_c99_gc_keep_alive(&arguments[1]);
-    if (arguments[0].tag != KILN_VALUE_STRING || host == NULL || host->call == NULL) {
-        status = KILN_C99_OUT_OF_MEMORY;
-        goto done;
+    if (!lex->parse_only) {
+        arguments[0] = kiln_c99_copy_text(lex->curr.str_val, lex->curr.str_len);
+        arguments[1] = importer;
+        kiln_c99_gc_keep_alive(&arguments[0]);
+        kiln_c99_gc_keep_alive(&arguments[1]);
+        if (arguments[0].tag != KILN_VALUE_STRING || host == NULL || host->call == NULL) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        status = host->call(host->context, KILN_C99_HOST_RUNTIME_MODULE_IMPORT, 2,
+                            arguments, &namespace_value);
+        if (status == KILN_C99_THROWN && thrown != NULL) *thrown = namespace_value;
+        if (status != KILN_C99_OK) goto done;
+        kiln_c99_gc_keep_alive(&namespace_value);
     }
-    status = host->call(host->context, KILN_C99_HOST_RUNTIME_MODULE_IMPORT, 2,
-                        arguments, &namespace_value);
-    if (status == KILN_C99_THROWN && thrown != NULL) *thrown = namespace_value;
-    if (status != KILN_C99_OK) goto done;
-    kiln_c99_gc_keep_alive(&namespace_value);
     if (!side_effect_only) {
         for (size_t index = 0; index < count; ++index) {
             if (kiln_dyn_scope_has_own(scope, bindings[index].local,
@@ -9155,9 +9157,11 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
                 goto done;
             }
             kiln_value value = kiln_c99_undefined();
-            status = kiln_dyn_module_namespace_binding(host, namespace_value,
-                bindings[index].imported, bindings[index].imported_len, &value, depth, thrown);
-            if (status != KILN_C99_OK) goto done;
+            if (!lex->parse_only) {
+                status = kiln_dyn_module_namespace_binding(host, namespace_value,
+                    bindings[index].imported, bindings[index].imported_len, &value, depth, thrown);
+                if (status != KILN_C99_OK) goto done;
+            }
             if (!kiln_dyn_scope_set(scope, bindings[index].local,
                                     bindings[index].local_len, value)) {
                 status = KILN_C99_OUT_OF_MEMORY;
@@ -9177,6 +9181,179 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
 
 done:
     free(bindings);
+    return status;
+}
+
+/* Runtime module parsing must finish before a static import can evaluate its dependency. The
+ * ordinary evaluator is also the parser: use its parse-only mode to validate the complete module
+ * goal first, with imports recorded as inert bindings. This prevents a late syntax/export error
+ * from leaving dependency or module-body side effects behind. */
+static int kiln_dyn_preflight_module(kiln_host *host, const char *source, size_t source_len,
+                                    kiln_value importer, int depth, kiln_value *thrown) {
+    kiln_dyn_lexer lex;
+    kiln_dyn_scope scope;
+    kiln_dyn_module_export *exports = NULL;
+    size_t export_count = 0;
+    size_t export_capacity = 0;
+    kiln_value completion = kiln_c99_undefined();
+    int status = KILN_C99_OK;
+
+    kiln_dyn_scope_init(&scope, NULL);
+    scope.strict = 1;
+    status = kiln_dyn_scope_predeclare_lexicals(&scope, source, source_len, 0);
+    if (status != KILN_C99_OK) goto preflight_done;
+    memset(&lex, 0, sizeof lex);
+    lex.src = source;
+    lex.len = source_len;
+    lex.strict = 1;
+    lex.parse_only = 1;
+    kiln_dyn_lexer_next(&lex);
+    while (lex.curr.kind != KILN_DYN_EOF) {
+        if (kiln_dyn_module_ident_is(&lex, "await")) {
+            status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                          "top-level await in runtime modules is unsupported");
+            break;
+        }
+        int module_function_decl = 0;
+        char *module_function_name = NULL;
+        size_t module_function_name_len = 0;
+        if (lex.curr.kind == KILN_DYN_KW_FUNCTION) {
+            kiln_dyn_lexer look = lex;
+            kiln_dyn_lexer_next(&look);
+            if (look.curr.kind != KILN_DYN_IDENT ||
+                !kiln_dyn_module_name_copy(&module_function_name,
+                    &module_function_name_len, look.curr.start, look.curr.len)) {
+                kiln_dyn_token_free(&look.curr);
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                              "runtime module function declaration requires a name");
+                break;
+            }
+            kiln_dyn_token_free(&look.curr);
+            module_function_decl = 1;
+        }
+        if (kiln_dyn_module_ident_is(&lex, "import")) {
+            status = kiln_dyn_module_import(host, &lex, &scope, importer, depth, thrown);
+            if (status != KILN_C99_OK) break;
+            continue;
+        }
+        if (kiln_dyn_module_ident_is(&lex, "export")) {
+            kiln_dyn_lexer_next(&lex);
+            if (lex.curr.kind == KILN_DYN_KW_FUNCTION) {
+                kiln_dyn_lexer look = lex;
+                kiln_dyn_lexer_next(&look);
+                if (look.curr.kind != KILN_DYN_IDENT) {
+                    kiln_dyn_token_free(&look.curr);
+                    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                  "anonymous default functions are unsupported in runtime modules");
+                    break;
+                }
+                if (module_function_name == NULL &&
+                    !kiln_dyn_module_name_copy(&module_function_name,
+                        &module_function_name_len, look.curr.start, look.curr.len)) {
+                    kiln_dyn_token_free(&look.curr);
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                status = kiln_dyn_module_add_export(&exports, &export_count, &export_capacity,
+                    look.curr.start, look.curr.len, look.curr.start, look.curr.len, thrown);
+                kiln_dyn_token_free(&look.curr);
+                if (status != KILN_C99_OK) {
+                    free(module_function_name);
+                    break;
+                }
+                module_function_decl = 1;
+            } else if (lex.curr.kind == KILN_DYN_KW_ASYNC) {
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                              "async runtime module exports are unsupported");
+                break;
+            } else if (lex.curr.kind == KILN_DYN_KW_CONST ||
+                       lex.curr.kind == KILN_DYN_KW_LET ||
+                       lex.curr.kind == KILN_DYN_KW_VAR) {
+                kiln_dyn_lexer look = lex;
+                kiln_dyn_lexer_next(&look);
+                if (look.curr.kind != KILN_DYN_IDENT) {
+                    kiln_dyn_token_free(&look.curr);
+                    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                  "destructured runtime module exports are unsupported");
+                    break;
+                }
+                status = kiln_dyn_module_add_export(&exports, &export_count, &export_capacity,
+                    look.curr.start, look.curr.len, look.curr.start, look.curr.len, thrown);
+                if (status == KILN_C99_OK &&
+                    !kiln_dyn_scope_has_own(&scope, look.curr.start, look.curr.len) &&
+                    !kiln_dyn_scope_set(&scope, look.curr.start, look.curr.len,
+                                        kiln_c99_undefined()))
+                    status = KILN_C99_OUT_OF_MEMORY;
+                kiln_dyn_token_free(&look.curr);
+                if (status != KILN_C99_OK) break;
+            } else {
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                              "runtime module export syntax is unsupported");
+                break;
+            }
+        } else if (lex.curr.kind == KILN_DYN_KW_RETURN) {
+            status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                          "return is not allowed at module top level");
+            break;
+        }
+        if (module_function_decl) {
+            kiln_value function = kiln_c99_undefined();
+            status = kiln_dyn_eval_expr(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
+                                        depth, &function, thrown);
+            if (status == KILN_C99_OK &&
+                !kiln_dyn_scope_set(&scope, module_function_name,
+                                    module_function_name_len, function))
+                status = KILN_C99_OUT_OF_MEMORY;
+            free(module_function_name);
+            if (status != KILN_C99_OK) break;
+            if (lex.curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(&lex);
+            continue;
+        }
+        int returned = 0;
+        status = kiln_dyn_eval_stmt(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
+                                    depth, &completion, &returned, thrown);
+        if (status != KILN_C99_OK) break;
+        if (returned) {
+            status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                          "return is not allowed at module top level");
+            break;
+        }
+    }
+    if (status == KILN_C99_CONTROL_ERROR) {
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                      "unsupported syntax in runtime source module");
+    }
+    kiln_dyn_token_free(&lex.curr);
+    if (status == KILN_C99_OK) {
+        for (size_t index = 0; index < export_count; ++index) {
+            int found = 0;
+            for (size_t slot = 0; slot < scope.count; ++slot) {
+                if (scope.bindings[slot].name_len == exports[index].local_len &&
+                    memcmp(scope.bindings[slot].name, exports[index].local,
+                           exports[index].local_len) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                char message[192];
+                (void)snprintf(message, sizeof message,
+                               "exported binding %.*s is not declared",
+                               (int)exports[index].local_len, exports[index].local);
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, message);
+                break;
+            }
+        }
+    }
+
+preflight_done:
+    for (size_t index = 0; index < export_count; ++index) {
+        free(exports[index].name);
+        free(exports[index].local);
+    }
+    free(exports);
+    kiln_dyn_scope_destroy(&scope);
+    (void)completion;
     return status;
 }
 
@@ -9269,6 +9446,12 @@ int kiln_c99_dynamic_eval_module(kiln_host *host, kiln_value source, kiln_value 
         return KILN_C99_INVALID_ARGUMENT;
     status = kiln_dyn_string_to_source(source, &source_owned, &source_len);
     if (status != KILN_C99_OK) return status;
+    status = kiln_dyn_preflight_module(host, (const char *)source_owned, source_len,
+                                      importer, depth, thrown);
+    if (status != KILN_C99_OK) {
+        free(source_owned);
+        return status;
+    }
     kiln_dyn_scope_init(&scope, NULL);
     scope.strict = 1;
     status = kiln_dyn_scope_predeclare_lexicals(&scope, (const char *)source_owned,

@@ -3047,7 +3047,10 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
              const url = 'file://' + path;\n\
              const first = await import(url);\n\
              const second = await import(url);\n\
-             console.log(value, first.answer(), first === second, first.bump(), first.count);\n\
+             const descriptor = Object.getOwnPropertyDescriptor(first, 'count');\n\
+             const directWrite = Reflect.set(first, 'count', 99);\n\
+             const proxyWrite = Reflect.set(new Proxy(first, {{}}), 'count', 99);\n\
+             console.log(value, first.answer(), first === second, descriptor.value, descriptor.writable, descriptor.enumerable, descriptor.configurable, directWrite, proxyWrite, first.bump(), first.count);\n\
              writeFileSync(path + '.bad', 'export = ;');\n\
              try {{ await import('file://' + path + '.bad'); }}\n\
              catch (error) {{ console.log(error.name); }}\n",
@@ -3063,7 +3066,7 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
     )
     .expect("runtime module graph compiles");
     let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
-        .run_graph(
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: root.path.join("program"),
@@ -3073,14 +3076,173 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("runtime module graph builds and runs");
-    assert_eq!(
-        report.stdout,
-        b"42 42 true 1 1\nSyntaxError\n",
-        "stderr={}, exit={:?}",
-        String::from_utf8_lossy(&report.stderr),
-        report.exit_code
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module with GC stress");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(
+        output.stdout,
+        b"42 42 true 0 true true false false false 1 1\nSyntaxError\n",
+        "stderr={}, exit={:?}",
+        String::from_utf8_lossy(&output.stderr),
+        output.status.code()
+    );
+}
+
+#[test]
+fn native_runtime_module_syntax_failure_has_no_import_or_body_side_effects() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module preflight integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-preflight");
+    fs::write(
+        root.path.join("package.json"),
+        r#"{"name":"pkg","type":"module"}"#,
+    )
+    .expect("write package manifest");
+    fs::write(
+        root.path.join("tsconfig.json"),
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"pkg/*":["src/*.mjs"]}}}"#,
+    )
+    .expect("write path alias");
+    fs::create_dir_all(root.path.join("src")).expect("create package source directory");
+    fs::write(
+        root.path.join("src/runtime.mjs"),
+        "globalThis.dependencyRuns++; export const value = 42;\n",
+    )
+    .expect("write linked dependency");
+    fs::write(
+        root.path.join("preserver.mjs"),
+        "export const load = () => import('pkg/runtime');\n",
+    )
+    .expect("write lazy graph edge");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import './preserver.mjs';\n\
+             import {{ writeFileSync }} from 'node:fs';\n\
+             globalThis.dependencyRuns = 0;\n\
+             const path = '{}';\n\
+             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; globalThis.bodyRuns = 1; export const = value;\");\n\
+             const url = 'file://' + path;\n\
+             let first, second;\n\
+             try {{ await import(url); }} catch (error) {{ first = error; }}\n\
+             try {{ await import(url); }} catch (error) {{ second = error; }}\n\
+             console.log(first && first.name, first === second, globalThis.dependencyRuns, globalThis.bodyRuns);\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module preflight with GC stress");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"SyntaxError true 0 undefined\n",
+        "stderr={}, exit={:?}",
+        String::from_utf8_lossy(&output.stderr),
+        output.status.code()
+    );
+}
+
+#[test]
+fn native_runtime_module_reset_keeps_old_namespace_closure_and_collects_safely() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module reset integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-reset");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package manifest");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+             loader('registerRunner', import.meta.url);\n\
+             const path = '{}';\n\
+             const moduleSource = value => 'export const value = ' + value + '; export function retained() {{ return value; }}';\n\
+             writeFileSync(path, moduleSource(1));\n\
+             const url = 'file://' + path;\n\
+             const old = await import(url);\n\
+             loader('reset');\n\
+             writeFileSync(path, moduleSource(2));\n\
+             const current = await import(url);\n\
+             console.log(old === current, old.value, current.value, old.retained(), current.retained());\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed runtime module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"false 1 2 1 2\n");
 }
 
 #[test]
