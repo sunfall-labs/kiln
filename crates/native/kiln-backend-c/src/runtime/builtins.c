@@ -319,26 +319,14 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
         }
         if (piece != NULL) {
             kiln_value text = kiln_c99_from_units(piece, piece_count);
-            uint8_t *encoded = NULL;
-            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
-                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
-                free(encoded);
+                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            }
-            free(encoded);
         } else {
             kiln_value text = kiln_c99_from_units(&literal, 1);
-            uint8_t *encoded = NULL;
-            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
-                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
-                free(encoded);
+                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            }
-            free(encoded);
         }
         at += taken;
     }

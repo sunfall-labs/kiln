@@ -2251,12 +2251,12 @@ pub(crate) fn call_native(
                 // String patterns only. A regular expression is a different search and a
                 // different replacement grammar, and neither exists yet.
                 Native::StringReplace | Native::StringReplaceAll => {
-                    let pattern = arguments
-                        .first()
-                        .map_or_else(String::new, Value::to_display_string);
-                    let replacement = arguments
-                        .get(1)
-                        .map_or_else(String::new, Value::to_display_string);
+                    let pattern = value_to_string_units(
+                        arguments.first().unwrap_or(&Value::Undefined),
+                    )?;
+                    let replacement = value_to_string_units(
+                        arguments.get(1).unwrap_or(&Value::Undefined),
+                    )?;
                     // The replacement is a *template*, not literal text, even when the pattern
                     // is a plain string: `$&` is what matched, `` $` `` and `$'` are what came
                     // before and after, and `$$` is one dollar. Treating it literally is the
@@ -2267,8 +2267,8 @@ pub(crate) fn call_native(
                     // path uses does it, so the two cannot disagree.
                     let all = matches!(native, Native::StringReplaceAll);
                     let subject: Vec<u16> = text.units().collect();
-                    let needle: Vec<u16> = pattern.encode_utf16().collect();
-                    let mut out = String::with_capacity(text.len());
+                    let needle = pattern;
+                    let mut out = Vec::with_capacity(subject.len());
                     let mut at = 0;
                     loop {
                         // An empty pattern matches at every position including the end, which is
@@ -2285,17 +2285,15 @@ pub(crate) fn call_native(
                                 .map(|offset| at + offset)
                         };
                         let Some(start) = found else { break };
-                        push_bounded(&mut out, &utf16_slice(&subject, at..start))?;
-                        push_bounded(
-                            &mut out,
-                            &expand_replacement(
-                                &replacement,
-                                &subject,
-                                &(start..start + needle.len()),
-                                &[],
-                                &[],
-                            )?,
+                        push_bounded_units(&mut out, &subject[at..start])?;
+                        let expanded = expand_replacement(
+                            &replacement,
+                            &subject,
+                            &(start..start + needle.len()),
+                            &[],
+                            &[],
                         )?;
+                        push_bounded_units(&mut out, &expanded)?;
                         at = start + needle.len();
                         if !all {
                             break;
@@ -2303,7 +2301,7 @@ pub(crate) fn call_native(
                         if needle.is_empty() {
                             if start < subject.len() {
                                 // Carry across the unit the empty match stepped over.
-                                out.push_str(&utf16_slice(&subject, start..start + 1));
+                                push_bounded_units(&mut out, &subject[start..start + 1])?;
                                 at = start + 1;
                             } else {
                                 at = subject.len() + 1;
@@ -2312,9 +2310,9 @@ pub(crate) fn call_native(
                         }
                     }
                     if at <= subject.len() {
-                        push_bounded(&mut out, &utf16_slice(&subject, at..subject.len()))?;
+                        push_bounded_units(&mut out, &subject[at..subject.len()])?;
                     }
-                    Value::String(out.into())
+                    Value::String(StringUnits::from_units(&out))
                 }
                 Native::StringLastIndexOf => {
                     let needle = arguments

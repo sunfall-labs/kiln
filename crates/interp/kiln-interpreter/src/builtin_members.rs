@@ -173,82 +173,78 @@ pub(super) fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec
 /// against a megabyte-long match asks for a string in the tens of gigabytes -- from a single
 /// call, before the caller ever sees a byte of it.
 pub(super) fn expand_replacement(
-    template: &str,
+    template: &[u16],
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
     names: &[(String, Option<std::ops::Range<usize>>)],
-) -> Result<String, ExecutionError> {
-    let mut out = String::new();
-    let characters: Vec<char> = template.chars().collect();
+) -> Result<Vec<u16>, ExecutionError> {
+    let mut out = Vec::new();
     let mut at = 0;
-    while at < characters.len() {
-        if characters[at] != '$' || at + 1 >= characters.len() {
-            push_bounded_char(&mut out, characters[at])?;
+    while at < template.len() {
+        if template[at] != b'$' as u16 || at + 1 >= template.len() {
+            push_bounded_units(&mut out, &template[at..at + 1])?;
             at += 1;
             continue;
         }
-        match characters[at + 1] {
-            '$' => {
-                push_bounded_char(&mut out, '$')?;
+        match template[at + 1] {
+            x if x == b'$' as u16 => {
+                out.push(b'$' as u16);
                 at += 2;
             }
-            '&' => {
-                push_bounded(&mut out, &utf16_slice(subject, range.clone()))?;
+            x if x == b'&' as u16 => {
+                push_bounded_units(&mut out, &subject[range.clone()])?;
                 at += 2;
             }
-            '`' => {
-                push_bounded(&mut out, &utf16_slice(subject, 0..range.start))?;
+            x if x == b'`' as u16 => {
+                push_bounded_units(&mut out, &subject[..range.start])?;
                 at += 2;
             }
-            '\'' => {
-                push_bounded(&mut out, &utf16_slice(subject, range.end..subject.len()))?;
+            x if x == b'\'' as u16 => {
+                push_bounded_units(&mut out, &subject[range.end..])?;
                 at += 2;
             }
-            first if first.is_ascii_digit() => {
-                // Two digits are preferred when that names a group, which is why `$12` is group
-                // twelve where there are twelve and group one followed by "2" where there are not.
-                let two = characters
+            first if (b'0' as u16..=b'9' as u16).contains(&first) => {
+                let first_digit = usize::from(first - b'0' as u16);
+                let two = template
                     .get(at + 2)
-                    .filter(|second| second.is_ascii_digit())
-                    .and_then(|second| format!("{first}{second}").parse::<usize>().ok())
+                    .filter(|second| (b'0' as u16..=b'9' as u16).contains(second))
+                    .map(|second| first_digit * 10 + usize::from(*second - b'0' as u16))
                     .filter(|index| *index > 0 && *index < groups.len());
                 let (index, width) = match two {
                     Some(index) => (index, 3),
-                    None => match first.to_digit(10).map(|digit| digit as usize) {
-                        Some(index) if index > 0 && index < groups.len() => (index, 2),
-                        // Not a group reference at all, so the text stands as written.
-                        _ => {
-                            push_bounded_char(&mut out, '$')?;
-                            at += 1;
-                            continue;
-                        }
-                    },
+                    None if first_digit > 0 && first_digit < groups.len() => (first_digit, 2),
+                    None => {
+                        out.push(b'$' as u16);
+                        at += 1;
+                        continue;
+                    }
                 };
                 if let Some(Some(group)) = groups.get(index) {
-                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                    push_bounded_units(&mut out, &subject[group.clone()])?;
                 }
                 at += width;
             }
-            // `$<name>` is a group reference only for a pattern that *has* named groups: in
-            // one that does not, the specification leaves the text exactly as written, so
-            // `"x".replace(/x/, "$<a>")` is the literal `$<a>` rather than an empty string.
-            '<' if !names.is_empty() => {
-                let Some(end) = characters[at + 2..].iter().position(|c| *c == '>') else {
-                    push_bounded_char(&mut out, '$')?;
+            x if x == b'<' as u16 && !names.is_empty() => {
+                let Some(end) = template[at + 2..]
+                    .iter()
+                    .position(|unit| *unit == b'>' as u16)
+                else {
+                    out.push(b'$' as u16);
                     at += 1;
                     continue;
                 };
-                let name: String = characters[at + 2..at + 2 + end].iter().collect();
-                // A name the pattern does not declare expands to nothing, like a group that did
-                // not participate -- it is not an error, and not the literal text either.
-                if let Some((_, Some(group))) = names.iter().find(|(key, _)| *key == name) {
-                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                let name_units = &template[at + 2..at + 2 + end];
+                if let Some((_, Some(group))) = names
+                    .iter()
+                    .find(|(key, _)| key.encode_utf16().eq(name_units.iter().copied()))
+                {
+                    push_bounded_units(&mut out, &subject[group.clone()])?;
                 }
                 at += 3 + end;
             }
             _ => {
-                push_bounded_char(&mut out, '$')?;
+                out.push(b'$' as u16);
                 at += 1;
             }
         }

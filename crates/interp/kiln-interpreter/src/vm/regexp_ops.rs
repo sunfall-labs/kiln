@@ -142,14 +142,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let units = subject.to_units();
             return self.regexp_match_all_symbol(receiver, &units, instruction);
         }
+        if method == RegExpSymbol::Replace {
+            let subject = self.as_text_units(subject_argument, instruction)?;
+            return self.regexp_replace_symbol(receiver, &subject, &second, instruction);
+        }
         let subject = self.as_text(subject_argument, instruction)?;
         match method {
             RegExpSymbol::Match => self.regexp_match_symbol(receiver, &subject, instruction),
             RegExpSymbol::Search => self.regexp_search_symbol(receiver, &subject, instruction),
             RegExpSymbol::MatchAll => unreachable!("handled with UTF-16 units above"),
-            RegExpSymbol::Replace => {
-                self.regexp_replace_symbol(receiver, &subject, &second, instruction)
-            }
+            RegExpSymbol::Replace => unreachable!("replace uses lossless string units above"),
             RegExpSymbol::Split => {
                 self.regexp_split_symbol(receiver, &subject, &second, instruction)
             }
@@ -183,7 +185,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Array(ArrayData::new(found))
                 });
             }
-            let matched = self.read_text(&result, "0", instruction)?;
+            let matched_value = self.read_property(&result, "0", instruction)?;
+            let matched = self.as_text_units(&matched_value, instruction)?;
             let empty = matched.is_empty();
             found.push(Value::String(matched.into()));
             // An empty match would leave the cursor where it is and match again forever, so the
@@ -367,18 +370,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn regexp_replace_symbol(
         &mut self,
         target: &Value,
-        subject: &str,
+        subject: &StringUnits,
         replacement: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let units: Vec<u16> = subject.encode_utf16().collect();
+        let units = subject.to_units().into_vec();
         let functional = is_callable(replacement);
         // Coerced once, up front, and only when it is not a function: the template is read for
         // every match, and a `toString` that ran per match would be observable.
         let template = if functional {
-            String::new()
+            StringUnits::from("")
         } else {
-            self.as_text(replacement, instruction)?
+            self.as_text_units(replacement, instruction)?
         };
         let flags = self.read_text(target, "flags", instruction)?;
         let global = flags.contains('g');
@@ -391,11 +394,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // which matches the replacement covers.
         let mut results = Vec::new();
         loop {
-            let result = self.regexp_exec_abstract(target, subject, instruction)?;
+            let result = self.regexp_exec_abstract_value(
+                target,
+                Value::String(subject.clone()),
+                instruction,
+            )?;
             if matches!(result, Value::Null) {
                 break;
             }
-            let matched = self.read_text(&result, "0", instruction)?;
+            let matched_value = self.read_property(&result, "0", instruction)?;
+            let matched = self.as_text_units(&matched_value, instruction)?;
             results.push(result);
             if !global {
                 break;
@@ -406,12 +414,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.set_last_index(target, next as f64, instruction)?;
             }
         }
-        let mut built = String::new();
+        let mut built = Vec::new();
         let mut copied = 0usize;
         for result in results {
             let count = self.read_length(&result, "length", instruction)?.max(1) - 1;
-            let matched = self.read_text(&result, "0", instruction)?;
-            let match_units = matched.encode_utf16().count();
+            let matched_value = self.read_property(&result, "0", instruction)?;
+            let matched = self.as_text_units(&matched_value, instruction)?;
+            let matched_units = matched.to_units();
+            let match_units = matched_units.len();
             let index = self.read_property(&result, "index", instruction)?;
             let index = self.as_number_argument(Some(&index), instruction)?;
             let position = if index.is_nan() {
@@ -424,16 +434,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let capture = self.read_property(&result, &slot.to_string(), instruction)?;
                 captures.push(match capture {
                     Value::Undefined => Value::Undefined,
-                    other => Value::String(self.as_text(&other, instruction)?.into()),
+                    other => Value::String(self.as_text_units(&other, instruction)?),
                 });
             }
             let named = self.read_property(&result, "groups", instruction)?;
             let produced = if functional {
                 let mut call_arguments = Vec::with_capacity(count + 4);
-                call_arguments.push(Value::String(matched.clone().into()));
+                call_arguments.push(Value::String(matched.clone()));
                 call_arguments.extend(captures.iter().cloned());
                 call_arguments.push(Value::Number(position as f64));
-                call_arguments.push(Value::String(subject.to_owned().into()));
+                call_arguments.push(Value::String(subject.clone()));
                 // The groups object is passed only when there is one, which is what keeps the
                 // replacer's argument count stable for a pattern with no named groups.
                 if !matches!(named, Value::Undefined) {
@@ -441,29 +451,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let value =
                     self.call_value(replacement, Value::Undefined, call_arguments, instruction)?;
-                self.as_text(&value, instruction)?
+                self.as_text_units(&value, instruction)?
             } else {
-                self.substitute(
-                    &template,
-                    &matched,
+                StringUnits::from_units(&self.substitute(
+                    &template.to_units(),
+                    &matched_units,
                     &units,
                     position,
                     &captures,
                     &named,
                     instruction,
-                )?
+                )?)
             };
             // A match that starts before what has already been copied is skipped outright: an
             // `exec` of the program's own may hand back overlapping or backwards positions, and
             // the specification refuses to rewind rather than producing text twice.
             if position >= copied {
-                push_bounded(&mut built, &utf16_slice(&units, copied..position))?;
-                push_bounded(&mut built, &produced)?;
+                push_bounded_units(&mut built, &units[copied..position])?;
+                push_bounded_units(&mut built, &produced.to_units())?;
                 copied = (position + match_units).min(units.len());
             }
         }
-        push_bounded(&mut built, &utf16_slice(&units, copied..units.len()))?;
-        Ok(Value::String(built.into()))
+        push_bounded_units(&mut built, &units[copied..units.len()])?;
+        Ok(Value::String(StringUnits::from_units(&built)))
     }
 
     /// `GetSubstitution`: expand `$&`, `$1`, `` $` ``, `$'` and `$<name>` in a replacement.
@@ -474,86 +484,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn substitute(
         &mut self,
-        template: &str,
-        matched: &str,
+        template: &[u16],
+        matched: &[u16],
         units: &[u16],
         position: usize,
         captures: &[Value],
         named: &Value,
         instruction: usize,
-    ) -> Result<String, ExecutionError> {
-        let tail = (position + matched.encode_utf16().count()).min(units.len());
-        let characters: Vec<char> = template.chars().collect();
-        let mut out = String::new();
+    ) -> Result<Vec<u16>, ExecutionError> {
+        let tail = (position + matched.len()).min(units.len());
+        let mut out = Vec::new();
         let mut at = 0;
-        while at < characters.len() {
-            if characters[at] != '$' || at + 1 >= characters.len() {
-                push_bounded_char(&mut out, characters[at])?;
+        while at < template.len() {
+            if template[at] != b'$' as u16 || at + 1 >= template.len() {
+                push_bounded_units(&mut out, &template[at..at + 1])?;
                 at += 1;
                 continue;
             }
-            match characters[at + 1] {
-                '$' => {
-                    push_bounded_char(&mut out, '$')?;
+            match template[at + 1] {
+                unit if unit == b'$' as u16 => {
+                    push_bounded_units(&mut out, &[b'$' as u16])?;
                     at += 2;
                 }
-                '&' => {
-                    push_bounded(&mut out, matched)?;
+                unit if unit == b'&' as u16 => {
+                    push_bounded_units(&mut out, matched)?;
                     at += 2;
                 }
-                '`' => {
-                    push_bounded(&mut out, &utf16_slice(units, 0..position))?;
+                unit if unit == b'`' as u16 => {
+                    push_bounded_units(&mut out, &units[0..position])?;
                     at += 2;
                 }
-                '\'' => {
-                    push_bounded(&mut out, &utf16_slice(units, tail..units.len()))?;
+                unit if unit == b'\'' as u16 => {
+                    push_bounded_units(&mut out, &units[tail..])?;
                     at += 2;
                 }
-                '<' => {
+                unit if unit == b'<' as u16 => {
                     // A pattern with no named groups leaves `$<` alone rather than treating it
                     // as an unterminated group reference: the sequence is only special when
                     // there is a groups object for it to name something in.
-                    let Some(end) = characters[at + 2..].iter().position(|found| *found == '>')
+                    let Some(end) = template[at + 2..]
+                        .iter()
+                        .position(|found| *found == b'>' as u16)
                     else {
-                        push_bounded_char(&mut out, '$')?;
+                        push_bounded_units(&mut out, &[b'$' as u16])?;
                         at += 1;
                         continue;
                     };
                     if matches!(named, Value::Undefined) {
-                        push_bounded_char(&mut out, '$')?;
+                        push_bounded_units(&mut out, &[b'$' as u16])?;
                         at += 1;
                         continue;
                     }
-                    let name: String = characters[at + 2..at + 2 + end].iter().collect();
+                    let name: String = String::from_utf16_lossy(&template[at + 2..at + 2 + end]);
                     let value = self.read_property(named, &name, instruction)?;
                     if !matches!(value, Value::Undefined) {
-                        push_bounded(&mut out, &self.as_text(&value, instruction)?)?;
+                        push_bounded_units(
+                            &mut out,
+                            &self.as_text_units(&value, instruction)?.to_units(),
+                        )?;
                     }
                     at += end + 3;
                 }
-                first @ '0'..='9' => {
+                first if (b'0' as u16..=b'9' as u16).contains(&first) => {
                     // Two digits are preferred to one, but only when the two-digit group
                     // exists: `$12` in a pattern with three groups is group one followed by a
                     // literal `2`.
-                    let second = characters.get(at + 2).copied().filter(char::is_ascii_digit);
-                    let single = first as usize - '0' as usize;
-                    let double = second.map(|digit| single * 10 + (digit as usize - '0' as usize));
+                    let second = template
+                        .get(at + 2)
+                        .copied()
+                        .filter(|digit| (b'0' as u16..=b'9' as u16).contains(digit));
+                    let single = first as usize - b'0' as usize;
+                    let double = second.map(|digit| single * 10 + (digit as usize - b'0' as usize));
                     let (index, width) = match double {
                         Some(both) if both >= 1 && both <= captures.len() => (both, 3),
                         _ if single >= 1 && single <= captures.len() => (single, 2),
                         _ => {
-                            push_bounded_char(&mut out, '$')?;
+                            push_bounded_units(&mut out, &[b'$' as u16])?;
                             at += 1;
                             continue;
                         }
                     };
                     if let Value::String(text) = &captures[index - 1] {
-                        push_bounded(&mut out, &text.to_lossy_string())?;
+                        push_bounded_units(&mut out, &text.to_units())?;
                     }
                     at += width;
                 }
                 _ => {
-                    push_bounded_char(&mut out, '$')?;
+                    push_bounded_units(&mut out, &[b'$' as u16])?;
                     at += 1;
                 }
             }
@@ -653,7 +670,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Value::String(text) = receiver else {
             return Ok(Value::Undefined);
         };
-        let subject: Vec<u16> = text.encode_utf16().collect();
+        let subject: Vec<u16> = text.units().collect();
         let replacement = arguments.get(1).cloned().unwrap_or(Value::Undefined);
         let callable = matches!(
             replacement,
@@ -673,10 +690,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 (found, true)
             }
             other => {
-                let needle: Vec<u16> = other
-                    .map_or_else(String::new, Value::to_display_string)
-                    .encode_utf16()
-                    .collect();
+                let needle = other
+                    .map(value_to_string_units)
+                    .transpose()?
+                    .unwrap_or_default();
                 (
                     literal_matches(
                         &subject,
@@ -691,50 +708,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.publish_regexp_legacy_captures(&subject, groups);
         }
 
-        let mut out = String::new();
+        let mut out = Vec::new();
         let mut copied = 0;
         for (range, groups, names) in matches {
-            push_bounded(&mut out, &utf16_slice(&subject, copied..range.start))?;
-            let matched = utf16_slice(&subject, range.clone());
+            push_bounded_units(&mut out, &subject[copied..range.start])?;
+            let matched = StringUnits::from_units(&subject[range.clone()]);
             if callable {
                 // The handler receives the match, then each group, then where it was found and
                 // the whole subject -- the same arguments the specification passes.
-                let mut call_arguments = vec![Value::String(matched.clone().into())];
+                let mut call_arguments = vec![Value::String(matched.clone())];
                 for group in groups.iter().skip(1) {
                     call_arguments.push(match group {
-                        Some(range) => Value::String(utf16_slice(&subject, range.clone()).into()),
+                        Some(range) => {
+                            Value::String(StringUnits::from_units(&subject[range.clone()]))
+                        }
                         None => Value::Undefined,
                     });
                 }
                 call_arguments.push(Value::Number(range.start as f64));
-                call_arguments.push(Value::String(text.clone().into()));
+                call_arguments.push(Value::String(text.clone()));
                 // The groups object is last, and only for a pattern that has names -- which is
                 // what keeps the replacer's argument count what it has always been otherwise.
                 if !names.is_empty() {
                     call_arguments.push(named_group_object(&names, |group| match group {
-                        Some(range) => Value::String(utf16_slice(&subject, range.clone()).into()),
+                        Some(range) => {
+                            Value::String(StringUnits::from_units(&subject[range.clone()]))
+                        }
                         None => Value::Undefined,
                     }));
                 }
                 let produced =
                     self.call_value(&replacement, Value::Undefined, call_arguments, instruction)?;
-                push_bounded(&mut out, &produced.to_display_string())?;
+                push_bounded_units(&mut out, &value_to_string_units(&produced)?)?;
             } else {
-                push_bounded(
-                    &mut out,
-                    &expand_replacement(
-                        &replacement.to_display_string(),
-                        &subject,
-                        &range,
-                        &groups,
-                        &names,
-                    )?,
-                )?;
+                let template = value_to_string_units(&replacement)?;
+                let expanded = expand_replacement(&template, &subject, &range, &groups, &names)?;
+                push_bounded_units(&mut out, &expanded)?;
             }
             copied = range.end;
         }
-        push_bounded(&mut out, &utf16_slice(&subject, copied..subject.len()))?;
-        Ok(Value::String(out.into()))
+        push_bounded_units(&mut out, &subject[copied..subject.len()])?;
+        Ok(Value::String(StringUnits::from_units(&out)))
     }
 
     /// The pattern argument of a string method, promoted to a regexp when it is a plain string.

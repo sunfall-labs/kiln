@@ -3713,6 +3713,8 @@ static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t 
  * belongs to the caller. */
 static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len);
 static int kiln_c99_text_append_string(kiln_text *text, kiln_value value);
+static int kiln_c99_text_append_js_string(kiln_text *text, kiln_value value);
+static kiln_value kiln_c99_text_preserving_surrogates_value(kiln_text *text);
 
 /* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
  * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost

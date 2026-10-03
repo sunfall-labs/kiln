@@ -294,48 +294,10 @@ static const kiln_string *kiln_c99_json_raw_source(const kiln_object *object) {
  * byte sequence impossible in valid UTF-8 JSON as an internal sentinel. The JSON-specific text
  * escape in text.c restores it when the final JavaScript string is built. */
 static int kiln_c99_json_append_raw_source(kiln_text *text, const kiln_string *source) {
-    size_t index;
-    for (index = 0; index < source->unit_len; ++index) {
-        uint32_t point = kiln_string_unit_at(source, index);
-        char bytes[4];
-        size_t length;
-        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < source->unit_len) {
-            uint32_t low = kiln_string_unit_at(source, index + 1);
-            if (low >= 0xDC00 && low <= 0xDFFF) {
-                point = UINT32_C(0x10000) + ((point - 0xD800) << 10) + (low - 0xDC00);
-                ++index;
-            }
-        }
-        if (point >= 0xD800 && point <= 0xDFFF) {
-            unsigned char marker[3] = {0xFF, (unsigned char)(point & 0xFF),
-                                       (unsigned char)(point >> 8)};
-            if (kiln_c99_text_append(text, (const char *)marker, sizeof marker) != KILN_C99_OK)
-                return KILN_C99_OUT_OF_MEMORY;
-            continue;
-        }
-        if (point <= 0x7F) {
-            bytes[0] = (char)point;
-            length = 1;
-        } else if (point <= 0x7FF) {
-            bytes[0] = (char)(0xC0 | (point >> 6));
-            bytes[1] = (char)(0x80 | (point & 0x3F));
-            length = 2;
-        } else if (point <= 0xFFFF) {
-            bytes[0] = (char)(0xE0 | (point >> 12));
-            bytes[1] = (char)(0x80 | ((point >> 6) & 0x3F));
-            bytes[2] = (char)(0x80 | (point & 0x3F));
-            length = 3;
-        } else {
-            bytes[0] = (char)(0xF0 | (point >> 18));
-            bytes[1] = (char)(0x80 | ((point >> 12) & 0x3F));
-            bytes[2] = (char)(0x80 | ((point >> 6) & 0x3F));
-            bytes[3] = (char)(0x80 | (point & 0x3F));
-            length = 4;
-        }
-        if (kiln_c99_text_append(text, bytes, length) != KILN_C99_OK)
-            return KILN_C99_OUT_OF_MEMORY;
-    }
-    return KILN_C99_OK;
+    kiln_value value;
+    if (source == NULL) return KILN_C99_INVALID_ARGUMENT;
+    value = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)source, source->unit_len);
+    return kiln_c99_text_append_js_string(text, value);
 }
 
 /* True when no object in `value`'s own store or its prototype chain owns a property named
@@ -1559,63 +1521,7 @@ static int kiln_c99_json_document(const kiln_string *source, kiln_val *out) {
  * Most stringify results take the ordinary fast path; only raw source containing a literal lone
  * surrogate needs this conversion. */
 kiln_value kiln_c99_json_text_value(kiln_text *text) {
-    size_t offset = 0;
-    size_t unit_count = 0;
-    int has_surrogate = 0;
-    kiln_string *string;
-    uint16_t *units;
-    size_t output = 0;
-    if (text->len == 0 || memchr(text->bytes, 0xFF, text->len) == NULL)
-        return kiln_c99_text_value(text);
-    while (offset < text->len) {
-        unsigned char byte = (unsigned char)text->bytes[offset];
-        if (byte == 0xFF) {
-            if (text->len - offset < 3) goto malformed;
-            has_surrogate = 1;
-            unit_count++;
-            offset += 3;
-        } else {
-            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
-            unit_count += point > 0xFFFF ? 2 : 1;
-        }
-    }
-    if (!has_surrogate) return kiln_c99_text_value(text);
-    string = kiln_c99_gc_alloc_units(unit_count, KILN_STRING_UTF16);
-    if (string == NULL) {
-        free(text->bytes);
-        text->bytes = NULL;
-        text->len = text->capacity = 0;
-        return kiln_c99_undefined();
-    }
-    units = (uint16_t *)(uintptr_t)string->data;
-    offset = 0;
-    while (offset < text->len) {
-        unsigned char byte = (unsigned char)text->bytes[offset];
-        if (byte == 0xFF) {
-            units[output++] = (uint16_t)((unsigned char)text->bytes[offset + 1] |
-                                         ((uint16_t)(unsigned char)text->bytes[offset + 2] << 8));
-            offset += 3;
-        } else {
-            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
-            if (point > 0xFFFF) {
-                point -= 0x10000;
-                units[output++] = (uint16_t)(0xD800 | (point >> 10));
-                units[output++] = (uint16_t)(0xDC00 | (point & 0x3FF));
-            } else {
-                units[output++] = (uint16_t)point;
-            }
-        }
-    }
-    free(text->bytes);
-    text->bytes = NULL;
-    text->len = text->capacity = 0;
-    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, string->unit_len);
-
-malformed:
-    free(text->bytes);
-    text->bytes = NULL;
-    text->len = text->capacity = 0;
-    return kiln_c99_undefined();
+    return kiln_c99_text_preserving_surrogates_value(text);
 }
 
 int kiln_c99_json_is_raw(uint16_t argc, const kiln_value *args, kiln_value *result) {

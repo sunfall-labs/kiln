@@ -2544,22 +2544,17 @@ pub(super) fn bounded_string(bytes: usize) -> Result<(), ExecutionError> {
     Ok(())
 }
 
-/// Append one character, refusing past [`MAX_STRING_STORAGE_BYTES`].
-///
-/// A replacement template is expanded character by character, and `$1` against a megabyte-long
-/// match appends a megabyte every time it appears -- so the refusal has to be checked as the
-/// string grows. Checked once at the end, the allocation has already happened: this is what took
-/// `staging/sm/String/replace-math.js` to 3.9 GB.
-pub(super) fn push_bounded_char(out: &mut String, character: char) -> Result<(), ExecutionError> {
-    bounded_string(out.len().saturating_add(character.len_utf8()))?;
-    out.push(character);
-    Ok(())
-}
-
 /// Append text without growing past [`MAX_STRING_STORAGE_BYTES`].
 pub(super) fn push_bounded(out: &mut String, text: &str) -> Result<(), ExecutionError> {
     bounded_string(out.len().saturating_add(text.len()))?;
     out.push_str(text);
+    Ok(())
+}
+
+/// Append UTF-16 units without normalizing lone surrogates through Rust `String`.
+pub(super) fn push_bounded_units(out: &mut Vec<u16>, units: &[u16]) -> Result<(), ExecutionError> {
+    bounded_string(out.len().saturating_add(units.len().saturating_mul(2)))?;
+    out.extend_from_slice(units);
     Ok(())
 }
 
