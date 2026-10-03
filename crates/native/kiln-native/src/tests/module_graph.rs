@@ -3707,9 +3707,14 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     let main = launcher
         .find("int main(int argc, char **argv)")
         .expect("launcher has main");
-    // The linkage arrays are the realm's graph context's fields (realms issue 04 step 5).
+    // Generated code is shared, but mutable linker slots are owned by the explicit instance.
     assert!(launcher[..main].contains("    kiln_value exports_"));
     assert!(launcher[..main].contains("    kiln_value imports_"));
+    assert!(launcher[..main].contains("kiln_graph_module_instance module_instance;"));
+    assert!(launcher[..main].contains("kiln_graph_module_instance *instance;"));
+    assert!(launcher[..main].contains("graph->instance = &run->module_instance;"));
+    assert!(launcher[..main].contains("(graph->instance->exports_"));
+    assert!(launcher[..main].contains("&graph->instance->module_states[index].result"));
     assert!(launcher[..main].contains("kiln_graph_realm_state realm_state;"));
     assert!(launcher[..main].contains("kiln_graph_realm_state *realm;"));
     assert!(launcher[..main].contains("graph->realm = &run->realm_state;"));
