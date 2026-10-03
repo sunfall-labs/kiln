@@ -1706,8 +1706,13 @@
                                                         &descriptor, &found, depth, thrown);
                 if (status != KILN_C99_OK) return status;
                 if (found) {
-                    status = kiln_c99_put_mode_key(host, built, name, canonical, descriptor,
-                                                   0, depth, thrown);
+                    /* The descriptor map uses CreateDataProperty, so an own __proto__ key
+                     * cannot call the inherited setter or replace the map's prototype. */
+                    status = kiln_c99_create_data_property(host, built, key, descriptor,
+                                                           depth, thrown);
+                    kiln_c99_gc_keep_alive(&subject);
+                    kiln_c99_gc_keep_alive(&keys);
+                    kiln_c99_gc_keep_alive(&built);
                     if (status != KILN_C99_OK) return status;
                 }
             }
