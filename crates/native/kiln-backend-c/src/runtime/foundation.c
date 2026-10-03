@@ -231,6 +231,9 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                           const kiln_string *view,
                                           const kiln_string *canonical, kiln_value *out,
                                           int *found, int depth, kiln_value *thrown);
+static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, const char *name,
+                                     kiln_value *out, int *present, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                          const kiln_string *view,
                                          const kiln_string *canonical, kiln_value descriptor,

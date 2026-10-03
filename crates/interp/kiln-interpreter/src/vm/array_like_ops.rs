@@ -189,7 +189,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.check_set_invariant(&inner, key, &value, instruction)
                 }
-                None => self.set_or_throw(&inner, key, value, instruction),
+                None => {
+                    if self.set_reflect(&inner, key, value, target, instruction)? {
+                        Ok(())
+                    } else {
+                        Err(Self::write_refused(key))
+                    }
+                }
             };
         }
         // Ordinary numeric writes need no key spelling or prototype scan when the array

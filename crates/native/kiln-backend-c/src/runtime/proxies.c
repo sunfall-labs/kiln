@@ -200,6 +200,86 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set_with_receiver(host, target, key, value, receiver, strict, depth, thrown);
     }
+    /* OrdinarySetWithOwnDescriptor keeps the original receiver. Callable targets have a
+     * separate property store, and a proxy receiver must observe GetOwnProperty/DefineOwnProperty
+     * rather than receiving a write directly in the target's store. */
+    if (kiln_c99_is_callable(target) || receiver.tag == KILN_VALUE_PROXY) {
+        kiln_value name = kiln_c99_property_key(key);
+        kiln_value descriptor = kiln_c99_undefined();
+        kiln_value field = kiln_c99_undefined();
+        kiln_value definition = kiln_c99_undefined();
+        int found = 0, present = 0, accepted = 0;
+        if (name.tag != KILN_VALUE_STRING)
+            KILN_C99_REFUSE("a receiver write key with no property spelling");
+        const kiln_string *view = (const kiln_string *)name.ptr;
+        int status = kiln_c99_describe_property_key(host, target, view, NULL,
+                                                   &descriptor, &found, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!found) {
+            kiln_value parent = kiln_c99_undefined();
+            status = kiln_c99_invoke_method(host, &parent,
+                KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(),
+                &target, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (parent.tag != KILN_VALUE_NULL && parent.tag != KILN_VALUE_UNDEFINED) {
+                if (depth >= KILN_C99_MAX_PROTOTYPE_DEPTH)
+                    KILN_C99_REFUSE("a receiver write exceeded the prototype depth limit");
+                return kiln_c99_set_with_receiver(host, parent, key, value, receiver,
+                                                  strict, depth + 1, thrown);
+            }
+        } else {
+            status = kiln_c99_descriptor_field(host, descriptor, "set", &field,
+                                               &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present) {
+                if (field.tag == KILN_VALUE_UNDEFINED)
+                    return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+                kiln_value ignored;
+                return kiln_c99_call(host, &ignored, field, receiver, &value, 1, depth, thrown);
+            }
+            status = kiln_c99_get(host, descriptor, "writable", 8, &field, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(field))
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+        }
+        if (!kiln_c99_is_reference(receiver) && receiver.tag != KILN_VALUE_DATE)
+            return strict ? kiln_c99_throw_cannot_set(thrown, receiver) : KILN_C99_OK;
+        status = kiln_c99_describe_property_key(host, receiver, view, NULL,
+                                               &descriptor, &found, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (found) {
+            status = kiln_c99_descriptor_field(host, descriptor, "set", &field,
+                                               &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present)
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+            status = kiln_c99_get(host, descriptor, "writable", 8, &field, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(field))
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+        }
+        status = kiln_c99_new_object(&definition);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "value", 5, value, depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "writable", 8, kiln_c99_boolean(1), depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "enumerable", 10, kiln_c99_boolean(1), depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "configurable", 12, kiln_c99_boolean(1), depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_reflect_define_property(host, receiver, key, definition,
+                                                     &accepted, depth, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&receiver);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&name);
+        kiln_c99_gc_keep_alive(&value);
+        kiln_c99_gc_keep_alive(&descriptor);
+        kiln_c99_gc_keep_alive(&definition);
+        if (status != KILN_C99_OK) return status;
+        return !accepted && strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_value name = kiln_c99_property_key(key);
         kiln_value current = target;

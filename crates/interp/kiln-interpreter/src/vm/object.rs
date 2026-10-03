@@ -1865,7 +1865,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.check_set_invariant(&inner, key, &value, instruction)
                 }
-                None => self.set_computed(&inner, key, value, instruction),
+                None => self
+                    .set_reflect(&inner, key, value, target, instruction)
+                    .map(|_| ()),
             };
         }
         // Numeric array indices are already primitive property keys. Keep their integer
