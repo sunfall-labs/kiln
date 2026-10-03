@@ -193,7 +193,10 @@ mod tests {
                 let mut concatenated = encoded.clone();
                 concatenated.extend_from_slice(&encoded);
                 let mut decoder = Codec::new(format, Direction::Decompress);
-                assert_eq!(decoder.push(&concatenated, false), Err(Error::InvalidStream));
+                assert_eq!(
+                    decoder.push(&concatenated, false),
+                    Err(Error::InvalidStream)
+                );
             }
         }
     }

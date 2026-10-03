@@ -1166,7 +1166,10 @@ mod tests {
         assert_eq!(cli_resolutions[0].target, resolutions[0].target);
         assert_eq!(cli_resolutions[0].importer, resolutions[0].importer);
         assert_eq!(cli_resolutions[0].specifier, resolutions[0].specifier);
-        assert_ne!(cli_resolutions[0].package_json_hash, resolutions[0].package_json_hash);
+        assert_ne!(
+            cli_resolutions[0].package_json_hash,
+            resolutions[0].package_json_hash
+        );
         assert_eq!(cli_formats, formats);
         assert_eq!(cli_texts, texts);
     }
