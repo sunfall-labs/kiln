@@ -1491,6 +1491,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
 }
 
 mod compilation;
+mod emission_determinism;
 mod module_graph;
 mod node_builtins;
 mod node_http;

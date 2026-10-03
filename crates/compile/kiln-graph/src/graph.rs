@@ -2503,7 +2503,13 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
     }
 
     // Step 3: For each natural loop, check if a unique preheader exists.
-    for (header_id, loop_blocks) in loops {
+    // Hoisting changes block operation order and can change the compacted SSA ids, so visit
+    // loops in graph order rather than HashMap iteration order. Otherwise identical programs
+    // can produce different generated C and collide in the artifact cache.
+    let mut loop_headers: Vec<_> = loops.keys().copied().collect();
+    loop_headers.sort_unstable();
+    for header_id in loop_headers {
+        let loop_blocks = &loops[&header_id];
         let header_block = match graph.blocks.iter().find(|b| b.id == header_id) {
             Some(b) => b,
             None => continue,
