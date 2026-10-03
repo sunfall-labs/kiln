@@ -3188,13 +3188,24 @@ fn native_exec_file_sync_runs_linked_child_and_captures_both_streams() {
     .expect("write child entry");
     fs::write(
         &parent,
-        "import { execFileSync } from 'node:child_process';\n\
+        "import { execFileSync, spawnSync } from 'node:child_process';\n\
          import process from 'node:process';\n\
          const child = new URL('./child.mjs', import.meta.url).pathname;\n\
+         const sync = spawnSync(process.execPath, ['--disallow-code-generation-from-strings', child]);\n\
+         console.log('spawn:', typeof sync.pid, sync.pid > 0, sync.status, sync.signal, sync.stdout.toString('utf8').trim());\n\
+         const fileOutput = execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child]);\n\
+         console.log('exec-args:', fileOutput.toString('utf8').trim());\n\
          const output = execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child], { encoding: 'utf8' });\n\
          console.log('captured:', output.trim());\n\
-         try { execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child, 'nonzero']); }\n\
-         catch (error) { console.log('status:', error.status, 'stderr:', error.stderr.toString('utf8').trim()); }\n",
+         try { execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child, 'nonzero'], { encoding: 'utf8' }); }\n\
+         catch (error) { console.log('status:', error.status, 'signal:', error.signal, 'stdout:', typeof error.stdout, error.stdout.trim(), 'stderr:', typeof error.stderr, error.stderr.trim()); }\n\
+         if (process.platform !== 'win32') {\n\
+           const execOptions = execFileSync('/usr/bin/true', { encoding: 'utf8' });\n\
+           const spawnOptions = spawnSync('/usr/bin/true', { encoding: 'utf8' });\n\
+           console.log('options-overload:', typeof execOptions, execOptions.length, typeof spawnOptions.stdout, spawnOptions.status);\n\
+           try { execFileSync('/bin/sh', ['-c', 'kill -TERM $$'], { encoding: 'utf8' }); }\n\
+           catch (error) { console.log('signal:', error.signal, error.status, typeof error.stderr); }\n\
+         }\n",
     )
     .expect("write parent entry");
     let graph = ModuleGraph::build_node_with_includes(
@@ -3227,7 +3238,7 @@ fn native_exec_file_sync_runs_linked_child_and_captures_both_streams() {
     );
     assert_eq!(
         output.stdout,
-        b"captured: child stdout\nstatus: 7 stderr: child stderr\n"
+        b"spawn: number true 0 null child stdout\nexec-args: child stdout\ncaptured: child stdout\nstatus: 7 signal: null stdout: string child stdout stderr: string child stderr\noptions-overload: string 0 string 0\nsignal: SIGTERM null string\n"
     );
     assert!(output.stderr.is_empty());
 }

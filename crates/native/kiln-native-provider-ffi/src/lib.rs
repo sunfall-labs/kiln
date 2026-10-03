@@ -316,7 +316,7 @@ macro_rules! assert_root_provider_export {
         const _: unsafe extern "C" fn(*const KilnString, *const KilnString, usize, *mut *mut core::ffi::c_void) -> i32 = process::kiln_process_exec_file_sync;
     };
     (realm, kiln_process_output_view, process_output_view) => {
-        const _: unsafe extern "C" fn(*const core::ffi::c_void, *mut *const u8, *mut usize, *mut *const u8, *mut usize, *mut i32, *mut *const u8, *mut usize) -> i32 = process::kiln_process_output_view;
+        const _: unsafe extern "C" fn(*const core::ffi::c_void, *mut *const u8, *mut usize, *mut *const u8, *mut usize, *mut i32, *mut u32, *mut *const u8, *mut usize, *mut *const u8, *mut usize) -> i32 = process::kiln_process_output_view;
     };
     (realm, kiln_process_output_free, process_output_free) => {
         const _: unsafe extern "C" fn(*mut core::ffi::c_void) = process::kiln_process_output_free;

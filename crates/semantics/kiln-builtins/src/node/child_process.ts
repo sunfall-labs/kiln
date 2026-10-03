@@ -50,17 +50,21 @@ export function spawn(command: string, args?: any, options?: any): ChildProcess 
   if (nativeModule && typeof nativeModule.spawn === "function") {
     return nativeModule.spawn(command, args, options);
   }
-  const child = new ChildProcess();
-  child.pid = 0;
-  return child;
+  throw new Error("node:child_process spawn is unavailable in this runtime");
 }
 
 export function spawnSync(command: string, args?: any, options?: any): any {
-  if (typeof args === "string" || args == null) {
-    options = args ?? options;
+  if (nativeModule && typeof nativeModule.spawnSync === "function") {
+    return nativeModule.spawnSync(command, args, options);
+  }
+  if (args == null) {
+    args = [];
+  } else if (typeof args === "object" && !Array.isArray(args) && options === undefined) {
+    options = args;
     args = [];
   }
   if (!Array.isArray(args)) throw new TypeError("spawnSync arguments must be an array")
+  if (typeof command !== "string") throw new TypeError("spawnSync command must be a string")
   const settings = normalizeSyncOptions(options)
   const raw = runFileSync(command, args)
   const stdout = Buffer.from(raw.stdout, "latin1")
@@ -69,12 +73,12 @@ export function spawnSync(command: string, args?: any, options?: any): any {
   const visibleOut = encoding ? stdout.toString(encoding) : stdout
   const visibleErr = encoding ? stderr.toString(encoding) : stderr
   return {
-    pid: raw.error ? undefined : 0,
+    pid: raw.pid,
     output: [null, visibleOut, visibleErr],
     stdout: visibleOut,
     stderr: visibleErr,
-    status: raw.status < 0 ? null : raw.status,
-    signal: raw.status < 0 ? "SIGTERM" : null,
+    status: raw.status,
+    signal: raw.signal,
     error: raw.error ? new Error(raw.error) : undefined,
   }
 }
@@ -87,23 +91,14 @@ export function exec(command: string, options?: any, callback?: any): ChildProce
   if (nativeModule && typeof nativeModule.exec === "function") {
     return nativeModule.exec(command, options, callback);
   }
-  const child = new ChildProcess();
-  if (typeof callback === "function") {
-    queueMicrotask(() => {
-      callback(null, "", "");
-    });
-  }
-  return child;
+  throw new Error("node:child_process exec is unavailable in this runtime");
 }
 
 export function execSync(command: string, options?: any): any {
   if (nativeModule && typeof nativeModule.execSync === "function") {
     return nativeModule.execSync(command, options);
   }
-  const result = spawnSync(command, [], { ...options, shell: true });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Command failed: ${command}`);
-  return result.stdout;
+  throw new Error("node:child_process execSync is unavailable in this runtime");
 }
 
 export function execFile(file: string, args?: any, options?: any, callback?: any): ChildProcess {
@@ -118,37 +113,41 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
   if (nativeModule && typeof nativeModule.execFile === "function") {
     return nativeModule.execFile(file, args, options, callback);
   }
-  const child = new ChildProcess();
-  if (typeof callback === "function") {
-    queueMicrotask(() => {
-      callback(null, "", "");
-    });
-  }
-  return child;
+  throw new Error("node:child_process execFile is unavailable in this runtime");
 }
 
 export function execFileSync(file: string, args?: any, options?: any): any {
-  if (typeof args === "string" || args == null) {
-    options = args ?? options;
+  if (nativeModule && typeof nativeModule.execFileSync === "function") {
+    return nativeModule.execFileSync(file, args, options);
+  }
+  if (args == null) {
+    args = [];
+  } else if (typeof args === "object" && !Array.isArray(args) && options === undefined) {
+    options = args;
     args = [];
   }
   if (!Array.isArray(args)) throw new TypeError("execFileSync arguments must be an array")
+  if (typeof file !== "string") throw new TypeError("execFileSync file must be a string")
   const settings = normalizeSyncOptions(options)
   const raw = runFileSync(file, args)
   const stdout = Buffer.from(raw.stdout, "latin1")
   const stderr = Buffer.from(raw.stderr, "latin1")
+  const visibleOut = settings?.encoding ? stdout.toString(settings.encoding) : stdout
+  const visibleErr = settings?.encoding ? stderr.toString(settings.encoding) : stderr
   if (raw.error || raw.status !== 0) {
     const error = new Error(raw.error || `Command failed: ${file}`) as Error & {
       status?: number | null
+      signal?: string | null
       stdout?: any
       stderr?: any
     }
-    error.status = raw.status < 0 ? null : raw.status
-    error.stdout = stdout
-    error.stderr = stderr
+    error.status = raw.status
+    error.signal = raw.signal
+    error.stdout = visibleOut
+    error.stderr = visibleErr
     throw error
   }
-  return settings?.encoding ? stdout.toString(settings.encoding) : stdout
+  return visibleOut
 }
 
 function normalizeSyncOptions(options: any): { encoding?: string } | undefined {
@@ -168,11 +167,13 @@ function normalizeSyncOptions(options: any): { encoding?: string } | undefined {
 function runFileSync(file: string, args: ReadonlyArray<any>): {
   stdout: string
   stderr: string
-  status: number
+  status: number | null
+  pid: number | undefined
+  signal: string | null
   error: string | null
 } {
   if (nativeModule && typeof nativeModule.__execFileSync === "function") {
-    return nativeModule.__execFileSync(String(file), ...args.map((argument) => String(argument)))
+    return nativeModule.__execFileSync(file, ...args.map((argument) => String(argument)))
   }
   throw new Error("node:child_process synchronous execution is unavailable in this runtime")
 }

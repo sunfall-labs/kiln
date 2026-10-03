@@ -1186,6 +1186,24 @@ pub(crate) fn linked_source(module_source: &str, wrapper: &str) -> String {
 /// Link-only symbols for executable backend fixtures, which do not link the packaged Rust
 /// semantic provider. Production compression and WebCrypto always resolve to their real archive.
 const SEMANTIC_PROVIDER_FIXTURE: &str = r#"
+int kiln_process_exec_file_sync(const kiln_string *file, const kiln_string *argv,
+                                size_t argc, void **out) {
+    (void)file; (void)argv; (void)argc;
+    if (out != NULL) *out = NULL;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_process_output_view(const void *result, const uint8_t **stdout_bytes,
+                             size_t *stdout_len, const uint8_t **stderr_bytes,
+                             size_t *stderr_len, int32_t *status, uint32_t *pid,
+                             const uint8_t **error_bytes, size_t *error_len,
+                             const uint8_t **signal_bytes, size_t *signal_len) {
+    (void)result; (void)stdout_bytes; (void)stdout_len; (void)stderr_bytes; (void)stderr_len;
+    (void)status; (void)pid; (void)error_bytes; (void)error_len;
+    (void)signal_bytes; (void)signal_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+void kiln_process_output_free(void *result) { (void)result; }
+
 int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
                            const uint8_t *data, size_t data_length,
                            const uint8_t *iv, size_t iv_length,

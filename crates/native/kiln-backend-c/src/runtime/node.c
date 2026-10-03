@@ -3380,8 +3380,9 @@ extern int kiln_process_exec_file_sync(const kiln_string *file, const kiln_strin
                                       size_t argc, void **out);
 extern int kiln_process_output_view(const void *result, const uint8_t **stdout_bytes,
                                    size_t *stdout_len, const uint8_t **stderr_bytes,
-                                   size_t *stderr_len, int32_t *status,
-                                   const uint8_t **error_bytes, size_t *error_len);
+                                   size_t *stderr_len, int32_t *status, uint32_t *pid,
+                                   const uint8_t **error_bytes, size_t *error_len,
+                                   const uint8_t **signal_bytes, size_t *signal_len);
 extern void kiln_process_output_free(void *result);
 
 static int kiln_c99_node_process_string_view(kiln_value value, kiln_string *out) {
@@ -3422,8 +3423,10 @@ int kiln_c99_node_child_process_sync(kiln_host *host, kiln_value *result,
     kiln_string *argument_views = NULL;
     void *owner = NULL;
     const uint8_t *stdout_bytes = NULL, *stderr_bytes = NULL, *error_bytes = NULL;
-    size_t stdout_len = 0, stderr_len = 0, error_len = 0;
+    const uint8_t *signal_bytes = NULL;
+    size_t stdout_len = 0, stderr_len = 0, error_len = 0, signal_len = 0;
     int32_t exit_status = -1;
+    uint32_t child_pid = 0;
     int status;
     kiln_value stream_value;
     (void)host;
@@ -3452,7 +3455,8 @@ int kiln_c99_node_child_process_sync(kiln_host *host, kiln_value *result,
                                     "child process provider failed");
     status = kiln_process_output_view(owner, &stdout_bytes, &stdout_len,
                                       &stderr_bytes, &stderr_len, &exit_status,
-                                      &error_bytes, &error_len);
+                                      &child_pid, &error_bytes, &error_len,
+                                      &signal_bytes, &signal_len);
     if (status != 0) {
         kiln_process_output_free(owner);
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
@@ -3472,9 +3476,19 @@ int kiln_c99_node_child_process_sync(kiln_host *host, kiln_value *result,
                               exit_status < 0 ? kiln_c99_null() : kiln_c99_number((double)exit_status),
                               depth, thrown);
     if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "pid", 3,
+                              child_pid == 0 ? kiln_c99_undefined()
+                                             : kiln_c99_number((double)child_pid),
+                              depth, thrown);
+    if (status == KILN_C99_OK)
         status = kiln_c99_put(host, *result, "error", 5,
                               error_bytes == NULL ? kiln_c99_null()
                                                   : kiln_c99_copy_text((const char *)error_bytes, error_len),
+                              depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "signal", 6,
+                              signal_bytes == NULL ? kiln_c99_null()
+                                                   : kiln_c99_copy_text((const char *)signal_bytes, signal_len),
                               depth, thrown);
     kiln_process_output_free(owner);
     return status;
