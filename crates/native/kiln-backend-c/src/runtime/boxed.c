@@ -2634,7 +2634,6 @@ int kiln_c99_val_make_cell_owned(kiln_val *slot, void *external_owner) {
     kiln_gc_cell *box = (kiln_gc_cell *)kiln_c99_gc_alloc_hot(KILN_GC_CELL, sizeof *box, 1);
     if (box == NULL) return KILN_C99_OUT_OF_MEMORY;
     box->value = *slot;
-    box->external_owner = external_owner;
     kiln_c99_val_store_cell(&box->value, *slot);
     kiln_c99_heap_store_pointer(box, &box->external_owner, external_owner);
     *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, &box->value);
