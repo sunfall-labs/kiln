@@ -3809,6 +3809,11 @@ impl Lowerer<'_> {
             Expression::TSNonNullExpression(expression) => {
                 return self.expression(&expression.expression);
             }
+            // Type arguments affect checking, not JavaScript evaluation. Lower the wrapped
+            // expression itself so a generic member call retains its Reference (and `this`).
+            Expression::TSInstantiationExpression(expression) => {
+                return self.expression(&expression.expression);
+            }
             // `delete o.x` must not evaluate `o.x`, so it is not a unary operator over a member
             // read even though the syntax says it is.
             Expression::UnaryExpression(expression)
@@ -4193,12 +4198,43 @@ impl Lowerer<'_> {
                     ),
                     // `this.#n++`. A private name is a member target like any other here; only
                     // the key differs, and it is one the compiler already knows how to read and
-                    // write. Refusing it made the ordinary way of incrementing a private counter
-                    // a compile error rather than a missing optimisation.
+                    // write.
                     SimpleAssignmentTarget::PrivateFieldExpression(member) => (
                         self.expression(&member.object),
                         kiln_hir::ObjectKey::Private(member.field.name.to_string()),
                     ),
+                    SimpleAssignmentTarget::TSAsExpression(wrapper) => {
+                        let Some(target) = self.update_member_expression(&wrapper.expression)
+                        else {
+                            return self
+                                .unsupported_expression("update of that target", expression_span);
+                        };
+                        target
+                    }
+                    SimpleAssignmentTarget::TSSatisfiesExpression(wrapper) => {
+                        let Some(target) = self.update_member_expression(&wrapper.expression)
+                        else {
+                            return self
+                                .unsupported_expression("update of that target", expression_span);
+                        };
+                        target
+                    }
+                    SimpleAssignmentTarget::TSNonNullExpression(wrapper) => {
+                        let Some(target) = self.update_member_expression(&wrapper.expression)
+                        else {
+                            return self
+                                .unsupported_expression("update of that target", expression_span);
+                        };
+                        target
+                    }
+                    SimpleAssignmentTarget::TSTypeAssertion(wrapper) => {
+                        let Some(target) = self.update_member_expression(&wrapper.expression)
+                        else {
+                            return self
+                                .unsupported_expression("update of that target", expression_span);
+                        };
+                        target
+                    }
                     _ => {
                         return self
                             .unsupported_expression("update of that target", expression_span);
@@ -4420,12 +4456,6 @@ impl Lowerer<'_> {
             Expression::JSXElement(_) | Expression::JSXFragment(_) => {
                 return self.unsupported_expression("JSX expression", expression_span);
             }
-            Expression::TSInstantiationExpression(_) => {
-                return self.unsupported_expression(
-                    "TypeScript instantiation expression",
-                    expression_span,
-                );
-            }
             Expression::V8IntrinsicExpression(_) => {
                 return self.unsupported_expression("V8 intrinsic expression", expression_span);
             }
@@ -4470,6 +4500,45 @@ impl Lowerer<'_> {
     ///
     /// `value` arrives already lowered because the loops' value is a binding rather than an
     /// expression the source contains.
+    fn update_member_expression(
+        &mut self,
+        expression: &Expression<'_>,
+    ) -> Option<(HirExpression, kiln_hir::ObjectKey)> {
+        match expression {
+            Expression::ParenthesizedExpression(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::TSAsExpression(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::TSSatisfiesExpression(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::TSTypeAssertion(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::TSNonNullExpression(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::TSInstantiationExpression(wrapper) => {
+                self.update_member_expression(&wrapper.expression)
+            }
+            Expression::StaticMemberExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Static(member.property.name.to_string().into()),
+            )),
+            Expression::ComputedMemberExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Computed(self.expression(&member.expression)),
+            )),
+            Expression::PrivateFieldExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Private(member.field.name.to_string()),
+            )),
+            _ => None,
+        }
+    }
+
     fn assign_to(
         &mut self,
         target: &AssignmentTarget<'_>,
@@ -6733,6 +6802,52 @@ mod tests {
                 &initializer.kind,
                 HirExpressionKind::Unsupported { feature } if feature == expected
             ));
+        }
+    }
+
+    #[test]
+    fn erases_typescript_call_and_update_wrappers_at_the_hir_boundary() {
+        let module = parse(
+            "module.ts",
+            "const result = schedule.run<number>(input); buckets[key()]!++; ++buckets[key()]!;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected generic call declaration");
+        };
+        let call = declarations[0].initializer.as_ref().unwrap();
+        let HirExpressionKind::Call { callee, .. } = &call.kind else {
+            panic!(
+                "expected call after erasing instantiation, got {:?}",
+                call.kind
+            );
+        };
+        assert!(matches!(
+            callee.kind,
+            HirExpressionKind::StaticMember { .. }
+        ));
+
+        for (statement, prefix) in module.body[1..].iter().zip([false, true]) {
+            let HirStatementKind::Expression(expression) = &statement.kind else {
+                panic!("expected update expression");
+            };
+            let HirExpressionKind::UpdateMember {
+                prefix: actual_prefix,
+                property,
+                ..
+            } = &expression.kind
+            else {
+                panic!(
+                    "expected member update after erasure, got {:?}",
+                    expression.kind
+                );
+            };
+            assert_eq!(*actual_prefix, prefix);
+            let kiln_hir::ObjectKey::Computed(key) = property.as_ref() else {
+                panic!("computed update key must remain an expression");
+            };
+            assert!(matches!(key.kind, HirExpressionKind::Call { .. }));
         }
     }
 
