@@ -1570,6 +1570,29 @@ int main(void) {{
     status = kiln_c99_get(NULL, my_obj, "count", 5, &read_back, 0, &thrown);
     if (status != KILN_C99_OK || kiln_c99_as_number(read_back) != 15.0) return 10;
 
+    // 4. Generated schema functions bind aliased properties from the runtime object.
+    kiln_value runtime_obj;
+    status = kiln_c99_new_object(&runtime_obj);
+    if (status != KILN_C99_OK) return 11;
+    status = kiln_c99_put(NULL, runtime_obj, "invalid", 7, kiln_c99_number(17.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 12;
+    status = kiln_c99_put(NULL, runtime_obj, "getCheckIssues", 14,
+                          kiln_c99_number(25.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 13;
+    const char generated_body[] =
+        "const {{invalid:I,getCheckIssues:K}}=R; return I + K;";
+    kiln_value generated_args[2] = {{
+        kiln_c99_copy_text("R", 1),
+        kiln_c99_copy_text(generated_body, sizeof generated_body - 1)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, generated_args, 2, 0, &thrown);
+    if (status != KILN_C99_OK) return 14;
+    kiln_value call_args4[1] = {{ runtime_obj }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(),
+                           call_args4, 1, 0, &thrown);
+    if (status != KILN_C99_OK || call_res.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(call_res) != 42.0) return 15;
+
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
 }}

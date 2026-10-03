@@ -2106,6 +2106,109 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                  kiln_value receiver, const kiln_value *args, size_t argc,
                                  int depth, kiln_value *out, kiln_value *thrown,
                                  int construct_first_call);
+typedef struct kiln_dyn_object_binding {
+    const char *property;
+    size_t property_len;
+    const char *name;
+    size_t name_len;
+} kiln_dyn_object_binding;
+
+/* The dynamic Function evaluator accepts the object-binding form emitted by schema codegen.
+ * Each key is read with ordinary Get (including inherited accessors), and the local bindings
+ * retain the same lexical restriction as a simple const/let declaration. */
+static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
+                                        kiln_dyn_scope *scope, int is_var, int is_const,
+                                        kiln_value receiver, const kiln_value *args,
+                                        size_t argc, int depth, kiln_value *thrown) {
+    kiln_dyn_object_binding *bindings = NULL;
+    size_t count = 0, capacity = 0;
+    int status = KILN_C99_OK;
+    kiln_value initial = kiln_c99_undefined();
+    kiln_dyn_lexer_next(lex); /* opening brace */
+    while (lex->curr.kind != KILN_DYN_RBRACE) {
+        if (lex->curr.kind != KILN_DYN_IDENT) {
+            status = kiln_dyn_throw_parse_error(lex, thrown,
+                                                "Expected property name in object binding");
+            goto done;
+        }
+        const char *property = lex->curr.start;
+        size_t property_len = lex->curr.len;
+        const char *name = property;
+        size_t name_len = property_len;
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_COLON) {
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind != KILN_DYN_IDENT) {
+                status = kiln_dyn_throw_parse_error(lex, thrown,
+                                                    "Expected binding name after ':'");
+                goto done;
+            }
+            name = lex->curr.start;
+            name_len = lex->curr.len;
+            kiln_dyn_lexer_next(lex);
+        }
+        if (count == capacity) {
+            size_t next = capacity == 0 ? 8 : capacity * 2;
+            if (next <= capacity || next > SIZE_MAX / sizeof *bindings) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            kiln_dyn_object_binding *grown = realloc(bindings, next * sizeof *bindings);
+            if (grown == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            bindings = grown;
+            capacity = next;
+        }
+        bindings[count++] = (kiln_dyn_object_binding){
+            .property = property, .property_len = property_len,
+            .name = name, .name_len = name_len
+        };
+        if (lex->curr.kind != KILN_DYN_COMMA) break;
+        kiln_dyn_lexer_next(lex);
+    }
+    if (lex->curr.kind != KILN_DYN_RBRACE) {
+        status = kiln_dyn_throw_parse_error(lex, thrown,
+                                            "Expected '}' after object binding");
+        goto done;
+    }
+    kiln_dyn_lexer_next(lex);
+    if (lex->curr.kind != KILN_DYN_ASSIGN) {
+        status = kiln_dyn_throw_parse_error(lex, thrown,
+                                            "Expected initializer for object binding");
+        goto done;
+    }
+    kiln_dyn_lexer_next(lex);
+    status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                &initial, thrown);
+    if (status != KILN_C99_OK || lex->parse_only) goto done;
+    kiln_dyn_scope *decl_scope = is_var && scope->var_target != NULL
+                                     ? scope->var_target : scope;
+    for (size_t index = 0; index < count; ++index) {
+        kiln_value value = kiln_c99_undefined();
+        status = kiln_c99_get(host, initial, bindings[index].property,
+                              bindings[index].property_len, &value, depth, thrown);
+        if (status != KILN_C99_OK) goto done;
+        if (!kiln_dyn_scope_set(decl_scope, bindings[index].name,
+                                bindings[index].name_len, value)) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        if (is_const)
+            (void)kiln_dyn_scope_mark_restriction(decl_scope, bindings[index].name,
+                                                  bindings[index].name_len,
+                                                  KILN_DYN_BINDING_READ_ONLY);
+        else if (!is_var)
+            (void)kiln_dyn_scope_mark_restriction(decl_scope, bindings[index].name,
+                                                  bindings[index].name_len,
+                                                  KILN_DYN_BINDING_LEXICAL);
+    }
+done:
+    free(bindings);
+    return status;
+}
+
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *result, int *returned,
@@ -7005,6 +7108,15 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         int is_const = lex->curr.kind == KILN_DYN_KW_CONST;
         kiln_dyn_lexer_next(lex);
         for (;;) {
+            if (lex->curr.kind == KILN_DYN_LBRACE) {
+                int status = kiln_dyn_eval_object_binding(host, lex, scope, is_var,
+                                                         is_const, receiver, args,
+                                                         argc, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (lex->curr.kind != KILN_DYN_COMMA) break;
+                kiln_dyn_lexer_next(lex);
+                continue;
+            }
             if (lex->curr.kind != KILN_DYN_IDENT) {
                 return kiln_dyn_throw_parse_error(lex, thrown,
                                             "Expected identifier");
