@@ -25,3 +25,13 @@ With the final `9904979c` CLI, `KILN_GC_MINOR_AUDIT=1` on pinned upstream `arbit
 After the active-range guard, `mise exec -- mbx test -p kiln-backend-c executable_minor_gc` passed all three focused C fixtures: tenured owner barrier insertion/reclamation, active young owner fastpath, and filled/open nursery cross-chunk promotion.
 
 A GDB run sampled five calls to `kiln_c99_gc_collect_mid_turn` (hits 1, 25, 50, 75 and 100). Every sample entered through `gc_alloc_due`; callers were closure creation, owned cell creation, or object construction. This identifies allocation-triggered collection as the remaining broad cost but does not identify the hottest instruction inside the collector.
+
+## Random execution stack samples
+
+Five GDB `SIGINT` samples of the final native-dev binary were taken during actual benchmark execution (not at a GC entry breakpoint). Three showed array-element writes through `kiln_c99_write_element` and `kiln_c99_set_computed_mode`, with string-key work in `kiln_c99_is_node_hidden_key_key` / `kiln_c99_intern_key` / `kiln_c99_key_hash`. One was in constructor prototype lookup (`kiln_c99_get_prototype_from_constructor`), and one was in `kiln_c99_val_new` nested beneath the generated Effect shrink functions. The raw five stacks are retained below. These are qualitative O0 samples; inspect the release-profile stacks before selecting an optimization.
+
+1. `is_node_hidden_key_key -> put_mode_key -> set_computed_mode -> write_element -> val_write_element -> generated fn_162 -> invoke_closure_body -> call_inner -> call -> construct_with_new_target -> construct -> val_new`
+2. `val_new -> generated fn_198 -> ku_call_fast -> generated fn_17 -> invoke_closure_body -> val_call_method_view -> val_call_method_key -> generated fn_36 -> val_call -> generated fn_35 -> ku_call_fast -> generated fn_168`
+3. `is_node_hidden_key_key -> put_mode_key -> set_computed_mode -> write_element -> val_write_element -> generated fn_162 -> invoke_closure_body -> call_inner -> call -> construct_with_new_target -> construct -> val_new`
+4. `same_name_key -> is_node_hidden_key_key -> get_key -> get_ikey -> get -> get_prototype_from_constructor -> construct_with_new_target -> construct -> val_new -> generated fn_198 -> ku_call_fast -> generated fn_17`
+5. `string_is_utf16 -> string_unit_at -> key_hash -> intern_key -> put_mode_key -> set_computed_mode -> write_element -> val_write_element -> generated fn_162 -> invoke_closure_body -> call_inner -> call -> call`
