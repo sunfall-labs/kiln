@@ -760,7 +760,15 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     fallback_dict:
         kiln_c99_ensure_dictionary(object);
     }
-    status = kiln_c99_own_slot_key(target, (const kiln_string *)text.ptr, NULL, &slot);
+    /* `text` carries the internal spelling used to display the key, while `ikey` carries the
+     * property identity. Keeping the latter matters when a shaped object falls back to its
+     * dictionary for a symbol key: interning the spelling as an ordinary string would create a
+     * second, enumerable string property beside the symbol. */
+    const kiln_string *canonical = key.tag == KILN_VALUE_SYMBOL
+                                       ? kiln_c99_property_ikey(key)
+                                       : NULL;
+    if (key.tag == KILN_VALUE_SYMBOL && canonical == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_own_slot_key(target, (const kiln_string *)text.ptr, canonical, &slot);
     if (status != KILN_C99_OK) {
         return status;
     }
