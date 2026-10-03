@@ -2360,6 +2360,26 @@ fn lower_parsed_in_context(
         })
         .map(|statement| (statement.span().start, statement.span().end))
         .collect::<HashSet<_>>();
+    // A namespace that contains only erased TypeScript declarations has no runtime binding.
+    // Oxc's module record still reports `export namespace N` as a value export, so retain these
+    // declaration spans separately and remove them from the runtime interface below.
+    let erased_namespace_spans = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let declaration = match statement {
+                Statement::TSNamespaceDeclaration(declaration) => Some(declaration),
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSNamespaceDeclaration(declaration) => Some(declaration),
+                    _ => None,
+                },
+                _ => None,
+            }?;
+            type_only_namespace(declaration)
+                .then_some((statement.span().start, statement.span().end))
+        })
+        .collect::<HashSet<_>>();
     let import_binding_spans = parsed
         .program
         .body
@@ -2518,6 +2538,8 @@ fn lower_parsed_in_context(
             (!filter_module_record
                 || module_statement_spans
                     .contains(&(entry.statement_span.start, entry.statement_span.end)))
+                && !erased_namespace_spans
+                    .contains(&(entry.statement_span.start, entry.statement_span.end))
                 && demanded_exports.is_none_or(|demanded| match &entry.export_name {
                     ExportExportName::Name(name) => demanded.contains(name.name.as_str()),
                     ExportExportName::Default(_) => demanded.contains("default"),
@@ -2619,6 +2641,46 @@ fn lower_parsed_in_context(
         node_runtime_requests: Vec::new(),
     };
     module
+}
+
+/// Whether a namespace is guaranteed to disappear during TypeScript erasure. Empty namespaces
+/// are intentionally excluded: even an empty runtime namespace emits an object binding.
+fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -> bool {
+    use oxc_ast::ast::{TSNamespaceDeclarationBody, TSNamespaceDeclarationBody as NamespaceBody};
+
+    if declaration.declare {
+        return true;
+    }
+    match &declaration.body {
+        NamespaceBody::TSNamespaceDeclaration(nested) => type_only_namespace(nested),
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            !block.body.is_empty() && block.body.iter().all(type_only_namespace_statement)
+        }
+    }
+}
+
+fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+    match statement {
+        Statement::EmptyStatement(_) => true,
+        Statement::TSTypeAliasDeclaration(_)
+        | Statement::TSInterfaceDeclaration(_)
+        | Statement::TSGlobalDeclaration(_)
+        | Statement::TSNamespaceExportDeclaration(_) => true,
+        Statement::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+        Statement::ImportDeclaration(import) => import.import_kind.is_type(),
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => true,
+            Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            _ => false,
+        },
+        Statement::ExportNamedDeclaration(export) => export.export_kind.is_type(),
+        Statement::ExportDefaultDeclaration(export) => matches!(
+            export.declaration,
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+        ),
+        _ => false,
+    }
 }
 
 fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> HashSet<(u32, u32)> {
@@ -3349,7 +3411,7 @@ impl Lowerer<'_> {
             | Statement::TSExternalModuleDeclaration(_)
             | Statement::TSNamespaceExportDeclaration(_) => return None,
             Statement::TSNamespaceDeclaration(declaration) => {
-                if declaration.declare {
+                if type_only_namespace(declaration) {
                     return None;
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
@@ -3651,7 +3713,7 @@ impl Lowerer<'_> {
                 }
             }
             Declaration::TSNamespaceDeclaration(declaration) => {
-                if declaration.declare {
+                if type_only_namespace(declaration) {
                     return None;
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
@@ -6450,6 +6512,31 @@ mod tests {
         assert_eq!(module.source_kind, SourceKind::TypeScript);
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.runtime_export_names(), ["value"]);
+    }
+
+    #[test]
+    fn erases_only_type_only_typescript_namespaces_and_their_exports() {
+        let module = parse(
+            "namespace.ts",
+            r#"
+                export namespace Vitest {
+                    export interface TestContext { name: string }
+                    export type Hook = (context: TestContext) => void;
+                    export namespace Nested { export interface Item { id: number } }
+                }
+                export namespace Runtime { export const value = 1; }
+            "#,
+        );
+
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert_eq!(module.runtime_export_names(), ["Runtime"]);
+        assert!(
+            module
+                .body
+                .iter()
+                .any(|statement| matches!(&statement.kind, HirStatementKind::Unsupported { .. })),
+            "runtime namespace must remain refused"
+        );
     }
 
     #[test]
