@@ -30,6 +30,24 @@ delete (globalThis as any).__kilnPreventExtensions;
         methodDescriptor.value = undefined;
     };
 
+    // AddEntriesFromIterable creates own data properties. Assignment would instead
+    // invoke inherited setters, including Object.prototype.__proto__.
+    const defineProperty = Object.defineProperty;
+    const IntrinsicTypeError = TypeError;
+    defineMethod(Object, "fromEntries", { fromEntries(iterable: any) {
+        const result = {};
+        const descriptor = { value: undefined as any, writable: true, enumerable: true, configurable: true };
+        for (const entry of iterable) {
+            if (entry === null || (typeof entry !== "object" && typeof entry !== "function")) {
+                throw new IntrinsicTypeError("Iterator value is not an entry object");
+            }
+            const key = entry[0];
+            descriptor.value = entry[1];
+            defineProperty(result, key, descriptor);
+        }
+        return result;
+    } }.fromEntries);
+
     if (typeof Reflect !== "undefined") {
         const isExtensible = { isExtensible(target: any) {
             if (target === null || (typeof target !== "object" && typeof target !== "function")) {

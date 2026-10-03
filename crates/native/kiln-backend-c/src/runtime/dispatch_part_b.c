@@ -1650,15 +1650,26 @@
             return status;
         }
         case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: {
-            kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value key = argc > 1 ? args[1] : kiln_c99_undefined();
+            if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
+                subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE)
+                return kiln_c99_throw_not_a(thrown, subject, "object");
+            status = kiln_c99_reduce_key(host, subject, key, &key, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&key);
+            kiln_value name = kiln_c99_property_key(key);
             const kiln_string *name_key =
                 name.tag == KILN_VALUE_STRING ? (const kiln_string *)name.ptr : NULL;
             if (argc < 3 || name_key == NULL) {
                 KILN_C99_REFUSE("Object.defineProperty invalid key or arity");
             }
             /* The headed form: the byte adapter would read the header's words as key bytes. */
-            status = kiln_c99_define_property_key(host, args[0], name_key, NULL, args[2],
+            status = kiln_c99_define_property_key(host, args[0], name_key,
+                                                  kiln_c99_property_ikey(key), args[2],
                                                   depth, thrown);
+            kiln_c99_gc_keep_alive(&key);
+            kiln_c99_gc_keep_alive(&name);
             if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL)
                 kiln_c99_diagnostic_detail = "Object.defineProperty rejected descriptor or target";
             /* The target, so a definition can be inlined into the expression that built it. */
@@ -1798,12 +1809,16 @@
                 subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
                 return kiln_c99_throw_not_a(thrown, subject, "object");
             }
+            status = kiln_c99_reduce_key(host, subject, key, &key, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            kiln_c99_gc_keep_alive(&key);
             if (descriptor.tag != KILN_VALUE_OBJECT) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Property description must be an object");
             }
             status = kiln_c99_reflect_define_property(host, subject, key, descriptor, &answer,
                                                       depth, thrown);
+            kiln_c99_gc_keep_alive(&key);
             *result = kiln_c99_boolean(answer);
             return status;
         }
