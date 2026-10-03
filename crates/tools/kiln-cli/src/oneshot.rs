@@ -813,7 +813,39 @@ server.listen(0, "127.0.0.1", () => {
              console.log(caught, mutation);\n\
              let syntax = false;\n\
              try { indirectEval('mutation = 2 )'); } catch (error) { syntax = error instanceof SyntaxError; }\n\
-             console.log(syntax, mutation);\n",
+             console.log(syntax, mutation);\n\
+             let grammar = false;\n\
+             try { indirectEval('mutation = 3 + * 4'); } catch (error) { grammar = error instanceof SyntaxError; }\n\
+             console.log(grammar, mutation);\n\
+             globalThis.bump = () => { mutation++; return 1; };\n\
+             Object.defineProperty(globalThis, 'watched', { get() { mutation++; return 1; } });\n\
+             Object.defineProperty(Object.prototype, 'parseOnlySetter', { set(value) { mutation++; } });\n\
+             let callGrammar = false;\n\
+             try { indirectEval('bump() + globalThis.watched + ({ parseOnlySetter: 1 }) + * 4'); } catch (error) { callGrammar = error instanceof SyntaxError; }\n\
+             console.log(callGrammar, mutation);\n\
+             let computedKey = false;\n\
+             try { indirectEval('({})[bump()] + * 4'); } catch (error) { computedKey = error instanceof SyntaxError; }\n\
+             console.log(computedKey, mutation);\n\
+             let skipped = false;\n\
+             try { indirectEval('true || mutation++ + * 2'); } catch (error) { skipped = error instanceof SyntaxError; }\n\
+             console.log(skipped, mutation);\n\
+             let conditional = false;\n\
+             try { indirectEval('true ? 1 : mutation++ + * 2'); } catch (error) { conditional = error instanceof SyntaxError; }\n\
+             console.log(conditional, mutation);\n\
+             let functionBody = false;\n\
+             try { indirectEval('(function(){ mutation = 7; return 1 + * 2; })'); } catch (error) { functionBody = error instanceof SyntaxError; }\n\
+             console.log(functionBody, mutation);\n\
+             let arrowBody = false;\n\
+             try { indirectEval('() => { mutation = 8; return 1 + * 2; }'); } catch (error) { arrowBody = error instanceof SyntaxError; }\n\
+             console.log(arrowBody, mutation);\n\
+             let arrowExpression = false;\n\
+             try { indirectEval('() => (mutation = 9) + * 2'); } catch (error) { arrowExpression = error instanceof SyntaxError; }\n\
+             console.log(arrowExpression, mutation);\n\
+             let controlBodies = false;\n\
+             try { indirectEval('(function(){ do { mutation++; } while (false); let malformed = ; })'); } catch (error) { controlBodies = error instanceof SyntaxError; }\n\
+             console.log(controlBodies, mutation);\n\
+             const validControl = indirectEval('(function(){ let n = 0; while (n < 1) { n++; } do { n++; } while (false); for (let i = 0; i < 1; i++) { n++; } switch (n) { case 3: n++; break; default: n = 99; } try { throw 1; } catch (error) { n += error; } finally { n++; } return n; })');\n\
+             console.log(validControl());\n",
         )
         .expect("write source");
         share_native_semantic_cache(&fixture);
@@ -846,7 +878,10 @@ server.listen(0, "127.0.0.1", () => {
             "stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue 0\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "true 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\n6\n"
+        );
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
