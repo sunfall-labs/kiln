@@ -1103,7 +1103,7 @@ function headerListFromNodeHeaders(headers: any): string {
   return list;
 }
 
-function fetch(input: any, init?: any): Promise<Response> {
+function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirected: boolean = false): Promise<Response> {
   return new Promise((resolve, reject) => {
     let req: Request;
     try {
@@ -1246,14 +1246,58 @@ function fetch(input: any, init?: any): Promise<Response> {
             }
           }
 
-          resolve(
-            makeResponse(
-              res.statusCode || 200,
-              headerListFromNodeHeaders(res.headers),
-              bodyBytes,
-              responseExtra(res.statusMessage || "", "basic", req.url, false)
-            )
-          );
+          const status = res.statusCode || 200;
+          const location = res.headers?.location;
+          const isRedirect = status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+          if (isRedirect && typeof location === "string" && req.redirect === "error") {
+            reject(new TypeError("fetch: redirect mode is 'error'"));
+            return;
+          }
+          if (isRedirect && typeof location === "string" && req.redirect === "follow") {
+            if (redirectCount >= 20) {
+              reject(new TypeError("fetch: redirect limit exceeded"));
+              return;
+            }
+            let target: string;
+            try {
+              target = new URL(location, req.url).href;
+            } catch (err) {
+              reject(err);
+              return;
+            }
+            const rewriteToGet = (status === 303 && req.method !== "GET" && req.method !== "HEAD") ||
+              ((status === 301 || status === 302) && req.method === "POST");
+            const nextMethod = rewriteToGet ? "GET" : req.method;
+            const headers = new Headers();
+            const nextPairs = headerListPairs(requestHeaderList(req));
+            let oldOrigin = "";
+            let newOrigin = "";
+            try {
+              oldOrigin = new URL(req.url).origin;
+              newOrigin = new URL(target).origin;
+            } catch (_) {}
+            for (let i = 0; i < nextPairs.length; i++) {
+              const name = nextPairs[i][0].toLowerCase();
+              if (rewriteToGet && (name === "content-encoding" || name === "content-language" || name === "content-length" || name === "content-location" || name === "content-type")) continue;
+              if (oldOrigin !== newOrigin && (name === "authorization" || name === "cookie" || name === "cookie2" || name === "proxy-authorization")) continue;
+              headers.append(nextPairs[i][0], nextPairs[i][1]);
+            }
+            const nextInit: any = {
+              method: nextMethod,
+              headers,
+              signal: req.signal,
+              redirect: req.redirect,
+            };
+            if (!rewriteToGet && req._body !== null) nextInit.body = req._body;
+            fetch(target, nextInit, redirectCount + 1, true).then(resolve, reject);
+            return;
+          }
+          resolve(makeResponse(
+            status,
+            headerListFromNodeHeaders(res.headers),
+            bodyBytes,
+            responseExtra(res.statusMessage || "", "basic", req.url, alreadyRedirected)
+          ));
         });
         res.on("error", (err: any) => {
           reject(err);
