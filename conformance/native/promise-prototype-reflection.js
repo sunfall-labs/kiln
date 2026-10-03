@@ -1,0 +1,12 @@
+const promise = Promise.resolve(1);
+console.log(Object.getPrototypeOf(promise) === Promise.prototype);
+console.log(Reflect.getPrototypeOf(promise) === Promise.prototype);
+console.log(Object.getPrototypeOf(Promise.prototype) === Object.prototype);
+const relinked = Object.create(Promise.prototype);
+Object.setPrototypeOf(promise, relinked);
+console.log(Object.getPrototypeOf(promise) === relinked);
+console.log(Reflect.setPrototypeOf(promise, relinked));
+console.log(Object.getPrototypeOf(promise) === relinked);
+const detached = Promise.resolve(2);
+Object.setPrototypeOf(detached, null);
+console.log(Object.getPrototypeOf(detached) === null);

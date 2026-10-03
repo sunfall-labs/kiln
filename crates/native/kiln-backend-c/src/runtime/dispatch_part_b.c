@@ -1377,7 +1377,8 @@
                               : linked;
                 return KILN_C99_OK;
             }
-            if (subject.tag == KILN_VALUE_ARRAY || subject.tag == KILN_VALUE_COLLECTION) {
+            if (subject.tag == KILN_VALUE_ARRAY || subject.tag == KILN_VALUE_COLLECTION ||
+                subject.tag == KILN_VALUE_PROMISE) {
                 /* A subclass instance, or one a `setPrototypeOf` relinked, answers with the
                  * link its store carries. */
                 kiln_value *slot = kiln_c99_exotic_store(subject);
@@ -1390,6 +1391,8 @@
                 }
                 if (subject.tag == KILN_VALUE_ARRAY) {
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+                } else if (subject.tag == KILN_VALUE_PROMISE) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE_PROTOTYPE);
                 } else {
                     kiln_collection *collection = kiln_c99_collection_of(subject);
                     *result = kiln_c99_builtin(
