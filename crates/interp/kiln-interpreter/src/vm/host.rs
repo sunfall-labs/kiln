@@ -2094,6 +2094,43 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Native::NodeServerListen => {
                 let state = node_http_server(receiver)?;
+                let normalized;
+                let arguments = if let Some(options @ (Value::Object(_) | Value::Proxy(_))) =
+                    arguments.first()
+                {
+                    if !self.has(options, &Value::String("port".into()), instruction)? {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "The argument 'options' must have the property port or path"
+                                .into(),
+                        });
+                    }
+                    let mut port = self.read_property(options, "port", instruction)?;
+                    let host = self.read_property(options, "host", instruction)?;
+                    if matches!(port, Value::Undefined | Value::Null) {
+                        port = Value::Number(0.0);
+                    }
+                    if !matches!(port, Value::Number(_) | Value::String(_)) {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "The argument 'options.port' must be a number or string"
+                                .into(),
+                        });
+                    }
+                    let host = if matches!(host, Value::Undefined | Value::Null) {
+                        Value::String("0.0.0.0".into())
+                    } else {
+                        host
+                    };
+                    let mut values = vec![port, host];
+                    if let Some(callback) =
+                        arguments.iter().skip(1).rfind(|value| is_callable(value))
+                    {
+                        values.push(callback.clone());
+                    }
+                    normalized = values;
+                    normalized.as_slice()
+                } else {
+                    arguments
+                };
                 let (port, host, callback) = node_listen_arguments(arguments)?;
                 // A listening transport can outlive the expression that created its JS wrapper.
                 // Keep its EventEmitter alive in the owning VM/graph realm until the terminal

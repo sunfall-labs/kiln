@@ -5677,8 +5677,37 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                             args[1].tag != KILN_VALUE_NUMBER
                                         ? kiln_c99_text(args[1])
                                         : kiln_c99_copy_text("0.0.0.0", 7);
-            double port = kiln_c99_as_number(port_value);
             int status;
+            if (argc > 0 && (args[0].tag == KILN_VALUE_OBJECT ||
+                             args[0].tag == KILN_VALUE_PROXY)) {
+                // The options overload is decoded before the existing TCP-listen transition.
+                // Ordinary Get preserves inherited values, getters and Proxy traps.
+                int has_port;
+                status = kiln_c99_has_computed(host, args[0], kiln_c99_static_text("port", 4),
+                                               &has_port, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!has_port) {
+                    int has_path;
+                    status = kiln_c99_has_computed(host, args[0], kiln_c99_static_text("path", 4),
+                                                   &has_path, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (has_path) KILN_C99_REFUSE("server.listen options.path requires an IPC transport");
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                        "The argument 'options' must have the property port or path");
+                }
+                status = kiln_c99_get(host, args[0], "port", 4, &port_value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_get(host, args[0], "host", 4, &host_value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (port_value.tag == KILN_VALUE_UNDEFINED || port_value.tag == KILN_VALUE_NULL)
+                    port_value = kiln_c99_number(0);
+                if (port_value.tag != KILN_VALUE_NUMBER && port_value.tag != KILN_VALUE_STRING)
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                        "The argument 'options.port' must be a number or string");
+                if (host_value.tag == KILN_VALUE_UNDEFINED || host_value.tag == KILN_VALUE_NULL)
+                    host_value = kiln_c99_copy_text("0.0.0.0", 7);
+            }
+            double port = kiln_c99_as_number(port_value);
             if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "Port should be >= 0 and < 65536");
@@ -6640,11 +6669,13 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                     response->object, KILN_C99_NODE_RES_HEADERS_SENT,
                     layout->response_keys[KILN_C99_NODE_RES_HEADERS_SENT], kiln_c99_boolean(1));
             if (status != KILN_C99_OK) return status;
-            if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            /* The status-message overload places headers in the third argument. */
+            size_t headers_index = argc > 2 && args[1].tag != KILN_VALUE_OBJECT ? 2 : 1;
+            if (argc > headers_index && args[headers_index].tag == KILN_VALUE_OBJECT) {
                 /* The object's own enumerable data members in property order, read in place:
                  * an object literal is shaped, and converting it to dictionary mode to walk it
                  * would slow every later read of the program's own object. */
-                kiln_value provided = args[1];
+                kiln_value provided = args[headers_index];
                 kiln_object *object = kiln_c99_object_of(provided);
                 size_t index;
                 if (object->shape != NULL &&
