@@ -140,6 +140,7 @@ struct GraphWorkers {
     graph: ModuleGraph,
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
+    clock: ClockCapability,
 }
 
 impl kiln_interpreter::WorkerHost for GraphWorkers {
@@ -185,7 +186,8 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
             .clone()
             .with_argv(worker.spec.argv.clone());
         LAST_THROWN.with(|last| last.borrow_mut().take());
-        let outcome = graph.execute_node(&mut host, self.limits, capabilities);
+        let outcome =
+            graph.execute_node_with_clock(&mut host, self.limits, capabilities, self.clock);
         let thrown = LAST_THROWN.with(|last| last.borrow_mut().take());
         match outcome {
             Ok(result) => result.process_exit_code.unwrap_or(0),
@@ -1274,6 +1276,7 @@ impl GraphExecutor<'_> {
                 graph: (*self.0).clone(),
                 limits,
                 capabilities: capabilities.clone(),
+                clock,
             };
             capabilities.with_worker_host(Arc::new(workers))
         } else {
