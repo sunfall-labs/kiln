@@ -1479,6 +1479,8 @@ pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     "\n",
     include_str!("buffer.ts"),
     "\n",
+    include_str!("web_text_encoding.ts"),
+    "\n",
     include_str!("web_encoding_crypto.ts")
 );
 
