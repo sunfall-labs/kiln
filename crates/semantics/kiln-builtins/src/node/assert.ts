@@ -65,7 +65,10 @@ function matchesExpectedError(err: any, expected: any): boolean {
   return false;
 }
 
-type ComparedPairs = { left: any[]; right: any[] };
+type ComparedPairs = {
+  left: WeakMap<object, object>;
+  right: WeakMap<object, object>;
+};
 
 function isDeepEqual(
   a: any,
@@ -84,13 +87,25 @@ function isDeepEqual(
   }
   // Deep equality is defined over object graphs, not just trees. Remember
   // object pairs before descending so self references and mutual cycles end.
-  for (let i = 0; i < compared.left.length; i++) {
-    if (compared.left[i] === a && compared.right[i] === b) {
-      return true;
-    }
+  const leftAncestor = compared.left.has(a);
+  const rightAncestor = compared.right.has(b);
+  if (leftAncestor || rightAncestor) {
+    return leftAncestor && rightAncestor && compared.left.get(a) === b && compared.right.get(b) === a;
   }
-  compared.left.push(a);
-  compared.right.push(b);
+  compared.left.set(a, b);
+  compared.right.set(b, a);
+  const equal = compareObjectProperties(a, b, strict, compared);
+  compared.left.delete(a);
+  compared.right.delete(b);
+  return equal;
+}
+
+function compareObjectProperties(
+  a: any,
+  b: any,
+  strict: boolean,
+  compared: ComparedPairs,
+): boolean {
   if (Array.isArray(a)) {
     if (a.length !== b.length) {
       return false;
@@ -120,7 +135,10 @@ function isDeepEqual(
 }
 
 function deepEqualGraph(a: any, b: any, strict: boolean): boolean {
-  return isDeepEqual(a, b, strict, { left: [], right: [] });
+  return isDeepEqual(a, b, strict, {
+    left: new WeakMap<object, object>(),
+    right: new WeakMap<object, object>(),
+  });
 }
 
 export function fail(

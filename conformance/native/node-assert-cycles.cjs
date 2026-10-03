@@ -19,4 +19,13 @@ assert.throws(
   { code: "ERR_ASSERTION" },
 );
 
+const twoNodeCycle = {};
+const secondNode = {};
+twoNodeCycle.self = secondNode;
+secondNode.self = twoNodeCycle;
+assert.throws(
+  () => assert.deepStrictEqual(actual, twoNodeCycle),
+  { code: "ERR_ASSERTION" },
+);
+
 console.log("node assert cyclic equality passed");
