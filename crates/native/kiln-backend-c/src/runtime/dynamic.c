@@ -771,6 +771,7 @@ typedef enum {
     KILN_DYN_NULLISH,
     KILN_DYN_NOT,
     KILN_DYN_DOT,
+    KILN_DYN_OPTIONAL_CHAIN,
     KILN_DYN_ELLIPSIS,
     KILN_DYN_COMMA,
     KILN_DYN_COLON,
@@ -852,7 +853,7 @@ static void kiln_dyn_token_free(kiln_dyn_token *tok);
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex);
 
 static int kiln_dyn_current_token_is_control_head(const kiln_dyn_lexer *lex) {
-    if (lex->prev_kind == KILN_DYN_DOT) return 0;
+    if (lex->prev_kind == KILN_DYN_DOT || lex->prev_kind == KILN_DYN_OPTIONAL_CHAIN) return 0;
     if (lex->curr.kind == KILN_DYN_KW_IF || lex->curr.kind == KILN_DYN_KW_FOR ||
         lex->curr.kind == KILN_DYN_KW_WITH || lex->curr.kind == KILN_DYN_KW_SWITCH)
         return 1;
@@ -1992,6 +1993,14 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         return;
     case '~': lex->curr.kind = KILN_DYN_BIT_NOT; return;
     case '?':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '.' &&
+            (lex->pos + 1 >= lex->len || lex->src[lex->pos + 1] < '0' ||
+             lex->src[lex->pos + 1] > '9')) {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_OPTIONAL_CHAIN;
+            return;
+        }
         if (lex->pos < lex->len && lex->src[lex->pos] == '?') {
             lex->pos++;
             lex->curr.len = 2;
@@ -3313,7 +3322,7 @@ object_property_value_ready:;
     return kiln_dyn_throw_unexpected_token(lex, thrown);
 }
 
-static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_eval_postfix_inner(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                  kiln_value receiver, const kiln_value *args, size_t argc,
                                  int depth, kiln_value *out, kiln_value *thrown,
                                  int construct_first_call) {
@@ -3326,8 +3335,26 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
     int constructing = construct_first_call;
 
     while (1) {
-        if (lex->curr.kind == KILN_DYN_DOT) {
+        int optional = lex->curr.kind == KILN_DYN_OPTIONAL_CHAIN;
+        if (optional) {
+            if (constructing)
+                return kiln_dyn_throw_parse_error(lex, thrown,
+                    "Optional chain cannot be used as a constructor");
             kiln_dyn_lexer_next(lex);
+            if (!lex->parse_only &&
+                (out->tag == KILN_VALUE_NULL || out->tag == KILN_VALUE_UNDEFINED)) {
+                /* Parse the entire remaining chain, including keys and arguments, without
+                 * executing it. The outer wrapper restores the caller's execution mode. */
+                lex->parse_only = 1;
+                *out = kiln_c99_undefined();
+            }
+            if (!kiln_dyn_is_ident_name(lex->curr.kind) &&
+                lex->curr.kind != KILN_DYN_LBRACKET && lex->curr.kind != KILN_DYN_LPAREN)
+                return kiln_dyn_throw_parse_error(lex, thrown, "Expected optional chain member");
+        }
+        if (lex->curr.kind == KILN_DYN_DOT ||
+            (optional && kiln_dyn_is_ident_name(lex->curr.kind))) {
+            if (!optional) kiln_dyn_lexer_next(lex);
             if (!kiln_dyn_is_ident_name(lex->curr.kind)) {
                 return kiln_dyn_throw_parse_error(lex, thrown, "Expected identifier after '.'");
             }
@@ -3379,7 +3406,7 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             }
             kiln_dyn_lexer_next(lex);
             kiln_value res;
-            if (!lex->parse_only && !constructing && out->tag == KILN_VALUE_BUILTIN &&
+            if (!lex->parse_only && !constructing && !optional && out->tag == KILN_VALUE_BUILTIN &&
                 out->bits == KILN_C99_BUILTIN_EVAL) {
                 if (call_argc == 0) {
                     res = kiln_c99_undefined();
@@ -3450,6 +3477,19 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
         if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
+}
+
+/* Optional-chain short-circuiting changes only this chain's execution mode. Restore it
+ * even on an abrupt completion, so surrounding expressions and catch bodies still execute. */
+static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                 kiln_value receiver, const kiln_value *args, size_t argc,
+                                 int depth, kiln_value *out, kiln_value *thrown,
+                                 int construct_first_call) {
+    int parse_only = lex->parse_only;
+    int status = kiln_dyn_eval_postfix_inner(host, lex, scope, receiver, args, argc, depth,
+                                            out, thrown, construct_first_call);
+    lex->parse_only = parse_only;
+    return status;
 }
 
 static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int prefix);
@@ -4105,7 +4145,9 @@ static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int mod
         kiln_dyn_lexer_next(&scan);
     } else {
         if (scan.curr.kind != KILN_DYN_IDENT && scan.curr.kind != KILN_DYN_KW_THIS &&
-            scan.curr.kind != KILN_DYN_KW_ARGUMENTS) return 0;
+            scan.curr.kind != KILN_DYN_KW_ARGUMENTS &&
+            scan.curr.kind != KILN_DYN_KW_UNDEFINED && scan.curr.kind != KILN_DYN_KW_NULL)
+            return 0;
         kiln_dyn_lexer_next(&scan);
     }
     while (scan.curr.kind == KILN_DYN_DOT || scan.curr.kind == KILN_DYN_LBRACKET ||
@@ -8396,6 +8438,11 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                                    body_source_len);
     int validation_status = kiln_dyn_validate_source((const char *)body_source,
                                                      body_source_len, body_strict, thrown);
+    if (validation_status == KILN_C99_OK)
+        validation_status = kiln_dyn_preflight_body(host, (const char *)body_source,
+                                                    body_source_len, depth + 1, thrown);
+    kiln_c99_gc_keep_alive(&upvalues[0]);
+    kiln_c99_gc_keep_alive(&upvalues[1]);
     free(body_source);
     if (validation_status != KILN_C99_OK) return validation_status;
 
