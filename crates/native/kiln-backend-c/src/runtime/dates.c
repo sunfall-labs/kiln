@@ -74,7 +74,9 @@ static double kiln_c99_date_time(kiln_value value) {
 static int kiln_c99_new_date(kiln_value *out, double time) {
     kiln_date *slot = (kiln_date *)kiln_c99_gc_alloc(KILN_GC_DATE, sizeof *slot);
     if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
-    slot->time = time;
+    /* [[DateValue]] always contains TimeClip's result, including numeric construction. */
+    slot->time = isfinite(time) && fabs(time) <= 8640000000000000.0
+        ? trunc(time) + 0.0 : 0.0 / 0.0;
     kiln_c99_heap_store_value(slot, &slot->properties, kiln_c99_undefined());
     *out = kiln_c99_value(KILN_VALUE_DATE, (uint64_t)(uintptr_t)slot, NULL, 0);
     return KILN_C99_OK;

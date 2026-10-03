@@ -26,9 +26,89 @@ pub fn time_clip(time: f64) -> f64 {
 
 pub fn parse_date(text: &str) -> f64 {
     let text = text.trim();
-    match iso_date(text).or_else(|| legacy_date(text)) {
+    match iso_date(text)
+        .or_else(|| compatible_iso_date(text))
+        .or_else(|| legacy_date(text))
+    {
         Some(time) => time_clip(time),
         None => f64::NAN,
+    }
+}
+
+/// Node-compatible extensions to the ISO format stay separate from the specified grammar:
+/// a space separator, a compact numeric offset, and fractional seconds of arbitrary precision.
+/// Normalize only those fields, then reuse the strict parser for all calendar/range checks.
+fn compatible_iso_date(text: &str) -> Option<f64> {
+    let separator = match text.as_bytes().first() {
+        Some(b'+' | b'-') => 13,
+        _ => 10,
+    };
+    if !matches!(text.as_bytes().get(separator), Some(b'T' | b' ')) {
+        return None;
+    }
+    let mut normalized = text.to_owned();
+    normalized.replace_range(separator..separator + 1, "T");
+    let fraction_start = separator + 9;
+    if normalized.as_bytes().get(fraction_start) == Some(&b'.') {
+        let start = fraction_start + 1;
+        let count = normalized.as_bytes()[start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if count == 0 {
+            return None;
+        }
+        let digits = &normalized[start..start + count];
+        // 24:00 requires every fractional digit to be zero, including discarded precision.
+        if normalized.as_bytes().get(separator + 1..separator + 3) == Some(b"24")
+            && digits.bytes().any(|byte| byte != b'0')
+        {
+            return None;
+        }
+        let mut milliseconds = digits[..count.min(3)].to_owned();
+        while milliseconds.len() < 3 {
+            milliseconds.push('0');
+        }
+        normalized.replace_range(start..start + count, &milliseconds);
+    }
+    if normalized.len() >= separator + 6 {
+        let offset = normalized.len() - 5;
+        let tail = &normalized.as_bytes()[offset..];
+        if offset > separator
+            && matches!(tail[0], b'+' | b'-')
+            && tail[1..].iter().all(u8::is_ascii_digit)
+        {
+            normalized.insert(offset + 3, ':');
+        }
+    }
+    iso_date(&normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatible_iso_fields_preserve_milliseconds_and_offsets() {
+        for (source, expected) in [
+            ("2024-01-01 01:00:00Z", 1_704_070_800_000.0),
+            ("2020-02-01T11:17:00+1100", 1_580_516_220_000.0),
+            ("2024-01-01T00:00:00.1Z", 1_704_067_200_100.0),
+            ("2024-01-01T00:00:00.123456789Z", 1_704_067_200_123.0),
+            ("2024-07-21T20:12:34.112546348+12:00", 1_721_549_554_112.0),
+        ] {
+            assert_eq!(parse_date(source), expected, "{source}");
+        }
+        for source in [
+            "2024-01-01T24:00:00.0001Z",
+            "2024-01-01T00:00:00.Z",
+            "2024-01-01T00:00:00.1Zjunk",
+            "2024-01-01T00:00:00+2460",
+        ] {
+            assert!(parse_date(source).is_nan(), "{source}");
+        }
+        // The strict grammar has not silently expanded with the compatibility forms.
+        assert!(iso_date("2024-01-01T00:00:00.123456789Z").is_none());
     }
 }
 
