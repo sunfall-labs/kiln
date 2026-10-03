@@ -192,7 +192,7 @@ fn production_engine() -> MemoEngine {
 /// still share the source view, graph cache and conformance catalog. Each channel has its own
 /// staging transaction and a full-size request stack, just like a daemon connection.
 pub struct LocalClient {
-    sender: Option<mpsc::Sender<(Request, mpsc::SyncSender<Response>)>>,
+    sender: Option<mpsc::Sender<(Request, mpsc::SyncSender<Response>, bool)>>,
     serving: Option<JoinHandle<()>>,
     state: Arc<Mutex<DaemonState<MemoEngine>>>,
     tests: Arc<crate::testing::ConformanceCoordinator>,
@@ -219,7 +219,7 @@ impl LocalClient {
         state: Arc<Mutex<DaemonState<MemoEngine>>>,
         tests: Arc<crate::testing::ConformanceCoordinator>,
     ) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>)>();
+        let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>, bool)>();
         let lane_state = Arc::clone(&state);
         let lane_tests = Arc::clone(&tests);
         let serving = thread::Builder::new()
@@ -227,7 +227,9 @@ impl LocalClient {
             .spawn(move || {
                 let mut pending = None;
                 let mut next_sync_id = 0;
-                while let Ok((request, reply)) = receiver.recv() {
+                while let Ok((request, reply, inherit_native)) = receiver.recv() {
+                    let _inherit_native =
+                        inherit_native.then(crate::stream::install_inherit_native_output);
                     let streaming = crate::stream::wants_stream(&request).then(|| {
                         let frames = reply.clone();
                         crate::stream::install(crate::stream::OutputSink::new(Box::new(
@@ -269,11 +271,26 @@ impl LocalClient {
         request: Request,
         on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
     ) -> io::Result<Response> {
+        self.request_with_output_mode(request, on_output, false)
+    }
+
+    /// As [`Self::request_streaming`], but asks native execution to inherit this process's
+    /// stdout/stderr descriptors instead of transporting chunks. Used only by `--one-shot`.
+    pub fn request_native_inheriting(&mut self, request: Request) -> io::Result<Response> {
+        self.request_with_output_mode(request, &mut |_, _| {}, true)
+    }
+
+    fn request_with_output_mode(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+        inherit_native: bool,
+    ) -> io::Result<Response> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.sender
             .as_ref()
             .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "local engine is closed"))?
-            .send((request, reply))
+            .send((request, reply, inherit_native))
             .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "local engine stopped"))?;
         loop {
             match answer.recv() {

@@ -246,12 +246,17 @@ pub(crate) fn run_executable(
     command: &mut Command,
     executable: &Path,
     on_output: Option<&mut dyn FnMut(kiln_native_runtime::ChildStream, &[u8])>,
+    inherit_output: bool,
 ) -> Result<std::process::Output, NativeError> {
-    match on_output {
-        Some(on_output) => kiln_native_runtime::stream_built_executable(command, on_output),
-        None => command.output_when_launchable(),
-    }
-    .map_err(|source| NativeError::Launch {
+    let output = if inherit_output {
+        kiln_native_runtime::inherit_built_executable(command)
+    } else {
+        match on_output {
+            Some(on_output) => kiln_native_runtime::stream_built_executable(command, on_output),
+            None => command.output_when_launchable(),
+        }
+    };
+    output.map_err(|source| NativeError::Launch {
         executable: executable.to_path_buf(),
         source,
     })

@@ -15,6 +15,18 @@ pub fn output_built_executable(command: &mut Command) -> io::Result<Output> {
     retry_while_executable_is_busy(|| command.output())
 }
 
+/// Run a native executable with the caller's actual standard descriptors. Keeping stdout and
+/// stderr attached to their original descriptors preserves kernel ordering when the caller has
+/// redirected both streams to one destination.
+pub fn inherit_built_executable(command: &mut Command) -> io::Result<Output> {
+    let status = retry_while_executable_is_busy(|| command.status())?;
+    Ok(Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
 /// Which of a child's standard streams a chunk of streamed output came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildStream {
@@ -113,10 +125,70 @@ fn retry_while_executable_is_busy<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::retry_while_executable_is_busy;
+    use super::{inherit_built_executable, retry_while_executable_is_busy};
     use std::cell::Cell;
     use std::io;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn output_file(label: &str) -> (std::path::PathBuf, std::fs::File) {
+        use std::time::SystemTime;
+        let path = std::env::temp_dir().join(format!(
+            "kiln-native-inherit-{label}-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        (path, file)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_descriptors_preserve_merged_stream_order() {
+        use std::process::{Command, Stdio};
+
+        let (path, stdout) = output_file("merged");
+        let stderr = stdout.try_clone().unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf 'out-1\\n'; printf 'err-1\\n' >&2; printf 'out-2\\n'; printf 'err-2\\n' >&2")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        // Both child descriptors refer to the same open file description, as with `2>&1`.
+        let output = inherit_built_executable(&mut command).unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty() && output.stderr.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "out-1\nerr-1\nout-2\nerr-2\n"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_descriptors_keep_stdout_and_stderr_separate() {
+        use std::process::{Command, Stdio};
+
+        let (stdout_path, stdout) = output_file("stdout");
+        let (stderr_path, stderr) = output_file("stderr");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf 'out\\n'; printf 'err\\n' >&2")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        let output = inherit_built_executable(&mut command).unwrap();
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(&stdout_path).unwrap(), "out\n");
+        assert_eq!(std::fs::read_to_string(&stderr_path).unwrap(), "err\n");
+        let _ = std::fs::remove_file(stdout_path);
+        let _ = std::fs::remove_file(stderr_path);
+    }
 
     #[test]
     fn a_busy_executable_is_waited_out_past_the_old_attempt_bound() {

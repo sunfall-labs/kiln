@@ -2195,20 +2195,28 @@ pub(crate) fn native_build_graph(
 fn run_streaming_native(
     run: impl FnOnce(
         Option<&mut dyn FnMut(kiln_native::ChildStream, &[u8])>,
+        bool,
     ) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError>,
 ) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError> {
+    let inherit = crate::stream::inherit_native_output();
+    if inherit {
+        return run(None, true);
+    }
     let Some(sink) = crate::stream::current() else {
-        return run(None);
+        return run(None, false);
     };
     let mut chunker = crate::stream::Utf8Chunker::default();
     let wire = |stream: kiln_native::ChildStream| match stream {
         kiln_native::ChildStream::Stdout => kiln_proto::OutputStream::Stdout,
         kiln_native::ChildStream::Stderr => kiln_proto::OutputStream::Stderr,
     };
-    let outcome = run(Some(&mut |stream, bytes| {
-        let stream = wire(stream);
-        sink.emit(stream, chunker.push(stream, bytes));
-    }));
+    let outcome = run(
+        Some(&mut |stream, bytes| {
+            let stream = wire(stream);
+            sink.emit(stream, chunker.push(stream, bytes));
+        }),
+        false,
+    );
     for (stream, text) in chunker.finish() {
         sink.emit(stream, text);
     }
@@ -2234,21 +2242,37 @@ pub(crate) fn native_run_program(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    let result = run_streaming_native(|sink| {
-        builder.run_streaming(
-            &program,
-            &kiln_native::NativeBuildOptions {
-                output,
-                profile: native_profile(profile),
-                realm: kiln_native::NativeRealmPolicy::default(),
-                march_native: false,
-                static_link,
-                pgo_generate,
-                pgo_use,
-                node: false,
-            },
-            sink,
-        )
+    let result = run_streaming_native(|sink, inherit| {
+        if inherit {
+            builder.run_inheriting_output(
+                &program,
+                &kiln_native::NativeBuildOptions {
+                    output,
+                    profile: native_profile(profile),
+                    realm: kiln_native::NativeRealmPolicy::default(),
+                    march_native: false,
+                    static_link,
+                    pgo_generate,
+                    pgo_use,
+                    node: false,
+                },
+            )
+        } else {
+            builder.run_streaming(
+                &program,
+                &kiln_native::NativeBuildOptions {
+                    output,
+                    profile: native_profile(profile),
+                    realm: kiln_native::NativeRealmPolicy::default(),
+                    march_native: false,
+                    static_link,
+                    pgo_generate,
+                    pgo_use,
+                    node: false,
+                },
+                sink,
+            )
+        }
     });
     match result {
         Ok(report) => native_ran(&project_root, &builder, report),
@@ -2279,21 +2303,22 @@ pub(crate) fn native_run_graph(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    let result = run_streaming_native(|sink| {
-        builder.run_graph_streaming(
-            graph,
-            &kiln_native::NativeBuildOptions {
-                output,
-                profile: native_profile(profile),
-                realm: kiln_native::NativeRealmPolicy::default(),
-                march_native: false,
-                static_link,
-                pgo_generate,
-                pgo_use,
-                node,
-            },
-            sink,
-        )
+    let result = run_streaming_native(|sink, inherit| {
+        let options = kiln_native::NativeBuildOptions {
+            output,
+            profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
+            march_native: false,
+            static_link,
+            pgo_generate,
+            pgo_use,
+            node,
+        };
+        if inherit {
+            builder.run_graph_inheriting_output(graph, &options)
+        } else {
+            builder.run_graph_streaming(graph, &options, sink)
+        }
     });
     match result {
         Ok(report) => native_ran(&project_root, &builder, report),

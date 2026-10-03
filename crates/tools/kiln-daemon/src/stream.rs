@@ -39,6 +39,24 @@ impl OutputSink {
 
 thread_local! {
     static CURRENT: RefCell<Option<OutputSink>> = const { RefCell::new(None) };
+    static INHERIT_NATIVE: RefCell<bool> = const { RefCell::new(false) };
+}
+
+pub(crate) fn inherit_native_output() -> bool {
+    INHERIT_NATIVE.with(|value| *value.borrow())
+}
+
+pub(crate) struct InheritNativeOutput;
+
+impl Drop for InheritNativeOutput {
+    fn drop(&mut self) {
+        INHERIT_NATIVE.with(|value| *value.borrow_mut() = false);
+    }
+}
+
+pub(crate) fn install_inherit_native_output() -> InheritNativeOutput {
+    INHERIT_NATIVE.with(|value| *value.borrow_mut() = true);
+    InheritNativeOutput
 }
 
 /// The sink installed for the request this thread is serving, if it asked for streaming.

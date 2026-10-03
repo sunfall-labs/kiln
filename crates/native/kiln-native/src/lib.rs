@@ -3426,6 +3426,25 @@ impl NativeBuilder {
         options: &NativeBuildOptions,
         on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_with_output_mode(graph, options, on_output, false)
+    }
+
+    /// Build and execute with the caller's stdout and stderr descriptors inherited by the child.
+    pub fn run_graph_inheriting_output(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_with_output_mode(graph, options, None, true)
+    }
+
+    fn run_graph_with_output_mode(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+        inherit_output: bool,
+    ) -> Result<NativeRunReport, NativeError> {
         let workspace = WorkDirectory::create()?;
         let private_output = workspace.path().join(if cfg!(windows) {
             "run-graph.exe"
@@ -3440,6 +3459,7 @@ impl NativeBuilder {
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
             on_output,
+            inherit_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
@@ -3470,6 +3490,26 @@ impl NativeBuilder {
         options: &NativeBuildOptions,
         on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_with_output_mode(program, options, on_output, false)
+    }
+
+    /// Build and execute with the caller's stdout and stderr descriptors inherited by the child.
+    /// This is for an in-process one-shot CLI; daemon clients must use [`Self::run_streaming`].
+    pub fn run_inheriting_output(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_with_output_mode(program, options, None, true)
+    }
+
+    fn run_with_output_mode(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+        inherit_output: bool,
+    ) -> Result<NativeRunReport, NativeError> {
         // A public output path is stable and therefore shareable between requests. Launching it
         // directly would let another concurrent build replace the file between build and exec.
         // Build and launch a process-owned copy, then publish the same bytes afterward.
@@ -3487,6 +3527,7 @@ impl NativeBuilder {
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
             on_output,
+            inherit_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;

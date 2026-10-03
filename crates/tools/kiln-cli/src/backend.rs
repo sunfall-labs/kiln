@@ -63,6 +63,17 @@ pub trait Backend: Send {
         self.request(request)
     }
 
+    /// Native run output has a more efficient local option: inherit the caller's actual file
+    /// descriptors so merged stdout/stderr retain kernel write order. Remote backends keep the
+    /// ordinary chunk stream transport.
+    fn request_native_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(OutputStream, &str),
+    ) -> Result<Response> {
+        self.request_streaming(request, on_output)
+    }
+
     /// Open an independent request/response channel to the same engine. Watch uses this to
     /// keep a slow native toolchain off the interpreter's critical path.
     fn peer(&self) -> Result<Box<dyn Backend>> {
@@ -261,7 +272,7 @@ pub trait Backend: Send {
         source_view: SourceView,
         stream_output: bool,
     ) -> Result<SourceResponse<NativeRunSummary>> {
-        match self.request_streaming(
+        match self.request_native_streaming(
             Request::NativeRun {
                 path,
                 project_root,

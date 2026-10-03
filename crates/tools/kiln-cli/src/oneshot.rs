@@ -54,6 +54,28 @@ impl Backend for OneShot {
             .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
         interpret(response)
     }
+
+    fn request_native_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> Result<Response> {
+        if matches!(
+            request,
+            Request::NativeRun {
+                stream_output: true,
+                ..
+            }
+        ) {
+            let response = self
+                .client
+                .request_native_inheriting(request)
+                .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
+            interpret(response)
+        } else {
+            self.request_streaming(request, on_output)
+        }
+    }
 }
 
 #[cfg(test)]

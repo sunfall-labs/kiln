@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 mod launch;
 
 pub use launch::{
-    ChildStream, output_built_executable, spawn_built_executable, stream_built_executable,
+    ChildStream, inherit_built_executable, output_built_executable, spawn_built_executable,
+    stream_built_executable,
 };
 
 /// Version of the generated native runtime source and its C ABI.
