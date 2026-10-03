@@ -2284,8 +2284,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         kind: f64,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // The factory is `timerHandle` on the realm's engine-private object, kept in an internal
+        // slot of the global object: not a property a program can find.
         let global = self.global_object_in(self.current_realm);
-        let factory = self.read_property(&global, "__kilnTimerHandle", instruction)?;
+        let private = match &global {
+            Value::Object(global) => global.borrow().get_own(crate::ENGINE_PRIVATE_SLOT).cloned(),
+            _ => None,
+        };
+        let factory = match private {
+            Some(private) => self.read_property(&private, "timerHandle", instruction)?,
+            None => Value::Undefined,
+        };
         if !is_callable(&factory) {
             return Ok(Value::Number(id));
         }

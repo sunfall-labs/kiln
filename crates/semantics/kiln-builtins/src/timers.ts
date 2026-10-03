@@ -6,10 +6,10 @@
 // interpreter and the native backend, and `__kilnTimerRef(id, referenced)` is the only way to
 // move it. Everything else here -- the object, `hasRef`, `toPrimitive` -- is TypeScript.
 //
-// The engines ask for a handle by calling `__kilnTimerHandle(id, kind)`, which stays on the
-// global object (non-enumerable) because a timer is armed from native code that has no other way
-// to find it: `kind` is 0 for a timeout, 1 for an interval, 2 for an immediate. A realm that does
-// not install it gets the bare numeric identity. `clearTimeout` and friends accept either, by
+// The engines ask for a handle by calling `timerHandle(id, kind)` on the realm's engine-private
+// object (`kilnPrivate`, captured in `extensions.ts`; ADR 0068), the one channel a program cannot
+// see: `kind` is 0 for a timeout, 1 for an interval, 2 for an immediate. A realm that does not
+// install it gets the bare numeric identity. `clearTimeout` and friends accept either, by
 // reading a handle's `Symbol.toPrimitive`.
 //
 // `refresh()` is not here: it re-arms the same callback and arguments, which a handle created
@@ -93,10 +93,6 @@
     });
   }
 
-  Object.defineProperty(G, "__kilnTimerHandle", {
-    value: (id: number, kind: number) => (kind === 2 ? new Immediate(id) : new Timeout(id)),
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
+  kilnPrivate.timerHandle = (id: number, kind: number) =>
+    kind === 2 ? new Immediate(id) : new Timeout(id);
 })();

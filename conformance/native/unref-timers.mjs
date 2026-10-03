@@ -30,3 +30,6 @@ setTimeout(() => {
   clearTimeout(t);
   console.log("after", t.ref().hasRef(), t.unref().hasRef());
 }, 80);
+
+// The handles come from the engine-private channel, not from anything a program can find.
+console.log("__kiln names", Object.getOwnPropertyNames(globalThis).filter((name) => name.startsWith("__kiln")).length);

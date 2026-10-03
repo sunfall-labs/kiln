@@ -252,16 +252,20 @@ static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *
 /* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id`: the handle
  * object the bootstrap's `__kilnTimerHandle` makes (`kiln-builtins/src/timers.ts`; `kind` 0 a
  * timeout, 1 an interval, 2 an immediate), or the bare identity where it is not installed. The
- * object and its `ref`/`unref` are TypeScript; this only asks for one. */
+ * object and its `ref`/`unref` are TypeScript; this only asks for one. The factory is
+ * `timerHandle` on the realm's engine-private object (`kiln_c99_private_object`), never a
+ * property a program can find. */
+static int kiln_c99_private_object(kiln_value *out);
 static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
                                  int depth, kiln_value *thrown) {
+    kiln_value private_object = kiln_c99_undefined();
     kiln_value factory = kiln_c99_undefined();
     kiln_value factory_args[2];
-    int found = 0;
-    int status = kiln_c99_global_binding(host, &factory, "__kilnTimerHandle", 17, &found, depth,
-                                         thrown);
+    int status = kiln_c99_private_object(&private_object);
     *result = kiln_c99_number((double)id);
-    if (status != KILN_C99_OK || !found || !kiln_c99_is_callable(factory)) return status;
+    if (status == KILN_C99_OK)
+        status = kiln_c99_get(host, private_object, "timerHandle", 11, &factory, depth, thrown);
+    if (status != KILN_C99_OK || !kiln_c99_is_callable(factory)) return status;
     factory_args[0] = kiln_c99_number((double)id);
     factory_args[1] = kiln_c99_number(code == KILN_C99_METHOD_SET_INTERVAL    ? 1.0
                                       : code == KILN_C99_METHOD_SET_IMMEDIATE ? 2.0
