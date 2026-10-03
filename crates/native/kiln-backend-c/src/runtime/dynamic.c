@@ -9109,6 +9109,27 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_dyn_lexer_next(lex); /* import */
     if (lex->curr.kind == KILN_DYN_STR) {
         side_effect_only = 1;
+    } else if (lex->curr.kind == KILN_DYN_STAR) {
+        kiln_dyn_lexer_next(lex);
+        if (!kiln_dyn_module_ident_is(lex, "as")) {
+            status = kiln_dyn_throw_parse_error(lex, thrown, "expected `as` in namespace import");
+            goto done;
+        }
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_IDENT) {
+            status = kiln_dyn_throw_parse_error(lex, thrown, "expected namespace binding name");
+            goto done;
+        }
+        bindings = (import_binding *)malloc(sizeof *bindings);
+        if (bindings == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+        capacity = count = 1;
+        bindings[0] = (import_binding){ NULL, 0, lex->curr.start, lex->curr.len };
+        kiln_dyn_lexer_next(lex);
+        if (!kiln_dyn_module_ident_is(lex, "from")) {
+            status = kiln_dyn_throw_parse_error(lex, thrown, "expected `from` in namespace import");
+            goto done;
+        }
+        kiln_dyn_lexer_next(lex);
     } else if (lex->curr.kind == KILN_DYN_LBRACE) {
         kiln_dyn_lexer_next(lex);
         while (lex->curr.kind != KILN_DYN_RBRACE) {
@@ -9143,7 +9164,7 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
         if (lex->curr.kind != KILN_DYN_STR) { status = kiln_dyn_throw_parse_error(lex, thrown, "expected module specifier string"); goto done; }
     } else {
         status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                      "runtime modules currently require named static imports");
+                                      "runtime modules require named or namespace static imports");
         goto done;
     }
     if (lex->curr.kind != KILN_DYN_STR || lex->curr.str_val == NULL) {
@@ -9175,9 +9196,12 @@ static int kiln_dyn_module_import(kiln_host *host, kiln_dyn_lexer *lex,
             }
             kiln_value value = kiln_c99_undefined();
             if (!lex->parse_only) {
-                status = kiln_dyn_module_namespace_binding(host, namespace_value,
-                    bindings[index].imported, bindings[index].imported_len, &value, depth, thrown);
-                if (status != KILN_C99_OK) goto done;
+                if (bindings[index].imported == NULL) value = namespace_value;
+                else {
+                    status = kiln_dyn_module_namespace_binding(host, namespace_value,
+                        bindings[index].imported, bindings[index].imported_len, &value, depth, thrown);
+                    if (status != KILN_C99_OK) goto done;
+                }
             }
             if (!kiln_dyn_scope_set(scope, bindings[index].local,
                                     bindings[index].local_len, value)) {
