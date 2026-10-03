@@ -183,6 +183,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::PromiseRejectionsRaw => "__kilnPromiseRejections".to_owned(),
         Native::RegExpLegacyCaptureRaw => "__kilnRegExpLegacyCapture".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
+        Native::NodeModuleLoader => "__kilnHostModuleLoader".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
         // `functionHasInstance`, the name of a Rust variant rather than of anything a program

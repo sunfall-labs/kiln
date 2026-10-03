@@ -289,6 +289,8 @@ pub enum Native {
     NodeHttp2CreateSecureServer,
     NodeModule,
     NodeModuleCreateRequire,
+    /// Private runner-only access to the realm's module export cells for Vitest spy overlays.
+    NodeModuleLoader,
     NodePath,
     NodePathJoin,
     NodePathResolve,

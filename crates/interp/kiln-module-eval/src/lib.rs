@@ -1342,6 +1342,16 @@ impl GraphExecutor<'_> {
         } else {
             ModuleRealmSession::without_adapter()
         });
+        if node {
+            let module_map = node_session
+                .as_ref()
+                .expect("Node graph has a realm session")
+                .module_map();
+            let mut module_map = module_map.borrow_mut();
+            for path in self.module_map().keys() {
+                module_map.add_runner_candidate(RealmId::PRIMARY, &module_key(path));
+            }
+        }
         // The realm's module map: one record per module, holding its evaluation state and its
         // exports by name. Dynamic `import()` in any module body reads and writes the same map,
         // so whichever reaches a module first is its only evaluation. A binding a cycle forces

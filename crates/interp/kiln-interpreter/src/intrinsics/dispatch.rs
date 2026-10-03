@@ -2864,6 +2864,7 @@ pub(crate) fn call_native(
         | Native::NodeHttp2CreateSecureServer
         | Native::NodeModule
         | Native::NodeModuleCreateRequire
+        | Native::NodeModuleLoader
         | Native::NodePath
         | Native::NodePathJoin
         | Native::NodePathResolve

@@ -680,6 +680,85 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
+            Native::NodeModuleLoader => {
+                let Some(Value::String(action)) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "module loader action must be a string".to_owned(),
+                    });
+                };
+                let action = action.to_lossy_string();
+                let module_key = |value: &Value| -> Option<String> {
+                    let Value::String(value) = value else {
+                        return None;
+                    };
+                    let value = value.to_lossy_string();
+                    if let Ok(url) = ::url::Url::parse(&value) {
+                        if url.scheme() == "file" {
+                            return url
+                                .to_file_path()
+                                .ok()
+                                .map(|path| path.to_string_lossy().into_owned());
+                        }
+                    }
+                    Some(value)
+                };
+                let bool_result = match action.as_str() {
+                    "registerRunner" if arguments.len() == 2 => {
+                        let Some(key) = module_key(&arguments[1]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "runner referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        return Ok(Value::Boolean(
+                            self.module_map
+                                .borrow_mut()
+                                .register_runner(self.current_realm, &key),
+                        ));
+                    }
+                    "registerSpyAdapter" if arguments.len() == 2 => {
+                        let Some(key) = module_key(&arguments[1]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "spy adapter referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        return Ok(Value::Boolean(
+                            self.module_map
+                                .borrow_mut()
+                                .register_spy_adapter(self.current_realm, &key),
+                        ));
+                    }
+                    "spyExport" if arguments.len() == 5 => {
+                        let Some(adapter) = module_key(&arguments[4]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "spy adapter referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        let Value::String(name) = &arguments[2] else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "export name must be a string".to_owned(),
+                            });
+                        };
+                        self.module_map.borrow_mut().spy_export(
+                            self.current_realm,
+                            &arguments[1],
+                            &name.to_lossy_string(),
+                            arguments[3].clone(),
+                            &adapter,
+                        )
+                    }
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "unknown or malformed module loader action '{action}'"
+                            ),
+                        });
+                    }
+                };
+                return Ok(Value::Boolean(bool_result));
+            }
             Native::AbortControllerAbort | Native::AbortSignalAbort => {
                 let reason = arguments.first().cloned();
                 let signal = if matches!(native, Native::AbortSignalAbort) {

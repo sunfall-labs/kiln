@@ -186,6 +186,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::NodeModuleCreateRequire, RealmId::PRIMARY),
             ),
             (
+                "__kilnHostModuleLoader".to_owned(),
+                Value::Native(Native::NodeModuleLoader, RealmId::PRIMARY),
+            ),
+            (
                 "async_hooks".to_owned(),
                 Value::Native(Native::NodeAsyncHooks, RealmId::PRIMARY),
             ),
