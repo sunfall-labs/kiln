@@ -215,33 +215,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
             });
         }
-        let frame_snapshot = |function: Option<Rc<Closure>>,
-                              method_name: Option<StringUnits>,
-                              program: &Program,
-                              file_name: String,
-                              instruction: usize| {
-            let span = function
-                .as_ref()
-                .and_then(|closure| program.functions.get(closure.function as usize))
-                .map(|proto| proto.span);
-            let site = program.debug_call_site(span, instruction);
-            (
-                function,
-                method_name,
-                file_name,
-                site.map(|site| (site.line, site.column)),
-            )
-        };
-        let mut frames = Vec::with_capacity(self.frames.len() + 1);
-        if self.function.is_some() {
-            frames.push(frame_snapshot(
-                self.function.clone(),
-                self.method_name.clone(),
-                &self.program,
-                self.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
-                self.instruction.saturating_sub(1),
-            ));
-        }
+        let mut frames = Vec::with_capacity(self.frames.len());
+        // This primitive is called by the public TypeScript `Error.captureStackTrace`
+        // facade. Like the native frame-snapshot primitive, omit that implementation
+        // frame so the first CallSite is the caller of the facade.
         frames.extend(self.frames.iter().rev().map(|frame| {
             let span = frame
                 .function
