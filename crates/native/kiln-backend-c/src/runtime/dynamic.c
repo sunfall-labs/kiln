@@ -1,4 +1,6 @@
 
+extern int kiln_realm_string_code_generation_allowed(int *out_allowed);
+
 /* Generated graph launchers provide the completion hook when module promises need to publish
  * their namespace. Keeping the symbol weak lets ordinary realms use this runtime file without a
  * graph launcher. */
@@ -2124,6 +2126,17 @@ static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t l
 static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
                                           int depth, kiln_value *thrown);
 
+/* Runtime-created strings consult realm policy; already-linked source modules do not. */
+static int kiln_dyn_require_string_codegen(kiln_value *thrown) {
+    int allowed = 1;
+    int status = kiln_realm_string_code_generation_allowed(&allowed);
+    if (status != KILN_C99_OK)
+        return kiln_c99_internal_status("active realm string-code-generation policy");
+    if (allowed) return KILN_C99_OK;
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_EVAL_ERROR,
+                                "Code generation from strings is disabled");
+}
+
 static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
                                              kiln_value left, kiln_value right) {
     return lex->parse_only ? kiln_c99_undefined() : kiln_c99_binary(operation, left, right);
@@ -3444,8 +3457,10 @@ static int kiln_dyn_eval_postfix_inner(kiln_host *host, kiln_dyn_lexer *lex, kil
                 } else {
                     uint8_t *eval_source = NULL;
                     size_t eval_length = 0;
-                    status = kiln_dyn_string_to_source(call_args[0], &eval_source,
-                                                       &eval_length);
+                    status = kiln_dyn_require_string_codegen(thrown);
+                    if (status == KILN_C99_OK)
+                        status = kiln_dyn_string_to_source(call_args[0], &eval_source,
+                                                           &eval_length);
                     if (status == KILN_C99_OK)
                         status = kiln_dyn_preflight_direct_eval(host,
                             (const char *)eval_source, eval_length, depth + 1, thrown);
@@ -4920,6 +4935,8 @@ int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_valu
         *out = args[0];
         return KILN_C99_OK;
     }
+    int policy_status = kiln_dyn_require_string_codegen(thrown);
+    if (policy_status != KILN_C99_OK) return policy_status;
     uint8_t *source_owned = NULL;
     size_t source_len = 0;
     int status = kiln_dyn_string_to_source(args[0], &source_owned, &source_len);
@@ -8873,6 +8890,9 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
         return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_gc_keep_alive(&upvalues[0]);
     kiln_c99_gc_keep_alive(&upvalues[1]);
+
+    int policy_status = kiln_dyn_require_string_codegen(thrown);
+    if (policy_status != KILN_C99_OK) return policy_status;
 
     kiln_val val_upvalues[3] = {
         kiln_val_from_boundary(upvalues[0]),

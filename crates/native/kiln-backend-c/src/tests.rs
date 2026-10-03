@@ -257,6 +257,7 @@ int32_t kiln_json_parse(const kiln_string *source, const kiln_json_node **out_no
 const REALM_FIXTURE: &str = r#"
 static uint64_t kiln_test_next_timer_id = 1;
 static int kiln_test_realm_active = 0;
+int kiln_test_string_code_generation_allowed = 1;
 static uint64_t kiln_test_symbol_id = 1;
 static uint16_t kiln_test_symbol_key[256];
 static uint64_t kiln_test_symbol_key_len = 0;
@@ -321,6 +322,12 @@ int kiln_realm_create(uint64_t *out_realm) {
     kiln_test_registered_count = 0;
     kiln_test_legacy_roots = 0;
     *out_realm = 1;
+    return KILN_C99_OK;
+}
+int kiln_realm_set_string_code_generation(uint64_t realm, int allowed) {
+    if (realm != 1 || (allowed != 0 && allowed != 1) || kiln_test_realm_active)
+        return KILN_C99_INVALID_ARGUMENT;
+    kiln_test_string_code_generation_allowed = allowed;
     return KILN_C99_OK;
 }
 int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context) {
@@ -860,6 +867,11 @@ int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
 int kiln_realm_argv_count(uint64_t *out_count) {
     if (!kiln_test_realm_active || out_count == NULL) return KILN_C99_INVALID_ARGUMENT;
     *out_count = 0;
+    return KILN_C99_OK;
+}
+int kiln_realm_string_code_generation_allowed(int *out_allowed) {
+    if (!kiln_test_realm_active || out_allowed == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_allowed = kiln_test_string_code_generation_allowed;
     return KILN_C99_OK;
 }
 int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len) {

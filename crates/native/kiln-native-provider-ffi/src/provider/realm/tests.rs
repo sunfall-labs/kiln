@@ -160,6 +160,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn string_code_generation_policy_is_realm_local_and_validated() {
+    struct Observation(i32);
+    unsafe extern "C" fn observe_policy(context: *mut c_void) -> i32 {
+        let observed = unsafe { &mut *context.cast::<Observation>() };
+        unsafe { kiln_realm_string_code_generation_allowed(&raw mut observed.0) }
+    }
+
+    let mut first = 0;
+    let mut second = 0;
+    assert_eq!(unsafe { kiln_realm_create(&raw mut first) }, 0);
+    assert_eq!(unsafe { kiln_realm_create(&raw mut second) }, 0);
+    assert_eq!(
+        kiln_realm_set_string_code_generation(first, 2),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        kiln_realm_set_string_code_generation(0, 0),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(kiln_realm_set_string_code_generation(first, 0), 0);
+
+    let mut denied = Observation(-1);
+    let mut allowed = Observation(-1);
+    assert_eq!(
+        unsafe { kiln_realm_enter(first, Some(observe_policy), (&raw mut denied).cast()) },
+        0
+    );
+    assert_eq!(
+        unsafe { kiln_realm_enter(second, Some(observe_policy), (&raw mut allowed).cast()) },
+        0
+    );
+    assert_eq!(denied.0, 0);
+    assert_eq!(allowed.0, 1);
+    assert_eq!(
+        unsafe { kiln_realm_string_code_generation_allowed(std::ptr::null_mut()) },
+        INVALID_ARGUMENT
+    );
+    assert_eq!(kiln_realm_destroy(first), 0);
+    assert_eq!(kiln_realm_destroy(second), 0);
+}
+
+#[test]
 fn scheduled_native_realms_keep_distinct_worker_programs_on_one_lane() {
     struct Turn {
         port: u64,

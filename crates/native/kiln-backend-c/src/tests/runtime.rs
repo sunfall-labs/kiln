@@ -1658,6 +1658,101 @@ int main(void) {{
 }
 
 #[test]
+fn string_code_generation_policy_guards_eval_and_function_only_for_strings() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    let wrapper = format!(
+        r#"
+extern int kiln_test_string_code_generation_allowed;
+static int conversions = 0;
+static int codegen_to_string(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                             const kiln_val *receiver, const kiln_val *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)receiver; (void)args; (void)argc;
+    conversions++;
+    *result = kiln_val_from_boundary(kiln_c99_copy_text("return 1;", 9));
+    return KILN_C99_OK;
+}}
+static const kiln_string codegen_to_string_name = {{ 12, KILN_STRING_LATIN1, "toStringBody" }};
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+    kiln_value dummy, out = kiln_c99_undefined(), thrown = kiln_c99_undefined();
+    if ({}(NULL, &dummy) != KILN_C99_OK) return 100;
+    kiln_test_string_code_generation_allowed = 0;
+
+    kiln_value source = kiln_c99_copy_text("(", 1);
+    if (kiln_c99_dynamic_indirect_eval(NULL, 1, &source, &out, 0, &thrown) != KILN_C99_THROWN)
+        return 1;
+    kiln_value kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 2;
+    kiln_value message = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "message", 7, &message, 0, &thrown) != KILN_C99_OK ||
+        message.tag != KILN_VALUE_STRING ||
+        !kiln_test_units_contain(message, "Code generation from strings is disabled")) return 20;
+
+    thrown = kiln_c99_undefined();
+    source = kiln_c99_copy_text("eval('(')", 9);
+    if (kiln_c99_dynamic_eval_expression(NULL, source, NULL, NULL, NULL, NULL, 0, 0,
+                                         &out, 0, &thrown) != KILN_C99_THROWN) return 6;
+    kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 7;
+
+    thrown = kiln_c99_undefined();
+    kiln_value function_args[1] = {{ kiln_c99_copy_text("return 1", 8) }};
+    if (kiln_c99_dynamic_new_function(NULL, &out, function_args, 1, 0, &thrown) !=
+        KILN_C99_THROWN) return 3;
+    kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 4;
+
+    kiln_value coercible, coercer;
+    if (kiln_c99_new_object(&coercible) != KILN_C99_OK ||
+        kiln_c99_make_closure(&coercer, codegen_to_string, &codegen_to_string_name,
+                              NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK ||
+        kiln_c99_put(NULL, coercible, "toString", 8, coercer, 0, &thrown) != KILN_C99_OK)
+        return 8;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_new_function(NULL, &out, &coercible, 1, 0, &thrown) !=
+        KILN_C99_THROWN || conversions != 1) return 9;
+
+    kiln_value non_string = kiln_c99_number(17.0);
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_indirect_eval(NULL, 1, &non_string, &out, 0, &thrown) != KILN_C99_OK ||
+        out.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(out) != 17.0) return 5;
+
+    // This is the runtime source-module evaluator, not eval of a user string. Linked module
+    // execution stays available when string compilation is disabled.
+    kiln_value module_source = kiln_c99_copy_text("export const value = 1;", 23);
+    kiln_value module_url = kiln_c99_copy_text("generated.js", 12);
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_eval_module(NULL, module_source, module_url, &out, 0, &thrown) !=
+        KILN_C99_OK || out.tag != KILN_VALUE_OBJECT) return 10;
+
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "string-code-generation-policy");
+    assert!(
+        run.status.success(),
+        "string code generation policy failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     let constants = vec![
         Constant::String("imul".into()),             // 0: "imul"

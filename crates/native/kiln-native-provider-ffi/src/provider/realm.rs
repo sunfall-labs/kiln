@@ -828,6 +828,9 @@ struct NativeRealm {
     /// `argv` before the realm is entered. Each element is its own allocation so that a
     /// pointer handed to generated C stays put for as long as the realm holds the vector.
     argv: RefCell<Vec<Box<[u8]>>>,
+    /// Whether this realm may compile source supplied as a string (ECMAScript host policy).
+    /// Source modules already part of its program graph do not consult this flag.
+    string_code_generation: Cell<bool>,
     entropy: Cell<Option<(u64, u64)>>,
     entered: Cell<bool>,
     diagnostic: RefCell<RealmDiagnostic>,
@@ -1344,6 +1347,7 @@ impl NativeRealm {
             crypto_keys: RefCell::new(HashMap::new()),
             next_crypto_key: Cell::new(1),
             argv: RefCell::new(Vec::new()),
+            string_code_generation: Cell::new(true),
             entropy: Cell::new(None),
             entered: Cell::new(false),
             diagnostic: RefCell::new(RealmDiagnostic::default()),
@@ -3660,6 +3664,42 @@ pub unsafe extern "C" fn kiln_realm_set_argv(
             copied.push(bytes.to_vec().into_boxed_slice());
         }
         *realm.argv.borrow_mut() = copied;
+        0
+    })
+}
+
+/// Sets whether this realm may evaluate dynamically supplied source strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_set_string_code_generation(handle: u64, allowed: i32) -> i32 {
+    ffi(|| {
+        let Some(realm) = realm(handle) else {
+            return INVALID_ARGUMENT;
+        };
+        let value = match allowed {
+            0 => false,
+            1 => true,
+            _ => return INVALID_ARGUMENT,
+        };
+        if realm.entered.get() {
+            return INVALID_ARGUMENT;
+        }
+        realm.string_code_generation.set(value);
+        0
+    })
+}
+
+/// Reads the string-code-generation policy for the currently active realm.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_string_code_generation_allowed(out_allowed: *mut i32) -> i32 {
+    ffi(|| {
+        if out_allowed.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the private ABI caller provides one writable integer.
+        unsafe { out_allowed.write(i32::from(realm.string_code_generation.get())) };
         0
     })
 }
@@ -7146,6 +7186,12 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_set_argv, realm_set_argv) => {
             const _: unsafe extern "C" fn(u64, u64, *const *const c_char) -> i32 = kiln_realm_set_argv;
+        };
+        (realm, kiln_realm_set_string_code_generation, realm_set_string_code_generation) => {
+            const _: extern "C" fn(u64, i32) -> i32 = kiln_realm_set_string_code_generation;
+        };
+        (realm, kiln_realm_string_code_generation_allowed, realm_string_code_generation_allowed) => {
+            const _: unsafe extern "C" fn(*mut i32) -> i32 = kiln_realm_string_code_generation_allowed;
         };
         (realm, kiln_realm_argv_count, realm_argv_count) => {
             const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_argv_count;

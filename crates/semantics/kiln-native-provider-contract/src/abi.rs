@@ -116,6 +116,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_callable_store, realm_callable_store);
             (realm, kiln_realm_value_slot, realm_value_slot);
             (realm, kiln_realm_set_argv, realm_set_argv);
+            (realm, kiln_realm_set_string_code_generation, realm_set_string_code_generation);
+            (realm, kiln_realm_string_code_generation_allowed, realm_string_code_generation_allowed);
             (realm, kiln_realm_argv_count, realm_argv_count);
             (realm, kiln_realm_argv_at, realm_argv_at);
             (realm, kiln_realm_entropy_word, realm_entropy_word);
@@ -299,7 +301,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 79;
+pub const PROVIDER_ABI_VERSION: u32 = 80;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -318,6 +320,10 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 80 and 195 exports: per-realm string-code-generation policy joined; this lets a launcher
+        // disable eval/Function source strings without disabling linked source modules. Before that,
+        // 79 and 193 exports: stateful compression stream primitives joined; the TypeScript
+        // TransformStream adapters own the public CompressionStream and DecompressionStream APIs.
         // 78 and 189 exports: stateless SHA-256, HKDF, AES-GCM and Ed25519 operations joined
         // `kiln-webcrypto`; the TypeScript facade owns WebCrypto keys and policy. Before that,
         // 76 and 185 exports: `kiln_realm_rearm_timeout` joined, so a `Timeout` that already ran
@@ -378,8 +384,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 79);
-        assert_eq!(PROVIDER_EXPORTS.len(), 193);
+        assert_eq!(PROVIDER_ABI_VERSION, 80);
+        assert_eq!(PROVIDER_EXPORTS.len(), 195);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }
