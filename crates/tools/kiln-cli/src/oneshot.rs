@@ -795,6 +795,58 @@ server.listen(0, "127.0.0.1", () => {
     }
 
     #[test]
+    fn one_shot_native_indirect_eval_returns_eval_error_for_unsupported_statements() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-indirect-eval-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create indirect-eval fixture");
+        let source = fixture.join("main.js");
+        let artifact = fixture.join("main");
+        std::fs::write(
+            &source,
+            "const indirectEval = eval;\n\
+             let caught = false;\n\
+             try { indirectEval('1 + 2; 3'); } catch (error) { caught = error instanceof EvalError; }\n\
+             console.log(caught);\n",
+        )
+        .expect("write source");
+        share_native_semantic_cache(&fixture);
+
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                false,
+                None,
+                false,
+                None,
+                None,
+            )
+            .expect("build unsupported indirect eval fixture")
+        };
+        assert_eq!(built.exit_code, 0);
+        let output = std::process::Command::new(&artifact)
+            .output()
+            .expect("run the native indirect-eval binary");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n");
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn one_shot_native_build_with_explain_prints_facts() {
         let fixture =
             std::env::temp_dir().join(format!("kiln-cli-explain-fixture-{}", std::process::id()));

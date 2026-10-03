@@ -4219,20 +4219,20 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     return KILN_C99_OK;
 }
 
-/* Direct eval cannot compile a new native body at run time. It can evaluate one expression with
- * the same cell-backed lexical environment the dynamic Function trampoline understands. This
- * supports expression forms the dynamic evaluator implements (including invoking a function
- * expression); statement eval still needs declaration-instantiation and is not approximated here.
- * Names arrive in EvalSite order, innermost first; duplicate spellings are ignored after their
- * first binding. */
-int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
+/* Eval cannot compile a new native body at run time. The evaluator handles one expression with
+ * either the cell-backed direct-eval environment or, for indirect eval, the global environment.
+ * It supports the expression forms understood by the dynamic evaluator (including invoking a
+ * function expression); statement eval still needs declaration instantiation. Names arrive in
+ * EvalSite order, innermost first; duplicate spellings are ignored after their first binding. */
+static int kiln_c99_dynamic_eval_expression_impl(kiln_host *host, kiln_value source,
                                               const char *const *names,
                                               const size_t *name_lengths,
                                               const kiln_value *values,
                                               const unsigned char *read_only_flags,
                                               size_t binding_count,
                                               int strict_context, kiln_value *out, int depth,
-                                              kiln_value *thrown) {
+                                              kiln_value *thrown,
+                                              int unsupported_as_eval_error) {
     kiln_dyn_scope scope;
     uint8_t *source_owned = NULL;
     size_t source_len = 0;
@@ -4294,11 +4294,33 @@ direct_eval_unsupported:
     kiln_dyn_token_free(&lex.curr);
     kiln_dyn_scope_destroy(&scope);
     free(source_owned);
+    if (unsupported_as_eval_error) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_EVAL_ERROR,
+                                    "Dynamic eval supports only a single expression");
+    }
     KILN_C99_REFUSE("unsupported direct eval source (expected supported single expression)");
 direct_eval_done:
     kiln_dyn_scope_destroy(&scope);
     free(source_owned);
     return status;
+}
+
+int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
+                                     const char *const *names,
+                                     const size_t *name_lengths,
+                                     const kiln_value *values,
+                                     const unsigned char *read_only_flags,
+                                     size_t binding_count, int strict_context,
+                                     kiln_value *out, int depth, kiln_value *thrown) {
+    return kiln_c99_dynamic_eval_expression_impl(host, source, names, name_lengths, values,
+                                                  read_only_flags, binding_count,
+                                                  strict_context, out, depth, thrown, 0);
+}
+
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
+                                   kiln_value *out, int depth, kiln_value *thrown) {
+    return kiln_c99_dynamic_eval_expression_impl(host, source, NULL, NULL, NULL, NULL, 0, 0,
+                                                  out, depth, thrown, 1);
 }
 
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {

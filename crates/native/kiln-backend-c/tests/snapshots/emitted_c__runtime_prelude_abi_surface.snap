@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 820
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -3262,6 +3263,7 @@ __attribute__((always_inline))
 static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
 static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
 static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value callee,
 #if KILN_RETAIN_GROUP_BUFFER
 #endif
@@ -4173,9 +4175,11 @@ static int kiln_dyn_eval_delete_identifier(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_delete_operand(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
-int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
+static int kiln_c99_dynamic_eval_expression_impl(kiln_host *host, kiln_value source,
 direct_eval_unsupported:
 direct_eval_done:
+int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {
 static const char *kiln_dyn_expression_syntax_end(const char *source, size_t start,
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,
