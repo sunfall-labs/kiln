@@ -312,6 +312,15 @@ macro_rules! assert_root_provider_export {
     (compression, kiln_compression_state_push, compression_state_push) => {
         const _: unsafe extern "C" fn(*mut kiln_compression::Codec, *const u8, usize, u32, *mut *mut u8, *mut usize) -> i32 = kiln_compression_state_push;
     };
+    (realm, kiln_process_exec_file_sync, process_exec_file_sync) => {
+        const _: unsafe extern "C" fn(*const KilnString, *const KilnString, usize, *mut *mut core::ffi::c_void) -> i32 = process::kiln_process_exec_file_sync;
+    };
+    (realm, kiln_process_output_view, process_output_view) => {
+        const _: unsafe extern "C" fn(*const core::ffi::c_void, *mut *const u8, *mut usize, *mut *const u8, *mut usize, *mut i32, *mut *const u8, *mut usize) -> i32 = process::kiln_process_output_view;
+    };
+    (realm, kiln_process_output_free, process_output_free) => {
+        const _: unsafe extern "C" fn(*mut core::ffi::c_void) = process::kiln_process_output_free;
+    };
     (compression, kiln_compression_output_free, compression_output_free) => {
         const _: unsafe extern "C" fn(*mut u8, usize) = kiln_compression_output_free;
     };
@@ -348,6 +357,9 @@ use compression::{
     kiln_compression_output_free, kiln_compression_state_create, kiln_compression_state_free,
     kiln_compression_state_push,
 };
+
+#[path = "provider/process.rs"]
+mod process;
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can

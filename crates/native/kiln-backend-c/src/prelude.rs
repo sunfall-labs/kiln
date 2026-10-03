@@ -1323,6 +1323,7 @@ method_ids! {
     // bridge, captured and deleted by the TypeScript facade before user code runs.
     (KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW, 582, Direct; 0, 0),
     (KILN_C99_METHOD_COMPRESSION_PRIMITIVE_RAW, 583, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_CHILD_PROCESS_EXEC_FILE_SYNC, 584, Direct; 0, 0),
     // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
     // deleted by `kiln-builtins/src/arraybuffer.ts`.
     (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),

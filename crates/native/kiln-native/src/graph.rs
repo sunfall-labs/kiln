@@ -4975,6 +4975,17 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
+    kiln_value child_process_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&child_process_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value child_process_exec_file_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 584 /* KILN_C99_METHOD_NODE_CHILD_PROCESS_EXEC_FILE_SYNC */ };
+    status = kiln_c99_put(host, child_process_obj, "__execFileSync", 14,
+                          child_process_exec_file_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "child_process", 13,
+                          child_process_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
     kiln_value http_obj = kiln_c99_undefined();
     status = kiln_c99_new_object(&http_obj);
     if (status != KILN_C99_OK) return status;

@@ -3173,6 +3173,66 @@ catch (error) { console.log(error.name, converted); }
 }
 
 #[test]
+fn native_exec_file_sync_runs_linked_child_and_captures_both_streams() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-exec-file-sync-linked-child");
+    let parent = root.path.join("parent.mjs");
+    let child = root.path.join("child.mjs");
+    fs::write(
+        &child,
+        "process.stdout.write('child stdout\\n'); process.stderr.write('child stderr\\n'); if (process.argv.includes('nonzero')) process.exitCode = 7;",
+    )
+    .expect("write child entry");
+    fs::write(
+        &parent,
+        "import { execFileSync } from 'node:child_process';\n\
+         import process from 'node:process';\n\
+         const child = new URL('./child.mjs', import.meta.url).pathname;\n\
+         const output = execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child], { encoding: 'utf8' });\n\
+         console.log('captured:', output.trim());\n\
+         try { execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child, 'nonzero']); }\n\
+         catch (error) { console.log('status:', error.status, 'stderr:', error.stderr.toString('utf8').trim()); }\n",
+    )
+    .expect("write parent entry");
+    let graph = ModuleGraph::build_node_with_includes(
+        &parent,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![(child, ModuleSource::Source)],
+    )
+    .expect("build graph with lazy linked child");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("build execFileSync graph");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run execFileSync graph under GC stress");
+    assert!(
+        output.status.success(),
+        "native graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"captured: child stdout\nstatus: 7 stderr: child stderr\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn native_declared_esm_include_stays_lazy_and_supports_computed_require() {
     use kiln_module_resolver::NodeRuntimeResolver;
     let Some(toolchain) = Toolchain::discover().ok() else {

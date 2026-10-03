@@ -1,6 +1,7 @@
 // kiln-builtins: node:child_process implementation (Phase 5.2, ADR 0005)
 
 import { EventEmitter } from "node:events";
+import { Buffer } from "node:buffer";
 
 const nativeModules =
   typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
@@ -55,18 +56,27 @@ export function spawn(command: string, args?: any, options?: any): ChildProcess 
 }
 
 export function spawnSync(command: string, args?: any, options?: any): any {
-  if (nativeModule && typeof nativeModule.spawnSync === "function") {
-    return nativeModule.spawnSync(command, args, options);
+  if (typeof args === "string" || args == null) {
+    options = args ?? options;
+    args = [];
   }
+  if (!Array.isArray(args)) throw new TypeError("spawnSync arguments must be an array")
+  const settings = normalizeSyncOptions(options)
+  const raw = runFileSync(command, args)
+  const stdout = Buffer.from(raw.stdout, "latin1")
+  const stderr = Buffer.from(raw.stderr, "latin1")
+  const encoding = settings?.encoding
+  const visibleOut = encoding ? stdout.toString(encoding) : stdout
+  const visibleErr = encoding ? stderr.toString(encoding) : stderr
   return {
-    pid: 0,
-    output: [null, "", ""],
-    stdout: "",
-    stderr: "",
-    status: 0,
-    signal: null,
-    error: undefined,
-  };
+    pid: raw.error ? undefined : 0,
+    output: [null, visibleOut, visibleErr],
+    stdout: visibleOut,
+    stderr: visibleErr,
+    status: raw.status < 0 ? null : raw.status,
+    signal: raw.status < 0 ? "SIGTERM" : null,
+    error: raw.error ? new Error(raw.error) : undefined,
+  }
 }
 
 export function exec(command: string, options?: any, callback?: any): ChildProcess {
@@ -118,10 +128,53 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
 }
 
 export function execFileSync(file: string, args?: any, options?: any): any {
-  if (nativeModule && typeof nativeModule.execFileSync === "function") {
-    return nativeModule.execFileSync(file, args, options);
+  if (typeof args === "string" || args == null) {
+    options = args ?? options;
+    args = [];
   }
-  return spawnSync(file, args, options).stdout;
+  if (!Array.isArray(args)) throw new TypeError("execFileSync arguments must be an array")
+  const settings = normalizeSyncOptions(options)
+  const raw = runFileSync(file, args)
+  const stdout = Buffer.from(raw.stdout, "latin1")
+  const stderr = Buffer.from(raw.stderr, "latin1")
+  if (raw.error || raw.status !== 0) {
+    const error = new Error(raw.error || `Command failed: ${file}`) as Error & {
+      status?: number | null
+      stdout?: any
+      stderr?: any
+    }
+    error.status = raw.status < 0 ? null : raw.status
+    error.stdout = stdout
+    error.stderr = stderr
+    throw error
+  }
+  return settings?.encoding ? stdout.toString(settings.encoding) : stdout
+}
+
+function normalizeSyncOptions(options: any): { encoding?: string } | undefined {
+  if (options == null) return undefined
+  const settings = typeof options === "string" ? { encoding: options } : options
+  if (typeof settings !== "object") throw new TypeError("child process options must be a string or object")
+  for (const key of Object.keys(settings)) {
+    if (key !== "encoding") throw new Error(`node:child_process option is not supported: ${key}`)
+  }
+  const encoding = settings.encoding
+  if (encoding !== undefined && encoding !== "utf8" && encoding !== "utf-8") {
+    throw new Error(`node:child_process encoding is not supported: ${String(encoding)}`)
+  }
+  return encoding === undefined ? undefined : { encoding }
+}
+
+function runFileSync(file: string, args: ReadonlyArray<any>): {
+  stdout: string
+  stderr: string
+  status: number
+  error: string | null
+} {
+  if (nativeModule && typeof nativeModule.__execFileSync === "function") {
+    return nativeModule.__execFileSync(String(file), ...args.map((argument) => String(argument)))
+  }
+  throw new Error("node:child_process synchronous execution is unavailable in this runtime")
 }
 
 export function fork(modulePath: string, args?: any, options?: any): ChildProcess {

@@ -2161,6 +2161,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
+    if (code == KILN_C99_METHOD_NODE_CHILD_PROCESS_EXEC_FILE_SYNC) {
+        return kiln_c99_node_child_process_sync(host, result, args, argc, depth, thrown);
+    }
 #endif
     if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
         return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);

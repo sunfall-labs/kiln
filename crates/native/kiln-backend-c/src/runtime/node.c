@@ -3376,6 +3376,110 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
     return status;
 }
 
+extern int kiln_process_exec_file_sync(const kiln_string *file, const kiln_string *argv,
+                                      size_t argc, void **out);
+extern int kiln_process_output_view(const void *result, const uint8_t **stdout_bytes,
+                                   size_t *stdout_len, const uint8_t **stderr_bytes,
+                                   size_t *stderr_len, int32_t *status,
+                                   const uint8_t **error_bytes, size_t *error_len);
+extern void kiln_process_output_free(void *result);
+
+static int kiln_c99_node_process_string_view(kiln_value value, kiln_string *out) {
+    const kiln_string *source;
+    if (out == NULL || value.tag != KILN_VALUE_STRING || value.ptr == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    source = (const kiln_string *)value.ptr;
+    out->unit_len = source->unit_len;
+    out->flags = kiln_string_is_utf16(source) ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+    out->data = source->data;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_node_process_byte_string(const uint8_t *bytes, size_t length,
+                                            kiln_value *out) {
+    kiln_string *string;
+    if (out == NULL || (length != 0 && bytes == NULL) || length > UINT32_MAX)
+        return KILN_C99_INVALID_ARGUMENT;
+    if (length == 0) {
+        *out = kiln_c99_copy_text(NULL, 0);
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    string = kiln_c99_gc_alloc_units(length, KILN_STRING_LATIN1);
+    if (string == NULL) return KILN_C99_OUT_OF_MEMORY;
+    memcpy((void *)(uintptr_t)string->data, bytes, length);
+    out->tag = KILN_VALUE_STRING;
+    out->flags = 0;
+    out->len = (uint32_t)length;
+    out->bits = 0;
+    out->ptr = (const char *)string;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_node_child_process_sync(kiln_host *host, kiln_value *result,
+                                     const kiln_value *args, size_t argc,
+                                     int depth, kiln_value *thrown) {
+    kiln_string file_view;
+    kiln_string *argument_views = NULL;
+    void *owner = NULL;
+    const uint8_t *stdout_bytes = NULL, *stderr_bytes = NULL, *error_bytes = NULL;
+    size_t stdout_len = 0, stderr_len = 0, error_len = 0;
+    int32_t exit_status = -1;
+    int status;
+    kiln_value stream_value;
+    (void)host;
+    (void)depth;
+    if (argc == 0 || kiln_c99_node_process_string_view(args[0], &file_view) != KILN_C99_OK)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "child process file must be a string");
+    size_t argument_count = argc - 1;
+    if (argument_count != 0) {
+        if (argument_count > SIZE_MAX / sizeof *argument_views)
+            return KILN_C99_OUT_OF_MEMORY;
+        argument_views = (kiln_string *)calloc(argument_count, sizeof *argument_views);
+        if (argument_views == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (size_t index = 0; index < argument_count; index++) {
+            if (kiln_c99_node_process_string_view(args[index + 1], &argument_views[index]) != KILN_C99_OK) {
+                free(argument_views);
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "child process arguments must be strings");
+            }
+        }
+    }
+    status = kiln_process_exec_file_sync(&file_view, argument_views, argument_count, &owner);
+    free(argument_views);
+    if (status != 0 || owner == NULL)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "child process provider failed");
+    status = kiln_process_output_view(owner, &stdout_bytes, &stdout_len,
+                                      &stderr_bytes, &stderr_len, &exit_status,
+                                      &error_bytes, &error_len);
+    if (status != 0) {
+        kiln_process_output_free(owner);
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "child process output was unavailable");
+    }
+    status = kiln_c99_new_object(result);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_node_process_byte_string(stdout_bytes, stdout_len, &stream_value);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "stdout", 6, stream_value, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_node_process_byte_string(stderr_bytes, stderr_len, &stream_value);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "stderr", 6, stream_value, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "status", 6,
+                              exit_status < 0 ? kiln_c99_null() : kiln_c99_number((double)exit_status),
+                              depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *result, "error", 5,
+                              error_bytes == NULL ? kiln_c99_null()
+                                                  : kiln_c99_copy_text((const char *)error_bytes, error_len),
+                              depth, thrown);
+    kiln_process_output_free(owner);
+    return status;
+}
+
 int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code,
                               const kiln_value *args, size_t argc, int depth, kiln_value *thrown) {
     (void)host; (void)depth;
