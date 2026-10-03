@@ -170,9 +170,10 @@ function legacyResponseMethod(name: string, fallback: Function): void {
     : prototype[name];
   const delegatedMethod = typeof nativeMethod === "function" ? nativeMethod : null;
   const method = function (this: any, ...args: any[]) {
-    return !delegatedMethod || (this && legacyResponseReceivers.has(this))
-      ? fallback.apply(this, args)
-      : delegatedMethod.apply(this, args);
+    if (!delegatedMethod || (this && legacyResponseReceivers.has(this))) {
+      return fallback.apply(this, args);
+    }
+    return delegatedMethod.apply(this, args);
   };
   Object.defineProperty(method, "name", { value: name, configurable: true });
   Object.defineProperty(method, "length", {
@@ -259,6 +260,39 @@ if (NativeServerResponse) {
 
 export function createServer(...args: any[]): any {
   if (nativeModule && typeof nativeModule.createServer === "function") {
+    // The native backend specializes methods installed on its ServerResponse prototype, so the
+    // prototype compatibility wrapper cannot intercept `res.end(callback)`. Adapt the per-request
+    // instance before user code receives it; the host emits `finish` at the real response
+    // completion boundary.
+    let listenerIndex = -1;
+    for (let index = args.length - 1; index >= 0; index--) {
+      if (typeof args[index] === "function") {
+        listenerIndex = index;
+        break;
+      }
+    }
+    if (listenerIndex >= 0) {
+      const listener = args[listenerIndex];
+      args[listenerIndex] = function (this: any, ...requestArgs: any[]) {
+        const response = requestArgs[1];
+        if (response && typeof response.end === "function") {
+          const nativeEnd = response.end;
+          response.end = function (this: any, ...endArgs: any[]) {
+            const callback = endArgs.length > 0 && typeof endArgs[endArgs.length - 1] === "function"
+              ? endArgs.pop()
+              : undefined;
+            if (callback !== undefined) this.once("finish", callback);
+            try {
+              return nativeEnd.apply(this, endArgs);
+            } catch (error) {
+              if (callback !== undefined) this.removeListener("finish", callback);
+              throw error;
+            }
+          };
+        }
+        return listener.apply(this, requestArgs);
+      };
+    }
     return nativeModule.createServer(...args);
   }
   throw new Error("node:http requires an HTTP host capability that this realm does not provide");

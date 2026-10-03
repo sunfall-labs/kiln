@@ -4625,6 +4625,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     message: "Hyper lost the HTTP response body".into(),
                 })?;
                 self.close_http_stream_after_response_end(resource, instruction)?;
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    receiver,
+                    &[Value::String("finish".into())],
+                    instruction,
+                )?;
                 if let Some(callback) = callback {
                     self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
                 }

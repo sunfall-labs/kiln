@@ -6692,6 +6692,26 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 }
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "write after end");
             }
+            if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
+                size_t callback_index;
+                for (callback_index = argc; callback_index > 0; --callback_index) {
+                    kiln_value callback = args[callback_index - 1];
+                    if (!kiln_c99_is_callable(callback)) continue;
+                    /* `ServerResponse.end` completion is the existing `finish` event. Register
+                     * the overload callback there so it follows the same transport completion
+                     * boundary and response-before-close ordering as ordinary finish listeners. */
+                    kiln_value finish_args[2] = {
+                        kiln_c99_copy_text("finish", 6), callback};
+                    kiln_value ignored;
+                    status = kiln_c99_node_event(
+                        host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE, response->object,
+                        finish_args, 2, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    break;
+                }
+                /* The one-argument overload is `end(callback)`, not a function body chunk. */
+                if (kiln_c99_is_callable(arg)) arg = kiln_c99_undefined();
+            }
             if (!response->started) {
                 /* `res.statusCode = 404; res.end()` is how most handlers set a status, so the
                  * head reads the member rather than the last `writeHead`. */
