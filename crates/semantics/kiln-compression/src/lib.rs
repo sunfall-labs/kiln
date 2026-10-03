@@ -114,6 +114,12 @@ impl Codec {
             consumed_input += read;
             output.extend_from_slice(&chunk[..wrote]);
             if status == Status::StreamEnd {
+                // `flate2` reports where the first compressed member ended. The Web Streams
+                // format accepts exactly one member; silently dropping bytes here would accept
+                // trailing garbage and concatenated gzip members as if they were valid input.
+                if consumed_input != input.len() {
+                    return Err(Error::InvalidStream);
+                }
                 self.finished = true;
                 break;
             }
@@ -157,6 +163,38 @@ mod tests {
             }
             decoded.extend(decoder.push(&[], true).unwrap());
             assert_eq!(decoded, data);
+        }
+    }
+
+    #[test]
+    fn decompression_rejects_truncated_trailing_and_concatenated_streams() {
+        for format in [Format::Gzip, Format::Deflate, Format::DeflateRaw] {
+            let mut encoder = Codec::new(format, Direction::Compress);
+            let mut encoded = encoder.push(b"payload", false).unwrap();
+            encoded.extend(encoder.push(&[], true).unwrap());
+
+            let mut truncated = Codec::new(format, Direction::Decompress);
+            assert!(truncated.push(&encoded[..encoded.len() - 1], false).is_ok());
+            assert_eq!(truncated.push(&[], true), Err(Error::InvalidStream));
+
+            let mut trailing = Codec::new(format, Direction::Decompress);
+            let mut with_junk = encoded.clone();
+            with_junk.extend_from_slice(b"tail");
+            assert_eq!(trailing.push(&with_junk, false), Err(Error::InvalidStream));
+
+            let mut split_trailing = Codec::new(format, Direction::Decompress);
+            split_trailing.push(&encoded, false).unwrap();
+            assert_eq!(
+                split_trailing.push(b"tail", false),
+                Err(Error::AlreadyFinished)
+            );
+
+            if format == Format::Gzip {
+                let mut concatenated = encoded.clone();
+                concatenated.extend_from_slice(&encoded);
+                let mut decoder = Codec::new(format, Direction::Decompress);
+                assert_eq!(decoder.push(&concatenated, false), Err(Error::InvalidStream));
+            }
         }
     }
 }
