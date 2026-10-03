@@ -807,9 +807,13 @@ server.listen(0, "127.0.0.1", () => {
         std::fs::write(
             &source,
             "const indirectEval = eval;\n\
+             globalThis.mutation = 0;\n\
              let caught = false;\n\
-             try { indirectEval('1 + 2; 3'); } catch (error) { caught = error instanceof EvalError; }\n\
-             console.log(caught);\n",
+             try { indirectEval('mutation = 1; 3'); } catch (error) { caught = error instanceof EvalError; }\n\
+             console.log(caught, mutation);\n\
+             let syntax = false;\n\
+             try { indirectEval('mutation = 2 )'); } catch (error) { syntax = error instanceof SyntaxError; }\n\
+             console.log(syntax, mutation);\n",
         )
         .expect("write source");
         share_native_semantic_cache(&fixture);
@@ -842,7 +846,7 @@ server.listen(0, "127.0.0.1", () => {
             "stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue 0\n");
         let _ = std::fs::remove_dir_all(&fixture);
     }
 

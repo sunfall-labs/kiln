@@ -683,7 +683,7 @@ static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                          const kiln_value *args, size_t argc,
                                          int depth, kiln_value *thrown);
-int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
                                   kiln_value *out, int depth, kiln_value *thrown);
 
 static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value callee,
@@ -993,19 +993,8 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
         case KILN_C99_BUILTIN_FUNCTION:
             return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
         case KILN_C99_BUILTIN_EVAL:
-            /* Indirect eval runs in the global environment. The dynamic evaluator already owns
-             * expression semantics and global lookup; expose that same path here instead of
-             * treating the intrinsic as a built-in with no call behavior. Statements that need
-             * eval declaration instantiation remain explicitly unsupported by that evaluator. */
-            if (argc == 0) {
-                *result = kiln_c99_undefined();
-                return KILN_C99_OK;
-            }
-            if (args[0].tag != KILN_VALUE_STRING) {
-                *result = args[0];
-                return KILN_C99_OK;
-            }
-            return kiln_c99_dynamic_indirect_eval(host, args[0], result, depth, thrown);
+            /* Dynamic source evaluation owns eval's argument and scope semantics. */
+            return kiln_c99_dynamic_indirect_eval(host, argc, args, result, depth, thrown);
         case KILN_C99_BUILTIN_ERROR:
         case KILN_C99_BUILTIN_TYPE_ERROR:
         case KILN_C99_BUILTIN_RANGE_ERROR:

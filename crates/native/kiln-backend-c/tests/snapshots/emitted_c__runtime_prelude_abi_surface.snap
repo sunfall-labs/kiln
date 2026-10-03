@@ -3263,7 +3263,7 @@ __attribute__((always_inline))
 static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
 static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
-int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
 static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value callee,
 #if KILN_RETAIN_GROUP_BUFFER
 #endif
@@ -4179,7 +4179,9 @@ static int kiln_c99_dynamic_eval_expression_impl(kiln_host *host, kiln_value sou
 direct_eval_unsupported:
 direct_eval_done:
 int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
-int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
+static int kiln_dyn_preflight_indirect_eval(const char *source, size_t length,
+syntax_error:
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {
 static const char *kiln_dyn_expression_syntax_end(const char *source, size_t start,
 static int kiln_dyn_capture_expression(kiln_dyn_lexer *lex, const char **body,

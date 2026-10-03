@@ -29,6 +29,8 @@ try {
 }
 console.log(syntaxErrorThrew);
 
+// The lexical preflight rejects unsupported statement separators before evaluating a prefix.
+globalThis.__indirectEvalMutation = 0;
 // eval returns non-string arguments unchanged without coercing them.
 let coercions = 0;
 const coercionProbe = { toString() { coercions++; return "1 + 2"; } };

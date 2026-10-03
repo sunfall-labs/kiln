@@ -4317,9 +4317,79 @@ int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
                                                   strict_context, out, depth, thrown, 0);
 }
 
-int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source,
+/* Refuse statement-shaped sources before evaluating any expression prefix. The dynamic
+ * evaluator parses while executing, so checking for a second token after evaluation is too
+ * late for inputs such as `mutate(); 1`. This lexical preflight recognizes separators and
+ * unbalanced delimiters without invoking getters, calls, or coercions. */
+static int kiln_dyn_preflight_indirect_eval(const char *source, size_t length,
+                                            kiln_value *thrown) {
+    kiln_dyn_lexer lex;
+    size_t parens = 0, brackets = 0, braces = 0;
+    memset(&lex, 0, sizeof(lex));
+    lex.src = source;
+    lex.len = length;
+    kiln_dyn_lexer_next(&lex);
+    while (lex.curr.kind != KILN_DYN_EOF && lex.curr.kind != KILN_DYN_ERROR) {
+        switch (lex.curr.kind) {
+        case KILN_DYN_SEMI:
+            kiln_dyn_token_free(&lex.curr);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_EVAL_ERROR,
+                                        "Dynamic eval supports only a single expression");
+        case KILN_DYN_LPAREN: parens++; break;
+        case KILN_DYN_RPAREN:
+            if (parens == 0) goto syntax_error;
+            parens--;
+            break;
+        case KILN_DYN_LBRACKET: brackets++; break;
+        case KILN_DYN_RBRACKET:
+            if (brackets == 0) goto syntax_error;
+            brackets--;
+            break;
+        case KILN_DYN_LBRACE: braces++; break;
+        case KILN_DYN_RBRACE:
+            if (braces == 0) goto syntax_error;
+            braces--;
+            break;
+        default: break;
+        }
+        kiln_dyn_lexer_next(&lex);
+    }
+    if (lex.curr.kind == KILN_DYN_ERROR) {
+        int status = lex.allocation_error ? KILN_C99_OUT_OF_MEMORY :
+            kiln_dyn_throw_parse_error(&lex, thrown, "Invalid eval source");
+        kiln_dyn_token_free(&lex.curr);
+        return status;
+    }
+    if (parens != 0 || brackets != 0 || braces != 0) goto syntax_error;
+    kiln_dyn_token_free(&lex.curr);
+    return KILN_C99_OK;
+syntax_error:
+    {
+        int status = kiln_dyn_throw_parse_error(&lex, thrown, "Unexpected token");
+        kiln_dyn_token_free(&lex.curr);
+        return status;
+    }
+}
+
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
                                    kiln_value *out, int depth, kiln_value *thrown) {
-    return kiln_c99_dynamic_eval_expression_impl(host, source, NULL, NULL, NULL, NULL, 0, 0,
+    if (argc == 0) {
+        kiln_value undefined_result = kiln_c99_undefined();
+        *out = undefined_result;
+        return KILN_C99_OK;
+    }
+    if (args[0].tag != KILN_VALUE_STRING) {
+        *out = args[0];
+        return KILN_C99_OK;
+    }
+    uint8_t *source_owned = NULL;
+    size_t source_len = 0;
+    int status = kiln_dyn_string_to_source(args[0], &source_owned, &source_len);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_dyn_preflight_indirect_eval((const char *)source_owned, source_len, thrown);
+    free(source_owned);
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_dynamic_eval_expression_impl(host, args[0], NULL, NULL, NULL, NULL, 0, 0,
                                                   out, depth, thrown, 1);
 }
 

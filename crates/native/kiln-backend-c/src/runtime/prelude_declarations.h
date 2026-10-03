@@ -308,7 +308,7 @@ extern int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value 
 /* Native direct eval is bounded to one function expression whose outer names are supplied as
  * live local/upvalue cells. Statement eval requires full declaration instantiation. */
 extern int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source, const char *const *names, const size_t *name_lengths, const kiln_value *values, const unsigned char *read_only_flags, size_t binding_count, int strict_context, kiln_value *out, int depth, kiln_value *thrown);
-extern int kiln_c99_dynamic_indirect_eval(kiln_host *host, kiln_value source, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source, int depth, kiln_value *thrown);
 extern int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len, kiln_value getter, kiln_value setter, int enumerable);
 extern int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
