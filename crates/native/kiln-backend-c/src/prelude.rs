@@ -4610,6 +4610,11 @@ fn build_runtime_prelude_source(src: &str) -> String {
 pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic", C99StateOwner::Frame),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
+    // The key stays on the caller's operand stack until the callee frame consumes this alias.
+    (
+        "kiln_c99_js_frame_pending_method_name",
+        C99StateOwner::ThreadCache,
+    ),
     ("kiln_c99_active_http_response", C99StateOwner::Frame),
     ("kiln_c99_new_target", C99StateOwner::Frame),
     ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),

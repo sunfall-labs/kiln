@@ -164,6 +164,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     pub(super) function: Option<Rc<Closure>>,
+    /// Property key used to enter the current function, when it was invoked as a method.
+    pub(super) method_name: Option<StringUnits>,
     /// Set by `Yield`, so the run loop knows it stopped at a suspension rather than a return.
     pub(super) suspended: bool,
     /// Active exception handlers, innermost last.

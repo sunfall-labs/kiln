@@ -31,6 +31,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             stack: Vec::new(),
             locals,
             function: None,
+            method_name: None,
             suspended: false,
             handlers: Vec::new(),
             arguments: Vec::new(),

@@ -24,6 +24,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         mut receiver: Value,
         mut arguments: Vec<Value>,
         instruction: usize,
+        method_name: Option<StringUnits>,
     ) -> Result<Option<Value>, ExecutionError> {
         let mut forwarded_call = false;
         // Resolve `.call` and `.apply` before entering the final callee. A compiled target
@@ -44,7 +45,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if forwarded_call && matches!(&method, Value::Function(_)) {
             // `call_with_this` records the caller's realm in the saved frame and installs the
             // closure's realm. The run loop restores the saved realm on `Return`.
-            return self.invoke_dispatch(method, receiver, arguments, instruction);
+            return self.invoke_dispatch(method, receiver, arguments, instruction, method_name);
         }
         if forwarded_call {
             // Native built-ins, proxies and bound functions may call into JavaScript before
@@ -56,7 +57,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let realm = value_realm(&method);
         self.entering(realm, |vm| {
-            vm.invoke_dispatch(method, receiver, arguments, instruction)
+            vm.invoke_dispatch(method, receiver, arguments, instruction, method_name)
         })
     }
 
@@ -66,6 +67,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: Value,
         arguments: Vec<Value>,
         instruction: usize,
+        method_name: Option<StringUnits>,
     ) -> Result<Option<Value>, ExecutionError> {
         if matches!(
             &method,
@@ -321,7 +323,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for argument in arguments {
                     self.stack.push(argument);
                 }
-                self.call_with_this(closure, argc as u16, instruction, receiver, None)?;
+                self.call_with_this(
+                    closure,
+                    argc as u16,
+                    instruction,
+                    receiver,
+                    None,
+                    method_name,
+                )?;
                 Ok(None)
             }
             other => Err(ExecutionError::NotCallable {

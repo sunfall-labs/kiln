@@ -12,7 +12,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         argc: u16,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        self.call_with_this(closure, argc, instruction, Value::Undefined, None)
+        self.call_with_this(closure, argc, instruction, Value::Undefined, None, None)
     }
 
     /// The receiver sloppy code actually gets, which is never a primitive.
@@ -44,8 +44,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         this_value: Value,
         constructing: Option<Value>,
+        method_name: Option<StringUnits>,
     ) -> Result<(), ExecutionError> {
-        self.call_constructing(closure, argc, instruction, this_value, constructing, None)
+        self.call_constructing(
+            closure,
+            argc,
+            instruction,
+            this_value,
+            constructing,
+            None,
+            method_name,
+        )
     }
 
     /// The same entry with `new.target` named rather than derived.
@@ -61,6 +70,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         this_value: Value,
         constructing: Option<Value>,
         new_target: Option<Value>,
+        method_name: Option<StringUnits>,
     ) -> Result<(), ExecutionError> {
         let function = closure.function;
         let Some(proto) = closure.program.functions.get(function as usize) else {
@@ -152,6 +162,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, method_name),
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
             arguments: std::mem::replace(&mut self.arguments, received),
@@ -348,6 +359,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, program_is_strict),
             module_path: self.module_path.clone(),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, frame_new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),

@@ -2435,7 +2435,9 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
             status = kiln_c99_normalize_closure_receiver(&vreceiver, plain);
             if (status != KILN_C99_OK) goto done;
             *out = KILN_VAL_UNDEFINED;
+            kiln_c99_js_frame_set_method_name(key);
             status = kiln_c99_invoke_closure(host, out, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
+            kiln_c99_js_frame_set_method_name(NULL);
             goto done;
         }
     }

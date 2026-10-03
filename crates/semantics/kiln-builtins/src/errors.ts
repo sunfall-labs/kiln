@@ -55,15 +55,24 @@
   if (typeof captureFrameSnapshots === "function") {
     function stackSites(frames: any[], limit: number): any[] {
       const sites: any[] = [];
+      const identifierName = (name: string): boolean =>
+        /^[$_\p{ID_Start}][$_\u200c\u200d\p{ID_Continue}]*$/u.test(name);
       for (let i = 0; i < frames.length && i < limit; i++) {
         const frame = frames[i];
         const site: any = {};
         const functionName = frame.functionName;
+        const methodName = frame.methodName;
+        // Bun omits redundant-looking aliases for identifier property calls; keep the property
+        // identity available through getMethodName, and show the alias where punctuation makes
+        // the invocation key useful diagnostic information (for example Effect's marker key).
+        const displayName = methodName && methodName !== functionName && !identifierName(methodName)
+          ? `${functionName} [as ${methodName}]`
+          : functionName;
         defineHidden(site, "getThis", () => undefined);
         defineHidden(site, "getTypeName", () => null);
         defineHidden(site, "getFunction", () => undefined);
         defineHidden(site, "getFunctionName", () => functionName);
-        defineHidden(site, "getMethodName", () => functionName);
+        defineHidden(site, "getMethodName", () => methodName ?? functionName);
         defineHidden(site, "getFileName", () => frame.fileName);
         defineHidden(site, "getLineNumber", () => frame.lineNumber ?? null);
         defineHidden(site, "getColumnNumber", () => frame.columnNumber ?? null);
@@ -76,7 +85,7 @@
           const where = frame.lineNumber == null
             ? frame.fileName
             : `${frame.fileName}:${frame.lineNumber}:${frame.columnNumber}`;
-          return functionName ? `at ${functionName} (${where})` : `at ${where}`;
+          return displayName ? `at ${displayName} (${where})` : `at ${where}`;
         });
         sites.push(site);
       }

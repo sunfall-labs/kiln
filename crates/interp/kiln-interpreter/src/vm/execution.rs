@@ -483,7 +483,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let invoked = self.invoke(method, receiver, arguments, current, Some(name));
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
                     };
@@ -501,7 +501,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let Some(method) = self.catchable(read, current)? else {
                         continue;
                     };
-                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let method_name = match &key {
+                        Value::String(name) => Some(name.clone()),
+                        _ => None,
+                    };
+                    let invoked = self.invoke(method, receiver, arguments, current, method_name);
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
                     };
@@ -2473,6 +2477,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
             arguments: std::mem::replace(&mut self.arguments, arguments.to_vec()),
@@ -2908,6 +2913,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
@@ -3279,6 +3285,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.strict = frame.strict;
         self.module_path = frame.module_path;
         self.function = frame.function;
+        self.method_name = frame.method_name;
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
         self.arguments = frame.arguments;

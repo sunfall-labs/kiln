@@ -215,26 +215,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
             });
         }
-        let mut frames = self
-            .frames
-            .iter()
-            .rev()
-            .map(|frame| {
-                let span = frame
-                    .function
-                    .as_ref()
-                    .and_then(|closure| frame.program.functions.get(closure.function as usize))
-                    .map(|proto| proto.span);
-                let site = frame
-                    .program
-                    .debug_call_site(span, frame.instruction.saturating_sub(1));
-                (
-                    frame.function.clone(),
-                    frame.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
-                    site.map(|site| (site.line, site.column)),
-                )
-            })
-            .collect::<Vec<_>>();
+        let frame_snapshot = |function: Option<Rc<Closure>>,
+                              method_name: Option<StringUnits>,
+                              program: &Program,
+                              file_name: String,
+                              instruction: usize| {
+            let span = function
+                .as_ref()
+                .and_then(|closure| program.functions.get(closure.function as usize))
+                .map(|proto| proto.span);
+            let site = program.debug_call_site(span, instruction);
+            (
+                function,
+                method_name,
+                file_name,
+                site.map(|site| (site.line, site.column)),
+            )
+        };
+        let mut frames = Vec::with_capacity(self.frames.len() + 1);
+        if self.function.is_some() {
+            frames.push(frame_snapshot(
+                self.function.clone(),
+                self.method_name.clone(),
+                &self.program,
+                self.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
+                self.instruction.saturating_sub(1),
+            ));
+        }
+        frames.extend(self.frames.iter().rev().map(|frame| {
+            let span = frame
+                .function
+                .as_ref()
+                .and_then(|closure| frame.program.functions.get(closure.function as usize))
+                .map(|proto| proto.span);
+            let site = frame
+                .program
+                .debug_call_site(span, frame.instruction.saturating_sub(1));
+            (
+                frame.function.clone(),
+                frame.method_name.clone(),
+                frame.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
+                site.map(|site| (site.line, site.column)),
+            )
+        }));
         // The primitive receives no public JavaScript CallSite objects. The facade is built in
         // errors.ts from these copied metadata records and cannot keep VM frames alive.
         if let Some(Value::Function(constructor)) = arguments.get(1)
@@ -250,16 +273,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Array(ArrayData::new(
             frames
                 .into_iter()
-                .map(|(frame, file_name, location)| {
+                .map(|(frame, method_name, file_name, location)| {
                     ordinary_object([
                         ("fileName".to_owned(), Value::String(file_name.into())),
                         (
                             "functionName".to_owned(),
                             frame
-                                .and_then(|closure| closure.name.clone())
-                                .map_or(Value::Undefined, |name| {
-                                    Value::String(name.as_ref().into())
-                                }),
+                                .and_then(|closure| closure.name.as_deref().map(str::to_owned))
+                                .or_else(|| method_name.as_ref().map(|name| name.to_lossy_string()))
+                                .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        (
+                            "methodName".to_owned(),
+                            method_name.map_or(Value::Undefined, Value::String),
                         ),
                         ("instruction".to_owned(), Value::Number(0.0)),
                         (
@@ -373,6 +399,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             );
             let stack_frames = self.error_stack_frame_limit().map(|limit| {
                 let snapshot = |function: Option<&Rc<Closure>>,
+                                method_name: Option<&StringUnits>,
                                 program: &Program,
                                 path: Option<&str>,
                                 instruction: usize| {
@@ -388,8 +415,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         (
                             "functionName".to_owned(),
                             function
-                                .and_then(|closure| closure.name.as_deref())
+                                .and_then(|closure| closure.name.as_deref().map(str::to_owned))
+                                .or_else(|| method_name.map(|name| name.to_lossy_string()))
                                 .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        (
+                            "methodName".to_owned(),
+                            method_name
+                                .map_or(Value::Undefined, |name| Value::String(name.clone())),
                         ),
                         ("instruction".to_owned(), Value::Number(instruction as f64)),
                         (
@@ -406,6 +439,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if self.function.is_some() {
                     frames.push(snapshot(
                         self.function.as_ref(),
+                        self.method_name.as_ref(),
                         &self.program,
                         self.module_path.as_deref(),
                         self.instruction.saturating_sub(1),
@@ -414,6 +448,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for frame in self.frames.iter().rev() {
                     frames.push(snapshot(
                         frame.function.as_ref(),
+                        frame.method_name.as_ref(),
                         &frame.program,
                         frame.module_path.as_deref(),
                         frame.instruction.saturating_sub(1),

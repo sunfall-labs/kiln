@@ -581,6 +581,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instance.clone(),
                     Some(instance),
                     Some(new_target.clone()),
+                    None,
                 )?;
             }
             other => {

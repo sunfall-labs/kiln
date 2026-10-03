@@ -14,10 +14,17 @@ int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value) {
 /* Defined later in strings.c; all runtime parts share one translation unit. */
 static int kiln_c99_is_trimmed(uint16_t unit);
 _Thread_local kiln_js_frame *kiln_c99_js_frame_top = NULL;
+static _Thread_local const kiln_string *kiln_c99_js_frame_pending_method_name = NULL;
+
+void kiln_c99_js_frame_set_method_name(const kiln_string *method_name) {
+    kiln_c99_js_frame_pending_method_name = method_name;
+}
 
 void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure) {
     frame->previous = kiln_c99_js_frame_top;
     frame->closure = closure;
+    frame->method_name = kiln_c99_js_frame_pending_method_name;
+    kiln_c99_js_frame_pending_method_name = NULL;
     frame->instruction_source = closure != NULL ? closure->diagnostic_source : NULL;
     frame->instruction = 0;
     frame->line = 0;
@@ -73,6 +80,10 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
         function_name = kiln_c99_value(KILN_VALUE_STRING, 0,
                                        (const char *)frame->closure->name,
                                        frame->closure->name->unit_len);
+    } else if (frame->method_name != NULL) {
+        function_name = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                       (const char *)frame->method_name,
+                                       frame->method_name->unit_len);
     }
     status = kiln_c99_put_mode(host, *out, "fileName", 8,
                                source != NULL ? kiln_c99_copy_text(source, strlen(source))
@@ -81,6 +92,15 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
     if (status == KILN_C99_OK)
         status = kiln_c99_put_mode(host, *out, "functionName", 12, function_name, 1, depth,
                                    thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(
+            host, *out, "methodName", 10,
+            frame->method_name != NULL
+                ? kiln_c99_value(KILN_VALUE_STRING, 0,
+                                 (const char *)frame->method_name,
+                                 frame->method_name->unit_len)
+                : kiln_c99_undefined(),
+            1, depth, thrown);
     if (status == KILN_C99_OK)
         status = kiln_c99_put_mode(host, *out, "instruction", 11,
                                    kiln_c99_number((double)frame->instruction), 1, depth,

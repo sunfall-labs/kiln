@@ -348,7 +348,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // which is how a base constructor can name the subclass it is being built for.
                 // `call_with_this` computes one from `constructing`, so it is put back after.
                 let inherited = self.new_target.clone();
-                self.call_with_this(closure, argc as u16, current, this_value, None)?;
+                self.call_with_this(closure, argc as u16, current, this_value, None, None)?;
                 self.new_target = inherited;
                 if let Some(frame) = self.frames.last_mut() {
                     frame.super_call = true;

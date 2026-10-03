@@ -433,6 +433,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, true),
             module_path: self.module_path.clone(),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             // A module body is always strict, so its `this` is `undefined` rather than the
             // global object.
             this_value: std::mem::replace(&mut self.this_value, Value::Undefined),

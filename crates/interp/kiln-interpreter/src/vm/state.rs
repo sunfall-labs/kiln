@@ -406,6 +406,8 @@ pub(super) struct Frame {
     pub(super) new_target: Value,
     /// The closure that was running, or `None` for the module body.
     pub(super) function: Option<Rc<Closure>>,
+    /// Property name through which this activation was called, for V8-compatible stack aliases.
+    pub(super) method_name: Option<StringUnits>,
     pub(super) this_value: Value,
     /// What this frame was called with, so `super(...arguments)` can forward them.
     pub(super) arguments: Vec<Value>,

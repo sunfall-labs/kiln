@@ -992,6 +992,7 @@ static inline kiln_host *kiln_c99_module_host(kiln_host *host) {
 typedef struct kiln_js_frame {
     struct kiln_js_frame *previous;
     const kiln_closure *closure;
+    const kiln_string *method_name;
     const char *instruction_source;
     size_t instruction;
     size_t line;
