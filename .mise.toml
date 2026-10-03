@@ -122,3 +122,7 @@ run = "python3 scripts/issues-index.py"
 [tasks.release-package]
 description = "Build and smoke-test the release archive for this host into dist/ (scripts/package-release.sh)"
 run = "scripts/package-release.sh dist"
+
+[tasks.effect-upstream]
+description = "Pinned Effect tests as direct TypeScript, Bun versus native"
+run = "./scripts/effect-upstream.py --out target/effect-upstream"

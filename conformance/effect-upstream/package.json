@@ -1,0 +1,29 @@
+{
+  "name": "kiln-effect-upstream-harness",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Direct TypeScript upstream Effect test adapter; runtime assertions use Vitest/Chai owners. No bundles.",
+  "dependencies": {
+    "@effect/platform-node": "4.0.0",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-metrics": "2.11.0",
+    "@opentelemetry/semantic-conventions": "1.43.0",
+    "@sinonjs/fake-timers": "15.4.0",
+    "@vitest/expect": "5.0.3",
+    "@vitest/snapshot": "5.0.3",
+    "@vitest/spy": "5.0.3",
+    "ajv": "8.20.0",
+    "ajv-draft-04": "1.0.0",
+    "chai": "6.3.0",
+    "fast-check": "4.10.2",
+    "immer": "11.1.21",
+    "vitest": "5.0.3",
+    "expect-type": "1.4.0",
+    "@vitest/pretty-format": "5.0.3"
+  },
+  "workspaces": [
+    "files/*"
+  ]
+}
