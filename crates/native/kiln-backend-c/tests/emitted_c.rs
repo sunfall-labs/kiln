@@ -1176,7 +1176,11 @@ fn runtime_prelude_size() {
     // Stateful decoder provider glue and process-status get/set primitives bring the
     // reviewed prelude to 80,806 lines. Builtin policy remains in TypeScript; the C
     // changes retain codec state and a realm status slot, with no duplicated sections.
-    const CEILING_LINES: usize = 80_950;
+    // Reviewed 2026-10-03: generation-local unit storage, external-owner detach and
+    // compact-cell tracing, deferred GC requests, and scoped direct-eval completion
+    // bring the shared prelude to 80,983 lines. These are language/ownership kernels;
+    // the Node VM and loader policy remain in TypeScript and the explicit runner.
+    const CEILING_LINES: usize = 81_050;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
