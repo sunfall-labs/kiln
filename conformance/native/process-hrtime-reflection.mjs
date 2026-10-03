@@ -1,5 +1,10 @@
 import process from "node:process";
 
+console.log(Date.now.name, Date.now.length, Object.hasOwn(Date.now, "prototype"), Date.now.prototype);
+const hostNow = Date.now;
+Date.now = () => 456;
+console.log(Date.now());
+Date.now = hostNow;
 for (const fn of [process.hrtime, process.hrtime.bigint]) {
   const descriptor = Object.getOwnPropertyDescriptor(fn, "prototype");
   console.log(fn.name, fn.length, fn.prototype.constructor === fn,
