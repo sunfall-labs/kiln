@@ -919,6 +919,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnJobsPending", Native::JobsPendingRaw),
             // The poll phase's lane, where message delivery (the same file) is queued.
             ("__kilnQueueIo", Native::QueueIoRaw),
+            // Whether a timer keeps the loop alive: `ref`/`unref` on the timer objects of
+            // `kiln-builtins/src/timers.ts`, which captures it.
+            ("__kilnTimerRef", Native::TimerRefRaw),
             // The runtime's cross-realm ports and workers, which the same file captures.
             ("__kilnWorkerOp", Native::WorkerOpRaw),
             ("__kilnPortWait", Native::PortWaitRaw),

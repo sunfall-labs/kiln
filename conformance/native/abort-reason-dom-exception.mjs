@@ -9,6 +9,7 @@ console.log("controller", describe(controller.signal.reason));
 console.log("static", describe(AbortSignal.abort().reason));
 console.log("explicit", AbortSignal.abort("why").reason);
 const timed = AbortSignal.timeout(1);
-// node does not let this timer keep the process alive; a referenced one waits for it here.
-const wait = setTimeout(() => {}, 1000);
-timed.addEventListener("abort", () => { console.log("timeout", describe(timed.reason)); clearTimeout(wait); });
+timed.addEventListener("abort", () => console.log("timeout", describe(timed.reason)));
+// The timeout's own timer is unreferenced, in node and here, so it takes something else to keep
+// the program running until it fires.
+setTimeout(() => {}, 50);

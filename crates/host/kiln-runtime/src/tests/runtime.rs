@@ -2483,6 +2483,68 @@ fn interval_rearms_before_callback_and_can_be_cleared() {
     assert!(!realm.has_pending_work());
 }
 
+/// An unreferenced timer never keeps the loop open and never moves the virtual clock by
+/// itself, but runs in its turn while a referenced one keeps the loop going.
+#[test]
+fn unreferenced_timers_do_not_keep_the_loop_alive() {
+    let drive = |realm: &mut Realm| {
+        let mut ran = Vec::new();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime
+            .drive(
+                realm,
+                |_, work| {
+                    if let WorkItem::Timer { work, .. } = work {
+                        ran.push(work);
+                    }
+                    Ok::<_, ()>(())
+                },
+                |_| Ok::<_, ()>(()),
+            )
+            .expect("realm drive succeeds");
+        ran
+    };
+
+    // Alone, one is never run, though it is due, and the clock stays where it was.
+    let mut realm: Realm = Realm::new();
+    let lone = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    assert!(realm.set_timer_referenced(lone, false));
+    assert!(!realm.has_referenced_timers());
+    assert!(drive(&mut realm).is_empty());
+    assert_eq!(realm.now(), Duration::ZERO);
+
+    // Beside a referenced timer it runs if it is due first, and not after the last one.
+    let mut realm: Realm = Realm::new();
+    let early = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    realm.set_timeout(Duration::from_millis(10), WorkId::new(2));
+    let late = realm.set_timeout(Duration::from_millis(50), WorkId::new(3));
+    realm.set_timer_referenced(early, false);
+    realm.set_timer_referenced(late, false);
+    assert_eq!(drive(&mut realm), vec![WorkId::new(1), WorkId::new(2)]);
+    assert_eq!(realm.now(), Duration::from_millis(10));
+
+    // `ref` undoes it, a cleared or finished timer is no longer there to mark, and an
+    // unreferenced interval stops holding the loop once the referenced work is gone.
+    let mut realm: Realm = Realm::new();
+    let id = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    realm.set_timer_referenced(id, false);
+    realm.set_timer_referenced(id, true);
+    assert!(realm.has_referenced_timers());
+    assert_eq!(drive(&mut realm), vec![WorkId::new(1)]);
+    assert!(!realm.set_timer_referenced(id, false));
+    let interval = realm.set_interval(Duration::from_millis(2), WorkId::new(2));
+    realm.set_timer_referenced(interval, false);
+    realm.set_timeout(Duration::from_millis(7), WorkId::new(3));
+    assert_eq!(
+        drive(&mut realm),
+        vec![WorkId::new(2), WorkId::new(2), WorkId::new(2), WorkId::new(3)]
+    );
+    let cleared = realm.set_timeout(Duration::from_millis(1), WorkId::new(4));
+    realm.set_timer_referenced(cleared, false);
+    assert!(realm.clear_timeout(cleared));
+    assert!(!realm.has_referenced_timers());
+}
+
 #[test]
 fn zero_interval_has_immediate_first_run_then_advances() {
     let mut realm: Realm = Realm::new();

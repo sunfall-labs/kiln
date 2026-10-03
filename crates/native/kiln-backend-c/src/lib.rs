@@ -275,6 +275,9 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_clear_timer) => {
         concat!("int ", stringify!($name), "(uint64_t id);\n")
     };
+    ($group:ident, $name:ident, realm_set_timer_ref) => {
+        concat!("int ", stringify!($name), "(uint64_t id, int referenced);\n")
+    };
     ($group:ident, $name:ident, realm_create) => {
         concat!("int ", stringify!($name), "(uint64_t *out_realm);\n")
     };

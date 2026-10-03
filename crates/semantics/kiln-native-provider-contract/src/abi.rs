@@ -149,6 +149,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_set_immediate, realm_queue_macrotask);
             (realm, kiln_realm_queue_io, realm_queue_macrotask);
             (realm, kiln_realm_clear_timer, realm_clear_timer);
+            (realm, kiln_realm_set_timer_ref, realm_set_timer_ref);
             (realm, kiln_realm_drive, realm_drive);
             (realm, kiln_realm_drive_step, realm_drive_step);
             (realm, kiln_realm_destroy, realm_destroy);
@@ -283,7 +284,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 73;
+pub const PROVIDER_ABI_VERSION: u32 = 74;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -302,7 +303,9 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 73 and 182 exports: `kiln_shared_graph_refusal` joined, so a native `share` throws the
+        // 74 and 183 exports: `kiln_realm_set_timer_ref` joined, the per-timer flag behind
+        // `timer.unref()` and `AbortSignal.timeout`, which the realm's timer queue owns. Before
+        // that, 73 and 182 exports: `kiln_shared_graph_refusal` joined, so a native `share` throws the
         // refusal `kiln-shared-graph` words, exactly the interpreter's text. Before that,
         // 72 and 181 exports: `kiln_text_decoder_label` and `kiln_text_decode` joined, so native
         // `TextDecoder` resolves labels and decodes through `kiln-encoding` (ADR 0060) as the
@@ -354,8 +357,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 73);
-        assert_eq!(PROVIDER_EXPORTS.len(), 182);
+        assert_eq!(PROVIDER_ABI_VERSION, 74);
+        assert_eq!(PROVIDER_EXPORTS.len(), 183);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

@@ -2275,6 +2275,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
+    /// What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id`: the
+    /// bootstrap's handle object (`kiln-builtins/src/timers.ts`, `kind` 0 a timeout, 1 an
+    /// interval, 2 an immediate), or the bare identity in a realm that has none.
+    pub(crate) fn timer_handle(
+        &mut self,
+        id: f64,
+        kind: f64,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let global = self.global_object_in(self.current_realm);
+        let factory = self.read_property(&global, "__kilnTimerHandle", instruction)?;
+        if !is_callable(&factory) {
+            return Ok(Value::Number(id));
+        }
+        self.call_value(
+            &factory,
+            Value::Undefined,
+            vec![Value::Number(id), Value::Number(kind)],
+            instruction,
+        )
+    }
+
     /// A platform exception, as node raises one: an `Error` named `name` whose prototype is the
     /// realm's `DOMException.prototype`, so `instanceof DOMException` and its `code` hold. A
     /// realm without `DOMException` gets the named `Error` alone.

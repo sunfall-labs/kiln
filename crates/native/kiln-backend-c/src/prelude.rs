@@ -1298,6 +1298,9 @@ method_ids! {
     // The realm's I/O lane, node's poll phase, where the same file queues a port's delivery;
     // the timer case of the generic dispatch, beside `setImmediate`.
     (KILN_C99_METHOD_QUEUE_IO_RAW, 535, Generic; 0, 0),
+    // Whether a timer keeps the loop alive, the flag the runtime's timer queue owns; captured
+    // and deleted by `kiln-builtins/src/timers.ts`, which makes `ref`/`unref` of it.
+    (KILN_C99_METHOD_TIMER_REF_RAW, 573, Generic; 0, 0),
     // Node's unhandled-rejection tracking registers itself here; captured and deleted by
     // `kiln-builtins/src/rejections.ts`.
     (KILN_C99_METHOD_PROMISE_REJECTIONS_RAW, 536, Direct; 0, 0),

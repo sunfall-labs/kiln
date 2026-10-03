@@ -2244,7 +2244,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
         // this drive, so a ready turn never reports it.
         Some(RuntimeTurn::Protocol) | None => {}
     }
-    let (referenced, pending, in_flight, deadline, now, signal) = {
+    let (referenced, pending, in_flight, deadline, timers_alive, now, signal) = {
         let runtime = realm.runtime.state.borrow();
         let mut work = realm.work.borrow_mut();
         (
@@ -2252,6 +2252,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             runtime.has_pending_host_work(),
             runtime.requests_in_flight(),
             work.next_timer_deadline(),
+            work.has_referenced_timers(),
             work.now(),
             runtime.completion_signal(),
         )
@@ -2261,6 +2262,13 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
             realm.runtime.state.borrow().describe_host_work(),
         );
+    }
+    // The loop is over once nothing referenced is left: no timer that keeps it alive, no
+    // completion that can arrive, no request in flight. An unreferenced timer, due or not, does
+    // not hold it open and does not move the virtual clock; while something else does keep it
+    // open, it runs in its turn like any other.
+    if !timers_alive && !(referenced && pending) && in_flight == 0 {
+        return DriveStep::Done(0);
     }
     // A timer that is already due runs now. It is not a wait case: under load the
     // completion signal always has a permit, and a select that prefers it would let a
@@ -5468,6 +5476,23 @@ pub extern "C" fn kiln_realm_clear_timer(id: u64) -> i32 {
     })
 }
 
+/// Marks a timeout, interval, immediate or I/O callback on the active Realm as referenced (it
+/// keeps the loop alive, node's default) or not (`timer.unref()`). Unknown identities are a
+/// no-op: a timer that already ran or was cleared has nothing left to keep alive.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_set_timer_ref(id: u64, referenced: i32) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        queue.set_timer_referenced(TimerId::new(id), referenced != 0);
+        0
+    })
+}
+
 /// Drives every queued microtask and timer on `handle` to deterministic quiescence.
 ///
 /// # Safety
@@ -7077,6 +7102,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_clear_timer, realm_clear_timer) => {
             const _: extern "C" fn(u64) -> i32 = kiln_realm_clear_timer;
+        };
+        (realm, kiln_realm_set_timer_ref, realm_set_timer_ref) => {
+            const _: extern "C" fn(u64, i32) -> i32 = kiln_realm_set_timer_ref;
         };
         (realm, kiln_realm_drive, realm_drive) => {
             const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;

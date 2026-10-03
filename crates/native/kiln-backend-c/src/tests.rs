@@ -892,6 +892,11 @@ int kiln_realm_clear_timer(uint64_t id) {
     (void)id;
     return KILN_C99_OK;
 }
+int kiln_realm_set_timer_ref(uint64_t id, int referenced) {
+    (void)id;
+    (void)referenced;
+    return KILN_C99_OK;
+}
 int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
                                     kiln_realm_completion_fn run,
                                     kiln_realm_drop_fn drop,

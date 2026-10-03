@@ -2931,6 +2931,7 @@ pub(crate) fn call_native(
         | Native::UrlAdoptRaw
         | Native::JobsPendingRaw
         | Native::QueueIoRaw
+        | Native::TimerRefRaw
         | Native::WorkerOpRaw
         | Native::PortWaitRaw
         | Native::PromiseRejectionsRaw

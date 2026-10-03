@@ -173,6 +173,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::DataViewStateRaw => "__kilnDataViewState".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::QueueIoRaw => "__kilnQueueIo".to_owned(),
+        Native::TimerRefRaw => "__kilnTimerRef".to_owned(),
         Native::WorkerOpRaw => "__kilnWorkerOp".to_owned(),
         Native::PortWaitRaw => "__kilnPortWait".to_owned(),
         Native::PromiseRejectionsRaw => "__kilnPromiseRejections".to_owned(),

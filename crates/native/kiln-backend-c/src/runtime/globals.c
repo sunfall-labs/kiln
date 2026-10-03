@@ -604,6 +604,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
+                     {"__kilnTimerRef", KILN_C99_METHOD_TIMER_REF_RAW},
                      /* The runtime's cross-realm ports and workers, captured the same way. */
                      {"__kilnWorkerOp", KILN_C99_METHOD_WORKER_OP_RAW},
                      {"__kilnPortWait", KILN_C99_METHOD_PORT_WAIT_RAW},

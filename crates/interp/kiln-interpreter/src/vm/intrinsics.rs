@@ -694,9 +694,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     context: Rc::clone(&self.async_context),
                 };
                 // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
+                // It never keeps the program alive, as in node, where its timer is unreferenced.
                 self.with_realm_mut(|realm| {
                     let (delay, _) = realm.node_timer_delay(Some(milliseconds.max(0.0)));
-                    realm.set_timeout(delay, timer)
+                    let id = realm.set_timeout(delay, timer);
+                    realm.set_timer_referenced(id, false);
                 });
                 return Ok(signal);
             }
@@ -1476,10 +1478,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Native::QueueIoRaw => realm.queue_io(timer),
                     _ => realm.set_timeout(delay, timer),
                 });
-                Ok(Value::Number(id.get() as f64))
+                // A realm whose bootstrap installed the timer handles gets an object with
+                // `ref`/`unref`/`hasRef`, as in node; any other, the bare identity.
+                let kind = match native {
+                    Native::SetInterval => 1.0,
+                    Native::SetImmediate => 2.0,
+                    _ => 0.0,
+                };
+                self.timer_handle(id.get() as f64, kind, instruction)
+            }
+            Native::TimerRefRaw => {
+                let id = arguments.first().map_or(f64::NAN, Value::as_number);
+                if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
+                    let referenced = arguments.get(1).is_some_and(Value::is_truthy);
+                    self.with_realm_mut(|realm| {
+                        realm.set_timer_referenced(TimerId::new(id as u64), referenced)
+                    });
+                }
+                Ok(Value::Undefined)
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
-                let id = arguments.first().map_or(f64::NAN, Value::as_number);
+                // A timer object clears by its identity, which is how `toPrimitive` reads it.
+                let id = match arguments.first() {
+                    Some(handle @ Value::Object(_)) => self
+                        .as_number_argument(Some(handle), instruction)
+                        .unwrap_or(f64::NAN),
+                    other => other.map_or(f64::NAN, Value::as_number),
+                };
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
                     self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));
                 }

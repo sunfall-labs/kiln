@@ -2895,8 +2895,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (!(isfinite(delay) && delay > 0.0)) delay = 0.0;
             status = kiln_realm_set_timeout(delay, kiln_c99_run_timer, kiln_c99_drop_timer,
                                             entry, &id);
-            if (status != KILN_C99_OK) kiln_c99_drop_timer(entry);
-            return status;
+            if (status != KILN_C99_OK) {
+                kiln_c99_drop_timer(entry);
+                return status;
+            }
+            /* As in node, this timer never keeps the program alive. */
+            return kiln_realm_set_timer_ref(id, 0);
         }
         case KILN_C99_METHOD_ABORT_SIGNAL_ANY: {
             kiln_value sources;
@@ -3016,8 +3020,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     status = kiln_c99_arm_timer(code, delay, direct, kiln_c99_drop_timer_value,
                                                 work, &id);
                     if (status != KILN_C99_OK) return status;
-                    *result = kiln_c99_number((double)id);
-                    return KILN_C99_OK;
+                    return kiln_c99_timer_handle(host, id, code, result, depth, thrown);
                 }
             }
             entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
@@ -3045,7 +3048,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_c99_drop_timer(entry);
                 return status;
             }
-            *result = kiln_c99_number((double)id);
+            return kiln_c99_timer_handle(host, id, code, result, depth, thrown);
+        }
+        case KILN_C99_METHOD_TIMER_REF_RAW: {
+            double id = 0.0 / 0.0;
+            if (argc > 0 && args[0].tag == KILN_VALUE_NUMBER) id = kiln_c99_as_number(args[0]);
+            *result = kiln_c99_undefined();
+            if (isfinite(id) && id >= 1.0 && floor(id) == id && id <= 9007199254740991.0)
+                return kiln_realm_set_timer_ref((uint64_t)id,
+                                                argc > 1 && kiln_c99_truthy(args[1]));
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_CLEAR_TIMEOUT:

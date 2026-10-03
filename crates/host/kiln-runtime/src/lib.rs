@@ -1447,7 +1447,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
         if !self.state.host.has_referenced_work()
-            && realm.next_timer_deadline().is_none()
+            && !realm.has_referenced_timers()
             && !self.state.has_live_http_work()
         {
             return None;
@@ -5199,6 +5199,9 @@ pub struct Realm<M = WorkId, T = WorkId> {
     phase: Phase,
     cancelled_timers: HashSet<TimerId, SequenceBuild>,
     active_timers: HashSet<TimerId, SequenceBuild>,
+    /// The active timers that do not keep the loop alive (`timer.unref()`). Always a subset of
+    /// `active_timers`: every place that retires an identity retires it here too.
+    unreferenced_timers: HashSet<TimerId, SequenceBuild>,
     /// Whether a process warning has been written, after which node leaves off its
     /// `--trace-warnings` hint.
     warned: bool,
@@ -5262,6 +5265,7 @@ impl<M, T> Realm<M, T> {
             phase: Phase::Check { remaining: 0 },
             cancelled_timers: HashSet::default(),
             active_timers: HashSet::default(),
+            unreferenced_timers: HashSet::default(),
             _not_send: PhantomData,
         }
     }
@@ -5460,11 +5464,35 @@ impl<M, T> Realm<M, T> {
     /// Cancels a pending timer, returning whether `id` was still active.
     pub fn clear_timeout(&mut self, id: TimerId) -> bool {
         if self.active_timers.remove(&id) {
+            self.unreferenced_timers.remove(&id);
             self.cancelled_timers.insert(id);
             true
         } else {
             false
         }
+    }
+
+    /// Marks an active timer, interval, immediate or I/O callback as keeping the loop alive
+    /// (`referenced`, node's default and `timer.ref()`) or not (`timer.unref()`). An unreferenced
+    /// timer still runs when its turn comes while something else keeps the loop going, but it
+    /// never holds the loop open and never moves the virtual clock by itself. Returns whether
+    /// `id` was still active.
+    pub fn set_timer_referenced(&mut self, id: TimerId, referenced: bool) -> bool {
+        if !self.active_timers.contains(&id) {
+            return false;
+        }
+        if referenced {
+            self.unreferenced_timers.remove(&id);
+        } else {
+            self.unreferenced_timers.insert(id);
+        }
+        true
+    }
+
+    /// Whether any active timer keeps the loop alive: the loop is finished, as far as timers
+    /// go, when only unreferenced ones remain.
+    pub fn has_referenced_timers(&self) -> bool {
+        self.active_timers.len() > self.unreferenced_timers.len()
     }
 
     /// Returns whether this realm still has language work waiting to run.
@@ -5588,6 +5616,7 @@ impl<M, T> Realm<M, T> {
             *remaining -= 1;
         }
         self.active_timers.remove(&id);
+        self.unreferenced_timers.remove(&id);
         Some(WorkItem::Timer { id, work })
     }
 
@@ -5622,6 +5651,7 @@ impl<M, T> Realm<M, T> {
             );
         } else {
             self.active_timers.remove(&id);
+            self.unreferenced_timers.remove(&id);
         }
         Some(WorkItem::Timer { id, work })
     }
@@ -5663,6 +5693,10 @@ where
             execute(realm, WorkItem::Microtask(work))?;
         }
         checkpoint(realm)?;
+        // Finished once only unreferenced timers remain, though one of them may be due.
+        if !realm.has_referenced_timers() {
+            return Ok(());
+        }
         let Some(deadline) = realm.next_timer_deadline() else {
             return Ok(());
         };
@@ -5684,6 +5718,9 @@ async fn next_timer<M, T>(realm: &mut Realm<M, T>) -> Option<WorkItem<M, T>>
 where
     T: Clone,
 {
+    if !realm.has_referenced_timers() {
+        return None;
+    }
     let deadline = realm.next_timer_deadline()?;
     let delay = deadline.saturating_sub(realm.now);
     if !delay.is_zero() {

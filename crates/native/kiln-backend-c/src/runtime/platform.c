@@ -249,6 +249,27 @@ static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *
     return status;
 }
 
+/* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id`: the handle
+ * object the bootstrap's `__kilnTimerHandle` makes (`kiln-builtins/src/timers.ts`; `kind` 0 a
+ * timeout, 1 an interval, 2 an immediate), or the bare identity where it is not installed. The
+ * object and its `ref`/`unref` are TypeScript; this only asks for one. */
+static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
+                                 int depth, kiln_value *thrown) {
+    kiln_value factory = kiln_c99_undefined();
+    kiln_value factory_args[2];
+    int found = 0;
+    int status = kiln_c99_global_binding(host, &factory, "__kilnTimerHandle", 17, &found, depth,
+                                         thrown);
+    *result = kiln_c99_number((double)id);
+    if (status != KILN_C99_OK || !found || !kiln_c99_is_callable(factory)) return status;
+    factory_args[0] = kiln_c99_number((double)id);
+    factory_args[1] = kiln_c99_number(code == KILN_C99_METHOD_SET_INTERVAL    ? 1.0
+                                      : code == KILN_C99_METHOD_SET_IMMEDIATE ? 2.0
+                                                                               : 0.0);
+    return kiln_c99_call(host, result, factory, kiln_c99_undefined(), factory_args, 2, depth,
+                         thrown);
+}
+
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
                           kiln_value *thrown) {
     kiln_value aborted;

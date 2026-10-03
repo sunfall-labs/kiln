@@ -1469,6 +1469,9 @@ declare_ts_builtins! {
 pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     include_str!("web.ts"),
     "\n",
+    // The timer handles `setTimeout` and friends return; before the files that schedule.
+    include_str!("timers.ts"),
+    "\n",
     // Before `web_events_streams.ts`, which deletes the port primitives this reads.
     include_str!("signals.ts"),
     "\n",
