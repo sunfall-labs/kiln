@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn native_graph_declares_runtime_module_host_abi_without_static_fs_or_dynamic_import() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime-module ABI integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-abi-declarations");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log('runtime loader declarations precede use');\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph without node:fs or dynamic import");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module host declarations precede every generated call site");
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run graph without dynamic imports");
+    assert!(
+        output.status.success(),
+        "native graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"runtime loader declarations precede use\n");
+}
+
+#[test]
 fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

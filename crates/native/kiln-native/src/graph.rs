@@ -2693,11 +2693,6 @@ pub(super) fn write_launcher_dynamic_import(
     output.push_str(
         &r#"
 typedef struct kiln_graph_context kiln_graph_context;
-extern int kiln_node_fs_read_file_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
-extern int kiln_node_fs_realpath_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
-extern void kiln_node_fs_free_bytes(uint8_t *, uint64_t);
-extern int kiln_c99_dynamic_eval_module(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
-extern int kiln_c99_dynamic_module_text(kiln_value, uint8_t **, size_t *);
 static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
                                         kiln_value *namespace_value, kiln_value *thrown,
                                         int depth);
@@ -3511,6 +3506,19 @@ enum kiln_value_tag {
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_cli_host_state_declaration!());
+    // Runtime-created modules are available to every native graph, even when the graph has no
+    // static node:fs import or import() expression. Declare their provider ABI before the shared
+    // loader call sites below; the optional import() block is emitted later in the file.
+    output.push_str(
+        r#"
+typedef struct kiln_host kiln_host;
+extern int kiln_node_fs_read_file_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern int kiln_node_fs_realpath_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern void kiln_node_fs_free_bytes(uint8_t *, uint64_t);
+extern int kiln_c99_dynamic_eval_module(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
+extern int kiln_c99_dynamic_module_text(kiln_value, uint8_t **, size_t *);
+"#,
+    );
     output.push_str(r#"/* The trusted builtin bootstrap installs methods onto built-ins; once it has run, the realm takes
  * those writes back out of the prelude's process-wide summary of modified built-ins, before any
  * user module can observe or mutate the realm (`kiln_c99_builtin_store_epoch`). */
