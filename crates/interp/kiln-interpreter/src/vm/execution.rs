@@ -1977,7 +1977,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::LoadCell(slot) => {
                     let cell = self.cell(*slot as usize)?;
-                    let value = cell.borrow().clone();
+                    // Imported bindings can cross a cycle before their provider has
+                    // published. Publishing then aliases the canonical export cell through
+                    // the pending link cell, so read the complete chain here just as namespace
+                    // construction and star expansion do.
+                    let value = read_through_cell(&Value::Cell(cell));
                     if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
@@ -2002,7 +2006,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                 }
                 Instruction::LoadUpvalue(index) => {
-                    let value = self.upvalue(*index)?.borrow().clone();
+                    let value = read_through_cell(&Value::Cell(Rc::clone(&self.upvalue(*index)?)));
                     if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         let message = self.upvalue_name(*index).map_or_else(
                             || "cannot access a binding before its declaration".to_owned(),
