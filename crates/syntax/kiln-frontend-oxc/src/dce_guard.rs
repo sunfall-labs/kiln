@@ -89,6 +89,21 @@ impl<'a> VisitMut<'a> for ExpressionTypeEraser<'a> {
             *expression = inner;
         }
     }
+
+    fn visit_chain_element(&mut self, element: &mut ChainElement<'a>) {
+        walk_mut::walk_chain_element(self, element);
+        // `foo?.bar!` is represented by a TypeScript wrapper inside the optional-chain element
+        // rather than as an `Expression`. `walk_expression` never sees that wrapper, but Oxc's
+        // JS minifier still unwraps it while folding the chain and can panic if it later tries to
+        // reinterpret the wrapper as a member expression. Erase it here while preserving the
+        // chain boundary and wrapped member.
+        if let ChainElement::TSNonNullExpression(wrapper) = element {
+            let expression = wrapper.expression.take_in(&self.builder);
+            if let Some(chain_element) = expression.into_chain_element() {
+                *element = chain_element;
+            }
+        }
+    }
 }
 
 /// Wrap every expression in `program` that Oxc could wrongly judge free of effects.

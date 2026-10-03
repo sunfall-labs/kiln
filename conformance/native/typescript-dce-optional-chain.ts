@@ -9,10 +9,20 @@ function invoke(value: { child: unknown }): number | undefined {
     ?.method?.(argument());
 }
 
+function readNext(value?: { member: { next: string } } | null): string | undefined {
+  return value?.member!.next;
+}
+
 const receiver = {
   base: 7,
   method(this: { base: number }, n: number) {
     return this.base + n;
   },
 };
-console.log(invoke({ child: null }), invoke({ child: receiver }), calls);
+console.log(
+  invoke({ child: null }),
+  invoke({ child: receiver }),
+  calls,
+  readNext(null),
+  readNext({ member: { next: "ready" } }),
+);

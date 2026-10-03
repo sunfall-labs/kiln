@@ -3436,7 +3436,11 @@ impl Lowerer<'_, '_> {
             path: self.path,
             native_import_meta: None,
             inline_eval_calls: HashSet::new(),
-            enum_scoping: self.enum_scoping,
+            // This is a separately parsed AST with its own SymbolId space. It has no semantic
+            // graph, so borrowing the caller's Scoping could accidentally resolve an unrelated
+            // reference if Oxc assigned colliding IDs. Eval text is intentionally lowered as
+            // ordinary JavaScript; enum-member references are not rewritten inside its string.
+            enum_scoping: None,
             active_enum_members: None,
             active_enum_name: None,
             enum_merge: false,
@@ -6291,6 +6295,29 @@ mod tests {
         assert!(
             !hir.contains("TypeScript instantiation expression"),
             "{hir}"
+        );
+
+        // Oxc stores `!` here as a ChainElement::TSNonNullExpression. The regular expression
+        // visitor path above cannot reach it, and the DCE optional-chain fold used to panic.
+        let nested_non_null = parse_dce_native(
+            "optional-chain-non-null.ts",
+            r#"
+                export function read(value?: { member: { next: string } } | null) {
+                    return value?.member!.next;
+                }
+            "#,
+            &BTreeSet::from(["read".to_owned()]),
+            true,
+        );
+        assert!(
+            nested_non_null.diagnostics.is_empty(),
+            "{:?}",
+            nested_non_null.diagnostics
+        );
+        let hir = format!("{:?}", nested_non_null.body);
+        assert!(
+            hir.contains("Chain"),
+            "optional chain should remain intact: {hir}"
         );
     }
 
