@@ -417,6 +417,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build standalone native Node server")
         };
@@ -510,6 +511,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build standalone native request-body server")
         };
@@ -853,6 +855,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build without kiln extensions")
         };
@@ -948,6 +951,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build unsupported indirect eval fixture")
         };
@@ -998,6 +1002,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build with explain")
         };

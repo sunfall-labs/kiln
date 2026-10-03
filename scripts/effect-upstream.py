@@ -103,18 +103,9 @@ def entry_for(workspace, source, name):
     text = test.read_text()
     directory = workspace / 'files' / name
     directory.mkdir(parents=True, exist_ok=True)
-    includes = RUNTIME_TARGETS.get('include', {}).get(name, [])
-    if includes:
-        # Generated modules can name dependencies that occur only in erased type
-        # imports. Declare those finite roots through the compiler's existing
-        # closed-world include policy, without executing them during setup.
-        # This standalone workspace boundary keeps each file's declarations local
-        # even when builds run concurrently inside the shared dependency workspace.
-        write_json(directory / 'package.json', {
-            'private': True, 'type': 'module', 'workspaces': [],
-            'dependencies': json.loads((workspace / 'package.json').read_text())['dependencies'],
-            'kiln': {'include': includes},
-        })
+    # Entry directories belong to the runner; resolution authority remains the
+    # shared workspace, including when a previous preparation left a manifest.
+    (directory / 'package.json').unlink(missing_ok=True)
     # The official upstream setup installs Effect equality testers, so expect is
     # unconditional. Optional adapters add their real library implementations.
     features = ['expect']
@@ -332,6 +323,8 @@ def main():
                     binary.unlink(missing_ok=True)
                     build_cmd = [*limiter, str(kiln), '--one-shot', 'build', str(entries[name]),
                                  '--node', '--profile', 'native-dev', '--output', str(binary)]
+                    for specifier in RUNTIME_TARGETS.get('include', {}).get(name, []):
+                        build_cmd.extend(['--include', specifier])
                     build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs)
                     if build['exit_code'] != 0 or not binary.is_file():
                         envelope = {**build, 'build': build, 'inventory': None, 'cases': [],

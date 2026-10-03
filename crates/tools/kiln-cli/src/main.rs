@@ -382,6 +382,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
         }
         Command::Build {
             path,
+            includes,
             output,
             profile,
             shared,
@@ -411,6 +412,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
+                &includes,
             )?;
             if explain_parallel && !explain {
                 built.text = render::parallel_explanation_only(&built.text);

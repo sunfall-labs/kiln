@@ -438,12 +438,19 @@ pub fn build(
     static_link: bool,
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
+    includes: &[String],
 ) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let (mut project_notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)), node)?;
+        sync_project_sources_with_includes(
+            backend,
+            project_root,
+            Some((&canonical, &text)),
+            node,
+            includes,
+        )?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
             backend,
@@ -928,6 +935,16 @@ fn sync_project_sources_with_override(
     source_override: Option<(&str, &str)>,
     node: bool,
 ) -> SyncResult {
+    sync_project_sources_with_includes(backend, root, source_override, node, &[])
+}
+
+fn sync_project_sources_with_includes(
+    backend: &mut dyn Backend,
+    root: &Path,
+    source_override: Option<(&str, &str)>,
+    node: bool,
+    includes: &[String],
+) -> SyncResult {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
     if walk.truncated {
@@ -957,8 +974,8 @@ fn sync_project_sources_with_override(
             // else; every module it reaches is absent from `texts` and so is read on the same terms
             // the entry always was.
             let (resolutions, formats, includes, runtime_aliases) =
-                sources::include_reachable_dependencies_with_aliases(
-                    root, entry, &mut texts, node,
+                sources::include_reachable_dependencies_with_extra_includes(
+                    root, entry, &mut texts, node, includes,
                 )?;
             notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
             (resolutions, formats, includes, runtime_aliases)
@@ -2129,6 +2146,7 @@ mod tests {
             false,
             None,
             None,
+            &[],
         )
         .expect("shared build");
         assert!(
@@ -2179,6 +2197,7 @@ mod tests {
             false,
             None,
             None,
+            &[],
         )
         .expect("native build keeps its captured entry snapshot");
 
@@ -2231,6 +2250,7 @@ mod tests {
             false,
             None,
             None,
+            &[],
         )
         .expect("native build with explain");
 

@@ -76,6 +76,7 @@ pub enum Command {
     },
     Build {
         path: PathBuf,
+        includes: Vec<String>,
         output: Option<PathBuf>,
         profile: NativeProfile,
         shared: bool,
@@ -150,6 +151,7 @@ where
     let mut clock_specified = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
+    let mut includes = Vec::new();
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut max_steps: Option<u64> = None;
@@ -249,6 +251,13 @@ where
             }
             "--output" => {
                 output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
+            "--include" => {
+                let specifier = value_for(&flag, inline, &mut args)?;
+                if specifier.is_empty() {
+                    return Err(Error::usage("--include needs a nonempty module specifier"));
+                }
+                includes.push(specifier);
             }
             "--out" => {
                 test_output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
@@ -413,6 +422,11 @@ where
     if explain && name != "build" {
         return Err(Error::usage("--explain only applies to `kiln build`"));
     }
+    if !includes.is_empty() && (name != "build" || shared) {
+        return Err(Error::usage(
+            "--include only applies to Node executable `kiln build`",
+        ));
+    }
     // The interpreter and `kiln run --native` take the same choice from `KILN_EXTENSIONS=0` at run
     // time; the flag exists for the one thing an environment cannot do, which is fix the answer
     // into a binary that will be run somewhere else (ADR 0068).
@@ -468,6 +482,7 @@ where
         }
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
+            includes,
             output,
             profile: profile.unwrap_or_default(),
             shared,
@@ -695,6 +710,7 @@ options:
     --clock <policy>   choose `virtual` (default) or `wall` timer scheduling for `run`
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
+    --include <module>  with `build`, retain an additional lazy module (repeatable)
     --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
     --explain-parallel with `build` or `check`, report every parallelMap call site and whether
@@ -796,6 +812,28 @@ mod tests {
     }
 
     #[test]
+    fn build_includes_are_repeatable_and_command_scoped() {
+        let invocation = run(&[
+            "build",
+            "main.ts",
+            "--include=./worker.ts",
+            "--include",
+            "pkg/runtime",
+        ]);
+        let Command::Build { includes, .. } = invocation.command else {
+            panic!("build command");
+        };
+        assert_eq!(includes, ["./worker.ts", "pkg/runtime"]);
+        for args in [
+            vec!["run", "main.ts", "--include=x"],
+            vec!["build", "main.ts", "--shared", "--include=x"],
+            vec!["build", "main.ts", "--include="],
+        ] {
+            assert!(parse(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
+
+    #[test]
     fn native_build_and_run_profiles_parse() {
         assert_eq!(
             run(&[
@@ -808,6 +846,7 @@ mod tests {
             .command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: Some(PathBuf::from("bin/app")),
                 profile: NativeProfile::Release,
                 shared: false,
@@ -1269,6 +1308,7 @@ mod tests {
             run(&["build", "src/main.ts", "--march=native"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1287,6 +1327,7 @@ mod tests {
             run(&["build", "src/main.ts", "--march", "native"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1395,6 +1436,7 @@ mod tests {
             run(&["build", "src/main.ts", "--explain"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1418,6 +1460,7 @@ mod tests {
             run(&["build", "src/main.ts", "--static"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1467,6 +1510,7 @@ mod tests {
             .command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,

@@ -439,6 +439,26 @@ pub(crate) fn include_reachable_dependencies_with_aliases(
     Vec<DeclaredInclude>,
     Vec<WireRuntimePackageAlias>,
 )> {
+    include_reachable_dependencies_with_extra_includes(root, entry, texts, node, &[])
+}
+
+pub(crate) fn include_reachable_dependencies_with_extra_includes(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+    extra_includes: &[String],
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+    Vec<WireRuntimePackageAlias>,
+)> {
+    if !node && !extra_includes.is_empty() {
+        return Err(Error::BadInput(
+            "additional module includes require the Node adapter".to_owned(),
+        ));
+    }
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
@@ -473,7 +493,11 @@ pub(crate) fn include_reachable_dependencies_with_aliases(
     let mut declared_includes = Vec::new();
     if node {
         let package_importer = resolver.project_root().join("package.json");
-        for specifier in declared_include_specifiers(resolver.project_root())? {
+        let mut specifiers = declared_include_specifiers(resolver.project_root())?;
+        specifiers.extend(extra_includes.iter().cloned());
+        specifiers.sort();
+        specifiers.dedup();
+        for specifier in specifiers {
             let resolved = resolver
                 .resolve_with_metadata_for_request(
                     &specifier,
@@ -1123,6 +1147,28 @@ mod tests {
                 .iter()
                 .any(|resolution| resolution.specifier == "./worker-dependency.cjs")
         );
+        std::fs::write(tree.0.join("package.json"), "{}").expect("remove manifest includes");
+        let mut cli_texts = Vec::new();
+        let (cli_resolutions, cli_formats, cli_includes, _) =
+            include_reachable_dependencies_with_extra_includes(
+                &root,
+                entry.to_str().expect("UTF-8 path"),
+                &mut cli_texts,
+                true,
+                &[
+                    "./worker-task.cjs".to_owned(),
+                    "./worker-task.cjs".to_owned(),
+                ],
+            )
+            .expect("collect command-line includes");
+        assert_eq!(cli_includes, includes);
+        assert_eq!(cli_resolutions.len(), resolutions.len());
+        assert_eq!(cli_resolutions[0].target, resolutions[0].target);
+        assert_eq!(cli_resolutions[0].importer, resolutions[0].importer);
+        assert_eq!(cli_resolutions[0].specifier, resolutions[0].specifier);
+        assert_ne!(cli_resolutions[0].package_json_hash, resolutions[0].package_json_hash);
+        assert_eq!(cli_formats, formats);
+        assert_eq!(cli_texts, texts);
     }
 
     #[test]
