@@ -1184,7 +1184,11 @@ fn runtime_prelude_size() {
     // completion callbacks (+20), Date TimeClip (+2), and the constructor predicate /
     // default typed-constructor inheritance kernel (+19) bring the prelude to 81,062.
     // The TypedArray.from algorithm is shared TypeScript; no runtime section is duplicated.
-    const CEILING_LINES: usize = 81_200;
+    // Reviewed 2026-10-03: per-realm Error frame/accessor kernels, runner spy cell stores,
+    // dynamic object binding initialization, literal callback search patterns and correct
+    // Proxy object-tag reads bring the prelude to 81,432 lines. Error formatting and brand
+    // policy remain shared TypeScript; these are activation, binding and property kernels.
+    const CEILING_LINES: usize = 81_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

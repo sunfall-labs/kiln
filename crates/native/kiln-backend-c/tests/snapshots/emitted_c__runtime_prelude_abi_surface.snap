@@ -967,6 +967,9 @@ typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 #define KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE UINT32_C(16)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_GETTER UINT32_C(17)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_SETTER UINT32_C(18)
+#define KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN UINT32_C(19)
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 typedef struct kiln_gc_hooks {
@@ -1896,6 +1899,7 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
+int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
@@ -3258,14 +3262,16 @@ static void kiln_c99_register_builtin_keys(void) {
 #define KILN_C99_REGISTER_OBJECT_BUILDING_KEY(text)                                               \
 #undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
 void kiln_c99_publish_diagnostic(void);
+int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value) {
 static int kiln_c99_is_trimmed(uint16_t unit);
 _Thread_local kiln_js_frame *kiln_c99_js_frame_top = NULL;
 void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure) {
 void kiln_c99_js_frame_leave(kiln_js_frame *frame) {
 void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction) {
-static kiln_value kiln_c99_builtin(uint64_t code) {
+kiln_value kiln_c99_builtin(uint64_t code) {
 static int kiln_c99_is_callable(kiln_value value) {
 static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
+int kiln_c99_capture_error_frames(kiln_value *result, size_t limit) {
 int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
 static int kiln_c99_is_reference(kiln_value value) {
 static int kiln_c99_has_intrinsic_text(kiln_value value) {
@@ -4015,8 +4021,10 @@ static int kiln_c99_iterator_terminal(kiln_host *host, kiln_value *result, uint6
 static int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code,
 static const char *kiln_c99_error_name(uint64_t builtin) {
 static uint64_t kiln_c99_error_kind(kiln_value value) {
+static int kiln_c99_error_stack_accessors(kiln_value *getter, kiln_value *setter) {
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
+int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
 static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
@@ -4118,6 +4126,7 @@ static int kiln_dyn_source_may_have_function_declaration(const char *source, siz
 static int kiln_dyn_private_environment_has(kiln_value environment, const char *name,
 static int kiln_dyn_has_line_terminator(const char *source, size_t start, size_t end) {
 static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
+static int kiln_dyn_scope_has_own(kiln_dyn_scope *scope, const char *name, size_t name_len) {
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
 static int kiln_dyn_scope_mark_restriction(kiln_dyn_scope *scope, const char *name,
 static int kiln_dyn_scope_add_function_declaration(kiln_dyn_scope *scope,
@@ -4172,6 +4181,9 @@ static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t l
 static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
 static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+typedef struct kiln_dyn_object_binding {
+static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
+done:
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_new_environment(kiln_value *out) {
 static int kiln_dyn_captured_record_push(kiln_value records, int with_record,
