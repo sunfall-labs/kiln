@@ -1137,6 +1137,10 @@ static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value c
         }
     }
     closure = kiln_c99_closure_of(callee);
+    if (closure->is_class && !kiln_c99_inheriting_new_target) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Class constructor cannot be invoked without 'new'");
+    }
     if (closure->arrow) {
         receiver = kiln_val_to_boundary(closure->captured_this);
     } else if (!closure->strict &&

@@ -69,6 +69,24 @@ const classFieldResults = runInNewContext(
 if (classFieldResults.join(",") !== "0,1,3,2") {
   throw new Error(`new-context class fields lost lexical/order semantics: ${classFieldResults}`);
 }
+const classCallCaughtInContext = runInNewContext(
+  "let caught = false; try { (class A {})() } catch (error) { caught = error?.name === 'TypeError' }; caught",
+  {},
+);
+if (classCallCaughtInContext !== true) {
+  throw new Error("new-context class call did not expose a catchable TypeError");
+}
+const dynamicClassContext = {};
+runInNewContext("C = class A {}", dynamicClassContext);
+let classCallCaughtByCaller = false;
+try {
+  dynamicClassContext.C();
+} catch (error) {
+  classCallCaughtByCaller = error?.name === "TypeError";
+}
+if (!classCallCaughtByCaller) {
+  throw new Error("dynamic class call did not throw a TypeError to its caller");
+}
 let returnWasSyntaxError = false;
 try {
   runInNewContext("return 1", {});
