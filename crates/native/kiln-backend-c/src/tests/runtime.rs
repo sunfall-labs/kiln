@@ -1626,10 +1626,8 @@ int main(void) {{
     kiln_value duplicate_args[1] = {{ kiln_c99_copy_text(duplicate_body, sizeof duplicate_body - 1) }};
     thrown = kiln_c99_undefined();
     status = kiln_c99_dynamic_new_function(NULL, &result, duplicate_args, 1, 0, &thrown);
-    if (status != KILN_C99_OK) return 22;
-    thrown = kiln_c99_undefined();
-    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
-    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 23;
+    // Function construction validates its entire body before returning a callable.
+    if (status != KILN_C99_THROWN || thrown.tag == KILN_VALUE_UNDEFINED) return 22;
 
     // 8. Var patterns may bind the same identifier more than once; the last property wins.
     const char var_alias_body[] = "var {{x:a,y:a}}={{x:1,y:2}}; return a;";
@@ -1674,7 +1672,7 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
 
     let code = vec![
         // local 0 = Math.imul(3, 4) (= 12), local 1 = 5
-        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Math),
         Instruction::Const(1),
         Instruction::Const(2),
         Instruction::CallMethod { name: 0, argc: 2 },

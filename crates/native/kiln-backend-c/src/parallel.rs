@@ -2441,21 +2441,21 @@ mod tests {
     #[test]
     fn rule_3_allowlisted_math_qualifies_and_other_math_does_not() {
         let sqrt = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::LoadLocal(0),
             Instruction::CallMethod { name: 1, argc: 1 },
             Instruction::Return,
         ];
         assert!(safe(proto(sqrt, 1)));
         let sin = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::LoadLocal(0),
             Instruction::CallMethod { name: 2, argc: 1 },
             Instruction::Return,
         ];
         assert!(safe(proto(sin, 1)));
         let random = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 5, argc: 0 },
             Instruction::Return,
         ];
@@ -2680,7 +2680,7 @@ mod tests {
     #[test]
     fn reason_calls() {
         let random = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 5, argc: 0 },
             Instruction::Return,
         ];
@@ -3011,7 +3011,7 @@ mod tests {
                 vec![
                     Instruction::LoadLocal(0),
                     Instruction::GetProperty(4),
-                    Instruction::LoadBuiltin(Builtin::String),
+                    Instruction::LoadIntrinsicBuiltin(Builtin::String),
                     Instruction::LoadLocal(0),
                     Instruction::GetProperty(4),
                     Instruction::Call { argc: 1 },
@@ -3030,7 +3030,7 @@ mod tests {
             heap(
                 proto(
                     vec![
-                        Instruction::LoadBuiltin(Builtin::String),
+                        Instruction::LoadIntrinsicBuiltin(Builtin::String),
                         Instruction::Return
                     ],
                     1
@@ -3280,7 +3280,7 @@ mod tests {
                     Instruction::CallMethod { name: 0, argc: 0 },
                     Instruction::Const(2),
                     Instruction::CallMethod { name: 1, argc: 1 },
-                    Instruction::LoadBuiltin(Builtin::Number),
+                    Instruction::LoadIntrinsicBuiltin(Builtin::Number),
                     Instruction::CallMethod { name: 3, argc: 1 },
                     Instruction::Return,
                 ],
@@ -3317,13 +3317,13 @@ mod tests {
             (Reason::CallsImpure, Some(".push()"))
         );
         let random = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 1, argc: 0 },
             Instruction::Return,
         ]);
         assert_eq!(random.detail.as_deref(), Some("Math.random"));
         let now = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Date),
             Instruction::CallMethod { name: 2, argc: 0 },
             Instruction::Return,
         ]);
@@ -3333,7 +3333,7 @@ mod tests {
         );
         // A pure global passed anywhere but as a callback is a value the clone never makes.
         let passed = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Number),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Number),
             Instruction::Return,
         ]);
         assert_eq!(passed.reason, Reason::UnsupportedOperation);
@@ -3553,10 +3553,10 @@ mod tests {
     fn tier_4_a_key_comparator_may_call_a_pure_global() {
         // `(a, b) => parseInt(a) - parseInt(b)`: a key, read from each side the same way.
         let code = vec![
-            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadIntrinsicBuiltin(Builtin::ParseInt),
             Instruction::LoadLocal(0),
             Instruction::Call { argc: 1 },
-            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadIntrinsicBuiltin(Builtin::ParseInt),
             Instruction::LoadLocal(1),
             Instruction::Call { argc: 1 },
             Instruction::Binary(BinaryOp::Subtract),
@@ -3572,10 +3572,10 @@ mod tests {
         // A call to anything else is not a key.
         let other = proto(
             vec![
-                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Date),
                 Instruction::LoadLocal(0),
                 Instruction::Call { argc: 1 },
-                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Date),
                 Instruction::LoadLocal(1),
                 Instruction::Call { argc: 1 },
                 Instruction::Binary(BinaryOp::Subtract),

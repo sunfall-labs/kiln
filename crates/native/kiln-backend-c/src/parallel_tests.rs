@@ -479,13 +479,13 @@ fn lower(expr: &Expr, constants: &mut Constants, code: &mut Vec<Instruction>) {
             code.push(Instruction::Binary(*op));
         }
         Expr::Math1(f, e) => {
-            code.push(Instruction::LoadBuiltin(Builtin::Math));
+            code.push(Instruction::LoadIntrinsicBuiltin(Builtin::Math));
             lower(e, constants, code);
             let name = constants.string(f);
             code.push(Instruction::CallMethod { name, argc: 1 });
         }
         Expr::Math2(f, a, b) => {
-            code.push(Instruction::LoadBuiltin(Builtin::Math));
+            code.push(Instruction::LoadIntrinsicBuiltin(Builtin::Math));
             lower(a, constants, code);
             lower(b, constants, code);
             let name = constants.string(f);
@@ -1436,7 +1436,7 @@ fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
                     name: split,
                     argc: 1,
                 },
-                Instruction::LoadBuiltin(Builtin::Number),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Number),
                 Instruction::CallMethod { name: map, argc: 1 },
                 Instruction::Const(bar),
                 Instruction::CallMethod {
