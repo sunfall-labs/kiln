@@ -52,6 +52,13 @@ replacement, text encoding and WebCrypto. Focused results from those fixes must
 not be added to this older run. A fresh complete run on one frozen compiler is
 required for an updated comparison.
 
+A separate frozen run on `e61fe6fb` passes all 46 TestSchema cases after sharing
+strict graph comparison with `node:util` and fixing native own-property
+enumerability. Its three-file selection still records two native RegExp codec
+failures and one native property-based diff/patch failure; Bun instead fails
+the File/FormData codec cases and the property-based case. The exact IDs and
+report digest are retained in `native-focused-reference.json`.
+
 Later focused runs on frozen compilers pass all 115 selected compression and
 SchemaAST cases, and all 206 selected Crypto and SchemaBinary cases, under both
 native and Bun. Generated-schema tests pass 14 of 15 under both runtimes; native
