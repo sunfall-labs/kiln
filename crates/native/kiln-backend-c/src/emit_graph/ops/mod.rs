@@ -519,7 +519,7 @@ pub(super) fn emit_graph_op(
             let name = crate::string::c_string(builtin.name());
             writeln!(
                 output,
-                "    {{ kiln_value value; int status = kiln_c99_global_builtin(host, &value, {name}, {}, 0, thrown); {check} v{v} = kiln_val_from_boundary(value); }}",
+                "    {{ kiln_value value; int status = kiln_c99_global_builtin(host, &value, {name}, {}, depth, thrown); {check} v{v} = kiln_val_from_boundary(value); }}",
                 builtin.name().len()
             )
             .unwrap();
