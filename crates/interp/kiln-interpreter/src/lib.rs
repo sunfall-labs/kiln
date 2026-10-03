@@ -2043,6 +2043,7 @@ pub(crate) fn new_engine_private(realm: RealmId) -> Value {
         "processExitCodeSet",
         Value::Native(Native::ProcessExitCodeSet, realm),
     );
+    private.set_non_enumerable("gcRequest", Value::Native(Native::GcRequest, realm));
     Value::Object(Rc::new(RefCell::new(private)))
 }
 

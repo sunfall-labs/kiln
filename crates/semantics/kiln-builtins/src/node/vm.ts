@@ -1,5 +1,7 @@
 // kiln-builtins: node:vm implementation (Phase 5.2, ADR 0005)
 
+const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
+
 export class Script {
   private _code: string;
   private _options: any;
@@ -43,13 +45,25 @@ export function runInContext(code: string, contextifiedObject: any, _options?: a
 }
 
 export function runInNewContext(code: string, contextObject?: any, _options?: any): any {
-  if (contextObject && typeof contextObject === "object") {
-    const keys = Object.keys(contextObject);
-    const values = keys.map((k) => contextObject[k]);
-    const fn = new Function(...keys, `return (0, eval)(${JSON.stringify(code)})`);
-    return fn(...values);
+  const scope = contextObject && typeof contextObject === "object" ? contextObject : {};
+  const keys = Object.keys(scope);
+  const values = keys.map((k) => scope[k]);
+  if (kilnPrivate.gcExposed === true && typeof kilnPrivate.gcRequest === "function" &&
+      !keys.includes("gc")) {
+    keys.push("gc");
+    values.push(kilnPrivate.gcRequest);
   }
-  return (0, eval)(code);
+  if (keys.length === 0) return (0, eval)(code);
+  // Compile expressions as the body of a function whose parameters are the context bindings.
+  // The previous indirect eval escaped this scope, making those names invisible to the script.
+  // A statement body remains executable through the ordinary Function path.
+  let evaluate: any;
+  try {
+    evaluate = new Function(...keys, `return (${code})`);
+  } catch (_error) {
+    evaluate = new Function(...keys, code);
+  }
+  return evaluate(...values);
 }
 
 export function createScript(code: string, options?: any): Script {

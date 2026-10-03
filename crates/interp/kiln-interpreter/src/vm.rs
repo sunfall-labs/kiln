@@ -198,6 +198,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Private actor graph roots. Weak handle identities stay in the engine; JavaScript holds
     /// only opaque handles and transfer tickets, never the graph in a module WeakMap.
     pub(super) isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
+    /// Values reached by WeakRef construction/deref stay alive through the current job only.
+    pub(super) weak_ref_keepalive: Vec<Value>,
     pub(super) actor_realm_id: u64,
     pub(super) actor_graph_requests: Rc<RefCell<std::collections::HashMap<u64, u8>>>,
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is

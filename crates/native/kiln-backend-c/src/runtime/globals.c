@@ -794,6 +794,9 @@ static int kiln_c99_private_object(kiln_value *out) {
         status = kiln_c99_commit_own_data(*slot, "processExitCodeSet", 18,
                                           kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT_CODE_SET),
                                           0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "gcRequest", 9,
+                                          kiln_c99_method(KILN_C99_METHOD_GC_REQUEST), 0, 1, 1);
     if (status != KILN_C99_OK) return status;
     *out = *slot;
     return KILN_C99_OK;

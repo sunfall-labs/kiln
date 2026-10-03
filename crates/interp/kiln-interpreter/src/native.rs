@@ -372,6 +372,9 @@ pub enum Native {
     /// Private realm status access used by the shared TypeScript `process.exitCode` policy.
     ProcessExitCodeGet,
     ProcessExitCodeSet,
+    /// The interpreter releases unreachable acyclic values through Rc; this request is a
+    /// lifecycle boundary hook, not a claim to trace or collect cycles.
+    GcRequest,
     /// The four bridges the shared TypeScript `URL` captures (`kiln-builtins/src/url.ts`).
     UrlParseRaw,
     UrlSetRaw,

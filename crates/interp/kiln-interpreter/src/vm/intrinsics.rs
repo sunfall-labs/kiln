@@ -2024,6 +2024,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.process_exit_code(Some(code));
                 Ok(Value::Undefined)
             }
+            // Ordinary unreachable objects are already released when their last Rc disappears.
+            // Cycles remain outside this interpreter's collection capability.
+            Native::GcRequest => Ok(Value::Undefined),
             Native::ProcessStdinSetRawMode => {
                 let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
                 if let Value::Object(obj) = receiver {

@@ -466,6 +466,8 @@ typedef struct kiln_gc_heap {
     uint32_t epoch;
     int enabled;
     int stress;
+    /* Explicit user requests are deferred to the provider's safe turn boundary. */
+    int force_pending;
     int trace;
     int collecting;
     /* Optional two-turn retained-heap sample for the first few realms. */
@@ -3819,6 +3821,16 @@ static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **
 }
 
 static void kiln_c99_gc_collect(void *opaque, int force);
+
+/* Publicly exposed only through the private node:vm bridge. Collection itself belongs at the
+ * provider's safe turn boundary; an in-turn request merely asks the next boundary to force it. */
+int kiln_c99_gc_request(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_c99_no_write()) return KILN_C99_INVALID_ARGUMENT;
+    heap->force_pending = 1;
+    return KILN_C99_OK;
+}
 
 /* A collection from inside a turn, at an allocation. */
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
@@ -9190,7 +9202,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     int tenured_due;
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (kiln_c99_actor_candidate_defer_gc(heap)) return;
-    if (!heap->enabled && !heap->stress) return;
+    if (!heap->enabled && !heap->stress && !heap->force_pending && !force) return;
     if (heap->actor_candidate_id != 0) heap->actor_candidate_collected = 1;
     if (KILN_UNLIKELY(heap->parallel_paused != 0)) {
         fputs("kiln: a collection was due while a parallel call's worker arenas were open\n",
@@ -9201,7 +9213,8 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     nursery_has_allocs = heap->nursery.full != NULL ||
                          (heap->nursery.active && heap->nursery.bump > heap->nursery.base);
     threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
-    tenured_due = force || heap->stress || (heap->since_collection >= threshold) ||
+    tenured_due = force || heap->force_pending || heap->stress ||
+                  (heap->since_collection >= threshold) ||
                   (heap->moved_external_current > heap->moved_external_baseline &&
                    heap->moved_external_current - heap->moved_external_baseline >= threshold);
 
@@ -9215,6 +9228,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     if (!tenured_due && !nursery_due) return;
 
     heap->collecting = 1;
+    heap->force_pending = 0;
     before_blocks = heap->freed_blocks;
     before_bytes = heap->freed_bytes;
     kiln_c99_gc_begin(heap);

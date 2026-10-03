@@ -2256,6 +2256,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_undefined();
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_GC_REQUEST) {
+        if (argc != 0) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_gc_request();
+        *result = kiln_c99_undefined();
+        return status;
+    }
     if (code == KILN_C99_METHOD_PROCESS_NEXT_TICK) {
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         if (!kiln_c99_is_callable(callback))

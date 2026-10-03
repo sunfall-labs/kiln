@@ -12,6 +12,7 @@ typedef struct kiln_data_view kiln_data_view;
 struct kiln_gc_heap;
 extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value *values,
                                     size_t count);
+extern int kiln_c99_gc_request(void);
 extern int kiln_c99_weak_reference_create(kiln_value owner, kiln_value target);
 extern int kiln_c99_weak_reference_deref(kiln_value owner, kiln_value *out);
 extern int kiln_c99_gc_keep_during_job(kiln_value value);

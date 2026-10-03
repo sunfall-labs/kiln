@@ -1,5 +1,9 @@
 // kiln-builtins: node:v8 implementation (Phase 5.2, ADR 0005)
 
+// The private object is shared with node:vm through the builtin graph's private read window.
+// Neither the flag nor the request primitive is installed on the user global.
+const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
+
 export function cachedDataVersionTag(): number {
   return 1;
 }
@@ -44,7 +48,12 @@ export function getCppHeapStatistics() {
   };
 }
 
-export function setFlagsFromString(_flags: string): void {}
+export function setFlagsFromString(flags: string): void {
+  for (const flag of String(flags).trim().split(/\s+/)) {
+    if (flag === "--expose_gc" || flag === "--expose-gc") kilnPrivate.gcExposed = true;
+    else if (flag === "--no-expose_gc" || flag === "--no-expose-gc") kilnPrivate.gcExposed = false;
+  }
+}
 
 export function serialize(value: any): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));

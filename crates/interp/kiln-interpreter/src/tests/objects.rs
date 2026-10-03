@@ -1749,6 +1749,29 @@ fn weak_ref_does_not_keep_a_shared_graph_alive() {
 }
 
 #[test]
+fn weak_ref_object_target_lives_only_through_the_current_job() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let reference = vm.construct_weak_ref(&[target.clone()], 0).unwrap();
+    drop(target);
+
+    assert!(matches!(
+        vm.weak_ref_deref(&reference, 0),
+        Ok(Value::Object(_))
+    ));
+    vm.weak_ref_keepalive.clear();
+    assert_eq!(vm.weak_ref_deref(&reference, 0), Ok(Value::Undefined));
+}
+
+#[test]
 fn spread_reads_every_own_property_including_symbol_keyed_ones() {
     let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
         serial: 1,

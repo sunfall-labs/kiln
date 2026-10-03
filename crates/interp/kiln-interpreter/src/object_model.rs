@@ -197,6 +197,9 @@ pub struct ObjectData {
     /// in a reserved property. The facade owns the graph lease, so storing it as a Value here
     /// would make WeakRef itself keep an otherwise unreachable shared graph alive.
     pub(super) weak_shared_target: Option<Weak<SharedFacade>>,
+    /// Ordinary object targets are genuinely weak. Other opaque value kinds still use the
+    /// reserved property representation until their Rc identities gain weak handle variants.
+    pub(super) weak_ref_object_target: Option<Weak<RefCell<ObjectData>>>,
     pub(super) finalization_cells: Vec<FinalizationCell>,
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
@@ -319,6 +322,7 @@ impl Default for ObjectData {
         Self {
             properties: Vec::new(),
             weak_shared_target: None,
+            weak_ref_object_target: None,
             finalization_cells: Vec::new(),
             error_brand: false,
             arguments_brand: false,
