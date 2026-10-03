@@ -1032,11 +1032,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::LoadBuiltin(builtin) => {
-                    // The running code's realm, not the primary one: a bare `ArrayBuffer` in code
-                    // a second realm runs names *that* realm's intrinsic (ADR 0038), which is what
-                    // makes its bootstrap install onto its own prototypes, and what makes
-                    // `other.evalScript("Array") === other.global.Array`.
-                    let value = self.builtin_value(*builtin, self.current_realm);
+                    // Read the running code's realm global, so a secondary realm's bare Array
+                    // agrees with other.global.Array (ADR 0038).
+                    // A source-level builtin name is a mutable global binding. Bootstrap
+                    // replacements and user descriptors must be observed just like any other
+                    // global property; LoadIntrinsicBuiltin below keeps the engine identity.
+                    let global = self.global_object();
+                    let read = self.read_property(&global, builtin.name(), current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
                     self.stack.push(value);
                 }
                 Instruction::LoadIntrinsicBuiltin(builtin) => {

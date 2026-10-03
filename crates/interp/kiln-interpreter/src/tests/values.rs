@@ -860,3 +860,37 @@ mod unit_reads {
         assert!(sum > 0.0);
     }
 }
+
+#[test]
+fn source_builtin_load_observes_global_replacement_but_intrinsic_load_keeps_identity() {
+    for intrinsic in [false, true] {
+        let code = if intrinsic {
+            Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Array)
+        } else {
+            Instruction::LoadBuiltin(kiln_ir::Builtin::Array)
+        };
+        let program = program(vec![], vec![code, Instruction::Return]);
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: Default::default(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let original = vm.builtin_value(kiln_ir::Builtin::Array, RealmId::PRIMARY);
+        let Value::Object(global) = vm.global_object() else {
+            panic!("global must be an object")
+        };
+        global.borrow_mut().set("Array", Value::Number(42.0));
+        let result = vm.run().unwrap().value;
+        assert!(strict_equal(
+            &result,
+            &if intrinsic {
+                original
+            } else {
+                Value::Number(42.0)
+            }
+        ));
+    }
+}
