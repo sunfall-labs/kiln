@@ -3069,6 +3069,47 @@ fn native_namespace_import_of_commonjs_resolves_property_values() {
 }
 
 #[test]
+fn native_declared_esm_include_stays_lazy_and_supports_computed_require() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-declared-esm");
+    let included = root.path.join("included.mjs");
+    let entry = root.path.join("main.cjs");
+    fs::write(&included, "globalThis.runs++; export const answer = 42;").expect("write lazy ESM");
+    fs::write(&entry, "globalThis.runs = 0; const path = __dirname + '/included.mjs'; console.log('before', runs); const first = require(path); console.log(first.answer, runs, first === require(path));").expect("write computed require");
+    let graph = ModuleGraph::build_node_with_includes(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![(included, ModuleSource::Source)],
+    )
+    .expect("build declared ESM graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("link declared ESM graph");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run declared ESM graph");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"before 0\n42 1 true\n");
+}
+
+#[test]
 fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and_cache_identity() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
