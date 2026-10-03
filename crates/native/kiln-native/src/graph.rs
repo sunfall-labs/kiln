@@ -5330,7 +5330,7 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
 "#
     );
     output.push_str("\n/* Detach callbacks while the heap is live, but keep every registered root context alive\n * through kiln_realm_destroy: roots marked KILN_GC_ROOT_SURVIVES_TEARDOWN are invoked there. */\nstatic void kiln_graph_detach_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    for (graph = realm->instances; graph != NULL; graph = graph->next_instance)\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n}\nstatic void kiln_graph_free_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
-    output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    int spy_authorized = 0;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
             continue;
@@ -5358,7 +5358,24 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
                 native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
         }
     }
-    output.push_str("        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"spyExport\", 9)) { if (argc != 5 || arguments[1].tag != 9 || arguments[2].tag != KILN_VALUE_STRING || arguments[4].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n        for (selected = graph->realm->instances; selected != NULL; selected = selected->next_instance) {\n");
+    output.push_str("        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"spyExport\", 9)) { if (argc != 5 || arguments[1].tag != 9 || arguments[2].tag != KILN_VALUE_STRING || arguments[4].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n        spy_authorized = 0; switch (graph->realm->spy_adapter_referrer_index) {\n");
+    for (adapter_index, (adapter_node, _)) in modules.iter().enumerate() {
+        if !matches!(
+            adapter_node.source,
+            ModuleSource::Source | ModuleSource::CommonJs
+        ) {
+            continue;
+        }
+        let Some(adapter_url) = Url::from_file_path(&adapter_node.path)
+            .ok()
+            .map(|value| value.to_string())
+        else {
+            continue;
+        };
+        writeln!(output, "        case (size_t){adapter_index}: spy_authorized = kiln_c99_string_equals_ascii(arguments[4], {}, (size_t){}); break;",
+            native_c_string(&adapter_url), adapter_url.len()).unwrap();
+    }
+    output.push_str("        default: break; } if (!spy_authorized) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n        for (selected = graph->realm->instances; selected != NULL; selected = selected->next_instance) {\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if node.source != ModuleSource::Source {
             continue;
@@ -5367,32 +5384,6 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
             continue;
         };
         writeln!(output, "            if (selected->instance->namespaces[{index}].tag == 9 && selected->instance->namespaces[{index}].bits == arguments[1].bits) {{").unwrap();
-        output.push_str("                if (!(");
-        let mut first_adapter = true;
-        for (adapter_index, (adapter_node, _)) in modules.iter().enumerate() {
-            if !matches!(
-                adapter_node.source,
-                ModuleSource::Source | ModuleSource::CommonJs
-            ) {
-                continue;
-            }
-            let Some(adapter_url) = Url::from_file_path(&adapter_node.path)
-                .ok()
-                .map(|value| value.to_string())
-            else {
-                continue;
-            };
-            if !first_adapter {
-                output.push_str(" || ");
-            }
-            first_adapter = false;
-            write!(output, "(selected->realm->spy_adapter_referrer_index == (size_t){adapter_index} && kiln_c99_string_equals_ascii(arguments[4], {}, (size_t){}) )",
-                native_c_string(&adapter_url), adapter_url.len()).unwrap();
-        }
-        if first_adapter {
-            output.push_str("0");
-        }
-        output.push_str(")) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n");
         for entry in entries {
             let NativeNamespaceValue::Binding {
                 provider_index,
