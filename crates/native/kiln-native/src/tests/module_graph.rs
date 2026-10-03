@@ -1930,7 +1930,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     assert!(launcher.contains("#define kiln_imports_0 (graph->instance->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
-        "kiln_commonjs_require_{commonjs_index}, kiln_commonjs_resolve_{commonjs_index}, graph, kiln_graph_gc_visit_roots, graph)"
+        "kiln_commonjs_require_{commonjs_index}, kiln_commonjs_resolve_{commonjs_index}, graph, kiln_graph_gc_visit_registered_roots, graph)"
     )));
     assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
