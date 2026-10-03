@@ -183,6 +183,30 @@ def records(log):
             'cases': cases, 'summary': summary, 'errors': errors, 'complete': valid}
 
 
+def aggregate(report, engines):
+    """Keep partial coverage and runner failures visible beside case totals."""
+    totals = {}
+    for engine in engines:
+        rows = [row['engines'][engine] for row in report['files']]
+        totals[engine] = {
+            'complete_files': sum(row['complete'] for row in rows),
+            'incomplete_files': sum(not row['complete'] for row in rows),
+            'registered_cases': sum(len(row['inventory'] or []) for row in rows),
+            'recorded_cases': sum(len(row['cases']) for row in rows),
+            'partial_cases': sum(len(row['cases']) for row in rows if not row['complete']),
+            **{outcome: sum(case['outcome'] == outcome for row in rows for case in row['cases'])
+               for outcome in ('pass', 'fail', 'skip')},
+            'timed_out_files': sum(row['timed_out'] for row in rows),
+            'nonzero_exit_files': sum(row['exit_code'] != 0 for row in rows),
+            'reference_inventory_mismatches': sum(row['matches_reference_inventory'] is False for row in rows),
+            'reference_mode_mismatches': sum(row['matches_reference_modes'] is False for row in rows),
+            'reference_outcome_mismatches': sum(row['matches_reference_outcomes'] is False for row in rows),
+        }
+    return {'reported_files': len(report['files']),
+            'pending_files': report['selected'] - len(report['files']),
+            'deferred_files': report['deferred'], 'engines': totals}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workspace', type=Path, default=Path.home() / '.cache/kiln' / ('effect-direct-' + PIN['commit'][:12]))
@@ -273,6 +297,7 @@ def main():
                 row = future.result()
                 report['files'].append(row)
                 report['files'].sort(key=lambda r: r['file'])
+                report['aggregate'] = aggregate(report, engines)
                 write_json(out / 'report.json', report)
                 print(row['file'], {e: r['summary'] if r['complete'] else 'INCOMPLETE' for e, r in row['engines'].items()}, flush=True)
         clean = all(r['complete'] and r['exit_code'] == 0 and r['summary']['failed'] == 0
@@ -280,6 +305,7 @@ def main():
                     for row in report['files'] for r in row['engines'].values())
         report['passed'] = clean
         write_json(out / 'report.json', report)
+        print('aggregate', json.dumps(report['aggregate'], sort_keys=True), flush=True)
         return 0 if clean else 1
 
 

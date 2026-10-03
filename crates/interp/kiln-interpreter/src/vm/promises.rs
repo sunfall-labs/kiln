@@ -888,14 +888,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         )
     }
 
-    /// Run every queued job, moving the virtual clock forward to reach each timer.
+    /// Run every queued job, using this realm's clock policy for timer deadlines.
     ///
     /// This is the event loop. Microtasks drain completely before any timer runs and again after
     /// each one, which is the ordering the language specifies and the reason a promise settles
     /// before a `setTimeout(f, 0)` queued earlier.
     ///
-    /// Time only moves when a timer is due, so a program that schedules an hour out finishes
-    /// instantly and always in the same order. Nothing here reads the host clock.
+    /// Virtual realms advance to each timer deterministically. Host-clock realms refresh
+    /// elapsed time at each turn and wait for future deadlines on the wall-clock executor.
     pub(crate) fn run_event_loop(
         &mut self,
         runtime: &mut RealmRuntime,
