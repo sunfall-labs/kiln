@@ -38,6 +38,44 @@ delete (globalThis as any).__kilnPortWait;
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
 
+  // The host primitive owns cancellation transport. Public controller identity, WebIDL
+  // descriptors and brand checks belong to this ordinary class in both engines.
+  const PrimitiveAbortController = G.AbortController;
+  if (typeof PrimitiveAbortController === "function") {
+    const records = new WeakMap<object, any>();
+    const weakGet = WeakMap.prototype.get;
+    const weakSet = WeakMap.prototype.set;
+    const apply = Reflect.apply;
+    function controllerRecord(receiver: any): any {
+      const record = apply(weakGet, records, [receiver]);
+      if (record === undefined) throw new TypeError("Illegal invocation");
+      return record;
+    }
+    class AbortController {
+      constructor() {
+        apply(weakSet, records, [this, new PrimitiveAbortController()]);
+      }
+      get signal(): AbortSignal {
+        return controllerRecord(this).signal;
+      }
+      abort(reason: any = undefined): void {
+        const record = controllerRecord(this);
+        record.abort(reason);
+      }
+    }
+    for (const name of ["signal", "abort"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(AbortController.prototype, name)!;
+      descriptor.enumerable = true;
+      Object.defineProperty(AbortController.prototype, name, descriptor);
+    }
+    Object.defineProperty(AbortController.prototype, Symbol.toStringTag, {
+      value: "AbortController", configurable: true,
+    });
+    Object.defineProperty(G, "AbortController", {
+      value: AbortController, writable: true, configurable: true,
+    });
+  }
+
   function invalidState(message: string): Error {
     const DOMExc = G.DOMException;
     if (typeof DOMExc === "function") return new DOMExc(message, "InvalidStateError");

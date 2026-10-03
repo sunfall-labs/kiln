@@ -1471,9 +1471,9 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::Buffer => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)"),
         kiln_ir::Builtin::NotANumber => BuiltinLoad::Value("kiln_c99_number(0.0 / 0.0)"),
         kiln_ir::Builtin::Infinity => BuiltinLoad::Value("kiln_c99_number(1.0 / 0.0)"),
-        kiln_ir::Builtin::AbortController => {
-            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_CONTROLLER)")
-        }
+        // The public WebIDL class is installed by the shared TypeScript bootstrap; the
+        // primitive controller remains reachable only through its captured private kernel.
+        kiln_ir::Builtin::AbortController => BuiltinLoad::Global("AbortController"),
         kiln_ir::Builtin::AbortSignal => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_SIGNAL)")
         }
