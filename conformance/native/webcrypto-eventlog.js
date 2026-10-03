@@ -12,6 +12,11 @@ if (hex(derived) !== '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ec
 
 const aesKey = await subtle.importKey('raw', bytes('000102030405060708090a0b0c0d0e0f'),
   'AES-GCM', true, ['encrypt', 'decrypt']);
+const canonicalAesKey = await subtle.importKey('raw', new Uint8Array(16), 'aes-gcm', true, new Set(['encrypt']));
+const duplicateAesKey = await subtle.importKey('raw', new Uint8Array(16), 'AES-GCM', true, ['encrypt', 'encrypt']);
+if (canonicalAesKey.algorithm.name !== 'AES-GCM' || duplicateAesKey.usages.join(',') !== 'encrypt') {
+  throw new Error('algorithm normalization or usage sequence conversion diverged');
+}
 const plain = new TextEncoder().encode('event log payload');
 const aad = new TextEncoder().encode('event:42');
 const iv1 = bytes('000000000000000000000001'), iv2 = bytes('000000000000000000000002');
@@ -44,6 +49,21 @@ const generatedSignature = await subtle.sign('Ed25519', generated.privateKey, pl
 if (!await subtle.verify('Ed25519', generated.publicKey, generatedSignature, plain) || generatedPublic.byteLength !== 32) {
   throw new Error('generated Ed25519 pair did not verify');
 }
+const noUsePublic = await subtle.importKey('raw', bytes('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'),
+  'ed25519', true, []);
+if (noUsePublic.usages.length !== 0) throw new Error('Ed25519 public key rejected empty usages');
+let hkdfExtractableRejected = false;
+try { await subtle.importKey('raw', new Uint8Array([1]), 'HKDF', true, ['deriveBits']); }
+catch (error) { hkdfExtractableRejected = error.name === 'SyntaxError'; }
+if (!hkdfExtractableRejected) throw new Error('HKDF accepted extractable key material');
+const deriveOnly = await subtle.importKey('raw', bytes('0b'.repeat(22)), 'HKDF', false, ['deriveKey']);
+const derivedAes = await subtle.deriveKey({ name: 'hkdf', hash: 'sha-256', salt: new Uint8Array(0), info: new Uint8Array(0) },
+  deriveOnly, { name: 'aes-gcm', length: 128 }, false, ['encrypt']);
+if (derivedAes.algorithm.name !== 'AES-GCM') throw new Error('deriveKey-only authorization was not honored');
+let deriveBitsRejected = false;
+try { await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new Uint8Array(0) }, deriveOnly, 128); }
+catch (error) { deriveBitsRejected = error.name === 'InvalidAccessError'; }
+if (!deriveBitsRejected) throw new Error('deriveKey usage incorrectly authorized deriveBits');
 
 const hmacKey = await subtle.importKey('raw', bytes('0b'.repeat(20)),
   { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);

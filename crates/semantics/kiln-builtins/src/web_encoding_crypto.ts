@@ -20,7 +20,18 @@
     try { return primitive(op, key, data, iv, aad, length); } catch (error) { throw new DOMException(String(error), 'OperationError'); }
   }
   function exactBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer as ArrayBuffer; }
-  function algorithmName(value: any): string { return typeof value === 'string' ? value : value && value.name; }
+  function algorithmName(value: any): string {
+    const name = typeof value === 'string' ? value : value && value.name;
+    if (typeof name !== 'string') return name;
+    switch (name.toLowerCase()) {
+      case 'aes-gcm': return 'AES-GCM';
+      case 'hkdf': return 'HKDF';
+      case 'hmac': return 'HMAC';
+      case 'ed25519': return 'Ed25519';
+      case 'sha-256': return 'SHA-256';
+      default: return name;
+    }
+  }
   function hashName(value: any): string {
     const hash = value && typeof value === 'object' ? value.hash : undefined;
     return String(typeof hash === 'string' ? hash : hash && hash.name || '').toUpperCase().replace('-', '');
@@ -45,9 +56,13 @@
   }
   function makeKey(value: any): any { return new CryptoKey(keyToken, value); }
   function usagesOf(usages: any, allowed: string[]): string[] {
-    if (!Array.isArray(usages)) throw new TypeError('Key usages must be an array');
-    const result = usages.slice();
-    for (let i = 0; i < result.length; i++) if (!allowed.includes(result[i]) || result.indexOf(result[i]) !== i) throw new DOMException('Invalid key usage', 'SyntaxError');
+    const input = [...usages];
+    const result: string[] = [];
+    for (let i = 0; i < input.length; i++) {
+      const usage = String(input[i]);
+      if (!allowed.includes(usage)) throw new DOMException('Invalid key usage', 'SyntaxError');
+      if (!result.includes(usage)) result.push(usage);
+    }
     return result;
   }
   function base64url(bytes: Uint8Array): string { return bytes.toBase64({ alphabet: 'base64url', omitPadding: true }); }
@@ -56,14 +71,14 @@
       const name = algorithmName(algorithm), raw = bytesOf(keyData).slice();
       let type = 'secret', allowed: string[], publicKey: Uint8Array | undefined;
       if (name === 'AES-GCM') { if (format !== 'raw') throw new DOMException('Unsupported format', 'NotSupportedError'); if (![16,24,32].includes(raw.length)) throw new DOMException('Invalid AES key length', 'DataError'); allowed = ['encrypt','decrypt']; }
-      else if (name === 'HKDF') { if (format !== 'raw') throw new DOMException('Unsupported format', 'NotSupportedError'); allowed = ['deriveKey','deriveBits']; }
+      else if (name === 'HKDF') { if (format !== 'raw') throw new DOMException('Unsupported format', 'NotSupportedError'); if (extractable) throw new DOMException('HKDF keys are not extractable', 'SyntaxError'); allowed = ['deriveKey','deriveBits']; }
       else if (name === 'HMAC') { if (format !== 'raw' || hashName(algorithm) !== 'SHA256') throw new DOMException('Unsupported HMAC parameters', 'NotSupportedError'); allowed = ['sign','verify']; }
       else if (name === 'Ed25519') {
         if (format === 'raw') { if (raw.length !== 32) throw new DOMException('Invalid Ed25519 public key', 'DataError'); provider(OP.ED_VALIDATE,raw); type='public'; allowed=['verify']; publicKey=raw; }
         else if (format === 'pkcs8') { publicKey=provider(OP.ED_PUBLIC,raw); type='private'; allowed=['sign']; }
         else throw new DOMException('Unsupported format', 'NotSupportedError');
       } else throw new DOMException('Unsupported algorithm', 'NotSupportedError');
-      const keyUsages = usagesOf(requested, allowed!); if (!keyUsages.length) throw new DOMException('At least one usage is required','SyntaxError');
+      const keyUsages = usagesOf(requested, allowed!); if (!keyUsages.length && type !== 'public') throw new DOMException('At least one usage is required','SyntaxError');
       const spec = name === 'AES-GCM' ? {name,length:raw.length*8} : name === 'HMAC' ? {name,hash:{name:'SHA-256'},length:raw.length*8} : {name};
       return makeKey({type,name,algorithm:spec,extractable:!!extractable,usages:keyUsages,bytes:raw,publicKey});
     },
@@ -74,11 +89,9 @@
       return {publicKey:makeKey({type:'public',name:'Ed25519',algorithm:{name:'Ed25519'},extractable:true,usages:uses.filter(x=>x==='verify'),bytes:pub,publicKey:pub}),privateKey:makeKey({type:'private',name:'Ed25519',algorithm:{name:'Ed25519'},extractable:!!extractable,usages:uses.filter(x=>x==='sign'),bytes:priv,publicKey:pub})};
     },
     async deriveBits(algorithm:any,baseKey:any,length:number|null):Promise<ArrayBuffer>{
-      const v=record(baseKey,'deriveBits','HKDF'); if(algorithmName(algorithm)!=='HKDF'||hashName(algorithm)!=='SHA256') throw new DOMException('Unsupported derivation','NotSupportedError');
-      const bits=Number(length); if(!Number.isFinite(bits)||bits<0||bits%8!==0||bits>65280) throw new DOMException('Invalid bit length','OperationError');
-      return exactBuffer(provider(OP.HKDF,v.bytes,bytesOf(algorithm.salt),bytesOf(algorithm.info),undefined,bits/8));
+      return exactBuffer(deriveMaterial(algorithm, baseKey, length, 'deriveBits'));
     },
-    async deriveKey(algorithm:any,baseKey:any,target:any,extractable:boolean,uses:string[]):Promise<any>{const n=algorithmName(target),bits=n==='AES-GCM'?Number(target.length):n==='HMAC'?Number(target.length||256):0;if(!bits||bits%8)throw new DOMException('Unsupported key algorithm','NotSupportedError');const raw=await subtle.deriveBits(algorithm,baseKey,bits);return subtle.importKey('raw',raw,target,extractable,uses);},
+    async deriveKey(algorithm:any,baseKey:any,target:any,extractable:boolean,uses:string[]):Promise<any>{const n=algorithmName(target),bits=n==='AES-GCM'?Number(target.length):n==='HMAC'?Number(target.length||256):0;if(!bits||bits%8)throw new DOMException('Unsupported key algorithm','NotSupportedError');const raw=deriveMaterial(algorithm,baseKey,bits,'deriveKey');return subtle.importKey('raw',exactBuffer(raw),target,extractable,uses);},
     async encrypt(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const v=record(key,'encrypt','AES-GCM');if(algorithmName(algorithm)!=='AES-GCM')throw new DOMException('Unsupported algorithm','NotSupportedError');if((algorithm.tagLength===undefined?128:Number(algorithm.tagLength))!==128)throw new DOMException('Unsupported tag length','NotSupportedError');return exactBuffer(provider(OP.AES_ENCRYPT,v.bytes,bytesOf(data),bytesOf(algorithm.iv),algorithm.additionalData===undefined?undefined:bytesOf(algorithm.additionalData)));},
     async decrypt(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const v=record(key,'decrypt','AES-GCM');if(algorithmName(algorithm)!=='AES-GCM')throw new DOMException('Unsupported algorithm','NotSupportedError');if((algorithm.tagLength===undefined?128:Number(algorithm.tagLength))!==128)throw new DOMException('Unsupported tag length','NotSupportedError');return exactBuffer(provider(OP.AES_DECRYPT,v.bytes,bytesOf(data),bytesOf(algorithm.iv),algorithm.additionalData===undefined?undefined:bytesOf(algorithm.additionalData)));},
     async sign(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const n=algorithmName(algorithm),v=record(key,'sign',n==='Ed25519'?'Ed25519':'HMAC'),op=n==='Ed25519'?OP.ED_SIGN:n==='HMAC'?OP.HMAC_SIGN:0;if(!op)throw new DOMException('Unsupported algorithm','NotSupportedError');return exactBuffer(provider(op,v.bytes,bytesOf(data)));},
@@ -86,6 +99,17 @@
     async exportKey(format:string,key:any):Promise<any>{const v=key&&keyRecords.get(key);if(!v)throw new DOMException('Invalid CryptoKey','InvalidAccessError');if(!v.extractable)throw new DOMException('Key is not extractable','InvalidAccessError');if(format==='raw'&&v.name==='Ed25519'&&v.type==='public')return exactBuffer(v.publicKey);if(format==='raw'&&v.type==='secret')return exactBuffer(v.bytes);if(format==='pkcs8'&&v.name==='Ed25519'&&v.type==='private')return exactBuffer(v.bytes);if(format==='jwk'&&v.name==='Ed25519'){const j:any={kty:'OKP',crv:'Ed25519',x:base64url(v.publicKey),key_ops:v.usages.slice(),ext:true};if(v.type==='private')j.d=base64url(v.bytes.slice(-32));return j;}if(format==='jwk'&&v.type==='secret')return{kty:'oct',k:base64url(v.bytes),alg:v.name==='AES-GCM'?`A${v.bytes.length*8}GCM`:'HS256',key_ops:v.usages.slice(),ext:true};throw new DOMException('Unsupported export','NotSupportedError');},
     async digest(algorithm:any,data:any):Promise<ArrayBuffer>{if(String(algorithmName(algorithm)||'').toUpperCase().replace('-','')!=='SHA256')throw new DOMException('Unsupported digest','NotSupportedError');return exactBuffer(provider(OP.SHA256,undefined,bytesOf(data)));},
   };
+  function deriveMaterial(algorithm: any, baseKey: any, length: number | null, usage: string): Uint8Array {
+    const value = record(baseKey, usage, 'HKDF');
+    if (algorithmName(algorithm) !== 'HKDF' || hashName(algorithm) !== 'SHA256') {
+      throw new DOMException('Unsupported derivation', 'NotSupportedError');
+    }
+    const bits = Number(length);
+    if (!Number.isFinite(bits) || bits < 0 || bits % 8 !== 0 || bits > 65280) {
+      throw new DOMException('Invalid bit length', 'OperationError');
+    }
+    return provider(OP.HKDF, value.bytes, bytesOf(algorithm.salt), bytesOf(algorithm.info), undefined, bits / 8);
+  }
   function invalidCharacter(): never {
     throw new DOMException('Invalid character', 'InvalidCharacterError');
   }
