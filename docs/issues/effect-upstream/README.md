@@ -28,6 +28,16 @@ the official Node run. `bun-reference.json` records the case IDs, pin, adapter
 digests and full report digest. These are correctness counts, not performance
 measurements. Runtime-specific skip modes are preserved and compared explicitly.
 
+The complete selection on native compiler `e445e822` recorded 9,379 passes,
+796 failures and 45 skips. Eighteen files stopped early: 799 registered cases
+were not recorded, so this is an incomplete diagnostic run, not a complete
+native score. The same run reproduced Bun's complete reference exactly.
+`native-diagnostic-reference.json` retains compiler and report digests, source
+and adapter digests, per-file completeness and failure IDs. Subsequent fixes
+have passed focused upstream subsets; those results must not be added to this
+older run. A new complete run on one frozen compiler is required for an updated
+comparison.
+
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
 `vitest.setup.ts`, retains per-file logs and case IDs, and records timeouts,
