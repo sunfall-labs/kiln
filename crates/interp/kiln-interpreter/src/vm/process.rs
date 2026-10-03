@@ -1,6 +1,17 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    pub(super) fn process_exit_code(&mut self, update: Option<Option<i32>>) -> Option<i32> {
+        let Value::Object(process) = self.process_object() else {
+            unreachable!("the process builtin is an object");
+        };
+        let mut process = process.borrow_mut();
+        if let Some(code) = update {
+            process.process_exit_code = code;
+        }
+        process.process_exit_code
+    }
+
     /// Lazily build this execution's restricted `process` object.
     pub(super) fn process_object(&mut self) -> Value {
         if let Some(existing) = &self.process_object {

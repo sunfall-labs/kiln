@@ -782,6 +782,14 @@ static int kiln_c99_private_object(kiln_value *out) {
                                               kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
                                               0, 1, 1);
     }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "processExitCodeGet", 18,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT_CODE_GET),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "processExitCodeSet", 18,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT_CODE_SET),
+                                          0, 1, 1);
     if (status != KILN_C99_OK) return status;
     *out = *slot;
     return KILN_C99_OK;

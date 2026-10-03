@@ -2230,6 +2230,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_MODULE) {
         KILN_C99_REFUSE("the node:module Module constructor, which this backend does not build");
     }
+    if (code == KILN_C99_METHOD_PROCESS_EXIT_CODE_GET ||
+        code == KILN_C99_METHOD_PROCESS_EXIT_CODE_SET) {
+        void *slot_pointer = NULL;
+        kiln_value *slot;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE, &slot_pointer);
+        if (status != KILN_C99_OK) return status;
+        slot = (kiln_value *)slot_pointer;
+        if (code == KILN_C99_METHOD_PROCESS_EXIT_CODE_GET) {
+            *result = *slot;
+            return KILN_C99_OK;
+        }
+        if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED) {
+            *slot = kiln_c99_undefined();
+        } else if (args[0].tag == KILN_VALUE_NUMBER) {
+            *slot = args[0];
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_PROCESS_NEXT_TICK) {
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
         if (!kiln_c99_is_callable(callback))

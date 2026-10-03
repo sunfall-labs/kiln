@@ -143,6 +143,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(ExecutionResult {
                     value: Value::Undefined,
                     steps: self.steps,
+                    process_exit_code: None,
                 });
             }
             if !Rc::ptr_eq(&program, &self.program) {
@@ -827,6 +828,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
+                        process_exit_code: None,
                     });
                 }
                 Instruction::YieldStar(exit_target) => {
@@ -842,6 +844,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
+                        process_exit_code: None,
                     });
                 }
                 Instruction::ToObject => {
@@ -2148,6 +2151,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(ExecutionResult {
                             value,
                             steps: self.steps,
+                            process_exit_code: None,
                         });
                     };
                     // Discard anything the callee left behind. A well-formed program leaves
@@ -2206,6 +2210,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(ExecutionResult {
                             value: self.stack.pop().unwrap_or(Value::Undefined),
                             steps: self.steps,
+                            process_exit_code: None,
                         });
                     }
                 }

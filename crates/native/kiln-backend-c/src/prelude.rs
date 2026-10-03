@@ -1051,6 +1051,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_SOCKET_READ_END_TICK, 570, NodeNet; 0, 0),
     // Private HTTP ownership completion invoked by the TS IncomingMessage end bridge.
     (KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED, 571, NodeHttp; 0, 0),
+    (KILN_C99_METHOD_PROCESS_EXIT_CODE_GET, 574, Direct; 0, 0),
+    (KILN_C99_METHOD_PROCESS_EXIT_CODE_SET, 575, Direct; 0, 0),
     /* Three groups, and no precedence between them: `kiln_c99_invoke_method` routes this
      * code by receiver before it consults any group. See the comment there. */
     (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284, NodeHttp, NodeNet, NodeStream; 0, 0),

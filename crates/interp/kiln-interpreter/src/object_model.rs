@@ -243,6 +243,8 @@ pub struct ObjectData {
     pub(super) primitive: Option<Value>,
     /// Realm-local Node EventEmitter state, intentionally absent from property reflection.
     pub(super) node_events: Option<Vec<NodeEventBucket>>,
+    /// Requested natural process status, hidden from ordinary property reflection.
+    pub(super) process_exit_code: Option<i32>,
     /// Stateful codec storage attached to the TextDecoder receiver, not a reflectable property.
     pub(super) text_decoder: Option<Rc<RefCell<kiln_encoding::StreamingDecoder>>>,
     /// Interpreter-owned Node server/socket/request/response state. Runtime drivers remain
@@ -330,6 +332,7 @@ impl Default for ObjectData {
             prototype: None,
             primitive: None,
             node_events: None,
+            process_exit_code: None,
             text_decoder: None,
             node_object: None,
         }

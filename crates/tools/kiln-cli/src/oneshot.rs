@@ -110,6 +110,57 @@ mod tests {
     fn share_native_semantic_cache(_fixture: &std::path::Path) {}
 
     #[test]
+    fn process_exit_code_is_applied_after_deferred_work_in_both_engines() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-process-exit-code-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create exit-code fixture");
+        let source = fixture.join("exit-code.mjs");
+        std::fs::write(
+            &source,
+            "process.exitCode = \"3\";\nsetTimeout(() => { process.exitCode = 7; }, 0);\n",
+        )
+        .expect("write exit-code fixture");
+        share_native_semantic_cache(&fixture);
+
+        let interpreted = {
+            let mut session = OneShot::start().expect("start interpreted engine");
+            commands::run(
+                &mut session,
+                &source,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+                false,
+            )
+            .expect("run interpreted exit-code fixture")
+        };
+        assert_eq!(interpreted.exit_code, 7);
+
+        let native = {
+            let mut session = OneShot::start().expect("start native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                true,
+                false,
+                None,
+                None,
+                false,
+            )
+            .expect("run native exit-code fixture")
+        };
+        assert_eq!(native.exit_code, 7);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
     fn concurrent_one_shot_sessions_have_private_engines() {
         let mut first = OneShot::start().expect("start first engine");
         let mut second = OneShot::start().expect("start second engine");

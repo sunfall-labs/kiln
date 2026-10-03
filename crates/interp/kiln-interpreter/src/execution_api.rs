@@ -153,6 +153,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     vm.run_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     })
 }
@@ -232,6 +233,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     vm.run_node_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     })
 }
@@ -1051,6 +1053,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     }
     let execution = ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     };
     let exports = own_exports(module, &vm.locals)?;

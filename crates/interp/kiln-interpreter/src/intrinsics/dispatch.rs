@@ -2923,6 +2923,8 @@ pub(crate) fn call_native(
         | Native::ProcessCwd
         | Native::ProcessKill
         | Native::ProcessExit
+        | Native::ProcessExitCodeGet
+        | Native::ProcessExitCodeSet
         | Native::ProcessStartRaw
         | Native::ProcessCancelRaw
         | Native::UrlParseRaw

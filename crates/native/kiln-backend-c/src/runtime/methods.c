@@ -237,6 +237,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_PROCESS_EXIT: return "exit";
+    case KILN_C99_METHOD_PROCESS_EXIT_CODE_GET: return "processExitCodeGet";
+    case KILN_C99_METHOD_PROCESS_EXIT_CODE_SET: return "processExitCodeSet";
     case KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC: return "readFileSync";
     case KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC: return "writeFileSync";
     case KILN_C99_METHOD_NODE_FS_MKDIR_SYNC: return "mkdirSync";

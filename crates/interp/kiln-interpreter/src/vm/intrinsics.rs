@@ -2012,6 +2012,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.flush_stdio();
                 return Err(ExecutionError::ProcessExited(code));
             }
+            Native::ProcessExitCodeGet => Ok(self
+                .process_exit_code(None)
+                .map_or(Value::Undefined, |code| Value::Number(f64::from(code)))),
+            Native::ProcessExitCodeSet => {
+                let code = match arguments.first() {
+                    None | Some(Value::Undefined) => None,
+                    Some(Value::Number(code)) => Some(*code as i32),
+                    _ => return Ok(Value::Undefined),
+                };
+                self.process_exit_code(Some(code));
+                Ok(Value::Undefined)
+            }
             Native::ProcessStdinSetRawMode => {
                 let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
                 if let Value::Object(obj) = receiver {

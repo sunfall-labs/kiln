@@ -1152,12 +1152,13 @@ fn execute_graph(
     match result {
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
+            let exit_code = execution.process_exit_code.unwrap_or(0);
             Response::Ran(RunSummary {
                 revision,
                 path,
                 file: FileId(file.0),
-                succeeded: true,
-                exit_code: Some(0),
+                succeeded: exit_code == 0,
+                exit_code: Some(exit_code),
                 signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
@@ -1671,12 +1672,13 @@ fn execute_program(
     match result {
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
+            let exit_code = execution.process_exit_code.unwrap_or(0);
             Response::Ran(RunSummary {
                 revision,
                 path,
                 file: FileId(file.0),
-                succeeded: true,
-                exit_code: Some(0),
+                succeeded: exit_code == 0,
+                exit_code: Some(exit_code),
                 signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),

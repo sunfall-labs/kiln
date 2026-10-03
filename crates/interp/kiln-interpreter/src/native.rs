@@ -369,6 +369,9 @@ pub enum Native {
     ProcessExit,
     ProcessStartRaw,
     ProcessCancelRaw,
+    /// Private realm status access used by the shared TypeScript `process.exitCode` policy.
+    ProcessExitCodeGet,
+    ProcessExitCodeSet,
     /// The four bridges the shared TypeScript `URL` captures (`kiln-builtins/src/url.ts`).
     UrlParseRaw,
     UrlSetRaw,

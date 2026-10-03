@@ -5129,6 +5129,40 @@ static int kiln_cli_take_realm_exit_code(uint64_t realm, int32_t *out) {
     return request.found;
 }
 
+typedef struct kiln_cli_process_exit_code {
+    int present;
+    int32_t code;
+} kiln_cli_process_exit_code;
+
+extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+#define KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE UINT32_C(16)
+
+static int kiln_cli_read_process_exit_code(void *opaque) {
+    kiln_cli_process_exit_code *request = (kiln_cli_process_exit_code *)opaque;
+    void *slot_pointer = NULL;
+    int status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE, &slot_pointer);
+    if (status != KILN_C99_OK) return status;
+    kiln_value *slot = (kiln_value *)slot_pointer;
+    if (slot->tag == KILN_VALUE_UNDEFINED) {
+        request->present = 0;
+        return KILN_C99_OK;
+    }
+    if (slot->tag != KILN_VALUE_NUMBER) return KILN_C99_CONTROL_ERROR;
+    double code;
+    memcpy(&code, &slot->bits, sizeof(code));
+    request->code = (int32_t)code;
+    request->present = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_cli_natural_process_exit_code(uint64_t realm, int32_t *out) {
+    kiln_cli_process_exit_code request = {0};
+    int status = kiln_realm_enter(realm, kiln_cli_read_process_exit_code, &request);
+    if (status != KILN_C99_OK) return -1;
+    if (request.present) *out = request.code;
+    return request.present;
+}
+
 /* The graph and result slots outlive every generated C frame. A scheduler can run one step,
  * release its lane, and later resume this record without retaining a frame pointer. */
 typedef struct kiln_cli_realm_run {
@@ -5251,6 +5285,8 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * was asked for. */
     int32_t exit_requested = 0;
     int exit_asked = 0;
+    int32_t natural_exit_requested = 0;
+    int natural_exit_present = 0;
     if (graph == NULL) {{ free(run); return 1; }}"#,
         startup_indices.len(),
         startup_indices.len()
@@ -5302,6 +5338,10 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
             if (graph->instance->result.tag != KILN_VALUE_STRING) graph->instance->result = kiln_c99_text(graph->instance->result);
             (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
             code = 1;
+        } else {
+            int natural = kiln_cli_natural_process_exit_code(realm, &requested);
+            if (natural < 0) code = 1;
+            else if (natural == 1) code = requested;
         }
         int completed = kiln_cli_end_worker_realm(realm, graph, code);
         free(run);
@@ -5347,6 +5387,11 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         kiln_cli_report_failure_with(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write", &graph->realm->cli);
         status = 1;
     }
+    if (status == 0 && !exit_asked && !unsettled_entry) {
+        int natural = kiln_cli_natural_process_exit_code(realm, &natural_exit_requested);
+        if (natural < 0) status = KILN_C99_CONTROL_ERROR;
+        else natural_exit_present = natural;
+    }
     destroy_status = kiln_realm_destroy(realm);
     free(graph);
     free(run);
@@ -5355,6 +5400,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * is told apart by, as `process.exit(code)` is. */
     if (unsettled_entry) return 13;
     if (status == 0) status = destroy_status;
+    if (status == 0 && natural_exit_present) return (int)natural_exit_requested;
     return status == 0 ? 0 : 1;
 }
 

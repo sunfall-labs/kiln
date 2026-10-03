@@ -172,7 +172,7 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
         let outcome = graph.execute_node(&mut host, self.limits, capabilities);
         let thrown = LAST_THROWN.with(|last| last.borrow_mut().take());
         match outcome {
-            Ok(_) => 0,
+            Ok(result) => result.process_exit_code.unwrap_or(0),
             Err(ModuleEvaluationError::Execution {
                 error: ExecutionError::ProcessExited(code),
                 ..
@@ -1358,6 +1358,7 @@ impl GraphExecutor<'_> {
                         entry_result = Some(ExecutionResult {
                             value: Value::Undefined,
                             steps: 0,
+                            process_exit_code: None,
                         });
                     }
                     continue;

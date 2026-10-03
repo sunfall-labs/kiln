@@ -1894,6 +1894,8 @@ fn skip_trivia(source: &str) -> &str {
 pub struct ExecutionResult {
     pub value: Value,
     pub steps: u64,
+    /// The exit status requested through `process.exitCode`, if any.
+    pub process_exit_code: Option<i32>,
 }
 
 /// One value published by a completed module evaluation.
@@ -2033,6 +2035,14 @@ pub(crate) fn new_engine_private(realm: RealmId) -> Value {
             private.set_non_enumerable(name, Value::Native(native, realm));
         }
     }
+    private.set_non_enumerable(
+        "processExitCodeGet",
+        Value::Native(Native::ProcessExitCodeGet, realm),
+    );
+    private.set_non_enumerable(
+        "processExitCodeSet",
+        Value::Native(Native::ProcessExitCodeSet, realm),
+    );
     Value::Object(Rc::new(RefCell::new(private)))
 }
 

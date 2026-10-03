@@ -19,6 +19,37 @@ delete (globalThis as any).__kilnExtensions;
 // module reads it from `globalThis.__kilnPrivate` only during its own initialization, in a window
 // the engine opens and closes around that code; no program ever sees the name, or a symbol key.
 const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
+
+// The public Node-compatible property is policy in TypeScript; the private methods only retain
+// and report a realm's requested status. Natural completion reads this after the turn loop drains.
+const processObject: any = (globalThis as any).process;
+if (processObject !== undefined && typeof kilnPrivate.processExitCodeGet === "function") {
+  Object.defineProperty(processObject, "exitCode", {
+    enumerable: true,
+    configurable: true,
+    get() { return kilnPrivate.processExitCodeGet(); },
+    set(value: any) {
+      if (value === undefined || value === null) {
+        kilnPrivate.processExitCodeSet(undefined);
+        return;
+      }
+      if (typeof value !== "number" && typeof value !== "string") {
+        throw new TypeError("The \"code\" argument must be of type number or string.");
+      }
+      if (typeof value === "string" && value.length === 0) {
+        throw new TypeError("The \"code\" argument must not be an empty string.");
+      }
+      const code = typeof value === "string" ? Number(value) : value;
+      if (Number.isNaN(code)) {
+        throw new TypeError("The \"code\" argument must be a number or a numeric string.");
+      }
+      if (!Number.isInteger(code)) {
+        throw new RangeError("The \"code\" argument must be an integer.");
+      }
+      kilnPrivate.processExitCodeSet(code | 0);
+    },
+  });
+}
 // `KILN_ENGINE_PRIVATE_FOR_TESTS=1` (set by the conformance probes that drive the actor protocol
 // directly, never by a program) leaves the name readable. Off by default in both engines.
 if (kilnPrivate.exposed !== true) {

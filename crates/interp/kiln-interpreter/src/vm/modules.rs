@@ -93,6 +93,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(ExecutionResult {
                 value: Value::Undefined,
                 steps: self.steps,
+                process_exit_code: None,
             });
         }
         Ok(outcome)
