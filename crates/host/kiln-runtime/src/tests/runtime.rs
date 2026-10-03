@@ -2537,7 +2537,12 @@ fn unreferenced_timers_do_not_keep_the_loop_alive() {
     realm.set_timeout(Duration::from_millis(7), WorkId::new(3));
     assert_eq!(
         drive(&mut realm),
-        vec![WorkId::new(2), WorkId::new(2), WorkId::new(2), WorkId::new(3)]
+        vec![
+            WorkId::new(2),
+            WorkId::new(2),
+            WorkId::new(2),
+            WorkId::new(3)
+        ]
     );
     let cleared = realm.set_timeout(Duration::from_millis(1), WorkId::new(4));
     realm.set_timer_referenced(cleared, false);
