@@ -2615,6 +2615,7 @@ extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     /* The graph whose host this is: its namespaces are the realm's. */
     kiln_graph_context *graph = host != NULL ? (kiln_graph_context *)host->context : NULL;
+    kiln_graph_context *target_graph = graph;
     if (promise == NULL || graph == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
         kiln_value primitive = kiln_c99_undefined();
@@ -2788,6 +2789,15 @@ import_attributes_valid:
                 "    if ({importer_guard}{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
+            output.push_str("        kiln_host *request_host = host;\n");
+            // A realm-shared builtin may initiate a lazy import while serving a worker entry.
+            // Such source targets belong to that worker's graph, so keep graph selection with
+            // the worker while retaining the original request host for promise operations.
+            if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+                && native_graph_export_count(node) != 0
+            {
+                output.push_str("        if (graph->is_builtin_graph && graph->realm != NULL && graph->realm->current_graph != NULL && graph->realm->current_graph->instance->worker_entry != 0) { graph = graph->realm->current_graph; host = &graph->host; }\n");
+            }
             if importer_index < modules.len()
                 && matches!(
                     modules[importer_index].0.source,
@@ -2799,9 +2809,17 @@ import_attributes_valid:
             }
             writeln!(
                 output,
-                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result((kiln_graph_context *)host->context, (size_t){index}), 1, depth, thrown);\n        if (kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index})->tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_THEN, *kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index}), NULL, 0, depth, thrown);"
+                "        target_graph = graph; int status = kiln_graph_ensure_module(target_graph, (size_t){index});"
             )
             .unwrap();
+            output.push_str("        host = request_host;\n");
+            output.push_str("        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str("), 1, depth, thrown);\n        if (kiln_graph_module_promise(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str(")->tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_THEN, *kiln_graph_module_promise(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str("), NULL, 0, depth, thrown);");
             if modules[index].0.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
@@ -3890,7 +3908,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
          typedef struct kiln_graph_unit_store {{ const kiln_c99_unit *unit; kiln_val *values; struct kiln_graph_unit_store *next; }} kiln_graph_unit_store;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
          typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
-         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
+         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
          struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    int is_builtin_graph;\n}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
@@ -4589,6 +4607,7 @@ static int kiln_graph_enter_inner(void *opaque) {
     if (graph == NULL) return -1;
     host = &graph->host;
     result = &graph->instance->result;
+    if (!graph->instance->linkage_ready) {
     (void)context;
 "#,
     );
@@ -4686,7 +4705,7 @@ static int kiln_graph_enter_inner(void *opaque) {
         writeln!(output, "        status = {}(host, {cells}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.prepare_symbol).unwrap();
         output.push_str("        }\n");
     }
-    for (index, (_, module)) in modules.iter().enumerate() {
+    for (index, (_node, module)) in modules.iter().enumerate() {
         if module.instantiation.is_some() {
             let is_builtin = matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_));
             writeln!(
@@ -4702,7 +4721,7 @@ static int kiln_graph_enter_inner(void *opaque) {
             output.push_str("        }\n");
         }
     }
-    for (index, (_, module)) in modules.iter().enumerate() {
+    for (index, (_node, module)) in modules.iter().enumerate() {
         if module.instantiation.is_some() {
             let is_builtin = matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_));
             writeln!(
@@ -4750,8 +4769,15 @@ static int kiln_graph_enter_inner(void *opaque) {
                 }
                 _ => None,
             };
-            if let Some(provider_index) = provider_index {
-                writeln!(output, "        if (!graph->is_builtin_graph) {{ status = kiln_graph_ensure_module(graph->realm->builtin_graph, (size_t){provider_index}); if (status != KILN_C99_OK) return status; kiln_graph_alias_builtins(graph); }}").unwrap();
+            if provider_index.is_some() {
+                // BuiltinGraph has prepared every builtin module's live export cells already.
+                // Link to those cells here, but do not evaluate a builtin body while this graph
+                // is still performing ModuleDeclarationInstantiation: builtin callbacks can
+                // dynamically import one of this graph's source modules. Normal evaluation
+                // ensures builtin dependencies after every source module has been instantiated.
+                output.push_str(
+                    "        if (!graph->is_builtin_graph) kiln_graph_alias_builtins(graph);\n",
+                );
             }
             if let NativeGraphImport::Binding {
                 provider_index,
@@ -5216,6 +5242,8 @@ static int kiln_graph_enter_inner(void *opaque) {
     }
 "#,
     );
+    output.push_str("    graph->instance->linkage_ready = 1;\n    }\n    if (graph->instance->defer_startup) return KILN_C99_OK;\n");
+    output.push_str("    if (!graph->is_builtin_graph && graph->realm->builtin_graph != NULL && graph->realm->builtin_graph->instance->defer_startup) { graph->realm->builtin_graph->instance->defer_startup = 0; status = kiln_graph_enter(graph->realm->builtin_graph); if (status != KILN_C99_OK) { *result = graph->realm->builtin_graph->instance->result; return status; } kiln_graph_alias_builtins(graph); }\n");
     output.push_str(&evaluation);
     output.push_str("    return 0;\n}\n");
     writeln!(
@@ -5239,7 +5267,7 @@ static int kiln_graph_enter_inner(void *opaque) {
         }
         writeln!(output, "    graph->instance->namespaces[{index}] = builtins->instance->namespaces[{index}]; graph->instance->module_states[{index}] = builtins->instance->module_states[{index}];").unwrap();
     }
-    output.push_str("}\nstatic int kiln_graph_initialize_builtins(kiln_graph_context *graph) { kiln_graph_context *builtins; int status; if (graph == NULL || graph->realm == NULL || graph->is_builtin_graph) return KILN_C99_OK; if (graph->realm->builtin_graph != NULL) return KILN_C99_OK; builtins = (kiln_graph_context *)calloc(1, sizeof *builtins); if (builtins == NULL) return KILN_C99_OUT_OF_MEMORY; builtins->instance = (kiln_graph_module_instance *)calloc(1, sizeof *builtins->instance); if (builtins->instance == NULL) { free(builtins); return KILN_C99_OUT_OF_MEMORY; } builtins->realm = graph->realm; builtins->is_builtin_graph = 1; builtins->host = graph->host; builtins->host.context = builtins; builtins->host.module_context = builtins; builtins->host.module_owner = NULL; builtins->host.module_unit_values = kiln_graph_unit_values; builtins->instance->instance_id = graph->realm->next_module_instance_id++; builtins->host.module_instance_id = builtins->instance->instance_id; builtins->instance->result.tag = KILN_VALUE_UNDEFINED; builtins->instance->entry_result.tag = KILN_VALUE_UNDEFINED; builtins->next_instance = graph->realm->instances; graph->realm->instances = builtins; graph->realm->builtin_graph = builtins; status = kiln_graph_enter(builtins); if (status != KILN_C99_OK) return status;\n");
+    output.push_str("}\nstatic int kiln_graph_initialize_builtins(kiln_graph_context *graph) { kiln_graph_context *builtins; int status; if (graph == NULL || graph->realm == NULL || graph->is_builtin_graph) return KILN_C99_OK; if (graph->realm->builtin_graph != NULL) return KILN_C99_OK; builtins = (kiln_graph_context *)calloc(1, sizeof *builtins); if (builtins == NULL) return KILN_C99_OUT_OF_MEMORY; builtins->instance = (kiln_graph_module_instance *)calloc(1, sizeof *builtins->instance); if (builtins->instance == NULL) { free(builtins); return KILN_C99_OUT_OF_MEMORY; } builtins->realm = graph->realm; builtins->is_builtin_graph = 1; builtins->host = graph->host; builtins->host.context = builtins; builtins->host.module_context = builtins; builtins->host.module_owner = NULL; builtins->host.module_unit_values = kiln_graph_unit_values; builtins->instance->instance_id = graph->realm->next_module_instance_id++; builtins->host.module_instance_id = builtins->instance->instance_id; builtins->instance->result.tag = KILN_VALUE_UNDEFINED; builtins->instance->entry_result.tag = KILN_VALUE_UNDEFINED; builtins->next_instance = graph->realm->instances; graph->realm->instances = builtins; graph->realm->builtin_graph = builtins; builtins->instance->defer_startup = 1; status = kiln_graph_enter(builtins); if (status != KILN_C99_OK) return status;\n");
     output.push_str("    return KILN_C99_OK; }\n");
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
@@ -5250,7 +5278,7 @@ static int kiln_graph_enter_inner(void *opaque) {
     output.push_str(") return KILN_C99_CONTROL_ERROR;\n");
     for index in 0..modules.len() {
         if matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_)) {
-            writeln!(output, "    if (!graph->is_builtin_graph && index == (size_t){index}) {{ if (graph->realm->builtin_graph == NULL) return KILN_C99_CONTROL_ERROR; status = kiln_graph_ensure_module(graph->realm->builtin_graph, index); if (status == KILN_C99_OK) kiln_graph_alias_builtins(graph); return status; }}").unwrap();
+            writeln!(output, "    if (!graph->is_builtin_graph && index == (size_t){index}) {{ if (graph->realm->builtin_graph == NULL) return KILN_C99_CONTROL_ERROR; status = kiln_graph_ensure_module(graph->realm->builtin_graph, index); kiln_graph_alias_builtins(graph); return status; }}").unwrap();
         }
     }
     output.push_str("    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n");
