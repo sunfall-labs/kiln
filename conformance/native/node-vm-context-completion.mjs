@@ -76,6 +76,14 @@ const classCallCaughtInContext = runInNewContext(
 if (classCallCaughtInContext !== true) {
   throw new Error("new-context class call did not expose a catchable TypeError");
 }
+const nestedClassCallCaught = runInNewContext(
+  "let caught = false; try { new (class Outer { field = (class Inner {})() })() } " +
+    "catch (error) { caught = error?.name === 'TypeError' }; caught",
+  {},
+);
+if (nestedClassCallCaught !== true) {
+  throw new Error("class field initializer bypassed class-call protection");
+}
 const dynamicClassContext = {};
 runInNewContext("C = class A {}", dynamicClassContext);
 let classCallCaughtByCaller = false;
