@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -104,7 +105,8 @@ def entry_for(workspace, source, name):
     # The official upstream setup installs Effect equality testers, so expect is
     # unconditional. Optional adapters add their real library implementations.
     features = ['expect']
-    import re
+    if re.search(r'\brequire\s*\(', text):
+        features.insert(0, 'node-support')
     if re.search(r'\b(?:vi|vitest)\s*\.', text):
         features.append('spy')
     if re.search(r'\b(?:useFakeTimers|useRealTimers|advanceTimersByTime)', text):
@@ -202,6 +204,7 @@ def main():
             versions[engine] = subprocess.check_output(cmd, text=True).strip()
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
+                  'clock_policy': {e: 'wall' for e in engines},
                   'kiln_binary_sha256': digest(kiln) if any(e != 'bun' for e in engines) else None,
                   'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
@@ -217,12 +220,29 @@ def main():
                 if engine == 'bun':
                     cmd = ['bun', '--tsconfig-override', str(workspace / 'tsconfig.json'), str(entries[name])]
                 else:
-                    cmd = [str(kiln), '--one-shot', 'run', str(entries[name]), '--node']
-                    if engine == 'native':
-                        cmd += ['--backend', 'native-dev']
-                    cmd = [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(args.kiln_memory_mb), *cmd]
+                    limiter = [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(args.kiln_memory_mb)]
+                    cmd = [*limiter, str(kiln), '--one-shot', 'run', str(entries[name]), '--node']
+                build = None
+                if engine == 'native':
+                    # A shipped executable has the host-clock policy. Native run's
+                    # deterministic clock cannot time out continuously runnable work.
+                    binary = directory / 'native.bin'
+                    binary.unlink(missing_ok=True)
+                    build_cmd = [*limiter, str(kiln), '--one-shot', 'build', str(entries[name]),
+                                 '--node', '--profile', 'native-dev', '--output', str(binary)]
+                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs)
+                    if build['exit_code'] != 0 or not binary.is_file():
+                        envelope = {**build, 'build': build, 'inventory': None, 'cases': [],
+                                    'summary': None, 'errors': [{'kind': 'runner_error', 'error': 'native build failed'}], 'complete': False}
+                        row['engines'][engine] = envelope
+                        write_json(directory / (engine + '.json'), envelope)
+                        continue
+                    cmd = [*limiter, str(binary)]
                 log = directory / (engine + '.log')
                 envelope = execute(cmd, workspace, log, args.timeout, args.runtime_jobs)
+                if build is not None:
+                    envelope['build'] = build
+                    envelope['binary_sha256'] = digest(binary)
                 envelope.update(records(log))
                 envelope['complete'] &= not envelope['timed_out']
                 row['engines'][engine] = envelope

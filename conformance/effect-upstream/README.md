@@ -9,8 +9,13 @@ mbx build --release -p kiln-cli
 ./scripts/effect-upstream.py --path Array --engine bun --engine interpreter --engine native --out target/effect-array
 ```
 
-The default comparison is Bun versus kiln native. Both load the original TS and
-the same adapter, including upstream setup, without bundling. Dependencies are
+The default comparison is Bun versus kiln native. Both consume the original TS and
+the same adapter, including upstream setup and a shared `createRequire` shim for files that use it, without bundling.
+The native lane builds a `native-dev` executable and runs it with the shipped
+wall-clock policy, matching Bun. Build and execution evidence are separate.
+The optional interpreter lane uses Node host-clock capability. Its timer scheduler
+is being brought into agreement with that capability; continuously runnable work
+currently exposes incomplete timer coverage. Dependencies are
 locked. The source/dependency workspace lives under `~/.cache/kiln` and is locked
 for the entire run. `--workspace` selects another owned directory. `--jobs`,
 `--timeout` and `--kiln-memory-mb` bound execution; each kiln process defaults to
