@@ -46,7 +46,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             data.set_non_enumerable(WEAK_REF_TARGET, target.clone());
         }
-        self.weak_ref_keepalive.push(target);
+        // A SharedFacade owns the graph lease. Keeping the facade alive through this VM's
+        // job would therefore make a WeakRef extend the lifetime of an otherwise dead graph.
+        // The graph is immutable and its weak target can be upgraded directly at deref time.
+        if !matches!(target, Value::Shared(_)) {
+            self.weak_ref_keepalive.push(target);
+        }
         data.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::WeakRef),
             RealmId::PRIMARY,
@@ -117,7 +122,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if let Some(target) = &data.weak_shared_target {
                 if let Some(target) = target.upgrade() {
                     let value = Value::Shared(target);
-                    self.weak_ref_keepalive.push(value.clone());
                     return Ok(value);
                 }
                 return Ok(Value::Undefined);
