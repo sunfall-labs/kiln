@@ -23,6 +23,30 @@ const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
 // The public Node-compatible property is policy in TypeScript; the private methods only retain
 // and report a realm's requested status. Natural completion reads this after the turn loop drains.
 const processObject: any = (globalThis as any).process;
+// Node exposes these clock functions as ordinary JavaScript functions. Keep the host clock
+// operation private to the wrappers so reflection, property replacement and spies see the same
+// callable surface in both engines, rather than a backend method-id representation.
+if (processObject !== undefined && typeof processObject.hrtime === "function") {
+  const hostHrtime = processObject.hrtime;
+  const hostHrtimeBigint = hostHrtime.bigint;
+  function hrtime(time?: any): any {
+    return arguments.length === 0 ? hostHrtime() : hostHrtime(time);
+  }
+  if (typeof hostHrtimeBigint === "function") {
+    Object.defineProperty(hrtime, "bigint", {
+      value: function bigint(): bigint { return hostHrtimeBigint(); },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(processObject, "hrtime", {
+    value: hrtime,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
 if (processObject !== undefined && typeof kilnPrivate.processExitCodeGet === "function") {
   Object.defineProperty(processObject, "exitCode", {
     enumerable: true,
