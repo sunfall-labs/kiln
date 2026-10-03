@@ -3103,6 +3103,9 @@ pub(super) fn write_graph_namespace_build(
             "    status = {module_symbol}_namespace_wrapper(&{namespaces}[{module_index}], NULL, NULL, NULL, (size_t)0);"
         )
         .unwrap();
+        if !shared {
+            writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_module_namespace_set_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+        }
         return;
     }
     let names = entries
@@ -3154,6 +3157,9 @@ pub(super) fn write_graph_namespace_build(
         entries.len()
     )
     .unwrap();
+    if !shared {
+        writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_module_namespace_set_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+    }
 }
 
 /// The graph launcher's root function (ADR 0041): the export, import and namespace arrays it
@@ -3186,7 +3192,7 @@ pub(super) fn render_graph_roots(
     }
     writeln!(output, "    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if (visit(visit_context, &graph->instance->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
     // Collection and ownership inspection enumerate precisely the same root slots.
-    output.push_str("\nstatic int kiln_graph_gc_mark_root(void *heap, const void *pointer, uint32_t kind) {\n    if (kind != KILN_GC_VISIT_VALUE) return KILN_C99_INVALID_ARGUMENT;\n    (void)kiln_realm_gc_mark_value(heap, pointer);\n    return KILN_C99_OK;\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || context == NULL) return;\n    (void)kiln_graph_gc_visit_roots(context, kiln_graph_gc_mark_root, heap);\n}\n");
+    output.push_str("\nstatic int kiln_graph_gc_mark_root(void *heap, const void *pointer, uint32_t kind) {\n    if (kind != KILN_GC_VISIT_VALUE) return KILN_C99_INVALID_ARGUMENT;\n    (void)kiln_realm_gc_mark_value(heap, pointer);\n    return KILN_C99_OK;\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL) return;\n    (void)kiln_graph_gc_visit_roots(graph, kiln_graph_gc_mark_root, heap);\n    if (graph->host.module_owner != NULL) { owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner }; (void)kiln_realm_gc_mark_value(heap, &owner_root); }\n}\n");
 }
 
 #[cfg(test)]
@@ -3384,6 +3390,7 @@ typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
     void *module_context;
+    void *module_owner;
 } kiln_host;
 
 static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *path, size_t path_len) {
@@ -3555,6 +3562,9 @@ typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit, void *visit_context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
              kiln_gc_visit_roots_fn visit_roots, void *context, uint32_t flags);
+extern void *kiln_c99_module_owner_create(void *context,
+             kiln_gc_visit_roots_fn visit_roots, void (*release_instance)(void *context));
+extern int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner);
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
@@ -4489,6 +4499,9 @@ static int kiln_graph_enter_inner(void *opaque) {
                          kiln_graph_gc_visit_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->instance->roots_registered = 1;
+        graph->host.module_owner = kiln_c99_module_owner_create(
+            graph, kiln_graph_gc_visit_roots, NULL);
+        if (graph->host.module_owner == NULL) return KILN_C99_OUT_OF_MEMORY;
         /* A realm hosted beside others writes its standard streams where its host said. */
         if (graph->realm->cli.output != NULL)
             kiln_c99_realm_capture_output(graph->realm->cli.output, graph->realm->cli.error_output);
@@ -5159,6 +5172,7 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
     graph->host.call = kiln_graph_host_call;
     graph->host.context = graph;
     graph->host.module_context = graph;
+    graph->host.module_owner = NULL;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);

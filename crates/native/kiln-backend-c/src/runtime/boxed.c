@@ -2623,6 +2623,17 @@ static int kiln_c99_val_make_cell(kiln_val *slot) {
     return KILN_C99_OK;
 }
 
+int kiln_c99_val_make_cell_owned(kiln_val *slot, void *module_owner) {
+    kiln_gc_cell *box = (kiln_gc_cell *)kiln_c99_gc_alloc_hot(KILN_GC_CELL, sizeof *box, 1);
+    if (box == NULL) return KILN_C99_OUT_OF_MEMORY;
+    box->value = *slot;
+    box->module_owner = module_owner;
+    kiln_c99_val_store_cell(&box->value, *slot);
+    kiln_c99_heap_store_pointer(box, &box->module_owner, module_owner);
+    *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, &box->value);
+    return KILN_C99_OK;
+}
+
 /* A shared-region unit's once-made binding already has a permanent realm-owned root in its
  * unit block. Its cell payload can live in an appended slot there: every closure reaches the
  * binding through the unit block, which also marks this value on collection. The block never

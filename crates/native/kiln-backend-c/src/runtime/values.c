@@ -233,6 +233,21 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
+void kiln_c99_closure_set_module_owner(kiln_closure *closure, void *owner) {
+    if (closure == NULL) return;
+    kiln_c99_heap_store_pointer(closure, &closure->module_owner, owner);
+}
+
+int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner) {
+    kiln_object *object;
+    if (namespace_value.tag != KILN_VALUE_OBJECT || namespace_value.bits == 0)
+        return KILN_C99_INVALID_ARGUMENT;
+    object = (kiln_object *)(uintptr_t)namespace_value.bits;
+    if (!object->module_namespace) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_heap_store_pointer(object, &object->module_owner, owner);
+    return KILN_C99_OK;
+}
+
 
 static kiln_val *kiln_c99_cell_of(kiln_value value) {
     return (kiln_val *)(uintptr_t)value.bits;

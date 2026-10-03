@@ -1210,7 +1210,11 @@ static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
 typedef struct kiln_gc_module_owner {
+typedef struct kiln_gc_cell {
 extern void *kiln_c99_module_owner_create(void *context,
+extern int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner);
+extern void kiln_c99_closure_set_module_owner(kiln_closure *closure, void *owner);
+extern int kiln_c99_val_make_cell_owned(kiln_val *slot, void *owner);
 #define KILN_C99_BLOCK_KIND_OFFSET 8u
 #define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x03FFFFFFu)
 static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
@@ -3251,6 +3255,8 @@ static kiln_value kiln_c99_null(void) {
 static kiln_value kiln_c99_boolean(int value) {
 static kiln_value kiln_c99_function(kiln_closure *closure) {
 static kiln_closure *kiln_c99_closure_of(kiln_value value) {
+void kiln_c99_closure_set_module_owner(kiln_closure *closure, void *owner) {
+int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner) {
 static kiln_val *kiln_c99_cell_of(kiln_value value) {
 static int kiln_c99_val_make_cell(kiln_val *slot);
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown);
@@ -4355,6 +4361,7 @@ static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_v
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell, kiln_val value) {
 static int kiln_c99_val_make_cell(kiln_val *slot) {
+int kiln_c99_val_make_cell_owned(kiln_val *slot, void *module_owner) {
 static void kiln_c99_val_make_unit_cell(kiln_val *slot, kiln_val *storage) {
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
 static void *kiln_c99_par_string_alloc(kiln_c99_par_arena *arena, size_t length, int utf16,

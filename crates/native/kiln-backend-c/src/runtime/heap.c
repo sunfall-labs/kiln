@@ -7992,6 +7992,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_trace_object_properties(heap, object);
         kiln_c99_gc_mark_value(heap, &object->prototype);
         kiln_c99_gc_mark_value(heap, &object->boxed_primitive);
+        kiln_c99_gc_mark_block(heap, object->module_owner);
         break;
     }
     case KILN_GC_COMMONJS_REQUIRE: {
@@ -8021,10 +8022,13 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
          * without a second representation or an unsafe header-kind probe. */
         kiln_c99_gc_mark_block(heap, closure->name);
         kiln_c99_gc_mark_value(heap, &closure->source_value);
+        kiln_c99_gc_mark_block(heap, closure->module_owner);
         break;
     }
     case KILN_GC_CELL:
         kiln_c99_gc_mark_val(heap, *(const kiln_val *)payload);
+        if (block->size >= sizeof(kiln_gc_cell))
+            kiln_c99_gc_mark_block(heap, ((const kiln_gc_cell *)payload)->module_owner);
         break;
     case KILN_GC_ARRAY: {
         kiln_array *array = (kiln_array *)payload;

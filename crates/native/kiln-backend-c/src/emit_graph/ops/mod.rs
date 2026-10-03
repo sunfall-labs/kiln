@@ -677,13 +677,13 @@ pub(super) fn emit_graph_op(
                  * enters its block (notably on each loop pass). */
                 writeln!(
                     output,
-                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             } else {
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -1534,7 +1534,7 @@ pub(super) fn emit_graph_op(
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host);{publish} v{v} = kiln_val_from_boundary(built); }}"
+                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host); kiln_c99_closure_set_module_owner(kiln_c99_closure_of(built), host != NULL ? host->module_owner : NULL);{publish} v{v} = kiln_val_from_boundary(built); }}"
                 )
                 .unwrap();
             }

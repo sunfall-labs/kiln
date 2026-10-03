@@ -680,6 +680,8 @@ typedef struct kiln_host {
     void *context;
     /* Non-null only when this host explicitly carries generated module-instance provenance. */
     void *module_context;
+    /* GC-managed owner for module-context storage, null for ordinary embedding hosts. */
+    void *module_owner;
 } kiln_host;
 
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
@@ -876,6 +878,7 @@ typedef struct kiln_closure {
     kiln_body_fn body;
     /* Generated module closures stay bound to their graph instance across later resets. */
     kiln_host *module_host;
+    void *module_owner;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
@@ -1263,6 +1266,7 @@ typedef struct kiln_object {
      * data properties report writable=true. This is deliberately separate from `frozen`: a
      * namespace is not an ordinary frozen object, and reflection must preserve that distinction. */
     int module_namespace;
+    void *module_owner;
     /* The `arguments` object of a call. An internal slot rather than a `Symbol.toStringTag`
      * property, because the tag is not a property: neither `getOwnPropertyNames` nor
      * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
@@ -2313,9 +2317,18 @@ typedef struct kiln_gc_module_owner {
     kiln_gc_release_instance_fn release_instance;
 } kiln_gc_module_owner;
 
+typedef struct kiln_gc_cell {
+    /* First member preserves existing generated `kiln_val *` cell access. */
+    kiln_val value;
+    void *module_owner;
+} kiln_gc_cell;
+
 extern void *kiln_c99_module_owner_create(void *context,
                                           kiln_gc_visit_roots_fn visit_roots,
                                           kiln_gc_release_instance_fn release_instance);
+extern int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner);
+extern void kiln_c99_closure_set_module_owner(kiln_closure *closure, void *owner);
+extern int kiln_c99_val_make_cell_owned(kiln_val *slot, void *owner);
 
 /* The kind of a heap payload, read from the block header in front of it. The header is exactly
  * one `kiln_gc_block` (`heap.c`) before the payload whatever its origin -- nursery, slab or

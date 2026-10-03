@@ -197,7 +197,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 5;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 6;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -568,7 +568,7 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #define KILN_NATIVE_RUNTIME_VERSION 14
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 5
+#define KILN_HOST_ABI_VERSION 6
 #define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0
@@ -615,6 +615,8 @@ typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t arg
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    void *module_context;
+    void *module_owner;
 } kiln_host;
 
 /* An invocation-scoped owned result.  The v2 run function initializes *result to NULL before
