@@ -964,20 +964,31 @@ static kiln_value kiln_c99_text(kiln_value value) {
         return kiln_c99_text_value(&built);
     }
     case KILN_VALUE_SYMBOL: {
-        /* `String(sym)` spells the symbol out. Concatenation is a different question -- the
-         * language throws for `sym + ""` -- and neither engine draws that line yet. */
+        /* SymbolDescriptiveString is a JavaScript string, so its description keeps every
+         * UTF-16 code unit. The diagnostic UTF-8 builder would replace lone surrogates. */
         kiln_symbol *symbol = kiln_c99_symbol_of(value);
-        kiln_text built = {NULL, 0, 0};
-        if (kiln_c99_text_append_c(&built, "Symbol(") != KILN_C99_OK ||
-            (symbol->description_value.tag == KILN_VALUE_STRING
-                 ? kiln_c99_text_append_string(&built, symbol->description_value)
-                 : kiln_c99_text_append(&built, symbol->description, symbol->description_len)) !=
-                KILN_C99_OK ||
-            kiln_c99_text_append_c(&built, ")") != KILN_C99_OK) {
-            free(built.bytes);
-            return kiln_c99_undefined();
+        const kiln_string *description = symbol->description_value.tag == KILN_VALUE_STRING
+                                            ? (const kiln_string *)symbol->description_value.ptr
+                                            : NULL;
+        size_t length = description != NULL ? description->unit_len : symbol->description_len;
+        uint32_t flags = description != NULL && kiln_string_is_utf16(description)
+                             ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+        kiln_string *built;
+        static const char prefix[] = "Symbol(";
+        if (length > UINT32_MAX - 8) return kiln_c99_undefined();
+        built = kiln_c99_gc_alloc_units(length + 8, flags);
+        if (built == NULL) return kiln_c99_undefined();
+        for (size_t index = 0; index < length + 8; ++index) {
+            uint16_t unit = index < 7 ? (unsigned char)prefix[index]
+                            : index == length + 7 ? ')'
+                            : description != NULL ? kiln_string_unit_at(description, index - 7)
+                            : (unsigned char)symbol->description[index - 7];
+            if (flags == KILN_STRING_UTF16)
+                ((uint16_t *)(uintptr_t)built->data)[index] = unit;
+            else
+                ((unsigned char *)(uintptr_t)built->data)[index] = (unsigned char)unit;
         }
-        return kiln_c99_text_value(&built);
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)built, length + 8);
     }
     case KILN_VALUE_METHOD:
     case KILN_VALUE_BUILTIN: {
