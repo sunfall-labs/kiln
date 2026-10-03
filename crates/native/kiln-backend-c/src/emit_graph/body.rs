@@ -78,6 +78,7 @@ fn arguments_length_only_values(
 
     let mut loads = HashSet::new();
     let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
+    let mut terminator_uses = HashSet::new();
     for block in &graph.blocks {
         for (value, operation) in &block.operations {
             if matches!(
@@ -94,6 +95,29 @@ fn arguments_length_only_values(
                 uses.entry(input).or_default().push(operation);
             }
         }
+        match &block.terminator {
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. }
+            | Terminator::Throw(condition) => {
+                terminator_uses.insert(*condition);
+            }
+            Terminator::Return(Some(value)) => {
+                terminator_uses.insert(*value);
+            }
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                terminator_uses.insert(*value);
+                terminator_uses.extend(spilled.iter().copied());
+                if let Some((iterator, _, _)) = delegate {
+                    terminator_uses.insert(*iterator);
+                }
+            }
+            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
+        }
     }
     if loads.is_empty() {
         return loads;
@@ -101,8 +125,11 @@ fn arguments_length_only_values(
 
     let mut optimized = HashSet::new();
     for value in loads.iter().copied() {
+        if terminator_uses.contains(&value) {
+            return HashSet::new();
+        }
         let Some(value_uses) = uses.get(&value) else {
-            continue;
+            return HashSet::new();
         };
         if value_uses.len() != 1 {
             return HashSet::new();
