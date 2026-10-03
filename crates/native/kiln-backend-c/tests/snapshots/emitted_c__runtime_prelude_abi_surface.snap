@@ -2377,6 +2377,8 @@ static kiln_gc_block *kiln_c99_nursery_block_at(const char *base, const char *li
 static inline kiln_nursery_chunk *kiln_c99_nursery_chunk_of(const kiln_gc_heap *heap,
 static inline void kiln_c99_nursery_note_mark(const kiln_gc_heap *heap, const kiln_gc_block *block) {
 static inline int kiln_c99_gc_is_marked(const kiln_gc_heap *heap, const kiln_gc_block *block) {
+static inline int kiln_c99_gc_is_young(const kiln_gc_heap *heap, const kiln_gc_block *block) {
+static inline int kiln_c99_gc_is_live_this_collection(const kiln_gc_heap *heap,
 static void kiln_c99_nursery_note_release(kiln_gc_heap *heap, const kiln_gc_block *block) {
 static void kiln_c99_gc_note_finalizable(const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
@@ -2442,6 +2444,7 @@ static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **
 static void kiln_c99_gc_collect(void *opaque, int force);
 int kiln_c99_gc_request(void) {
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+static void kiln_c99_gc_collect_minor_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_gc_note_external(size_t size) {
@@ -2658,6 +2661,9 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 #undef KILN_C99_HOST_MARK_ARRAY
 #undef KILN_C99_HOST_MARK_POINTER
 #undef KILN_C99_HOST_MARK_VALUE
+static void kiln_c99_gc_trace_minor_remembered(kiln_gc_heap *heap) {
+static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk,
+static void kiln_c99_gc_audit_minor_owners(kiln_gc_heap *heap) {
 static size_t kiln_c99_shared_facade_hash(uint32_t graph, uint32_t generation, uint32_t node) {
 static kiln_shared_facade *kiln_c99_shared_facade_find(kiln_gc_heap *heap, uint32_t graph,
 static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {

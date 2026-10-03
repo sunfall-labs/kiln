@@ -1203,7 +1203,10 @@ fn runtime_prelude_size() {
     // shared lossless UTF-16 text assembly and call-site method metadata make up
     // the remainder. The 83,506-line unit contains each runtime section once;
     // public validation/formatting remains in shared TypeScript.
-    const CEILING_LINES: usize = 84_000;
+    // Reviewed 2026-10-03: remembered-owner minor collection adds the generation barrier,
+    // diagnostic audit and safe full-collection fallback; it remains in the existing heap
+    // runtime and adds 55 prelude lines without duplicating a runtime section.
+    const CEILING_LINES: usize = 84_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
