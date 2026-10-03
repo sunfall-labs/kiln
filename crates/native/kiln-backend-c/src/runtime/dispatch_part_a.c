@@ -1167,6 +1167,56 @@ static int kiln_c99_is_object(kiln_value val) {
            (kiln_c99_is_reference(val) || val.tag == KILN_VALUE_DATE);
 }
 
+/* CreateListFromArrayLike shared by apply and Reflect.construct. Dense own data entries
+ * can be forwarded directly; holes and descriptors must perform each observable Get. */
+static int kiln_c99_create_argument_list(kiln_host *host, kiln_value list, kiln_value *out,
+                                         int depth, kiln_value *thrown) {
+    kiln_array *given = NULL;
+    kiln_value gathered;
+    kiln_value length_value;
+    double length;
+    size_t at;
+    int status;
+    if (!kiln_c99_is_object(list)) return kiln_c99_throw_not_a(thrown, list, "object");
+    if (list.tag == KILN_VALUE_ARRAY) {
+        given = kiln_c99_array_of(list);
+        if (given->properties.tag == KILN_VALUE_OBJECT) {
+            given = NULL;
+        } else {
+            for (at = 0; at < given->count; ++at) {
+                if (given->elements[at] == KILN_VAL_HOLE) {
+                    given = NULL;
+                    break;
+                }
+            }
+        }
+    }
+    if (given != NULL) {
+        *out = list;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_get(host, list, "length", 6, &length_value, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_to_number_checked(host, length_value, &length, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (!(length >= 1.0)) length = 0.0;
+    /* Keep the backend's existing bounded argument-list refusal explicit. */
+    if (length > 1000000.0)
+        KILN_C99_REFUSE("CreateListFromArrayLike was given a length no argument list could have");
+    status = kiln_c99_new_array(&gathered);
+    if (status != KILN_C99_OK) return status;
+    for (at = 0; at < (size_t)length; ++at) {
+        kiln_value element;
+        status = kiln_c99_get_computed(host, list, kiln_c99_number((double)at),
+                                       &element, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(gathered, element);
+        if (status != KILN_C99_OK) return status;
+    }
+    *out = gathered;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
                                     kiln_value *result, int depth, kiln_value *thrown) {
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
@@ -2630,59 +2680,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value list = argc > 1 ? args[1] : kiln_c99_undefined();
             kiln_array *given = NULL;
             kiln_value gathered;
-            if (list.tag == KILN_VALUE_ARRAY) {
-                given = kiln_c99_array_of(list);
-                /* A hole is heap storage, never a JavaScript argument. It may also read an
-                 * inherited indexed property, so sparse arrays take the ordinary Get path. */
-                if (given->properties.tag == KILN_VALUE_OBJECT) {
-                    given = NULL;
-                } else {
-                    for (size_t at = 0; at < given->count; ++at) {
-                        if (given->elements[at] == KILN_VAL_HOLE) {
-                            given = NULL;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (given == NULL && list.tag != KILN_VALUE_UNDEFINED && list.tag != KILN_VALUE_NULL) {
-                kiln_value length_value;
-                double length;
-                size_t at;
-                status = kiln_c99_get(host, list, "length", 6, &length_value, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                status = kiln_c99_to_number_checked(host, length_value, &length, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                /* NaN and everything below one are no arguments at all. The upper bound is not
-                 * the language's -- it has none -- but a list this long is a `length` that was
-                 * never meant as one, and refusing names that rather than trying to build it. */
-                if (!(length >= 1.0)) {
-                    length = 0.0;
-                }
-                if (length > 1000000.0) {
-                    KILN_C99_REFUSE("Function.prototype.apply was given a length no argument list "
-                                    "could have");
-                }
-                status = kiln_c99_new_array(&gathered);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                for (at = 0; at < (size_t)length; ++at) {
-                    kiln_value element;
-                    status = kiln_c99_get_computed(host, list, kiln_c99_number((double)at),
-                                                   &element, depth, thrown);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
-                    status = kiln_c99_array_push(gathered, element);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
-                }
+            if (list.tag != KILN_VALUE_UNDEFINED && list.tag != KILN_VALUE_NULL) {
+                status = kiln_c99_create_argument_list(host, list, &gathered, depth, thrown);
+                if (status != KILN_C99_OK) return status;
                 given = kiln_c99_array_of(gathered);
             }
             kiln_val call_result_val = KILN_VAL_UNDEFINED;

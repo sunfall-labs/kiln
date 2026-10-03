@@ -44,13 +44,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(dense_items(&items.borrow()));
         }
         let length = self
-            .read_property(&list, "length", instruction)?
-            .as_number();
-        let length = if length.is_nan() || length <= 0.0 {
-            0
-        } else {
-            length.min(u32::MAX as f64) as usize
-        };
+            .array_like_length(&list, instruction)?
+            .min(u64::from(u32::MAX)) as usize;
         let mut collected = Vec::with_capacity(length.min(1024));
         for index in 0..length {
             collected.push(self.read_property(&list, &index.to_string(), instruction)?);

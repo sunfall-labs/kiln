@@ -1831,10 +1831,11 @@
             if (!kiln_c99_is_constructor(new_target)) {
                 return kiln_c99_throw_not_a(thrown, new_target, "constructor");
             }
-            if (argc < 2 || args[1].tag != KILN_VALUE_ARRAY) {
-                KILN_C99_REFUSE("Reflect.construct requires an array-like argument list");
-            }
-            list = kiln_c99_array_of(args[1]);
+            kiln_value argument_list;
+            status = kiln_c99_create_argument_list(host,
+                argc > 1 ? args[1] : kiln_c99_undefined(), &argument_list, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            list = kiln_c99_array_of(argument_list);
             kiln_value built = kiln_c99_undefined();
             kiln_value inline_args[16];
             kiln_value *construct_args = inline_args;
