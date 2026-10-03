@@ -16,6 +16,31 @@ fn node_bytes_value_adopts_owned_vec_and_keeps_buffer_mutable() {
 }
 
 #[test]
+fn node_response_end_recognizes_callback_overloads_without_serializing_callback() {
+    let callback = Value::Native(Native::NodeResponseEnd, RealmId::PRIMARY);
+
+    let (body, done) = crate::http::node_response_end_arguments(std::slice::from_ref(&callback))
+        .expect("end(callback) is a valid overload");
+    assert!(body.is_empty());
+    assert!(matches!(
+        done,
+        Some(Value::Native(Native::NodeResponseEnd, _))
+    ));
+
+    let (body, done) = crate::http::node_response_end_arguments(&[
+        Value::String("body".into()),
+        Value::String("utf8".into()),
+        callback,
+    ])
+    .expect("end(chunk, encoding, callback) keeps only the body as bytes");
+    assert_eq!(body, b"body");
+    assert!(matches!(
+        done,
+        Some(Value::Native(Native::NodeResponseEnd, _))
+    ));
+}
+
+#[test]
 fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
     let initial = ordinary_object([]);
     let initial_object = match &initial {

@@ -4571,12 +4571,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 Ok(Value::Boolean(disposition.ready))
             }
             Native::NodeResponseEnd => {
-                let bytes = arguments
-                    .first()
-                    .filter(|value| !matches!(value, Value::Undefined))
-                    .map(|value| node_body_bytes(Some(value)))
-                    .transpose()?
-                    .unwrap_or_default();
+                // `ServerResponse.end` accepts a completion callback in place of its chunk
+                // argument (`end(callback)`), as well as after the chunk/encoding overloads.
+                // Treating that callback as body bytes makes the server-side HEAD response path
+                // fail before it can complete the close callback that the Node adapter awaits.
+                let (bytes, callback) = crate::http::node_response_end_arguments(arguments)?;
                 let (resource, request_id, status, headers, start) = {
                     let mut state = state.borrow_mut();
                     if state.ended {
@@ -4626,6 +4625,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     message: "Hyper lost the HTTP response body".into(),
                 })?;
                 self.close_http_stream_after_response_end(resource, instruction)?;
+                if let Some(callback) = callback {
+                    self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
+                }
                 Ok(receiver.clone())
             }
             _ => unreachable!("only response natives dispatch here"),

@@ -273,6 +273,23 @@ pub(crate) fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, Executio
     }
 }
 
+/// Reduce Node's `ServerResponse.end([chunk[, encoding]][, callback])` overloads to their body
+/// bytes and completion callback. A callback passed as the only argument is not a body chunk.
+pub(crate) fn node_response_end_arguments(
+    arguments: &[Value],
+) -> Result<(Vec<u8>, Option<Value>), ExecutionError> {
+    let callback = arguments
+        .iter()
+        .rev()
+        .find(|value| is_callable(value))
+        .cloned();
+    let chunk = arguments
+        .first()
+        .filter(|value| !is_callable(value) && !matches!(value, Value::Undefined));
+    let bytes = node_body_bytes(chunk)?;
+    Ok((bytes, callback))
+}
+
 pub(crate) fn readable_chunk_length(value: &Value) -> usize {
     match value {
         Value::String(value) => value.len(),
