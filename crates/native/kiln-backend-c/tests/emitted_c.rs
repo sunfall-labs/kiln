@@ -1173,7 +1173,10 @@ fn runtime_prelude_size() {
     // The syntax-only allocation guards and generic external-owner tracing/finalization
     // add 263 emitted lines (80,389 -> 80,652). Reviewed the separate dynamic/heap/
     // value sections and host context edges; no section is duplicated or built-in added.
-    const CEILING_LINES: usize = 80_800;
+    // Stateful decoder provider glue and process-status get/set primitives bring the
+    // reviewed prelude to 80,806 lines. Builtin policy remains in TypeScript; the C
+    // changes retain codec state and a realm status slot, with no duplicated sections.
+    const CEILING_LINES: usize = 80_950;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
