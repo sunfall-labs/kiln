@@ -44,6 +44,31 @@ if (runInNewContext("1; {}", {}) !== 1 ||
     runInNewContext("1; if (true) { 7 }", {}) !== 7) {
   throw new Error("new-context statement completion did not preserve UpdateEmpty values");
 }
+const dynamicClass = runInNewContext("new (class A { a = 1 })()", {});
+if (dynamicClass.a !== 1 || !Object.hasOwn(dynamicClass, "a") ||
+    dynamicClass.constructor.name !== "A") {
+  throw new Error("new-context class expression did not initialize a public field");
+}
+let inheritedFieldSetterCalls = 0;
+const fieldContext = { inheritedFieldSetterCalls };
+const fieldResult = runInNewContext(
+  "Object.defineProperty(Object.prototype, 'field', { set() { inheritedFieldSetterCalls++; } }); " +
+  "new (class { field = 3 })()",
+  fieldContext,
+);
+if (fieldResult.field !== 3 || !Object.hasOwn(fieldResult, "field") ||
+    fieldContext.inheritedFieldSetterCalls !== 0) {
+  throw new Error("new-context class field invoked an inherited setter");
+}
+const classFieldContext = {};
+const classFieldResults = runInNewContext(
+  "let count = 0; const C = class A { first = ++count; second = this.first + 1 }; " +
+    "[count, new C().first, new C().second, count]",
+  classFieldContext,
+);
+if (classFieldResults.join(",") !== "0,1,3,2") {
+  throw new Error(`new-context class fields lost lexical/order semantics: ${classFieldResults}`);
+}
 let returnWasSyntaxError = false;
 try {
   runInNewContext("return 1", {});

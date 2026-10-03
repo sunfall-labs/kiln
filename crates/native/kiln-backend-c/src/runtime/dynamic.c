@@ -719,6 +719,7 @@ typedef enum {
     KILN_DYN_KW_VOID,
     KILN_DYN_KW_DELETE,
     KILN_DYN_KW_FUNCTION,
+    KILN_DYN_KW_CLASS,
     KILN_DYN_KW_NEW,
     KILN_DYN_KW_FOR,
     KILN_DYN_KW_IN,
@@ -1869,6 +1870,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         KILN_CHECK_KW("void", KILN_DYN_KW_VOID);
         KILN_CHECK_KW("delete", KILN_DYN_KW_DELETE);
         KILN_CHECK_KW("function", KILN_DYN_KW_FUNCTION);
+        KILN_CHECK_KW("class", KILN_DYN_KW_CLASS);
         KILN_CHECK_KW("new", KILN_DYN_KW_NEW);
         KILN_CHECK_KW("for", KILN_DYN_KW_FOR);
         KILN_CHECK_KW("in", KILN_DYN_KW_IN);
@@ -2548,6 +2550,10 @@ static int kiln_dyn_make_arrow_from_tail(kiln_host *host, kiln_dyn_lexer *lex,
                                          int depth, kiln_value *out, kiln_value *thrown);
 static int kiln_dyn_parenthesized_arrow_params(kiln_dyn_lexer *lex, const char **params,
                                                size_t *params_len, size_t *after_close);
+static int kiln_dyn_eval_class_expression(kiln_host *host, kiln_dyn_lexer *lex,
+                                         kiln_dyn_scope *scope, kiln_value receiver,
+                                         const kiln_value *args, size_t argc, int depth,
+                                         kiln_value *out, kiln_value *thrown);
 
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
                                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
@@ -2608,6 +2614,10 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                 int depth, kiln_value *out, kiln_value *reference_base,
                                 kiln_value *thrown) {
     if (reference_base != NULL) *reference_base = kiln_c99_undefined();
+    if (lex->curr.kind == KILN_DYN_KW_CLASS) {
+        return kiln_dyn_eval_class_expression(host, lex, scope, receiver, args, argc,
+                                             depth, out, thrown);
+    }
     if (lex->curr.kind == KILN_DYN_NUM) {
         *out = kiln_c99_number(lex->curr.num_val);
     kiln_dyn_lexer_next(lex);
@@ -5075,6 +5085,185 @@ static int kiln_dyn_make_closure(kiln_host *host, kiln_dyn_scope *scope,
                                   &kiln_c99_closure_of(*out)->source_value,
                                   reflected_source);
     }
+    return status;
+}
+
+typedef struct kiln_dyn_public_field_source {
+    const char *key;
+    size_t key_len;
+    const char *initializer;
+    size_t initializer_len;
+} kiln_dyn_public_field_source;
+
+/* The dynamic evaluator shares this parser for class expressions created by eval and the Node
+ * VM adapter. This first class-body production covers public instance fields; initializers are
+ * parsed now, then evaluated at construction in the class's captured lexical environment. */
+static int kiln_dyn_eval_class_expression(kiln_host *host, kiln_dyn_lexer *lex,
+                                          kiln_dyn_scope *scope, kiln_value receiver,
+                                          const kiln_value *args, size_t argc, int depth,
+                                          kiln_value *out, kiln_value *thrown) {
+    static const char undefined_source[] = "undefined";
+    static const char empty_source[] = "";
+    const char *class_start = lex->curr.start;
+    const char *class_name = NULL;
+    size_t class_name_len = 0;
+    kiln_dyn_public_field_source *fields = NULL;
+    size_t field_count = 0, field_capacity = 0;
+    int status = KILN_C99_OK;
+
+    kiln_dyn_lexer_next(lex);
+    if (lex->curr.kind == KILN_DYN_IDENT) {
+        class_name = lex->curr.start;
+        class_name_len = lex->curr.len;
+        kiln_dyn_lexer_next(lex);
+    }
+    if (lex->curr.kind != KILN_DYN_LBRACE) {
+        status = kiln_dyn_throw_parse_error(lex, thrown,
+                                            "Expected '{' in class expression");
+        goto done;
+    }
+    kiln_dyn_lexer_next(lex);
+    while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+        if (lex->curr.kind == KILN_DYN_SEMI) {
+            kiln_dyn_lexer_next(lex);
+            continue;
+        }
+        if (lex->curr.kind != KILN_DYN_IDENT) {
+            status = kiln_dyn_throw_parse_error(
+                lex, thrown, "Expected a public field name in dynamic class expression");
+            goto done;
+        }
+        kiln_dyn_public_field_source field = {
+            .key = lex->curr.start,
+            .key_len = lex->curr.len,
+            .initializer = undefined_source,
+            .initializer_len = sizeof undefined_source - 1
+        };
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_ASSIGN) {
+            const char *initializer = NULL;
+            size_t initializer_len = 0;
+            kiln_dyn_lexer_next(lex);
+            if (!kiln_dyn_capture_expression(lex, &initializer, &initializer_len, NULL)) {
+                status = kiln_dyn_throw_parse_error(
+                    lex, thrown, "Expected a class field initializer");
+                goto done;
+            }
+            field.initializer = initializer;
+            field.initializer_len = initializer_len;
+        }
+        status = kiln_dyn_preflight_indirect_eval(host, field.initializer,
+                                                   field.initializer_len, depth + 1,
+                                                   0, thrown);
+        if (status != KILN_C99_OK) goto done;
+        if (field_count == field_capacity) {
+            size_t next = field_capacity == 0 ? 4 : field_capacity * 2;
+            if (next <= field_capacity || next > SIZE_MAX / sizeof *fields) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            kiln_dyn_public_field_source *grown =
+                realloc(fields, next * sizeof *fields);
+            if (grown == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            fields = grown;
+            field_capacity = next;
+        }
+        fields[field_count++] = field;
+        if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+    }
+    if (lex->curr.kind != KILN_DYN_RBRACE) {
+        status = kiln_dyn_throw_parse_error(lex, thrown,
+                                            "Unterminated dynamic class expression");
+        goto done;
+    }
+    const char *class_end = lex->curr.start + lex->curr.len;
+    kiln_dyn_lexer_next(lex);
+    if (lex->parse_only) {
+        *out = kiln_c99_undefined();
+        goto done;
+    }
+
+    kiln_value field_metadata = kiln_c99_undefined();
+    status = kiln_c99_new_array(&field_metadata);
+    if (status != KILN_C99_OK) goto done;
+    kiln_c99_gc_keep_alive(&field_metadata);
+    for (size_t index = 0; index < field_count; ++index) {
+        kiln_value pair = kiln_c99_undefined();
+        kiln_value key = kiln_c99_copy_text(fields[index].key, fields[index].key_len);
+        kiln_value initializer = kiln_c99_copy_text(fields[index].initializer,
+                                                     fields[index].initializer_len);
+        if (key.tag != KILN_VALUE_STRING || initializer.tag != KILN_VALUE_STRING) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        kiln_c99_gc_keep_alive(&field_metadata);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&initializer);
+        status = kiln_c99_new_array(&pair);
+        kiln_c99_gc_keep_alive(&field_metadata);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&initializer);
+        kiln_c99_gc_keep_alive(&pair);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+        kiln_c99_gc_keep_alive(&field_metadata);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&initializer);
+        kiln_c99_gc_keep_alive(&pair);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, initializer);
+        kiln_c99_gc_keep_alive(&field_metadata);
+        kiln_c99_gc_keep_alive(&pair);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(field_metadata, pair);
+        kiln_c99_gc_keep_alive(&field_metadata);
+        if (status != KILN_C99_OK) goto done;
+    }
+
+    status = kiln_dyn_make_closure(host, scope, class_name, class_name_len,
+                                   empty_source, 0, empty_source, 0,
+                                   class_start, (size_t)(class_end - class_start),
+                                   receiver, 0, 0, 0, out, thrown);
+    if (status != KILN_C99_OK) goto done;
+    kiln_c99_gc_keep_alive(out);
+    kiln_value environment = kiln_val_to_boundary(
+        kiln_c99_closure_of(*out)->upvalues[2]);
+    kiln_c99_gc_keep_alive(&environment);
+    const char field_marker[] = {'\005'};
+    status = kiln_c99_put(host, environment, field_marker, sizeof field_marker,
+                          field_metadata, depth, thrown);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_gc_keep_alive(&environment);
+    kiln_c99_gc_keep_alive(&field_metadata);
+    if (status != KILN_C99_OK) goto done;
+    if (class_name != NULL) {
+        status = kiln_c99_put(host, environment, class_name, class_name_len,
+                              *out, depth, thrown);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        if (status != KILN_C99_OK) goto done;
+    }
+
+    kiln_value prototype = kiln_c99_undefined();
+    status = kiln_c99_new_object(&prototype);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_gc_keep_alive(&environment);
+    kiln_c99_gc_keep_alive(&field_metadata);
+    kiln_c99_gc_keep_alive(&prototype);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, prototype, "constructor", 11, *out, depth, thrown);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_gc_keep_alive(&prototype);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(host, *out, "prototype", 9, prototype, depth, thrown);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_gc_keep_alive(&prototype);
+    if (status == KILN_C99_OK) kiln_c99_closure_of(*out)->is_class = 1;
+
+done:
+    free(fields);
+    (void)args;
+    (void)argc;
     return status;
 }
 
@@ -8298,6 +8487,86 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
     }
 
     free(params_owned);
+    /* Dynamic class expressions keep their public instance field initializers in the captured
+     * environment. Evaluate them in the constructor's lexical scope and use DefineField
+     * semantics, so an inherited setter cannot intercept field creation. */
+    if (env_val.tag == KILN_VALUE_OBJECT) {
+        const char field_marker[] = {'\005'};
+        kiln_value fields = kiln_c99_undefined();
+        int fields_present = 0;
+        int field_status = kiln_dyn_private_environment_get(env_val, field_marker,
+                                                            sizeof field_marker,
+                                                            &fields, &fields_present);
+        if (field_status != KILN_C99_OK) {
+            kiln_dyn_scope_destroy(&scope);
+            kiln_dyn_scope_destroy(&captured_scope);
+            return field_status;
+        }
+        if (fields_present && fields.tag == KILN_VALUE_ARRAY) {
+            size_t field_count = kiln_c99_array_of(fields)->count;
+            for (size_t index = 0; index < field_count; ++index) {
+                kiln_value field = kiln_c99_undefined();
+                kiln_value key = kiln_c99_undefined();
+                kiln_value expression = kiln_c99_undefined();
+                field_status = kiln_c99_array_get_index(host, fields, index, &field,
+                                                         depth, thrown);
+                if (field_status == KILN_C99_OK)
+                    field_status = kiln_c99_array_get_index(host, field, 0, &key,
+                                                            depth, thrown);
+                if (field_status == KILN_C99_OK)
+                    field_status = kiln_c99_array_get_index(host, field, 1, &expression,
+                                                            depth, thrown);
+                kiln_c99_gc_keep_alive(&fields);
+                kiln_c99_gc_keep_alive(&field);
+                kiln_c99_gc_keep_alive(&key);
+                kiln_c99_gc_keep_alive(&expression);
+                if (field_status != KILN_C99_OK || key.tag != KILN_VALUE_STRING ||
+                    expression.tag != KILN_VALUE_STRING) {
+                    if (field_status == KILN_C99_OK)
+                        field_status = kiln_c99_internal_status(
+                            "dynamic class field metadata is malformed");
+                    kiln_dyn_scope_destroy(&scope);
+                    kiln_dyn_scope_destroy(&captured_scope);
+                    return field_status;
+                }
+                uint8_t *expression_source = NULL;
+                size_t expression_len = 0;
+                field_status = kiln_dyn_string_to_source(expression, &expression_source,
+                                                          &expression_len);
+                if (field_status != KILN_C99_OK) {
+                    kiln_dyn_scope_destroy(&scope);
+                    kiln_dyn_scope_destroy(&captured_scope);
+                    return field_status;
+                }
+                kiln_dyn_lexer field_lex;
+                memset(&field_lex, 0, sizeof field_lex);
+                field_lex.src = (const char *)expression_source;
+                field_lex.len = expression_len;
+                kiln_dyn_lexer_next(&field_lex);
+                kiln_value field_value = kiln_c99_undefined();
+                field_status = kiln_dyn_eval_expr(host, &field_lex, &scope, receiver,
+                                                  argc > 0 ? bargs : NULL, argc,
+                                                  depth, &field_value, thrown);
+                if (field_status == KILN_C99_OK && field_lex.curr.kind != KILN_DYN_EOF)
+                    field_status = kiln_dyn_throw_unexpected_token(&field_lex, thrown);
+                if (field_status == KILN_C99_OK)
+                    field_status = kiln_c99_create_data_property(host, receiver, key,
+                                                                 field_value, depth, thrown);
+                kiln_c99_gc_keep_alive(&fields);
+                kiln_c99_gc_keep_alive(&field);
+                kiln_c99_gc_keep_alive(&key);
+                kiln_c99_gc_keep_alive(&expression);
+                kiln_c99_gc_keep_alive(&field_value);
+                kiln_dyn_token_free(&field_lex.curr);
+                free(expression_source);
+                if (field_status != KILN_C99_OK) {
+                    kiln_dyn_scope_destroy(&scope);
+                    kiln_dyn_scope_destroy(&captured_scope);
+                    return field_status;
+                }
+            }
+        }
+    }
     size_t body_len = 0;
     uint8_t *body_owned = NULL;
     const char *bsrc;
