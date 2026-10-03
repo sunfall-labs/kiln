@@ -184,12 +184,35 @@ pub trait Backend: Send {
         source_view: SourceView,
         stream_output: bool,
     ) -> Result<SourceResponse<RunSummary>> {
+        self.run_at_view_with_clock(
+            path,
+            project_root,
+            args,
+            node,
+            steps,
+            source_view,
+            stream_output,
+            false,
+        )
+    }
+    fn run_at_view_with_clock(
+        &mut self,
+        path: String,
+        project_root: String,
+        args: Vec<String>,
+        node: bool,
+        steps: StepBudget,
+        source_view: SourceView,
+        stream_output: bool,
+        wall_clock: bool,
+    ) -> Result<SourceResponse<RunSummary>> {
         match self.request_streaming(
             Request::Run {
                 path,
                 project_root,
                 args,
                 node,
+                wall_clock,
                 steps,
                 source_view,
                 stream_output,

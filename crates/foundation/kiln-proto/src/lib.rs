@@ -589,6 +589,10 @@ pub enum Request {
         args: Vec<String>,
         /// Install the explicit Tokio-owned Node Adapter for this execution.
         node: bool,
+        /// Schedule Node timers against elapsed host time instead of deterministic virtual time.
+        /// Protocol clients may omit it and retain the deterministic default.
+        #[serde(default)]
+        wall_clock: bool,
         /// How long this execution may run. The client decides, because the answer depends on
         /// who is waiting: a corpus runner needs a loop to fail, a person running their own
         /// program does not.
@@ -1194,6 +1198,7 @@ mod tests {
                     project_root: "/project".to_owned(),
                     args: Vec::new(),
                     node: true,
+                    wall_clock: false,
                     steps: StepBudget::Limited(1_000_000),
                     source_view: SourceView(12),
                     stream_output: false,
@@ -1203,6 +1208,7 @@ mod tests {
                     "project_root": "/project",
                     "args": [],
                     "node": true,
+                    "wall_clock": false,
                     "steps": {"Limited": 1_000_000},
                     "source_view": 12,
                     "stream_output": false

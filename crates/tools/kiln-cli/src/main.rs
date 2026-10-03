@@ -251,6 +251,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             args,
             node,
+            wall_clock,
             native: false,
             steps,
             workers,
@@ -266,7 +267,16 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     let socket = socket.clone();
                     handles.push(std::thread::spawn(move || {
                         let mut backend = open(one_shot, &socket)?;
-                        commands::run(backend.as_mut(), &path, &args, &root, node, steps, true)
+                        commands::run_with_clock(
+                            backend.as_mut(),
+                            &path,
+                            &args,
+                            &root,
+                            node,
+                            steps,
+                            true,
+                            wall_clock,
+                        )
                     }));
                 }
                 let mut status = 0;
@@ -285,7 +295,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 Ok(status)
             } else {
                 let mut backend = open(one_shot, &socket)?;
-                report(commands::run(
+                report(commands::run_with_clock(
                     backend.as_mut(),
                     &path,
                     &args,
@@ -293,6 +303,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     node,
                     steps,
                     true,
+                    wall_clock,
                 )?)
             }
         }
@@ -300,6 +311,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             args,
             node,
+            wall_clock: _,
             native: true,
             profile,
             // Refused by the parser: the native backend does not count steps.

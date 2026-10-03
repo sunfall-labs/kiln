@@ -61,6 +61,7 @@ pub enum Command {
         path: PathBuf,
         args: Vec<String>,
         node: bool,
+        wall_clock: bool,
         native: bool,
         profile: NativeProfile,
         /// How long the program may run. Unmetered unless `--max-steps` says otherwise: a
@@ -145,6 +146,8 @@ where
     let mut changed = false;
     let mut parse_only = false;
     let mut node = false;
+    let mut wall_clock = false;
+    let mut clock_specified = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
     let mut test_output: Option<PathBuf> = None;
@@ -219,6 +222,18 @@ where
             "--node" => {
                 reject_inline_value(&flag, &inline)?;
                 node = true;
+            }
+            "--clock" => {
+                clock_specified = true;
+                wall_clock = match value_for(&flag, inline, &mut args)?.as_str() {
+                    "wall" => true,
+                    "virtual" => false,
+                    value => {
+                        return Err(Error::usage(format!(
+                            "unknown clock policy `{value}`; use `virtual` or `wall`"
+                        )));
+                    }
+                };
             }
             "--native" => {
                 reject_inline_value(&flag, &inline)?;
@@ -298,6 +313,11 @@ where
 
     if native && name != "run" {
         return Err(Error::usage("--native only applies to `kiln run`"));
+    }
+    if clock_specified && (name != "run" || native) {
+        return Err(Error::usage(
+            "--clock only applies to interpreted `kiln run`; native launchers use their build clock policy",
+        ));
     }
     if shared && name != "build" {
         return Err(Error::usage("--shared only applies to `kiln build`"));
@@ -432,6 +452,7 @@ where
                 path: PathBuf::from(path),
                 args,
                 node,
+                wall_clock,
                 native,
                 profile: profile.unwrap_or_default(),
                 steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
@@ -668,6 +689,7 @@ options:
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
     --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
+    --clock <policy>   with interpreted `run`, choose `virtual` (default) or `wall` time
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
@@ -818,6 +840,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Check,
                 steps: StepBudget::Unmetered,
@@ -929,6 +952,7 @@ mod tests {
             run(&["run", "a.mjs", "--node"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: false,
                 ..
             }
@@ -1056,6 +1080,7 @@ mod tests {
             run(&["run", "server.mjs", "--node"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: false,
                 ..
             }
@@ -1065,10 +1090,37 @@ mod tests {
             run(&["run", "server.mjs", "--node", "--native"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: true,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn clock_policy_is_available_only_for_interpreted_runs() {
+        assert!(matches!(
+            run(&["run", "server.ts", "--node", "--clock", "wall"]).command,
+            Command::Run {
+                node: true,
+                wall_clock: true,
+                native: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "server.ts", "--clock=virtual"]).command,
+            Command::Run {
+                wall_clock: false,
+                native: false,
+                ..
+            }
+        ));
+        assert!(usage_error(&["test", "suite", "--clock", "virtual"]).contains("only applies"));
+        assert!(
+            usage_error(&["run", "server.ts", "--native", "--clock", "virtual"])
+                .contains("only applies")
+        );
     }
 
     #[test]
@@ -1202,6 +1254,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1340,6 +1393,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1398,6 +1452,7 @@ mod tests {
                 path: PathBuf::from("cli.ts"),
                 args: vec!["--version".to_string()],
                 node: true,
+                wall_clock: false,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1414,6 +1469,7 @@ mod tests {
                 path: PathBuf::from("app.ts"),
                 args: vec!["cmd".to_string(), "--flag".to_string(), "val".to_string()],
                 node: false,
+                wall_clock: false,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,

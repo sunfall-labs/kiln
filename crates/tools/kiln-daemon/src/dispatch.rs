@@ -183,11 +183,21 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             project_root,
             args,
             node,
+            wall_clock,
             steps,
             source_view: _,
             stream_output: _,
         } => (
-            run(engine, resolutions, path, project_root, args, node, steps),
+            run(
+                engine,
+                resolutions,
+                path,
+                project_root,
+                args,
+                node,
+                wall_clock,
+                steps,
+            ),
             Next::Continue,
         ),
         Request::NativeBuild {
@@ -885,6 +895,7 @@ pub(crate) fn graph_sources_from_snapshot(
 pub(crate) fn execute_prepared_run(
     prepared: PreparedRun,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
     #[cfg(test)]
@@ -902,7 +913,9 @@ pub(crate) fn execute_prepared_run(
             file,
             revision,
             overlay,
-        } => execute_graph(graph, path, args, file, revision, node, limits, overlay),
+        } => execute_graph(
+            graph, path, args, file, revision, node, wall_clock, limits, overlay,
+        ),
         PreparedRun::Program {
             program,
             path,
@@ -910,7 +923,9 @@ pub(crate) fn execute_prepared_run(
             file,
             revision,
             overlay,
-        } => execute_program(program, path, args, file, revision, node, limits, overlay),
+        } => execute_program(
+            program, path, args, file, revision, node, wall_clock, limits, overlay,
+        ),
     };
     if let (Some(signal), Response::Ran(summary)) = (hosted.terminated_by(), &mut response) {
         summary.signal = Some(signal);
@@ -1062,10 +1077,11 @@ fn run<E: QueryEngine>(
     project_root: String,
     args: Vec<String>,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
     match prepare_run(engine, resolutions, path, args, project_root, node) {
-        Ok(prepared) => execute_prepared_run(prepared, node, steps),
+        Ok(prepared) => execute_prepared_run(prepared, node, wall_clock, steps),
         Err(message) => Response::Error { message },
     }
 }
@@ -1113,6 +1129,7 @@ fn execute_graph(
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    wall_clock: bool,
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
@@ -1139,7 +1156,16 @@ fn execute_graph(
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
                 kiln_module_eval::GraphModuleLoader::new(std::sync::Arc::clone(&graph)),
             ));
-            graph.execute_node(&mut host, limits, capabilities)
+            graph.execute_node_with_clock(
+                &mut host,
+                limits,
+                capabilities,
+                if wall_clock {
+                    kiln_runtime::ClockCapability::Host
+                } else {
+                    kiln_runtime::ClockCapability::Virtual
+                },
+            )
         }
         Ok(graph) => {
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
@@ -1627,6 +1653,7 @@ fn execute_program(
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    wall_clock: bool,
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
@@ -1665,7 +1692,24 @@ fn execute_program(
         kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
     )));
     let result = if node {
-        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits, capabilities)
+        if wall_clock {
+            let strictness = std::rc::Rc::new(kiln_ir::Strictness::sloppy(&program));
+            kiln_interpreter::execute_node_with_clock_and_strictness(
+                std::rc::Rc::new(program),
+                strictness,
+                &mut host,
+                limits,
+                capabilities,
+                kiln_runtime::ClockCapability::Host,
+            )
+        } else {
+            kiln_interpreter::execute_node(
+                std::rc::Rc::new(program),
+                &mut host,
+                limits,
+                capabilities,
+            )
+        }
     } else {
         kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits, capabilities)
     };

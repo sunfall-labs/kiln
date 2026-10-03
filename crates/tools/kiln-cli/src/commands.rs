@@ -74,9 +74,31 @@ pub fn run(
     steps: StepBudget,
     stream: bool,
 ) -> Result<Output> {
+    run_with_clock(
+        backend,
+        path,
+        args,
+        project_root,
+        node,
+        steps,
+        stream,
+        false,
+    )
+}
+
+pub fn run_with_clock(
+    backend: &mut dyn Backend,
+    path: &Path,
+    args: &[String],
+    project_root: &Path,
+    node: bool,
+    steps: StepBudget,
+    stream: bool,
+    wall_clock: bool,
+) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    run_source(
+    run_source_with_clock(
         backend,
         path,
         args,
@@ -86,6 +108,7 @@ pub fn run(
         node,
         steps,
         stream,
+        wall_clock,
     )
 }
 
@@ -103,7 +126,7 @@ pub(crate) fn run_source(
     steps: StepBudget,
     stream: bool,
 ) -> Result<Output> {
-    run_source_with_manifest(
+    run_source_with_clock(
         backend,
         path,
         args,
@@ -113,6 +136,33 @@ pub(crate) fn run_source(
         node,
         steps,
         stream,
+        false,
+    )
+}
+
+pub(crate) fn run_source_with_clock(
+    backend: &mut dyn Backend,
+    path: &Path,
+    args: &[String],
+    project_root: &Path,
+    canonical: &str,
+    text: String,
+    node: bool,
+    steps: StepBudget,
+    stream: bool,
+    wall_clock: bool,
+) -> Result<Output> {
+    run_source_with_manifest_clock(
+        backend,
+        path,
+        args,
+        project_root,
+        canonical,
+        text,
+        node,
+        steps,
+        stream,
+        wall_clock,
     )
     .map(|(output, _, _, _)| output)
 }
@@ -133,6 +183,32 @@ pub(crate) fn run_source_with_manifest(
     steps: StepBudget,
     stream: bool,
 ) -> Result<(Output, SourceManifest, bool, SourceView)> {
+    run_source_with_manifest_clock(
+        backend,
+        path,
+        args,
+        project_root,
+        canonical,
+        text,
+        node,
+        steps,
+        stream,
+        false,
+    )
+}
+
+pub(crate) fn run_source_with_manifest_clock(
+    backend: &mut dyn Backend,
+    path: &Path,
+    args: &[String],
+    project_root: &Path,
+    canonical: &str,
+    text: String,
+    node: bool,
+    steps: StepBudget,
+    stream: bool,
+    wall_clock: bool,
+) -> Result<(Output, SourceManifest, bool, SourceView)> {
     let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
         sync_project_sources_with_override(backend, project_root, Some((canonical, &text)), node)?;
     // A source outside the discovered project (or an extension intentionally not walked) still
@@ -147,7 +223,7 @@ pub(crate) fn run_source_with_manifest(
             source_view,
         )?;
     }
-    let mut output = match backend.run_at_view(
+    let mut output = match backend.run_at_view_with_clock(
         canonical.to_owned(),
         project_root_string(project_root)?,
         args.to_vec(),
@@ -155,6 +231,7 @@ pub(crate) fn run_source_with_manifest(
         steps,
         source_view,
         stream,
+        wall_clock,
     )? {
         SourceResponse::Ready(summary) => {
             finish_run_summary(path, summary, project_notes, Some(&text))
@@ -166,7 +243,7 @@ pub(crate) fn run_source_with_manifest(
             manifest = snapshot.manifest;
             truncated = snapshot.truncated;
             source_view = snapshot.source_view;
-            match backend.run_at_view(
+            match backend.run_at_view_with_clock(
                 canonical.to_owned(),
                 project_root_string(project_root)?,
                 args.to_vec(),
@@ -174,6 +251,7 @@ pub(crate) fn run_source_with_manifest(
                 steps,
                 source_view,
                 stream,
+                wall_clock,
             )? {
                 SourceResponse::Ready(summary) => {
                     finish_run_summary(path, summary, project_notes, Some(&text))
@@ -1927,6 +2005,32 @@ mod tests {
             panic!("last request must be Run");
         };
         assert_eq!(project_root, &root.to_string_lossy());
+        assert!(matches!(
+            backend.seen.last(),
+            Some(Request::Run {
+                wall_clock: false,
+                ..
+            })
+        ));
+
+        let _ = run_with_clock(
+            &mut backend,
+            &entry,
+            &[],
+            &root,
+            true,
+            StepBudget::Unmetered,
+            false,
+            true,
+        )
+        .expect("explicit host-clock run");
+        assert!(matches!(
+            backend.seen.last(),
+            Some(Request::Run {
+                wall_clock: true,
+                ..
+            })
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }

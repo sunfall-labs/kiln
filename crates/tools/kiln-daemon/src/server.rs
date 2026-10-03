@@ -901,10 +901,20 @@ fn handle<E: QueryEngine>(
             project_root,
             args,
             node,
+            wall_clock,
             steps,
             source_view,
             stream_output: _,
-        } => handle_run(state, path, project_root, args, node, steps, source_view),
+        } => handle_run(
+            state,
+            path,
+            project_root,
+            args,
+            node,
+            wall_clock,
+            steps,
+            source_view,
+        ),
         Request::TestInventory { root } => {
             run_without_engine_lock(|| match tests.inventory(&root) {
                 Ok(tests) => Response::TestInventory(tests),
@@ -1127,6 +1137,7 @@ fn handle_run<E: QueryEngine>(
     project_root: String,
     args: Vec<String>,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
     source_view: SourceView,
 ) -> (Response, Next) {
@@ -1301,7 +1312,7 @@ fn handle_run<E: QueryEngine>(
             }
         }
     };
-    run_without_engine_lock(|| execute_prepared_run(prepared, node, steps))
+    run_without_engine_lock(|| execute_prepared_run(prepared, node, wall_clock, steps))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and

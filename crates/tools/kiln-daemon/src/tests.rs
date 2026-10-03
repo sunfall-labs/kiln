@@ -504,6 +504,7 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
             &Request::Run {
                 stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: old_view,
                 path: "source.js".into(),
@@ -756,6 +757,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
             .request(&Request::Run {
                 stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: run_path,
@@ -812,6 +814,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
@@ -881,6 +884,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
             .request(&Request::Run {
                 stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: initial_view,
                 path: old_entry,
@@ -904,6 +908,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: setup.source_view(),
             path: "./snapshot-entry.js".into(),
@@ -996,6 +1001,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         client.raw_request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: initial_view,
             path: run_path,
@@ -1045,6 +1051,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: entry_path,
@@ -1075,6 +1082,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: std::fs::canonicalize(fixture.dir.join("gated-entry.js"))
@@ -1119,7 +1127,8 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
     .expect("prepare unsaved buffer");
 
     engine.set_source(file, "console.log('new');\n".into());
-    let Response::Ran(summary) = execute_prepared_run(prepared, false, StepBudget::Unmetered)
+    let Response::Ran(summary) =
+        execute_prepared_run(prepared, false, false, StepBudget::Unmetered)
     else {
         panic!("expected run summary");
     };
@@ -1286,6 +1295,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -1308,6 +1318,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2292,6 +2303,7 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
             node: true,
+            wall_clock: false,
             args: Vec::new(),
         })
         .expect("run Node module");
@@ -2332,6 +2344,7 @@ fn production_daemon_forwards_run_arguments_to_process_argv() {
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
             node: false,
+            wall_clock: false,
             args: vec!["--foo".into(), "bar".into()],
         })
         .expect("run module");
@@ -2387,6 +2400,7 @@ fn production_daemon_does_not_evaluate_an_unused_side_effect_free_module() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path: entry.to_string_lossy().into_owned(),
@@ -2426,6 +2440,7 @@ fn production_daemon_compiles_direct_eval_at_runtime() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2465,6 +2480,7 @@ fn production_daemon_compiles_function_constructor_at_runtime() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2524,6 +2540,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2549,6 +2566,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2584,6 +2602,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
@@ -2672,6 +2691,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2709,6 +2729,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2748,6 +2769,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2788,6 +2810,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2809,6 +2832,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2853,6 +2877,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2938,6 +2963,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path.clone(),
@@ -2976,6 +3002,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path,
@@ -3039,6 +3066,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .request(&Request::Run {
                 stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: canonical_entry.clone(),
@@ -3075,6 +3103,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .request(&Request::Run {
                 stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: "overlay.js".into(),
@@ -3103,6 +3132,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: canonical_entry.clone(),
@@ -3142,6 +3172,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .request(&Request::Run {
             stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: "overlay.js".into(),
