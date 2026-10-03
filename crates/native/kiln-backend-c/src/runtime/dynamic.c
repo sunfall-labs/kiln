@@ -2970,7 +2970,24 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             char *owned_key = NULL;
             int string_key = 0;
             kiln_value string_key_value = kiln_c99_undefined();
-            if (kiln_dyn_is_ident_name(lex->curr.kind) || lex->curr.kind == KILN_DYN_STR) {
+            if (lex->curr.kind == KILN_DYN_LBRACKET) {
+                kiln_dyn_lexer_next(lex);
+                status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
+                                            &string_key_value, thrown);
+                if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(&string_key_value);
+                if (lex->curr.kind != KILN_DYN_RBRACKET)
+                    return kiln_dyn_throw_parse_error(lex, thrown,
+                                                      "Expected ']' after computed property key");
+                kiln_dyn_lexer_next(lex);
+                if (!lex->parse_only) {
+                    status = kiln_c99_reduce_key(host, *out, string_key_value,
+                                                 &string_key_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    kiln_c99_gc_keep_alive(&string_key_value);
+                }
+                string_key = 1;
+            } else if (kiln_dyn_is_ident_name(lex->curr.kind) || lex->curr.kind == KILN_DYN_STR) {
                 if (lex->curr.kind == KILN_DYN_STR) {
                     /* The lexer frees decoded string storage on its next advance. Object
                      * values and method bodies are evaluated before the key is installed, so
