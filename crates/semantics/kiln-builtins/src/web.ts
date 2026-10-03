@@ -1303,6 +1303,13 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
     const headersObj: Record<string, string> = {};
     const pairs = headerListPairs(requestHeaderList(req));
     for (let i = 0; i < pairs.length; i++) headersObj[pairs[i][0]] = pairs[i][1];
+    // Fetch knows the length of a materialized body before submitting the request.
+    // Publish it explicitly so transport scheduling cannot turn it into chunked framing.
+    const storedBody = req._body;
+    if (storedBody !== null && !isBodyReadable(storedBody) && headersObj["content-length"] === undefined) {
+      headersObj["content-length"] = String(typeof storedBody === "string"
+        ? getSharedEncoder().encode(storedBody).byteLength : storedBody.byteLength);
+    }
 
     const options = {
       host: parsed.hostname,

@@ -51,6 +51,9 @@ for (const status of [301, 302, 303, 307, 308]) {
   const value = await response.json();
   console.log(status, response.status, response.redirected, new URL(response.url).pathname, value.method, value.body, value.authorization, value.contentType, value.contentLength);
 }
+const unicode = await fetch(`${base}/final`, { method: "POST", body: "é😀" });
+const unicodeValue = await unicode.json();
+console.log("unicode-length", unicodeValue.body, unicodeValue.contentLength);
 for (const method of ["GET", "HEAD"]) {
   const response = await fetch(`${base}/redirect?status=303`, { method });
   console.log("303", method, response.redirected, new URL(response.url).pathname);
