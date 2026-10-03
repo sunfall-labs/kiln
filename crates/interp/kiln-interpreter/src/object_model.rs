@@ -255,6 +255,8 @@ pub struct ObjectData {
     pub(super) process_exit_code: Option<i32>,
     /// Stateful codec storage attached to the TextDecoder receiver, not a reflectable property.
     pub(super) text_decoder: Option<Rc<RefCell<kiln_encoding::StreamingDecoder>>>,
+    /// Incremental Web Compression Streams codec, kept off reflective JS properties.
+    pub(super) compression: Option<Rc<RefCell<kiln_compression::Codec>>>,
     /// Interpreter-owned Node server/socket/request/response state. Runtime drivers remain
     /// executor- and JavaScript-independent; this slot only ties one JS object to its adapter.
     pub(super) node_object: Option<NodeObject>,
@@ -345,6 +347,7 @@ impl Default for ObjectData {
             node_events: None,
             process_exit_code: None,
             text_decoder: None,
+            compression: None,
             node_object: None,
         }
     }

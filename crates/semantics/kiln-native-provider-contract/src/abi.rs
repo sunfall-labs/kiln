@@ -64,6 +64,11 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
         kind: OwnershipKind::SharedSemanticEngine,
     },
     GroupOwnership {
+        group: "compression",
+        owner: "kiln-compression",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
         group: "parallel",
         owner: "kiln-native-provider-ffi parallel engine",
         kind: OwnershipKind::RuntimeEngine,
@@ -269,6 +274,10 @@ macro_rules! provider_abi_registry {
             (crypto, kiln_crypto_key_export, crypto_key_export);
             (crypto, kiln_crypto_key_free, crypto_key_free);
             (crypto, kiln_webcrypto_execute, webcrypto_execute);
+            (compression, kiln_compression_state_create, compression_state_create);
+            (compression, kiln_compression_state_free, compression_state_free);
+            (compression, kiln_compression_state_push, compression_state_push);
+            (compression, kiln_compression_output_free, compression_output_free);
             (parallel, kiln_parallel_map, parallel_map);
             (parallel, kiln_parallel_sort, parallel_sort);
             (parallel, kiln_parallel_threads, parallel_threads);
@@ -290,7 +299,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 78;
+pub const PROVIDER_ABI_VERSION: u32 = 79;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -369,8 +378,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 78);
-        assert_eq!(PROVIDER_EXPORTS.len(), 189);
+        assert_eq!(PROVIDER_ABI_VERSION, 79);
+        assert_eq!(PROVIDER_EXPORTS.len(), 193);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

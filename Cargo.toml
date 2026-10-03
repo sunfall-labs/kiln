@@ -50,6 +50,7 @@ kiln-node-path = { path = "crates/semantics/kiln-node-path" }
 kiln-url = { path = "crates/semantics/kiln-url" }
 kiln-encoding = { path = "crates/semantics/kiln-encoding" }
 kiln-webcrypto = { path = "crates/semantics/kiln-webcrypto" }
+kiln-compression = { path = "crates/semantics/kiln-compression" }
 kiln-conformance = { path = "crates/tools/kiln-conformance" }
 kiln-proto = { path = "crates/foundation/kiln-proto" }
 kiln-daemon = { path = "crates/tools/kiln-daemon" }
@@ -167,8 +168,9 @@ annotate-snippets = { version = "0.12", default-features = false, features = ["s
 encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
 # WHATWG URL Standard reference implementation in safe Rust (URL/URLSearchParams).
 url = { version = "2.5", default-features = false, features = ["std"] }
-# Compression & decompression (gzip, zlib, deflate) for node:zlib via pure-Rust miniz_oxide backend.
-flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+# Compression & decompression for node:zlib and WHATWG streams; zlib-rs supplies framed gzip
+# support for flate2's incremental API without linking a system zlib.
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend", "zlib-rs"] }
 # Compact arena-backed string interner for property keys and shapes (ADR 0047, ADR 0050)
 lasso = { version = "0.7", default-features = false }
 # Capability-based sandboxed filesystem access (ADR 0029 §5)

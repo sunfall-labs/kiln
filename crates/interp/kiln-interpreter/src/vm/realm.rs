@@ -846,6 +846,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::WebCryptoPrimitive, realm),
         );
         globals.set_non_enumerable(
+            "__kilnCompressionPrimitive",
+            Value::Native(Native::WebCompressionPrimitive, realm),
+        );
+        globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor, realm),
         );

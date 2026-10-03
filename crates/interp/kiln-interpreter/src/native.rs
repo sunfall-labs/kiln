@@ -240,6 +240,7 @@ pub enum Native {
     NodeCryptoKeyExport,
     NodeCryptoKeyFree,
     WebCryptoPrimitive,
+    WebCompressionPrimitive,
     NodeHashUpdate,
     NodeHashDigest,
     NodeStringDecoder,

@@ -297,6 +297,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_URL_FAST_RAW: return "__kilnUrlFast";
     case KILN_C99_METHOD_URL_ADOPT_RAW: return "__kilnUrlAdopt";
     case KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW: return "__kilnWebCryptoPrimitive";
+    case KILN_C99_METHOD_COMPRESSION_PRIMITIVE_RAW: return "__kilnCompressionPrimitive";
     case KILN_C99_METHOD_UINT8_TO_BASE64_RAW: return "__kilnUint8ToBase64";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";

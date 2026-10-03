@@ -303,6 +303,18 @@ macro_rules! assert_root_provider_export {
     (crypto, kiln_webcrypto_execute, webcrypto_execute) => {
         const _: unsafe extern "C" fn(u32, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize, usize, *mut u8, usize, *mut usize) -> i32 = kiln_webcrypto_execute;
     };
+    (compression, kiln_compression_state_create, compression_state_create) => {
+        const _: unsafe extern "C" fn(u32, u32) -> *mut kiln_compression::Codec = kiln_compression_state_create;
+    };
+    (compression, kiln_compression_state_free, compression_state_free) => {
+        const _: unsafe extern "C" fn(*mut kiln_compression::Codec) = kiln_compression_state_free;
+    };
+    (compression, kiln_compression_state_push, compression_state_push) => {
+        const _: unsafe extern "C" fn(*mut kiln_compression::Codec, *const u8, usize, u32, *mut *mut u8, *mut usize) -> i32 = kiln_compression_state_push;
+    };
+    (compression, kiln_compression_output_free, compression_output_free) => {
+        const _: unsafe extern "C" fn(*mut u8, usize) = kiln_compression_output_free;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -329,6 +341,13 @@ use keys::{
 #[path = "provider/webcrypto.rs"]
 mod webcrypto;
 use webcrypto::kiln_webcrypto_execute;
+
+#[path = "provider/compression.rs"]
+mod compression;
+use compression::{
+    kiln_compression_output_free, kiln_compression_state_create, kiln_compression_state_free,
+    kiln_compression_state_push,
+};
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can

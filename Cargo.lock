@@ -2338,6 +2338,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-compression"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+]
+
+[[package]]
 name = "kiln-conformance"
 version = "0.1.0"
 dependencies = [
@@ -2505,6 +2512,7 @@ dependencies = [
  "flate2",
  "kiln-builtin-surface",
  "kiln-builtins",
+ "kiln-compression",
  "kiln-date-core",
  "kiln-encoding",
  "kiln-host-abi",
@@ -2682,6 +2690,7 @@ name = "kiln-native-provider-ffi"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
+ "kiln-compression",
  "kiln-date-core",
  "kiln-encoding",
  "kiln-host-abi",

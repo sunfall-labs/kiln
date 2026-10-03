@@ -161,6 +161,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::GcRequest => "gcRequest".to_owned(),
         Native::UrlParseRaw => "__kilnUrlParse".to_owned(),
         Native::WebCryptoPrimitive => "__kilnWebCryptoPrimitive".to_owned(),
+        Native::WebCompressionPrimitive => "__kilnCompressionPrimitive".to_owned(),
         Native::UrlSetRaw => "__kilnUrlSet".to_owned(),
         Native::UrlFastRaw => "__kilnUrlFast".to_owned(),
         Native::UrlAdoptRaw => "__kilnUrlAdopt".to_owned(),

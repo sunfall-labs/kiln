@@ -2831,6 +2831,7 @@ pub(crate) fn call_native(
         | Native::NodeCryptoKeyExport
         | Native::NodeCryptoKeyFree
         | Native::WebCryptoPrimitive
+        | Native::WebCompressionPrimitive
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder

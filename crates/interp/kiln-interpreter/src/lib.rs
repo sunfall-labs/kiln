@@ -37,6 +37,7 @@ mod intl;
 mod agent;
 use agent::{AgentGroup, AgentOwner, Bytes};
 // `crypto` houses node:crypto and Web Crypto primitives (hashes, HMAC, entropy, constant-time compare).
+mod compression;
 mod crypto;
 #[cfg(test)]
 pub(crate) use crypto::{node_hash, node_hash_digest, node_hash_state};

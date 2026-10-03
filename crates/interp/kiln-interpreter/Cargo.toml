@@ -23,6 +23,7 @@ kiln-node-path = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-key-core = { workspace = true }
 kiln-webcrypto = { workspace = true }
+kiln-compression = { workspace = true }
 kiln-date-core = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
