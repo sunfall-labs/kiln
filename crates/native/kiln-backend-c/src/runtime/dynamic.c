@@ -800,6 +800,9 @@ typedef struct {
     int strict;
     /* Parse-only walks use this same grammar before indirect eval executes source. */
     int parse_only;
+    /* Direct eval observes the completion value of its statement list. Ordinary dynamic
+     * function bodies leave this off because their callers use explicit return completion. */
+    int statement_completion;
     /* The lexer only needs to remember whether a closing parenthesis ended a control head,
      * not the full token stack. Keep the bounded nesting state inline so cheap lexer copies
      * remain independent and no parser-owned heap allocation can escape. */
@@ -2099,6 +2102,10 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                                  kiln_value receiver, const kiln_value *args, size_t argc,
                                  int depth, kiln_value *out, kiln_value *thrown,
                                  int construct_first_call);
+static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *result, int *returned,
+                              kiln_value *thrown);
 
 /* This object is a private serialized lexical environment, not a JavaScript object with the
  * realm's inherited names or legacy __proto__ setter. */
@@ -3207,55 +3214,38 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     size_t eval_length = 0;
                     status = kiln_dyn_string_to_source(call_args[0], &eval_source,
                                                        &eval_length);
-                    if (status == KILN_C99_OK) {
-                        kiln_dyn_lexer eval_goal;
-                        memset(&eval_goal, 0, sizeof eval_goal);
-                        eval_goal.src = (const char *)eval_source;
-                        eval_goal.len = eval_length;
-                        eval_goal.parse_only = 1;
-                        kiln_dyn_lexer_next(&eval_goal);
-                        switch (eval_goal.curr.kind) {
-                        case KILN_DYN_KW_VAR:
-                        case KILN_DYN_KW_LET:
-                        case KILN_DYN_KW_CONST:
-                        case KILN_DYN_KW_RETURN:
-                        case KILN_DYN_KW_IF:
-                        case KILN_DYN_KW_FOR:
-                        case KILN_DYN_KW_THROW:
-                        case KILN_DYN_KW_SWITCH:
-                        case KILN_DYN_KW_BREAK:
-                        case KILN_DYN_KW_CONTINUE:
-                        case KILN_DYN_KW_WITH:
-                        case KILN_DYN_LBRACE:
-                            status = kiln_c99_refuse(
-                                "direct eval statement completion in a new VM context");
-                            break;
-                        default:
-                            break;
-                        }
-                        kiln_dyn_token_free(&eval_goal.curr);
-                    }
                     if (status == KILN_C99_OK)
-                        status = kiln_dyn_preflight_indirect_eval(host,
-                            (const char *)eval_source, eval_length, depth + 1, 0, thrown);
+                        status = kiln_dyn_preflight_body(host, (const char *)eval_source,
+                            eval_length, depth + 1, thrown);
                     if (status == KILN_C99_OK) {
-                        kiln_dyn_lexer eval_lex;
-                        memset(&eval_lex, 0, sizeof eval_lex);
-                        eval_lex.src = (const char *)eval_source;
-                        eval_lex.len = eval_length;
-                        eval_lex.strict = scope != NULL && scope->strict;
-                        eval_lex.dynamic_function_body = 1;
-                        kiln_dyn_lexer_next(&eval_lex);
-                        if (eval_lex.curr.kind == KILN_DYN_EOF) {
+                        kiln_dyn_scope eval_scope;
+                        kiln_dyn_scope_init(&eval_scope, scope);
+                        eval_scope.var_target = scope;
+                        status = kiln_dyn_scope_predeclare_lexicals(&eval_scope,
+                            (const char *)eval_source, eval_length, SIZE_MAX);
+                        if (status == KILN_C99_OK) {
+                            kiln_dyn_lexer eval_lex;
+                            memset(&eval_lex, 0, sizeof eval_lex);
+                            eval_lex.src = (const char *)eval_source;
+                            eval_lex.len = eval_length;
+                            eval_lex.strict = eval_scope.strict;
+                            eval_lex.dynamic_function_body = 1;
+                            eval_lex.statement_completion = 1;
+                            kiln_dyn_lexer_next(&eval_lex);
+                            int returned = 0;
                             res = kiln_c99_undefined();
-                        } else {
-                            status = kiln_dyn_eval_expr(host, &eval_lex, scope,
-                                kiln_c99_undefined(), NULL, 0, depth + 1, &res, thrown);
-                            if (status == KILN_C99_OK && eval_lex.curr.kind != KILN_DYN_EOF)
+                            while (eval_lex.curr.kind != KILN_DYN_EOF &&
+                                   status == KILN_C99_OK && returned == 0) {
+                                status = kiln_dyn_eval_stmt(host, &eval_lex, &eval_scope,
+                                    kiln_c99_undefined(), NULL, 0, depth + 1, &res,
+                                    &returned, thrown);
+                            }
+                            if (status == KILN_C99_OK && returned != 0)
                                 status = kiln_c99_refuse(
-                                    "direct eval statements beyond a single expression");
+                                    "abrupt completion in direct eval for a new VM context");
+                            kiln_dyn_token_free(&eval_lex.curr);
                         }
-                        kiln_dyn_token_free(&eval_lex.curr);
+                        kiln_dyn_scope_destroy(&eval_scope);
                     }
                     free(eval_source);
                 }
@@ -7132,6 +7122,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         block.len = body_len;
         block.parse_only = lex->parse_only;
         block.strict = block_scope.strict;
+        block.statement_completion = lex->statement_completion;
         block.break_label = lex->break_label;
         block.break_label_len = lex->break_label_len;
         block.active_labels = lex->active_labels;
@@ -7151,6 +7142,10 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     kiln_value expr_val;
     int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &expr_val, thrown);
     if (status != KILN_C99_OK) return status;
+    if (lex->statement_completion && !lex->parse_only) {
+        *result = expr_val;
+        kiln_c99_gc_keep_alive(result);
+    }
     if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
     return KILN_C99_OK;
 }
