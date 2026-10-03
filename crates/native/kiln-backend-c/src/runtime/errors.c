@@ -153,7 +153,8 @@ int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value messag
     status = capture_enabled ? kiln_c99_capture_error_frames(&frames, frame_limit)
                              : (frames = kiln_c99_undefined(), KILN_C99_OK);
     if (status == KILN_C99_OK)
-        kiln_c99_object_of(error)->error_stack_frames = frames;
+        kiln_c99_heap_store_value(kiln_c99_object_of(error),
+                                  &kiln_c99_object_of(error)->error_stack_frames, frames);
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }

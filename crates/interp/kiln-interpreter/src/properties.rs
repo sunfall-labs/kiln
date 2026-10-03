@@ -1382,7 +1382,17 @@ pub(super) struct Intrinsics {
     /// Interior mutability for the same reason the entries have it: the prototype is built on
     /// first use, and first use is now a `&self` read.
     error_prototypes: RefCell<Vec<[Option<Value>; ErrorKind::ALL.len()]>>,
+    /// Shared TypeScript Error stack accessors and private brand token, owned by each realm.
+    /// Module VMs for a realm share this table, while a newly allocated realm starts empty.
+    error_stack_accessors: RefCell<Vec<Option<ErrorStackAccessors>>>,
     unscopables: RefCell<Vec<Option<Value>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct ErrorStackAccessors {
+    pub(super) getter: Value,
+    pub(super) setter: Value,
+    pub(super) brand_token: Value,
 }
 
 impl Default for Intrinsics {
@@ -1404,6 +1414,7 @@ impl Default for Intrinsics {
                     }),
             ),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
+            error_stack_accessors: RefCell::new(vec![None]),
             unscopables: RefCell::new(vec![None]),
         }
     }
@@ -1477,7 +1488,37 @@ impl Intrinsics {
         self.error_prototypes
             .borrow_mut()
             .push([const { None }; ErrorKind::ALL.len()]);
+        self.error_stack_accessors.borrow_mut().push(None);
         self.unscopables.borrow_mut().push(None);
+    }
+
+    pub(super) fn error_stack_accessors(&self, realm: RealmId) -> Option<ErrorStackAccessors> {
+        self.error_stack_accessors
+            .borrow()
+            .get(realm.0 as usize)
+            .and_then(Clone::clone)
+    }
+
+    pub(super) fn register_error_stack_accessors(
+        &self,
+        realm: RealmId,
+        accessors: ErrorStackAccessors,
+    ) {
+        let mut realms = self.error_stack_accessors.borrow_mut();
+        if let Some(slot) = realms.get_mut(realm.0 as usize) {
+            if slot.is_none() {
+                *slot = Some(accessors);
+            }
+        }
+    }
+
+    pub(super) fn take_error_stack_accessors(&self) -> Vec<Value> {
+        self.error_stack_accessors
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(Option::take)
+            .flat_map(|accessors| [accessors.getter, accessors.setter, accessors.brand_token])
+            .collect()
     }
 
     /// Every error prototype this store holds, taken out so the caller can break their cycles.

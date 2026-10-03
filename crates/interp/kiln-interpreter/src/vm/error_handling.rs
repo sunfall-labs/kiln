@@ -160,19 +160,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let registered_accessors = self.intrinsics.error_stack_accessors(self.current_realm);
         if matches!(&target, Value::Native(Native::Error(ErrorKind::Error), _))
             && arguments.len() >= 5
             && matches!(arguments.get(3), Some(Value::Object(_)))
             && matches!(arguments.get(4), Some(Value::Object(_)))
         {
-            if self.error_stack_getter.is_none() {
-                self.error_stack_getter = arguments.get(1).cloned();
-                self.error_stack_setter = arguments.get(2).cloned();
-                self.error_stack_brand_token = arguments.get(4).cloned();
+            if let (Some(getter), Some(setter), Some(brand_token)) =
+                (arguments.get(1), arguments.get(2), arguments.get(4))
+            {
+                self.intrinsics.register_error_stack_accessors(
+                    self.current_realm,
+                    ErrorStackAccessors {
+                        getter: getter.clone(),
+                        setter: setter.clone(),
+                        brand_token: brand_token.clone(),
+                    },
+                );
             }
             return Ok(Value::Undefined);
         }
-        if let Some(token) = &self.error_stack_brand_token
+        if let Some(token) = registered_accessors
+            .as_ref()
+            .map(|value| &value.brand_token)
             && arguments
                 .get(2)
                 .is_some_and(|candidate| strict_equal(candidate, token))
@@ -304,7 +314,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Object(object) = &error {
             let mut object = object.borrow_mut();
             object.set_prototype(prototype);
-            if let Some(getter) = self.error_stack_getter.clone() {
+            if let Some(accessors) = self.intrinsics.error_stack_accessors(self.current_realm) {
                 object.properties.insert(
                     0,
                     Slot {
@@ -312,8 +322,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         symbol: false,
                         internal: false,
                         property: Property::Accessor {
-                            get: Some(getter),
-                            set: self.error_stack_setter.clone(),
+                            get: Some(accessors.getter),
+                            set: Some(accessors.setter),
                         },
                         attributes: Attributes {
                             writable: false,

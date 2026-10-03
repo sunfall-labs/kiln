@@ -56,9 +56,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_stdio: [String::new(), String::new()],
             intrinsics: Rc::new(Intrinsics::default()),
             native_depth: 0,
-            error_stack_getter: None,
-            error_stack_setter: None,
-            error_stack_brand_token: None,
             frames: Vec::new(),
             global_base: 0,
             instruction: 0,
@@ -237,6 +234,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .into_iter()
             .flatten()
             .chain(self.intrinsics.take_error_prototypes())
+            .chain(self.intrinsics.take_error_stack_accessors())
             .chain(self.intrinsics.take_unscopables())
         {
             if let Value::Object(object) = root {
