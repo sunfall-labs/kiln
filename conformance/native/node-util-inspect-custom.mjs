@@ -1,0 +1,13 @@
+import {inspect} from 'node:util';
+const symbol = inspect.custom;
+const representation = {_id:'Chunk', values:[0,1,2]};
+console.log(inspect({[symbol](){return representation;}}) === inspect(representation));
+console.log(inspect({[symbol](){return 'Rendered';}}));
+console.log(inspect({[symbol](){return 42;}}));
+console.log(inspect({[symbol](depth, options, render){return `${depth}:${options.depth}:${render(null)}`;}}, {depth:0}));
+const self = Object.create({[symbol](){return this;}});
+self.value = 7;
+console.log(inspect(self));
+const ordinary = Object.create({[symbol](){throw new Error('disabled custom hook ran');}});
+ordinary.value = 8;
+console.log(inspect(ordinary, {customInspect:false}));

@@ -49,8 +49,13 @@ export function inspect(value: any, options?: any): string {
   }
 
   // Custom inspection method
-  if (typeof value[customInspectSymbol] === "function") {
-    return String(value[customInspectSymbol](2, options));
+  if (options?.customInspect !== false && typeof value[customInspectSymbol] === "function") {
+    const rendered = value[customInspectSymbol](options?.depth ?? 2, options || {}, inspect);
+    // Strings are already formatted. Other return values go through inspection;
+    // returning the receiver itself requests its ordinary representation.
+    if (rendered !== value) {
+      return typeof rendered === "string" ? rendered : inspect(rendered, options);
+    }
   }
 
   if (Array.isArray(value)) {
