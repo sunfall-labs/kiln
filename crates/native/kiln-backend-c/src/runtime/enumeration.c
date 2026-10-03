@@ -399,25 +399,19 @@ kiln_has_next_prototype:
         goto kiln_has_next_prototype;
     }
     if (target.tag == KILN_VALUE_DATE) {
-        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
-        /* The membership predicate the date read consults, so `"getTime" in d` and `d.getTime`
-         * cannot disagree -- and a member the language has but this backend has not built is
-         * still present, which is the question `in` asks.
-         *
-         * Except for the symbol keys. `kiln_c99_is_date_member` answers *every* `@@` name, which
-         * is right for the read it was written for -- an unimplemented well-known symbol must
-         * refuse rather than read as undefined -- and wrong here, where the question is whether
-         * the property exists. A date owns one symbol-keyed member. Answering the rest true said
-         * `Symbol.for("constructDateFrom") in date` was true to a bundled `date-fns`, which then
-         * called the undefined it found. */
-        if (kiln_c99_key_is_reserved(key)) {
-            *answer = kiln_c99_same_name_key(key, "@@toPrimitive");
+        kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        if (kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
             return KILN_C99_OK;
         }
-        *answer = kiln_c99_is_date_member(intrinsic_key, intrinsic_len) ||
-                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
-        return KILN_C99_OK;
+        /* Date carries program-defined string and symbol keys in its ordinary store.
+         * Membership must also consult the actual prototype without invoking getters. */
+        target = store.tag == KILN_VALUE_OBJECT
+                     ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
+        if (target.tag == KILN_VALUE_UNDEFINED)
+            target = kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE);
+        ++steps;
+        goto kiln_has_next_prototype;
     }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
         kiln_value store;
