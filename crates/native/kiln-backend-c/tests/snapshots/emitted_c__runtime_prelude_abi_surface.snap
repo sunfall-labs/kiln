@@ -1016,6 +1016,7 @@ typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
+typedef void (*kiln_gc_release_instance_fn)(void *context);
 extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
 extern int kiln_realm_is_active(void);
@@ -1208,6 +1209,8 @@ static inline uint32_t kiln_c99_site_encode_dictionary_index(size_t index) {
 static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
+typedef struct kiln_gc_module_owner {
+extern void *kiln_c99_module_owner_create(void *context,
 #define KILN_C99_BLOCK_KIND_OFFSET 8u
 #define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x03FFFFFFu)
 static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
@@ -2408,6 +2411,7 @@ static inline int kiln_c99_nursery_accepts_block(const kiln_gc_heap *heap, size_
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, size_t size) {
 KILN_ALWAYS_INLINE static inline void *kiln_c99_gc_alloc_hot(uint32_t kind, size_t size,
+void *kiln_c99_module_owner_create(void *context, kiln_gc_visit_roots_fn visit_roots,
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured_ex(uint32_t kind, size_t size, int capture_candidate) {
@@ -2599,6 +2603,7 @@ void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *opaque, const kiln_string 
 static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
 static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
 static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
+static int kiln_c99_gc_owner_visit(void *opaque, const void *pointer, uint32_t kind) {
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 #define KILN_C99_HOST_MARK_VALUE(field) kiln_c99_gc_mark_value(heap, &owner->field);

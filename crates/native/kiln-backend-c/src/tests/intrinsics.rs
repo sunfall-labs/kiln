@@ -68,6 +68,47 @@ int main(void) {
 }
 
 #[test]
+fn module_owner_gc_kind_visits_roots_and_releases_external_state_once() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+typedef struct { int visits; int releases; } owner_test_state;
+static int owner_test_visit(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    owner_test_state *state = (owner_test_state *)context;
+    state->visits += 1;
+    return visit(visit_context, NULL, KILN_GC_VISIT_BLOCK);
+}
+static void owner_test_release(void *context) {
+    owner_test_state *state = (owner_test_state *)context;
+    state->releases += 1;
+}
+int main(void) {
+    owner_test_state state = {0};
+    void *owner = kiln_c99_module_owner_create(&state, owner_test_visit, owner_test_release);
+    kiln_gc_block *block;
+    if (owner == NULL) return 1;
+    block = ((kiln_gc_block *)owner) - 1;
+    if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_MODULE_OWNER) return 2;
+    if (!kiln_c99_gc_kind_finalized_at_alloc(KILN_GC_MODULE_OWNER)) return 3;
+    if (kiln_c99_graph_inert_finalizer_block(block)) return 4;
+    kiln_c99_gc_trace(kiln_c99_gc_heap(), block);
+    if (state.visits != 1) return 5;
+    kiln_c99_gc_finalize(kiln_c99_gc_heap(), block);
+    if (state.releases != 1) return 6;
+    kiln_c99_gc_finalize(kiln_c99_gc_heap(), block);
+    return state.releases == 1 ? 0 : 7;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "module-owner-gc-kind");
+    assert!(
+        run.status.success(),
+        "module owner kind failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn native_shared_facade_cache_is_weak_and_releases_its_lease() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

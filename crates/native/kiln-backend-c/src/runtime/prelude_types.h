@@ -840,6 +840,7 @@ extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn 
                                               void *context);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
                                       void *visit_context);
+typedef void (*kiln_gc_release_instance_fn)(void *context);
 extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
                                          void *context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
@@ -2301,8 +2302,20 @@ typedef enum kiln_gc_kind {
     KILN_GC_NODE_PROCESS_COMPLETION,
     KILN_GC_NEXT_TICK,
     KILN_GC_TIMER,
+    /* Realm-local owner for external ESM instance state. Never cloned into shared heaps. */
+    KILN_GC_MODULE_OWNER,
     KILN_GC_KIND_COUNT
 } kiln_gc_kind;
+
+typedef struct kiln_gc_module_owner {
+    void *context;
+    kiln_gc_visit_roots_fn visit_roots;
+    kiln_gc_release_instance_fn release_instance;
+} kiln_gc_module_owner;
+
+extern void *kiln_c99_module_owner_create(void *context,
+                                          kiln_gc_visit_roots_fn visit_roots,
+                                          kiln_gc_release_instance_fn release_instance);
 
 /* The kind of a heap payload, read from the block header in front of it. The header is exactly
  * one `kiln_gc_block` (`heap.c`) before the payload whatever its origin -- nursery, slab or

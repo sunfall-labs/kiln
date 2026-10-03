@@ -94,7 +94,7 @@
      (UINT64_C(1) << KILN_GC_REGEXP) | (UINT64_C(1) << KILN_GC_NODE_SERVER) |                      \
      (UINT64_C(1) << KILN_GC_NODE_RESPONSE) | (UINT64_C(1) << KILN_GC_NODE_CLIENT_REQUEST) |       \
      (UINT64_C(1) << KILN_GC_NEXT_TICK) | (UINT64_C(1) << KILN_GC_TIMER) |                        \
-     (UINT64_C(1) << KILN_GC_SHARED_FACADE))
+     (UINT64_C(1) << KILN_GC_SHARED_FACADE) | (UINT64_C(1) << KILN_GC_MODULE_OWNER))
 
 static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
     uint32_t masked = kind & KILN_GC_KIND_MASK;
@@ -2546,7 +2546,7 @@ static void kiln_c99_heap_profile_dump(kiln_gc_heap *heap, uint32_t pass) {
         "proxy", "date", "regexp", "symbol", "typed_buffer", "typed_array", "data_view",
         "commonjs_require", "method_store", "node_server", "node_socket",
         "node_client_request", "node_response", "node_completion", "node_fs_completion",
-        "node_process_completion", "next_tick", "timer"
+        "node_process_completion", "next_tick", "timer", "module_owner"
     };
     uint64_t counts[KILN_GC_KIND_COUNT] = {0};
     uint64_t bytes[KILN_GC_KIND_COUNT] = {0};
@@ -4092,6 +4092,17 @@ KILN_ALWAYS_INLINE static inline void *kiln_c99_gc_alloc_hot(uint32_t kind, size
     return kiln_c99_gc_alloc_ex(kind, size, zero_payload);
 }
 
+void *kiln_c99_module_owner_create(void *context, kiln_gc_visit_roots_fn visit_roots,
+                                  kiln_gc_release_instance_fn release_instance) {
+    kiln_gc_module_owner *owner = (kiln_gc_module_owner *)kiln_c99_gc_alloc_hot(
+        KILN_GC_MODULE_OWNER, sizeof *owner, 1);
+    if (owner == NULL) return NULL;
+    owner->context = context;
+    owner->visit_roots = visit_roots;
+    owner->release_instance = release_instance;
+    return owner;
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     return kiln_c99_gc_alloc_ex(kind, size, 1);
 }
@@ -4374,6 +4385,9 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
             array->frozen || array->not_extensible) return 0;
         return 1;
     }
+    case KILN_GC_MODULE_OWNER:
+        /* Realm callbacks and external module state are never shareable. */
+        return 0;
     default:
         return 0;
     }
@@ -5381,6 +5395,9 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
+    case KILN_GC_MODULE_OWNER:
+        /* The token closes over realm-local callbacks and external instance storage. */
+        return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
     case KILN_GC_SYMBOL: {
         const kiln_symbol *symbol = (const kiln_symbol *)(block + 1);
         if (block->size < sizeof *symbol) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -7946,6 +7963,14 @@ static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
     for (index = 0; index < count; ++index) kiln_c99_gc_mark_val(heap, values[index]);
 }
 
+static int kiln_c99_gc_owner_visit(void *opaque, const void *pointer, uint32_t kind) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    if (kind == KILN_GC_VISIT_VALUE) kiln_c99_gc_mark_value(heap, (const kiln_value *)pointer);
+    else if (kind == KILN_GC_VISIT_BLOCK) kiln_c99_gc_mark_block(heap, pointer);
+    else return KILN_C99_INVALID_ARGUMENT;
+    return KILN_C99_OK;
+}
+
 /* Every kind that falls to the `default:` case below owns no pointer this tracer walks, which is
  * exactly the invariant `kiln_c99_gc_alloc_pointer_free` trades its zeroing for: a mid-turn
  * collection that lands before such a kind's payload is filled in traces the block (this
@@ -7972,6 +7997,13 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_COMMONJS_REQUIRE: {
         kiln_commonjs_require *require = (kiln_commonjs_require *)payload;
         kiln_c99_gc_mark_value(heap, &require->properties);
+        break;
+    }
+    case KILN_GC_MODULE_OWNER: {
+        kiln_gc_module_owner *owner = (kiln_gc_module_owner *)payload;
+        if (owner->visit_roots != NULL &&
+            owner->visit_roots(owner->context, kiln_c99_gc_owner_visit, heap) != KILN_C99_OK)
+            heap->mark_failed = 1;
         break;
     }
     case KILN_GC_CLOSURE: {
@@ -8248,6 +8280,14 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         if (closure->upvalues != NULL && closure->upvalues != closure->inline_upvalues) {
             free(closure->upvalues);
         }
+        break;
+    }
+    case KILN_GC_MODULE_OWNER: {
+        kiln_gc_module_owner *owner = (kiln_gc_module_owner *)payload;
+        if (owner->release_instance != NULL) owner->release_instance(owner->context);
+        owner->context = NULL;
+        owner->visit_roots = NULL;
+        owner->release_instance = NULL;
         break;
     }
     case KILN_GC_ARRAY: {
