@@ -1165,6 +1165,22 @@ fn produces_references(program: &Program) -> bool {
     if has_top_level_await(program) {
         return true;
     }
+    // A cell read can be a temporal-dead-zone read. The scalar entry has no `thrown` slot,
+    // while the boxed entry must preserve the actual ReferenceError for the host (and for JS
+    // catch blocks). Do not classify a program containing one as a non-throwing scalar body.
+    let reads_shared_cell = |code: &[Instruction]| {
+        code.iter().any(|instruction| {
+            matches!(instruction, Instruction::LoadGlobal(slot) if module_cells::is_cell_global(*slot))
+        })
+    };
+    if reads_shared_cell(&program.code)
+        || program
+            .functions
+            .iter()
+            .any(|proto| reads_shared_cell(&proto.code))
+    {
+        return true;
+    }
     let scalar_only = |code: &[Instruction]| {
         code.iter().all(|instruction| {
             matches!(
@@ -1175,7 +1191,6 @@ fn produces_references(program: &Program) -> bool {
                     | Instruction::LoadGlobal(_)
                     | Instruction::StoreGlobal(_)
                     | Instruction::NewCell(_)
-                    | Instruction::LoadCell(_)
                     | Instruction::StoreCell(_)
                     | Instruction::Pop
                     | Instruction::Dup

@@ -1774,12 +1774,17 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     }
 
     // A binding whose first store sits behind an inert prefix of its owner's entry block -- an
-    // entry block nothing jumps back to -- is initialized before any executor can read it:
-    // the owner reads it later in program order, and a closure the prefix made runs only after
-    // a call, which the prefix has none of. Every read of such a binding needs no dead-zone
-    // check, whatever it holds.
+    // entry block nothing jumps back to -- is initialized before a later read in that same
+    // body. A closure created in the prefix may be invoked as part of class construction or
+    // another initializer, though, so this proof cannot erase checks in a different function.
     let mut settled: HashSet<Binding> = HashSet::new();
     for (binding, binding_stores) in &stores {
+        if reads
+            .get(binding)
+            .is_some_and(|uses| uses.iter().any(|(owner, _)| owner != &binding.owner))
+        {
+            continue;
+        }
         let graph = graph_of(binding.owner);
         let Some(entry) = graph.block(graph.entry_block) else {
             continue;

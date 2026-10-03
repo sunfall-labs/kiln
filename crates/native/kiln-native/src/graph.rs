@@ -3568,6 +3568,29 @@ extern void kiln_cli_warn(const char *message, const kiln_cli_host_state *host_s
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
+                                 kiln_value *out, int depth, kiln_value *thrown);
+/* Error.stack can be an inherited lazy accessor (not an own data property).  Reporting must
+ * read it through the language property path while the failing realm's host is still active;
+ * the hostless launcher fallback only sees raw own data properties. */
+static kiln_value kiln_graph_describe_error(kiln_host *host, kiln_value value) {
+    if (value.tag == 9 /* KILN_VALUE_OBJECT */) {
+        kiln_value stack = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        kiln_value getter_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        int status = kiln_c99_get(host, value, "stack", 5, &stack, 0, &getter_error);
+        if (status == 0 && stack.tag == KILN_VALUE_STRING && stack.ptr != NULL) return stack;
+        /* If stack is absent or its accessor throws, use the language's ordinary
+         * ToPrimitive(string) path. This preserves `ReferenceError: ...` via Error#toString
+         * instead of reducing every error to its message field. */
+        kiln_value primitive = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        kiln_value conversion_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        status = kiln_c99_to_primitive(host, value, 1 /* string */, &primitive, 0,
+                                       &conversion_error);
+        if (status == 0 && primitive.tag == KILN_VALUE_STRING && primitive.ptr != NULL)
+            return primitive;
+    }
+    return kiln_cli_describe_error(value);
+}
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
@@ -3924,6 +3947,30 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         runtime_importers.len().max(1),
     );
     output = output.replace("/* KILN_GRAPH_CONTEXT */\n", &context);
+    output.push_str(
+        r#"
+typedef struct kiln_graph_error_read_context {
+    kiln_graph_context *graph;
+    kiln_value value;
+} kiln_graph_error_read_context;
+
+static int kiln_graph_read_error_in_realm(void *opaque) {
+    kiln_graph_error_read_context *context = (kiln_graph_error_read_context *)opaque;
+    context->graph->instance->result =
+        kiln_graph_describe_error(&context->graph->host, context->value);
+    return 0;
+}
+
+static kiln_value kiln_graph_describe_error_in_realm(uint64_t realm,
+                                                      kiln_graph_context *graph,
+                                                      kiln_value value) {
+    kiln_graph_error_read_context context = { graph, value };
+    if (kiln_realm_enter(realm, kiln_graph_read_error_in_realm, &context) == 0)
+        return graph->instance->result;
+    return kiln_cli_describe_error(value);
+}
+"#,
+    );
     output.push_str(
         r#"
 static kiln_val *kiln_graph_unit_values(void *opaque, const kiln_c99_unit *unit) {
@@ -4656,7 +4703,7 @@ static int kiln_graph_enter_inner(void *opaque) {
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_cli_describe_error(*result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_bootstrap_done();",
+            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_graph_describe_error(host, *result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_bootstrap_done();",
             bootstrap.symbol
         )
         .unwrap();
@@ -5705,7 +5752,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
             if (promise->state == 2 /* KILN_C99_REJECTED */) {
                 status = KILN_C99_THROWN;
                 phase = "module body";
-                graph->instance->result = kiln_cli_describe_error(promise->value);
+                graph->instance->result = kiln_graph_describe_error_in_realm(realm, graph, promise->value);
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
@@ -5761,7 +5808,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * handled throw resets the realm diagnostic bridge, so this cannot leak an earlier refusal
      * into a later ordinary error. */
     if (status == KILN_C99_THROWN) {
-        kiln_value message = kiln_cli_describe_error(graph->instance->result);
+        kiln_value message = kiln_graph_describe_error_in_realm(realm, graph, graph->instance->result);
         if (message.tag != KILN_VALUE_STRING) {
             message = kiln_c99_text(message);
         }

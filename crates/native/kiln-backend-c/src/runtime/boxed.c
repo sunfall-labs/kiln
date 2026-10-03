@@ -2606,7 +2606,8 @@ static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_v
 
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
     if (val == KILN_VAL_UNINITIALIZED) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                                    "cannot access a binding before its declaration");
     }
     return KILN_C99_OK;
 }
