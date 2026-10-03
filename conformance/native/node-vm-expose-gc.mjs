@@ -4,6 +4,10 @@ import { runInNewContext } from "node:vm";
 if (runInNewContext("seed + 2", { seed: 40 }) !== 42) {
   throw new Error("new-context scope ignored its context bindings");
 }
+const context = { state: { count: 0 } };
+if (runInNewContext("state.count += 1", context) !== 1 || context.state.count !== 1) {
+  throw new Error("new-context scope lost assignment side effects");
+}
 
 if (typeof globalThis.gc !== "undefined") {
   throw new Error("GC exposure leaked onto the current global");

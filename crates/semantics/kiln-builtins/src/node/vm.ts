@@ -54,15 +54,8 @@ export function runInNewContext(code: string, contextObject?: any, _options?: an
     values.push(kilnPrivate.gcRequest);
   }
   if (keys.length === 0) return (0, eval)(code);
-  // Compile expressions as the body of a function whose parameters are the context bindings.
-  // The previous indirect eval escaped this scope, making those names invisible to the script.
-  // A statement body remains executable through the ordinary Function path.
-  let evaluate: any;
-  try {
-    evaluate = new Function(...keys, `return (${code})`);
-  } catch (_error) {
-    evaluate = new Function(...keys, code);
-  }
+  // Direct eval keeps the context parameters in scope and preserves script completion values.
+  const evaluate = new Function(...keys, `return eval(${JSON.stringify(code)})`);
   return evaluate(...values);
 }
 

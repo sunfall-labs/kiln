@@ -3194,11 +3194,78 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             }
             kiln_dyn_lexer_next(lex);
             kiln_value res;
-            status = lex->parse_only ? KILN_C99_OK : constructing
-                         ? kiln_c99_construct(host, &res, *out, call_args, call_argc, depth,
-                                              thrown)
-                         : kiln_c99_call(host, &res, *out, current_receiver, call_args,
-                                         call_argc, depth, thrown);
+            if (!lex->parse_only && !constructing && out->tag == KILN_VALUE_BUILTIN &&
+                out->bits == KILN_C99_BUILTIN_EVAL) {
+                if (call_argc == 0) {
+                    res = kiln_c99_undefined();
+                    status = KILN_C99_OK;
+                } else if (call_args[0].tag != KILN_VALUE_STRING) {
+                    res = call_args[0];
+                    status = KILN_C99_OK;
+                } else {
+                    uint8_t *eval_source = NULL;
+                    size_t eval_length = 0;
+                    status = kiln_dyn_string_to_source(call_args[0], &eval_source,
+                                                       &eval_length);
+                    if (status == KILN_C99_OK) {
+                        kiln_dyn_lexer eval_goal;
+                        memset(&eval_goal, 0, sizeof eval_goal);
+                        eval_goal.src = (const char *)eval_source;
+                        eval_goal.len = eval_length;
+                        eval_goal.parse_only = 1;
+                        kiln_dyn_lexer_next(&eval_goal);
+                        switch (eval_goal.curr.kind) {
+                        case KILN_DYN_KW_VAR:
+                        case KILN_DYN_KW_LET:
+                        case KILN_DYN_KW_CONST:
+                        case KILN_DYN_KW_RETURN:
+                        case KILN_DYN_KW_IF:
+                        case KILN_DYN_KW_FOR:
+                        case KILN_DYN_KW_THROW:
+                        case KILN_DYN_KW_SWITCH:
+                        case KILN_DYN_KW_BREAK:
+                        case KILN_DYN_KW_CONTINUE:
+                        case KILN_DYN_KW_WITH:
+                        case KILN_DYN_LBRACE:
+                            status = kiln_c99_refuse(
+                                "direct eval statement completion in a new VM context");
+                            break;
+                        default:
+                            break;
+                        }
+                        kiln_dyn_token_free(&eval_goal.curr);
+                    }
+                    if (status == KILN_C99_OK)
+                        status = kiln_dyn_preflight_indirect_eval(host,
+                            (const char *)eval_source, eval_length, depth + 1, 0, thrown);
+                    if (status == KILN_C99_OK) {
+                        kiln_dyn_lexer eval_lex;
+                        memset(&eval_lex, 0, sizeof eval_lex);
+                        eval_lex.src = (const char *)eval_source;
+                        eval_lex.len = eval_length;
+                        eval_lex.strict = scope != NULL && scope->strict;
+                        eval_lex.dynamic_function_body = 1;
+                        kiln_dyn_lexer_next(&eval_lex);
+                        if (eval_lex.curr.kind == KILN_DYN_EOF) {
+                            res = kiln_c99_undefined();
+                        } else {
+                            status = kiln_dyn_eval_expr(host, &eval_lex, scope,
+                                kiln_c99_undefined(), NULL, 0, depth + 1, &res, thrown);
+                            if (status == KILN_C99_OK && eval_lex.curr.kind != KILN_DYN_EOF)
+                                status = kiln_c99_refuse(
+                                    "direct eval statements beyond a single expression");
+                        }
+                        kiln_dyn_token_free(&eval_lex.curr);
+                    }
+                    free(eval_source);
+                }
+            } else {
+                status = lex->parse_only ? KILN_C99_OK : constructing
+                             ? kiln_c99_construct(host, &res, *out, call_args, call_argc, depth,
+                                                  thrown)
+                             : kiln_c99_call(host, &res, *out, current_receiver, call_args,
+                                             call_argc, depth, thrown);
+            }
             kiln_c99_gc_keep_alive(&current_receiver);
             if (status != KILN_C99_OK) return status;
             constructing = 0;
