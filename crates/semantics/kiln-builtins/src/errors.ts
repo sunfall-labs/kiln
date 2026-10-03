@@ -143,9 +143,10 @@
       stackRegistrationToken,
       errorBrandToken,
     );
-    defineHidden(ErrorCtor, "isError", (value: unknown): boolean =>
-      captureFrameSnapshots(value, undefined, errorBrandToken) === true
-    );
+    const isError = (value: unknown): boolean =>
+      captureFrameSnapshots(value, undefined, errorBrandToken) === true;
+    defineHidden(isError, "name", "isError");
+    defineHidden(ErrorCtor, "isError", isError);
   }
 
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).
