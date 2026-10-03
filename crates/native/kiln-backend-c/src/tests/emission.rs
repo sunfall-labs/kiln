@@ -865,6 +865,51 @@ fn program_hash_covers_debug_call_site_coordinates() {
 }
 
 #[test]
+fn module_hash_covers_link_facts_used_by_emission() {
+    let base = ModuleProgram {
+        program: program(Vec::new(), vec![Instruction::Return], 0),
+        ..ModuleProgram::default()
+    };
+    let baseline = hash_module_with_seed(&base, 0xcbf29ce484222325);
+
+    let mut direct_eval = base.clone();
+    direct_eval.link_facts.direct_eval = true;
+    assert_ne!(
+        baseline,
+        hash_module_with_seed(&direct_eval, 0xcbf29ce484222325),
+        "direct eval changes module evaluation emission"
+    );
+
+    let mut removable = base.clone();
+    removable.link_facts.removable_declarations = vec![kiln_ir::RemovableDeclaration {
+        local_slots: vec![1, 3],
+        pc_start: 2,
+        pc_end: 5,
+    }];
+    assert_ne!(
+        baseline,
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        "closed-world declaration elision changes module emission"
+    );
+    let mut changed = removable.clone();
+    changed.link_facts.removable_declarations[0]
+        .local_slots
+        .reverse();
+    assert_ne!(
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        hash_module_with_seed(&changed, 0xcbf29ce484222325),
+        "declaration slot ordering is retained in module identity"
+    );
+    changed = removable.clone();
+    changed.link_facts.removable_declarations[0].pc_end += 1;
+    assert_ne!(
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        hash_module_with_seed(&changed, 0xcbf29ce484222325),
+        "declaration boundaries are retained in module identity"
+    );
+}
+
+#[test]
 fn emitted_closure_names_use_lossless_effective_function_metadata() {
     let mut high = function(vec![Instruction::Return]);
     high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));

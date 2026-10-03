@@ -798,5 +798,22 @@ pub(super) fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
         &mut hash,
         u64::from(module.link_facts.module_instantiation_end),
     );
+    // These facts select emitted evaluation paths and declaration elision. They are intentionally
+    // stored outside Program bytecode, so append them explicitly to the persistent module identity.
+    byte(&mut hash, 0x45);
+    byte(&mut hash, u8::from(module.link_facts.direct_eval));
+    byte(&mut hash, 0x46);
+    word(
+        &mut hash,
+        module.link_facts.removable_declarations.len() as u64,
+    );
+    for declaration in &module.link_facts.removable_declarations {
+        word(&mut hash, declaration.local_slots.len() as u64);
+        for slot in &declaration.local_slots {
+            word(&mut hash, u64::from(*slot));
+        }
+        word(&mut hash, u64::from(declaration.pc_start));
+        word(&mut hash, u64::from(declaration.pc_end));
+    }
     hash
 }
