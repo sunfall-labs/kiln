@@ -3152,7 +3152,7 @@ static int ledger_frame_entry(void *context) {
     (void)context;
     heap->fallback = 0;
     heap->enabled = 1;
-    kiln_val built_function = @ENTRY@_fn_0_t(0);
+    kiln_val built_function = @ENTRY@_fn_0_t(0, NULL, &thrown);
     if (built_function == KILN_VAL_TYPED_FAIL) return 1;
     function = kiln_val_to_boundary(built_function);
     if (function.tag != KILN_VALUE_FUNCTION) { fprintf(stderr, "function tag=%u bits=%llu\n", function.tag, (unsigned long long)function.bits); return 14; }

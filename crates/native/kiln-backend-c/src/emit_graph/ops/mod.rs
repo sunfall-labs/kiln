@@ -1045,7 +1045,7 @@ pub(super) fn emit_graph_op(
                             String::new()
                         };
                         format!(
-                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
                             n = argc.max(1),
                             boxed_upvalues = boxed_upvalues,
                             fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
@@ -1136,7 +1136,7 @@ pub(super) fn emit_graph_op(
                 let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
                     fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
