@@ -1095,7 +1095,10 @@ pub(crate) fn call_native(
         Native::EncodeUri | Native::EncodeUriComponent => {
             let text = arguments
                 .first()
-                .map_or_else(String::new, Value::to_display_string);
+                .unwrap_or(&Value::Undefined)
+                .to_string_units_checked()?
+                .to_scalar_string()
+                .map_err(|_| ExecutionError::MalformedUri)?;
             let whole = matches!(native, Native::EncodeUri);
             let mut out = String::with_capacity(text.len());
             for character in text.chars() {

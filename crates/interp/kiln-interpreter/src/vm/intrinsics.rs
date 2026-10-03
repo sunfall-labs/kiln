@@ -155,6 +155,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
+        // URI encoding performs abstract ToString and then UTF-8-encodes scalar values. The
+        // conversion can call @@toPrimitive/toString and can reject Symbols, so it belongs on
+        // the VM. Keep the resulting UTF-16 units until the encoder validates surrogate pairs;
+        // converting through a lossy Rust String here would silently replace lone surrogates.
+        if matches!(native, Native::EncodeUri | Native::EncodeUriComponent) {
+            let units =
+                self.as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+            let converted = [Value::String(units)];
+            return call_native(&self.intrinsics, native, receiver, &converted);
+        }
         // These three answer from the machine because each can run program code -- a set-like's
         // `has`/`keys`, a sort comparator, a getter reached through a generic receiver -- and
         // `call_native` has no VM to run it with. Their arms in `call_native` are `unreachable!`
