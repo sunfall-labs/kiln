@@ -3205,7 +3205,9 @@ static int ledger_frame_entry(void *context) {
     kiln_c99_heap_store_val(frame, &frame->locals[0], KILN_VAL_UNDEFINED);
     if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
             KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 10;
-    kiln_c99_heap_store_val(frame, &frame->stack[0], KILN_VAL_UNDEFINED);
+    /* A later suspension can use a shorter spill prefix. The old pointer remains in the
+     * allocation, but is no longer an edge owned by the suspended generator. */
+    frame->sp = 0;
     if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
             KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
         kiln_c99_graph_scan_outside_heap(heap, batch, 1) !=

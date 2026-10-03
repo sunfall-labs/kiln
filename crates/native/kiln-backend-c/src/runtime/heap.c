@@ -5550,13 +5550,14 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
         if (closure == NULL || (closure->local_count != 0 && frame->locals == NULL) ||
-            (closure->stack_size != 0 && frame->stack == NULL))
+            (closure->stack_size != 0 && frame->stack == NULL) ||
+            frame->sp > closure->stack_size)
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         for (index = 0; index < closure->local_count; ++index) {
             if (kiln_c99_graph_val_in_batch(heap, chunks, count, frame->locals[index]))
                 return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         }
-        for (index = 0; index < closure->stack_size; ++index) {
+        for (index = 0; index < frame->sp; ++index) {
             if (kiln_c99_graph_val_in_batch(heap, chunks, count, frame->stack[index]))
                 return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         }
@@ -8110,7 +8111,9 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         if (frame->function.tag == KILN_VALUE_FUNCTION) {
             const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
             kiln_c99_gc_mark_vals(heap, frame->locals, closure->local_count);
-            kiln_c99_gc_mark_vals(heap, frame->stack, closure->stack_size);
+            /* Only the current suspension's spill prefix is live. Capacity beyond sp may
+             * still contain values from an earlier suspension and must not keep them alive. */
+            kiln_c99_gc_mark_vals(heap, frame->stack, frame->sp);
         }
         if (frame->queue_promises != NULL) {
             kiln_c99_gc_mark_values(heap, frame->queue_promises, frame->queue_count);
