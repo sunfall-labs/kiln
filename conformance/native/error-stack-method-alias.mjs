@@ -38,5 +38,14 @@ if (identifierSite?.getFunctionName() !== "userCode" ||
   throw new Error("identifier properties should retain method metadata without a display alias");
 }
 
+const unicodeMethod = { "προσθήκη": function namedUser() { return new Error("unicode").stack; } };
+unicodeMethod["προσθήκη"]();
+const unicodeSite = sites?.[0];
+if (unicodeSite?.getFunctionName() !== "namedUser" ||
+    unicodeSite?.getMethodName() !== "προσθήκη" ||
+    unicodeSite?.toString().includes("[as προσθήκη]")) {
+  throw new Error("Unicode IdentifierName properties should retain metadata without a display alias");
+}
+
 Error.prepareStackTrace = previousPrepare;
 console.log("error stack method aliases passed");
