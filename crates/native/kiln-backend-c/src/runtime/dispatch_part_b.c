@@ -2134,7 +2134,7 @@
             }
             if (kiln_c99_property_read_own_value(receiver, (const kiln_string *)name.ptr,
                                                  NULL, &property))
-                *result = kiln_c99_boolean(property.enumerable);
+                *result = kiln_c99_boolean(kiln_c99_property_is_enumerable(&property));
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_IS_PROTOTYPE_OF: {
