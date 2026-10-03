@@ -1254,8 +1254,14 @@ pub struct WorkerContext {
 /// still run.
 #[derive(Debug)]
 pub struct Liveness {
-    active: AtomicBool,
+    /// `IDLE`, `ACTIVE` or `FINISHED`: one atomic, so a wake racing a worker's exit can never
+    /// mark a finished realm active again -- which would hold every virtual clock forever.
+    state: std::sync::atomic::AtomicU8,
 }
+
+const IDLE: u8 = 0;
+const ACTIVE: u8 = 1;
+const FINISHED: u8 = 2;
 
 static ACTIVE_REALMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1264,32 +1270,52 @@ impl Liveness {
     pub fn new_active() -> Arc<Self> {
         ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
         Arc::new(Self {
-            active: AtomicBool::new(true),
+            state: std::sync::atomic::AtomicU8::new(ACTIVE),
         })
     }
 
+    /// The realm has work: it runs, or a wake is on its way to it. A finished realm stays so.
     pub fn set_active(&self) {
-        if !self.active.swap(true, Ordering::AcqRel) {
+        if self
+            .state
+            .compare_exchange(IDLE, ACTIVE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     pub fn set_idle(&self) {
-        if self.active.swap(false, Ordering::AcqRel) {
+        if self
+            .state
+            .compare_exchange(ACTIVE, IDLE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             ACTIVE_REALMS.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
+    /// The realm has ended: it can cause no wake, and no wake can make it active again.
+    pub fn finish(&self) {
+        if self.state.swap(FINISHED, Ordering::AcqRel) == ACTIVE {
+            ACTIVE_REALMS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVE
+    }
+
     /// Whether any realm other than this one is active.
     pub fn others_active(&self) -> bool {
-        let mine = usize::from(self.active.load(Ordering::Acquire));
+        let mine = usize::from(self.is_active());
         ACTIVE_REALMS.load(Ordering::Acquire) > mine
     }
 }
 
 impl Drop for Liveness {
     fn drop(&mut self) {
-        self.set_idle();
+        self.finish();
     }
 }
 
@@ -1305,9 +1331,7 @@ impl BlockedGuard {
                 .as_ref()
                 .map(|context| Arc::clone(&context.liveness))
         });
-        let was_active = liveness
-            .as_ref()
-            .is_some_and(|l| l.active.load(Ordering::Acquire));
+        let was_active = liveness.as_ref().is_some_and(|l| l.is_active());
         if was_active && let Some(l) = &liveness {
             l.set_idle();
         }
@@ -1359,6 +1383,8 @@ struct WorkerRecord {
     terminate: Arc<AtomicBool>,
     control: u64,
     task: Option<WorkerTask>,
+    /// The worker's own liveness, which a wake aimed at it marks active ([`wake_worker`]).
+    liveness: Arc<Liveness>,
 }
 
 enum WorkerTask {
@@ -1664,6 +1690,7 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
             terminate: Arc::clone(&terminate),
             control,
             task: None,
+            liveness: Arc::clone(&context.liveness),
         },
     );
     RUNNING.fetch_add(1, Ordering::AcqRel);
@@ -1938,20 +1965,26 @@ fn complete_worker(context: &WorkerContext, code: i32) {
         }
     }
     close(context.spec.control);
-    exit_liveness.set_idle();
+    exit_liveness.finish();
 }
 
 /// Ask worker `key` to stop: raise its flag, wake it where it may be waiting, and tell its
 /// realm. `false` when there is no such worker (it has already ended).
 pub fn terminate(key: u64) -> bool {
-    let (terminate, control) = {
+    let (terminate, control, liveness) = {
         let workers = workers();
         let Some(record) = workers.get(&key) else {
             return false;
         };
-        (Arc::clone(&record.terminate), record.control)
+        (
+            Arc::clone(&record.terminate),
+            record.control,
+            Arc::clone(&record.liveness),
+        )
     };
     terminate.store(true, Ordering::Release);
+    // It has work now -- ending -- before the wake below reaches it.
+    liveness.set_active();
     {
         let workers = workers();
         if let Some(WorkerTask::Scheduled { handle, .. }) =

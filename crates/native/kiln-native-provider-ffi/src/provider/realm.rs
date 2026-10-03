@@ -1891,7 +1891,7 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
     // held across an await here.
     realm.drive_context.set((host, thrown));
     let status = realm.runtime.executor().block_on(drive_async(realm));
-    realm.liveness().set_idle();
+    drive_ended(realm);
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1910,7 +1910,7 @@ fn drive_scheduled(
     realm.drive_context.set((host, thrown));
     let step = drive_scheduled_inner(realm, waker);
     if matches!(step, ScheduledStep::Done(_)) {
-        realm.liveness().set_idle();
+        drive_ended(realm);
     }
     realm
         .drive_context
@@ -2130,6 +2130,34 @@ impl NativeRealm {
     }
 }
 
+/// The drive has returned its status. A top-level realm has nothing left to cause a wake, so it
+/// goes idle. A worker does not: between here and `workers::complete_worker` it still tears down
+/// (children, realm state) and only then queues the `exit` and closes the ports its parent is
+/// parked on, and a parent's virtual clock that saw it idle in that window would jump to its next
+/// timer first. `complete_worker` ends the worker's liveness once those messages are queued.
+fn drive_ended(realm: &NativeRealm) {
+    if kiln_runtime::workers::current_liveness().is_none() {
+        realm.liveness().set_idle();
+    }
+}
+
+/// Mark this realm idle because it is about to park, unless its parent has asked it to stop.
+///
+/// `terminate()` raises the flag and then marks the worker active (`workers::terminate`), so a
+/// virtual clock elsewhere stays held until the worker has ended. A worker mid-turn when that
+/// happens would otherwise go idle here, on its way to park, and undo it: the parent's parked
+/// clock could then jump to its next timer before the worker's next turn processed the stop.
+/// Checking the flag after going idle closes the race in either order. Returns `true` when the
+/// realm must not park; it is active again and the next turn ends it.
+fn park_idle(realm: &NativeRealm) -> bool {
+    realm.liveness().set_idle();
+    if kiln_runtime::workers::terminate_requested() {
+        realm.liveness().set_active();
+        return true;
+    }
+    false
+}
+
 fn run_one_timer(realm: &NativeRealm) -> i32 {
     let timer = take_next_timer(realm);
     if let Some(WorkItem::Timer { work, .. }) = timer {
@@ -2257,7 +2285,9 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             let Some(signal) = signal else {
                 return DriveStep::Done(RUNTIME_ERROR);
             };
-            realm.liveness().set_idle();
+            if park_idle(realm) {
+                return DriveStep::Ready;
+            }
             return DriveStep::Parked {
                 signal,
                 delay: Some(deadline.saturating_sub(now)),
@@ -2269,7 +2299,9 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
         if realm.virtual_clock_held()
             && let Some(signal) = signal
         {
-            realm.liveness().set_idle();
+            if park_idle(realm) {
+                return DriveStep::Ready;
+            }
             return DriveStep::Parked {
                 signal,
                 delay: Some(deadline.saturating_sub(now)),
@@ -2286,7 +2318,9 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     let Some(signal) = signal else {
         return DriveStep::Done(RUNTIME_ERROR);
     };
-    realm.liveness().set_idle();
+    if park_idle(realm) {
+        return DriveStep::Ready;
+    }
     // A wall-clock timer wake may be an introspection poll rather than the deadline. A
     // virtual timer wake consumes one timer after the executor returns from its wait.
     DriveStep::Parked {
