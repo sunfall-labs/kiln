@@ -26,7 +26,8 @@ releaseOld();
 const old = await oldPromise;
 console.log(old.value, current.value, old === current, old.retained(),
             old.urlConstructor === current.urlConstructor,
-            old.processObject === current.processObject);
+            old.processObject === current.processObject,
+            old.v8Object === current.v8Object);
 "#,
     )
     .expect("write entry");
@@ -35,12 +36,14 @@ console.log(old.value, current.value, old === current, old.retained(),
         r#"
 import { URL } from "node:url";
 import process from "node:process";
+import v8 from "node:v8";
 const generation = (globalThis.__moduleInstanceGeneration ?? 0) + 1;
 globalThis.__moduleInstanceGeneration = generation;
 if (generation === 1) await globalThis.__moduleInstanceGate;
 export const value = generation;
 export const urlConstructor = URL;
 export const processObject = process;
+export const v8Object = v8;
 export function retained() { return generation; }
 "#,
     )
@@ -66,7 +69,7 @@ export function retained() { return generation; }
             },
         )
         .expect("module-instance graph builds and runs");
-    assert_eq!(report.stdout, b"1 2 false 1 true true\n");
+    assert_eq!(report.stdout, b"1 2 false 1 true true true\n");
 }
 
 #[test]
