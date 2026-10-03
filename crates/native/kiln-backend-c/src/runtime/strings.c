@@ -1600,6 +1600,44 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         {
             kiln_value made;
             kiln_value forwarded[2];
+            if (code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) {
+                /* String.prototype.replace treats a string search value literally. This path
+                 * reaches the regexp walker only so callable replacements can execute in the
+                 * interpreter; quote regexp syntax before using that walker. */
+                uint16_t *needle = NULL;
+                size_t needle_count = 0;
+                uint16_t *quoted = NULL;
+                size_t quoted_count = 0;
+                size_t index;
+                kiln_c99_gc_keep_alive(&source);
+                status = kiln_c99_to_units(source, &needle, &needle_count);
+                if (status != KILN_C99_OK || needle_count > SIZE_MAX / (2 * sizeof(uint16_t))) {
+                    free(needle);
+                    return status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : status;
+                }
+                quoted = (uint16_t *)malloc((needle_count * 2 + 1) * sizeof(uint16_t));
+                if (quoted == NULL) {
+                    free(needle);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                for (index = 0; index < needle_count; ++index) {
+                    uint16_t unit = needle[index];
+                    if (unit == '\\' || unit == '^' || unit == '$' || unit == '.' ||
+                        unit == '*' || unit == '+' || unit == '?' || unit == '(' ||
+                        unit == ')' || unit == '[' || unit == ']' || unit == '{' ||
+                        unit == '}' || unit == '|') {
+                        quoted[quoted_count++] = '\\';
+                    }
+                    quoted[quoted_count++] = unit;
+                }
+                free(needle);
+                source = kiln_c99_from_units(quoted, quoted_count);
+                free(quoted);
+                if (source.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                kiln_c99_gc_keep_alive(&source);
+            }
             status = kiln_c99_new_regexp(&made, (const kiln_string *)source.ptr,
                                          &kiln_c99_empty_string, thrown);
             if (status != KILN_C99_OK) {
