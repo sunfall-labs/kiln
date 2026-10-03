@@ -260,6 +260,9 @@ def main():
     engines = args.engine or ['bun', 'native']
     if len(set(engines)) != len(engines):
         parser.error('engines must be distinct')
+    unmatched = [p for p in args.path if not any(name == p or name.startswith(p.rstrip('/') + '/') for name in PIN['files'])]
+    if unmatched:
+        parser.error('unknown pinned test selectors: ' + ', '.join(unmatched))
     selected = [name for name in PIN['files'] if not args.path or any(name == p or name.startswith(p.rstrip('/') + '/') for p in args.path)]
     if not selected:
         parser.error('no pinned tests matched')
@@ -324,6 +327,8 @@ def main():
                     build_cmd = [*limiter, str(kiln), '--one-shot', 'build', str(entries[name]),
                                  '--node', '--profile', 'native-dev', '--output', str(binary)]
                     for specifier in RUNTIME_TARGETS.get('include', {}).get(name, []):
+                        if specifier.startswith('.'):
+                            specifier = str((source / PIN['directory'] / (name + '.test.ts')).parent.joinpath(specifier).resolve())
                         build_cmd.extend(['--include', specifier])
                     build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs)
                     if build['exit_code'] != 0 or not binary.is_file():

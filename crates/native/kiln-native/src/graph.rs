@@ -3768,6 +3768,7 @@ typedef struct kiln_worker_token {
 extern int kiln_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);
 extern int kiln_c99_worker_report_error(kiln_value error) __attribute__((visibility("hidden")));
 extern int kiln_realm_kiln_extensions_on(void);
+extern int kiln_realm_set_string_code_generation(uint64_t realm, int allowed);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
@@ -4056,13 +4057,14 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
 "#,
     );
     let context = format!(
-        "typedef struct kiln_graph_context kiln_graph_context;\n\
+        "typedef struct kiln_graph_launch {{ const char *entry; int flag_count; char **flags; size_t *preloads; size_t preload_count; int disallow_strings; }} kiln_graph_launch;\n\
+         typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
          typedef struct kiln_graph_runtime_module {{ char *path; size_t suffix_len; uint64_t generation; kiln_value namespace_value; kiln_value failure; int state; struct kiln_graph_runtime_module *next; }} kiln_graph_runtime_module;\n\
          typedef struct kiln_graph_unit_store {{ const kiln_c99_unit *unit; kiln_val *values; struct kiln_graph_unit_store *next; }} kiln_graph_unit_store;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
          typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    kiln_graph_runtime_module *runtime_modules;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
-         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
+         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    const kiln_graph_launch *launch;\n    size_t preload_next;\n    int launch_configured;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
          struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    kiln_graph_context *runtime_module_generation;\n    int runtime_module_reset_requested;\n    int is_builtin_graph;\n}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
@@ -5116,6 +5118,24 @@ static int kiln_cli_put_worker_env(kiln_host *host) {
     return kiln_c99_put(host, env, "KILN_WORKER_COUNT", 17, kiln_c99_copy_text(text, (size_t)length), 0, NULL);
 }
 
+/* Configure the existing process arrays so node:process exports retain their identity. */
+static int kiln_graph_configure_launch(kiln_graph_context *graph) {
+    const kiln_graph_launch *launch = graph->instance->launch;
+    kiln_value process = kiln_c99_undefined(), args = kiln_c99_undefined();
+    int status = kiln_c99_process_object(&process);
+    if (status == 0) status = kiln_c99_get(&graph->host, process, "argv", 4, &args, 0, &graph->instance->result);
+    if (status == 0) status = kiln_c99_put(&graph->host, args, "1", 1,
+        kiln_c99_copy_text(launch->entry, strlen(launch->entry)), 0, &graph->instance->result);
+    if (status == 0) status = kiln_c99_get(&graph->host, process, "execArgv", 8, &args, 0, &graph->instance->result);
+    for (int i = 0; status == 0 && i < launch->flag_count; i++) {
+        char key[32]; int len = snprintf(key, sizeof key, "%d", i);
+        status = kiln_c99_put(&graph->host, args, key, (size_t)len,
+            kiln_c99_copy_text(launch->flags[i], strlen(launch->flags[i])), 0, &graph->instance->result);
+    }
+    if (status == 0) graph->instance->launch_configured = 1;
+    return status;
+}
+
 static int kiln_graph_enter_inner(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -5186,17 +5206,34 @@ static int kiln_graph_enter_inner(void *opaque) {
             );
         }
     }
-    // Node exposes the entry module through every CommonJS `require.main`. The wrapper creates
-    // one require function per source module, so publish the same entry module object onto each
-    // require function after all wrappers exist and before any module body runs.
-    if modules[entry_index].0.source == ModuleSource::CommonJs {
+    // All CommonJS require functions share the selected realm entry, including a linked child
+    // launched from an ESM parent. An ESM entry exposes undefined as require.main.
+    if modules
+        .iter()
+        .any(|(node, _)| node.source == ModuleSource::CommonJs)
+    {
+        output.push_str("        kiln_value commonjs_main = kiln_c99_undefined();\n        switch (graph->instance->worker_entry) {\n");
+        if modules[entry_index].0.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "        case 0: commonjs_main = kiln_imports_{entry_index}[2]; break;"
+            )
+            .unwrap();
+        }
         for (index, (node, _)) in modules.iter().enumerate() {
             if node.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
-                    "        status = kiln_c99_put(NULL, kiln_imports_{index}[1], \"main\", (size_t)4, kiln_imports_{entry_index}[2], 0, NULL);\n        if (status != KILN_C99_OK) {{ *result = kiln_graph_diagnostic(\"commonjs-main\", \"require.main property setup failed\"); return status; }}"
+                    "        case {}: commonjs_main = kiln_imports_{index}[2]; break;",
+                    index + 1
                 )
                 .unwrap();
+            }
+        }
+        output.push_str("        default: break;\n        }\n");
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if node.source == ModuleSource::CommonJs {
+                writeln!(output, "        status = kiln_c99_put(NULL, kiln_imports_{index}[1], \"main\", (size_t)4, commonjs_main, 0, NULL);\n        if (status != KILN_C99_OK) {{ *result = kiln_graph_diagnostic(\"commonjs-main\", \"require.main property setup failed\"); return status; }}").unwrap();
             }
         }
     }
@@ -5351,6 +5388,7 @@ static int kiln_graph_enter_inner(void *opaque) {
         output.push_str("        }\n");
     }
     output.push_str("    }\n");
+    evaluation.push_str("    if (graph->instance->launch != NULL) {\n        if (!graph->instance->launch_configured) { status = kiln_graph_configure_launch(graph); if (status != 0) return status; }\n        while (graph->instance->preload_next < graph->instance->launch->preload_count) {\n            size_t index = graph->instance->launch->preloads[graph->instance->preload_next];\n            status = kiln_graph_ensure_module(graph, index);\n            graph->instance->result = graph->instance->module_states[index].result;\n            if (status != 0 || graph->instance->module_states[index].module_settling) return status;\n            graph->instance->preload_next++;\n        }\n    }\n");
     // A worker's realm (`node:worker_threads`, realms issue 06) runs one module of the program as
     // its entry -- with what that module imports, first -- rather than the program's startup list.
     writeln!(
@@ -5799,7 +5837,7 @@ static int kiln_graph_enter_inner(void *opaque) {
             writeln!(output, "    if (!graph->is_builtin_graph && index == (size_t){index}) {{ if (graph->realm->builtin_graph == NULL) return KILN_C99_CONTROL_ERROR; status = kiln_graph_ensure_module(graph->realm->builtin_graph, index); kiln_graph_alias_builtins(graph); return status; }}").unwrap();
         }
     }
-    output.push_str("    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n");
+    output.push_str("    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING && !graph->instance->module_states[index].module_settling) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n");
     for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
         let dependencies = if modules[index].0.source == ModuleSource::CommonJs {
@@ -6152,6 +6190,23 @@ static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
     uint64_t realm = run->realm;
     if (run->status != 0 || graph == NULL) return 0;
+    if (graph->instance->launch != NULL && graph->instance->roots_registered) {{
+        size_t index = graph->instance->preload_next < graph->instance->launch->preload_count
+            ? graph->instance->launch->preloads[graph->instance->preload_next]
+            : graph->instance->worker_entry - 1;
+        if (graph->instance->module_states[index].module_settling && !run->settling_driven) {{
+            run->phase = "the turn loop";
+            int progress = kiln_cli_realm_drive_step(run);
+            if (progress == 4) {{ run->settling_driven = 1; return 1; }}
+            return progress;
+        }}
+        if (graph->instance->module_states[index].phase != KILN_MODULE_EVALUATED) {{
+            run->settling_driven = 0;
+            run->phase = "module body";
+            run->status = kiln_realm_enter(realm, kiln_graph_enter, graph);
+            return run->status == 0;
+        }}
+    }}
     if (graph->instance->current_module < (size_t){} || !graph->instance->roots_registered) {{
         if (!run->settling_driven && graph->instance->current_module < (size_t){} &&
             graph->instance->module_states[kiln_graph_startup_indices[graph->instance->current_module]].module_settling) {{
@@ -6225,7 +6280,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * its parent's `terminate`) is its code with nothing reported, and an exception nothing
      * caught goes to the parent's `error` event -- a copy made inside the realm, before the value
      * is turned into the text a main realm prints -- with 1 for its code. */
-    if (worker_entry != 0) {
+    if (worker_entry != 0 && graph->instance->launch == NULL) {
         int32_t requested = 0;
         int code = 0;
         int exit_request = kiln_cli_take_realm_exit_code(realm, &requested);
@@ -6307,16 +6362,24 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
     return status == 0 ? 0 : 1;
 }
 
-static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
-                                 FILE *error_output, size_t worker_entry) {
+static int kiln_cli_run_entry(int argc, char **argv, int writes_result, FILE *output,
+                              FILE *error_output, size_t worker_entry, const kiln_graph_launch *launch) {
     kiln_cli_realm_run *run = (kiln_cli_realm_run *)calloc(1, sizeof *run);
     if (run == NULL) {
         kiln_cli_warn("kiln: out of memory for the realm session", NULL);
         return 1;
     }
     kiln_cli_realm_begin(run, argc, argv, output, error_output, worker_entry);
+    if (run->graph != NULL) run->graph->instance->launch = launch;
+    if (run->status == 0 && launch != NULL && launch->disallow_strings)
+        run->status = kiln_realm_set_string_code_generation(run->realm, 0);
     while (kiln_cli_realm_step(run)) {}
     return kiln_cli_realm_finish(run, writes_result, worker_entry);
+}
+
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry) {
+    return kiln_cli_run_entry(argc, argv, writes_result, output, error_output, worker_entry, NULL);
 }
 
 /* A worker's standard streams (`node:worker_threads`): each write goes to the parent as a message,
@@ -7402,6 +7465,55 @@ static void kiln_cli_grow_main_stack(void) {
 #endif
 }
 
+/* Node execution flags select only source modules declared in this finite native graph.
+ * Ordinary application arguments keep their existing meaning. */
+static int kiln_cli_try_source_launch(int argc, char **argv, int *handled) {
+    kiln_graph_launch launch = {0};
+    size_t *preloads = NULL;
+    char **args = NULL;
+    int cursor = 1, status = 1;
+    *handled = argc > 1 && (strcmp(argv[1], "--import") == 0 ||
+        strncmp(argv[1], "--import=", 9) == 0 ||
+        strcmp(argv[1], "--disallow-code-generation-from-strings") == 0);
+    if (!*handled) return 0;
+    preloads = (size_t *)calloc((size_t)argc, sizeof *preloads);
+    if (preloads == NULL) { kiln_cli_warn("kiln: out of memory for source preloads", NULL); return 1; }
+    launch.preloads = preloads;
+    while (cursor < argc && argv[cursor][0] == '-') {
+        const char *preload = NULL;
+        if (strcmp(argv[cursor], "--disallow-code-generation-from-strings") == 0) {
+            launch.disallow_strings = 1; cursor++;
+        } else if (strcmp(argv[cursor], "--import") == 0) {
+            if (++cursor == argc) { kiln_cli_warn("kiln: --import requires a linked module path", NULL); goto done; }
+            preload = argv[cursor++];
+        } else if (strncmp(argv[cursor], "--import=", 9) == 0) {
+            preload = argv[cursor++] + 9;
+        } else {
+            fprintf(stderr, "kiln: unsupported source execution flag '%s'\n", argv[cursor]); goto done;
+        }
+        if (preload != NULL) {
+            long index = kiln_graph_module_index((const uint8_t *)preload, (uint64_t)strlen(preload));
+            if (index < 0) { fprintf(stderr, "kiln: source preload '%s' was not linked; declare it with build --include\n", preload); goto done; }
+            preloads[launch.preload_count++] = (size_t)index;
+        }
+    }
+    if (cursor == argc) { kiln_cli_warn("kiln: source execution flags require a linked entry path", NULL); goto done; }
+    long entry = kiln_graph_module_index((const uint8_t *)argv[cursor], (uint64_t)strlen(argv[cursor]));
+    if (entry < 0) { fprintf(stderr, "kiln: source entry '%s' was not linked; declare it with build --include\n", argv[cursor]); goto done; }
+    launch.entry = argv[cursor];
+    launch.flags = argv + 1;
+    launch.flag_count = cursor - 1;
+    int child_argc = argc - cursor;
+    args = (char **)calloc((size_t)child_argc + 1, sizeof *args);
+    if (args == NULL) { kiln_cli_warn("kiln: out of memory for source arguments", NULL); goto done; }
+    args[0] = argv[0];
+    for (int i = 1; i < child_argc; i++) args[i] = argv[cursor + i];
+    status = kiln_cli_run_entry(child_argc, args, 0, NULL, NULL, (size_t)entry + 1, &launch);
+done:
+    free(args); free(preloads);
+    return status;
+}
+
 int main(int argc, char **argv) {
     long workers, realms;
     kiln_cli_grow_main_stack();
@@ -7414,6 +7526,9 @@ int main(int argc, char **argv) {
         _putenv("KILN_HTTP3=1");
 #endif
     }
+    int source_launch = 0;
+    int source_status = kiln_cli_try_source_launch(argc, argv, &source_launch);
+    if (source_launch) return source_status;
     (void)kiln_worker_set_runner(kiln_cli_run_worker);
     (void)kiln_worker_set_turn_runner(kiln_cli_worker_begin_scheduled,
                                       kiln_cli_worker_identify, kiln_cli_worker_advance,

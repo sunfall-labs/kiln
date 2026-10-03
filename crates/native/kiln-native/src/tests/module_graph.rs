@@ -3069,6 +3069,110 @@ fn native_namespace_import_of_commonjs_resolves_property_values() {
 }
 
 #[test]
+fn native_linked_child_entry_preserves_preloads_arguments_and_codegen_policy() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-linked-child");
+    let parent = root.path.join("parent.mjs");
+    let preload = root.path.join("preload.mjs");
+    let child = root.path.join("child.mjs");
+    let commonjs = root.path.join("child.cjs");
+    fs::write(&parent, "console.log('parent');").expect("write parent");
+    fs::write(
+        &preload,
+        "await Promise.resolve(); globalThis.preloaded = 'ready';",
+    )
+    .expect("write preload");
+    fs::write(
+        &child,
+        r#"
+import process, { argv, execArgv } from 'node:process';
+await Promise.resolve();
+console.log(preloaded, argv === process.argv, execArgv === process.execArgv, argv[2], execArgv[0]);
+console.log(argv[1].endsWith('child.mjs'), execArgv[1], execArgv[2].endsWith('preload.mjs'));
+console.log(eval(42));
+try { eval('1 + 1'); } catch (error) { console.log(error.name); }
+let converted = 0;
+try { Function({ toString() { converted++; return 'return 1'; } }); }
+catch (error) { console.log(error.name, converted); }
+"#,
+    )
+    .expect("write child");
+    fs::write(
+        &commonjs,
+        "console.log(require.main === module, __filename.endsWith('child.cjs')); ",
+    )
+    .expect("write CommonJS child");
+    let graph = ModuleGraph::build_node_with_includes(
+        &parent,
+        NodeRuntimeResolver::new(&root.path).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![
+            (preload.clone(), ModuleSource::Source),
+            (child.clone(), ModuleSource::Source),
+            (commonjs.clone(), ModuleSource::CommonJs),
+        ],
+    )
+    .expect("build child graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("link child graph");
+    let output = Command::new(&report.output)
+        .arg("--disallow-code-generation-from-strings")
+        .arg("--import")
+        .arg(&preload)
+        .arg(&child)
+        .arg("payload")
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("launch linked child");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ready true true payload --disallow-code-generation-from-strings\ntrue --import true\n42\nEvalError\nEvalError 1\n");
+    let refused = Command::new(&report.output)
+        .arg("--import")
+        .arg(root.path.join("unlinked.mjs"))
+        .arg(&child)
+        .output_when_launchable()
+        .expect("reject unlinked preload");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("source preload"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unlinked.mjs"));
+    let commonjs_output = Command::new(&report.output)
+        .arg("--disallow-code-generation-from-strings")
+        .arg(&commonjs)
+        .output_when_launchable()
+        .expect("launch linked CommonJS child");
+    assert!(
+        commonjs_output.status.success(),
+        "status {:?}, stdout: {}, stderr: {}",
+        commonjs_output.status.code(),
+        String::from_utf8_lossy(&commonjs_output.stdout),
+        String::from_utf8_lossy(&commonjs_output.stderr)
+    );
+    assert_eq!(commonjs_output.stdout, b"true true\n");
+    let parent_output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run original parent");
+    assert!(parent_output.status.success());
+    assert_eq!(parent_output.stdout, b"parent\n");
+}
+
+#[test]
 fn native_declared_esm_include_stays_lazy_and_supports_computed_require() {
     use kiln_module_resolver::NodeRuntimeResolver;
     let Some(toolchain) = Toolchain::discover().ok() else {

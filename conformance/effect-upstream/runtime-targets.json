@@ -12,7 +12,7 @@
     "schema/representation/toJsonSchemaMultiDocument": ["ajv"]
   },
   "include": {
-    "schema/SchemaAOTCompiler": ["effect/schema/SchemaCompiler/runtime"],
+    "schema/SchemaAOTCompiler": ["effect/schema/SchemaCompiler/runtime", "./fixtures/aot-import-guard.ts", "./fixtures/aot-runner.ts"],
     "schema/SchemaAOTCompilerBuild": ["effect/schema/SchemaCompiler/runtime"]
   },
   "importActual": {
