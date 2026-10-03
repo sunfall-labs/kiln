@@ -2151,7 +2151,10 @@ fn drive_ended(realm: &NativeRealm) {
 /// realm must not park; it is active again and the next turn ends it.
 fn park_idle(realm: &NativeRealm) -> bool {
     realm.liveness().set_idle();
-    if kiln_runtime::workers::terminate_requested() {
+    // A wake sent to this realm (a post, a close, a notify) marked it active when it was sent,
+    // but a wake that landed before `set_idle` above was undone by it: the realm must run that
+    // turn, not park on it. The check follows going idle, so no wake falls between the two.
+    if kiln_runtime::workers::terminate_requested() || realm.liveness().wake_pending() {
         realm.liveness().set_active();
         return true;
     }
@@ -2175,6 +2178,8 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     if realm.http_callback_failure.get() != 0 {
         return DriveStep::Done(realm.http_callback_failure.get());
     }
+    // This turn sees every wake sent so far; one sent from here on keeps `park_idle` honest.
+    realm.liveness().clear_wake();
     realm.liveness().set_active();
     // A turn boundary: no generated frame is on this thread's stack.
     reclaim::quiescent();
@@ -2431,6 +2436,14 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
         let Ok(realm) = created else {
             return RUNTIME_ERROR;
         };
+        // A top-level realm has no worker record: register its liveness on its own thread so a
+        // port post or notify into it marks it active when sent, as for a worker. A realm on a
+        // shared lane shares its thread, so it registers nothing.
+        if dedicated && kiln_runtime::workers::current_liveness().is_none() {
+            kiln_runtime::workers::set_main_liveness(Some(Arc::clone(realm.liveness())));
+        } else if kiln_runtime::workers::current_liveness().is_none() {
+            kiln_runtime::workers::set_main_liveness(None);
+        }
         let Ok(handle) = NEXT_REALM.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         }) else {
