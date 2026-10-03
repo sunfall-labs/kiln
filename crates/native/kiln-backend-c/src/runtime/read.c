@@ -1652,6 +1652,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return kiln_c99_get_with_receiver(host, parent, property_key, target, out,
                                               depth, thrown);
         }
+        stored = kiln_c99_callable_store(target, &store, 0);
+        if (stored != KILN_C99_OK) return stored;
+        {
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
+        }
+        /* Only registered native constructors synthesize an own prototype. Other methods
+         * continue through ordinary inherited lookup, which also observes user-defined slots. */
+        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(key, "prototype") &&
+            kiln_c99_is_constructor(target)) {
+            return kiln_c99_callable_prototype(target, out);
+        }
         /* Non-bound synthetic callable values inherit the Function constructor unless a
          * specialized branch below provides another surface. */
         if (kiln_c99_same_name_key(key, "constructor")) {
@@ -1706,16 +1719,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_c99_same_name_key(key, "listenerCount")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT);
             return KILN_C99_OK;
-        }
-        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(key, "prototype")) {
-            return kiln_c99_callable_prototype(target, out);
-        }
-        stored = kiln_c99_callable_store(target, &store, 0);
-        if (stored != KILN_C99_OK) return stored;
-        {
-            int found = 0;
-            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
-            if (stored != KILN_C99_OK || found) return stored;
         }
         if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
             if (kiln_c99_same_name_key(key, "name")) {

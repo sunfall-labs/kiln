@@ -722,8 +722,8 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         }
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_FUNCTION) {
-        /* Function-owned properties live in the closure's ordinary property store. Keep
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD) {
+        /* Callable-owned properties live in the ordinary property store. Keep
          * deletion on that same authority used by reads and writes; treating the function as a
          * non-object here would report success while leaving an own property visible. */
         kiln_value store;
