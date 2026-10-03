@@ -1197,7 +1197,10 @@ fn await_resolve_fusion_arg(
         .or_else(|| defs.get(object).copied());
     if !matches!(
         receiver_definition,
-        Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Promise))
+        Some(
+            GraphOp::LoadBuiltin(kiln_ir::Builtin::Promise)
+                | GraphOp::LoadGlobalBuiltin(kiln_ir::Builtin::Promise)
+        )
     ) {
         return None;
     }
@@ -3857,7 +3860,9 @@ fn emit_terminator(
             // The previous caller's sent value has already been consumed or copied into
             // live locals/spills. A new suspension waits for a new value; retaining the old
             // one here would keep discarded yield results alive across subsequent jobs.
-            output.push_str("    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n");
+            output.push_str(
+                "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
+            );
             writeln!(
                 output,
                 "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered};{delegate_set} *result = v{}; return KILN_C99_YIELDED;",

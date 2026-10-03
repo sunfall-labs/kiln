@@ -2049,8 +2049,8 @@ export async function microtasks() {
 }
 
 /// Realms issue 20: a typed method entry that inlines `Math.sqrt` is entered only after its call
-/// site asks about that one member -- not about every built-in -- and the entry, which reaches
-/// nothing, does not ask again (under `KILN_IC_CHECK` it checks its caller did).
+/// site asks about that one member. Reading the mutable `Math` global can itself invoke an
+/// accessor, so the entry checks the member again after that read and keeps its boxed fallback.
 #[test]
 fn typed_entry_call_sites_ask_about_the_members_the_entry_inlines() {
     use kiln_module_resolver::NodeRuntimeResolver;
@@ -2094,8 +2094,8 @@ console.log(s);
     let body = &source[source.find(definition).expect("definition in source")..];
     let body = &body[..body.find("\n}\n").expect("typed entry ends")];
     assert!(
-        body.contains(&format!("KILN_C99_TYPED_RELIES_CHECK({sqrt})")),
-        "the entry leaves the check to its callers: {body}"
+        body.contains(&format!("if (KILN_LIKELY({sqrt}))")),
+        "the entry checks after its observable global read: {body}"
     );
     assert!(
         !body.contains("kiln_c99_builtins_unmodified()"),
