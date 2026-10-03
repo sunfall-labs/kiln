@@ -106,7 +106,13 @@ pub(crate) fn compute(graph: &FunctionGraph, include_unreachable_in_equations: b
                 continue;
             }
             let mut first_predecessor = true;
-            next.fill(0);
+            if include_unreachable_in_equations {
+                // Match the verifier's former initialization: a block with no predecessors keeps
+                // the all-block set (and blocks with predecessors intersect from that universe).
+                next.copy_from_slice(&universe);
+            } else {
+                next.fill(0);
+            }
             for predecessor in &block.predecessors {
                 if !include_unreachable_in_equations && !reachable.contains(predecessor) {
                     continue;
@@ -181,7 +187,8 @@ mod tests {
                 {
                     continue;
                 }
-                let mut next: Option<HashSet<BlockId>> = None;
+                let mut next: Option<HashSet<BlockId>> =
+                    include_unreachable_in_equations.then(|| ids.clone());
                 for predecessor in &block.predecessors {
                     if !include_unreachable_in_equations && !reachable.contains(predecessor) {
                         continue;
@@ -271,5 +278,14 @@ mod tests {
         assert!(dominators.contains(graph.blocks[count / 2].id, graph.blocks[count - 1].id));
         assert!(!dominators.contains(graph.blocks[count - 1].id, graph.blocks[0].id));
         assert!(dominators.contains(graph.blocks[count - 1].id, graph.blocks[count - 1].id));
+    }
+
+    #[test]
+    fn verifier_preserves_all_block_set_for_a_predecessor_free_block() {
+        let graph = graph_from_edges(3, &[(0, 1)]);
+        let dominators = compute(&graph, true);
+        assert!(dominators.contains(graph.blocks[0].id, graph.blocks[2].id));
+        assert!(dominators.contains(graph.blocks[1].id, graph.blocks[2].id));
+        assert!(dominators.contains(graph.blocks[2].id, graph.blocks[2].id));
     }
 }

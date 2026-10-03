@@ -531,6 +531,40 @@ mod tests {
     }
 
     #[test]
+    fn verifier_keeps_historical_dominance_for_disconnected_predecessor_free_blocks() {
+        let mut graph = FunctionGraph::new(Some("unreachable_dom".into()), 0, 0);
+        let entry_value = graph.alloc_value();
+        let entry = BlockId(0);
+        let unreachable = BlockId(1);
+        graph.blocks.push(BasicBlock {
+            id: entry,
+            operations: vec![(
+                entry_value,
+                GraphOp::Const {
+                    index: 0,
+                    constant: Constant::Number(1),
+                },
+            )],
+            terminator: Terminator::Return(Some(entry_value)),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        });
+        graph.blocks.push(BasicBlock {
+            id: unreachable,
+            operations: vec![],
+            terminator: Terminator::Return(Some(entry_value)),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        });
+
+        // The verifier's established all-block equations leave this no-predecessor block's
+        // dominator set initialized to all blocks; preserve that behavior exactly.
+        assert!(verify_function_graph(&graph).is_ok());
+    }
+
+    #[test]
     fn verifier_rejects_asymmetric_cf_edges() {
         let mut graph = FunctionGraph::new(Some("asym".into()), 0, 1);
         let b0 = BlockId(0);
