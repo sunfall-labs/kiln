@@ -1,6 +1,16 @@
 
 void kiln_c99_publish_diagnostic(void);
 
+/* The native module loader may update a live export cell only after its runner-scoped
+ * namespace-spy capability has authorized the realm. Keep the mutation here,
+ * where the boxed-cell representation and heap write barrier are authoritative. */
+int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value) {
+    kiln_val boxed = kiln_val_from_boundary(cell);
+    if ((boxed & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(boxed), kiln_val_from_boundary(value));
+    return KILN_C99_OK;
+}
+
 /* Defined later in strings.c; all runtime parts share one translation unit. */
 static int kiln_c99_is_trimmed(uint16_t unit);
 _Thread_local kiln_js_frame *kiln_c99_js_frame_top = NULL;

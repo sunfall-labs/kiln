@@ -122,7 +122,12 @@ def entry_for(workspace, source, name):
             + 'globalThis.require=specifier=>Object.hasOwn(loaders,specifier)?loaders[specifier]():require(specifier);\n')
         features.insert(0, 'node-support')
     if re.search(r'\b(?:vi|vitest)\s*\.', text):
-        features.append('spy')
+        # Keep the original test URL as the loader's reload authority even though the
+        # separate spy adapter registers its own canonical URL for namespace overlays.
+        (directory / 'spy-support.mjs').write_text(
+            'const loader=globalThis.process?.__kilnNativeModules?.__kilnHostModuleLoader;\n'
+            + 'if(typeof loader==="function")loader("registerRunner",' + json.dumps(test.as_uri()) + ');\n')
+        features.extend(['spy-support', 'spy'])
     if re.search(r'\b(?:useFakeTimers|useRealTimers|advanceTimersByTime)', text):
         features.append('timers')
     if 'toMatchInlineSnapshot' in text:
@@ -151,7 +156,7 @@ def entry_for(workspace, source, name):
             + 'return Promise.resolve(loader("importActual",specifier,referrer,targets[specifier].url));\n'
             + '}});\n}\n')
         features.append('reload-support')
-    imports = ''.join('import ' + json.dumps(str((directory if f in ('node-support', 'reload-support') else workspace) / (f + '.mjs'))) + ';\n' for f in features)
+    imports = ''.join('import ' + json.dumps(str((directory if f in ('node-support', 'reload-support', 'spy-support') else workspace) / (f + '.mjs'))) + ';\n' for f in features)
     entry = directory / 'entry.ts'
     entry.write_text(imports + 'import ' + json.dumps(str(source / 'vitest.setup.ts')) + ';\n'
                      + 'import ' + json.dumps(str(test)) + ';\n'

@@ -5509,3 +5509,154 @@ fn parallel_sites_without_compiling_are_the_builds_own() {
         .expect("build parallel-sites graph");
     assert_eq!(planned, built.parallel_sites);
 }
+
+#[test]
+fn native_runner_spy_overlay_mutates_live_export_without_mutating_namespace() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace spy integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-namespace-spy-overlay");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+import { run } from "./consumer.mjs";
+const nativeModules = process.__kilnNativeModules;
+const namespace = await import("./target.mjs");
+const before = Object.getOwnPropertyDescriptor(namespace, "run");
+const original = namespace.run;
+const replacement = () => "mock";
+const registrationDenied = nativeModules.__kilnHostModuleLoader("registerSpyAdapter", import.meta.url) === false;
+const unauthorized = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url) === false;
+nativeModules.__kilnHostModuleLoader("registerRunner", import.meta.url);
+nativeModules.__kilnHostModuleLoader("registerSpyAdapter", import.meta.url);
+const wrongReferrer = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, "file:///unauthorized.mjs") === false;
+let ordinaryMutation = false;
+try { Object.defineProperty(namespace, "run", { value: replacement }); }
+catch { ordinaryMutation = true; }
+const installed = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url);
+const mocked = namespace.run === replacement && run() === "mock";
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", original, import.meta.url);
+const after = Object.getOwnPropertyDescriptor(namespace, "run");
+console.log(registrationDenied, unauthorized, wrongReferrer, installed, ordinaryMutation, mocked,
+  run() === "real", after.configurable === before.configurable,
+  after.enumerable === before.enumerable, after.get === before.get,
+  after.set === before.set, after.value === before.value);
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        "export let run = () => 'real';\n",
+    )
+    .expect("write target");
+    fs::write(
+        root.path.join("consumer.mjs"),
+        "import { run } from './target.mjs'; export { run };\n",
+    )
+    .expect("write consumer");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("namespace-spy graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("namespace-spy graph builds and runs");
+    assert!(
+        report.succeeded(),
+        "namespace-spy process failed: {report:?}"
+    );
+    assert_eq!(
+        report.stdout,
+        b"true true true true true true true true true true true true\n"
+    );
+}
+
+#[test]
+fn native_runner_spy_overlay_targets_retained_namespace_generation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace-generation spy integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-namespace-spy-generation");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+import { run } from "./consumer.mjs";
+const nativeModules = process.__kilnNativeModules;
+const loader = nativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+loader("registerSpyAdapter", import.meta.url);
+const old = await import("./target.mjs");
+loader("reset");
+const current = await import("./target.mjs");
+const original = old.run;
+const replacement = () => "mock";
+const installed = loader("spyExport", old, "run", replacement, import.meta.url);
+const oldGenerationIntercepted = run() === "mock" && old.run === replacement;
+const currentGenerationUntouched = current.run() === "real2";
+const restored = loader("spyExport", old, "run", original, import.meta.url);
+console.log(installed, oldGenerationIntercepted, currentGenerationUntouched,
+  restored, run() === "real1", old.run() === "real1", current.run() === "real2");
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        "const generation = (globalThis.__spyGeneration ?? 0) + 1; globalThis.__spyGeneration = generation; export let run = () => 'real' + generation;\n",
+    )
+    .expect("write target");
+    fs::write(
+        root.path.join("consumer.mjs"),
+        "import { run } from './target.mjs'; export { run };\n",
+    )
+    .expect("write consumer");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("namespace-generation graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("namespace-generation graph builds and runs");
+    assert!(
+        report.succeeded(),
+        "spy generation process failed: {report:?}"
+    );
+    assert_eq!(report.stdout, b"true true true true true true true\n");
+}
