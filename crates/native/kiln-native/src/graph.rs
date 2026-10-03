@@ -5218,7 +5218,7 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
 }
 "#
     );
-    output.push_str("\nstatic void kiln_graph_destroy_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n        if (graph->instance != NULL && graph->instance->roots_registered) (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
+    output.push_str("\n/* Detach callbacks while the heap is live, but keep every registered root context alive\n * through kiln_realm_destroy: roots marked KILN_GC_ROOT_SURVIVES_TEARDOWN are invoked there. */\nstatic void kiln_graph_detach_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    for (graph = realm->instances; graph != NULL; graph = graph->next_instance)\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n}\nstatic void kiln_graph_free_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
     output.push_str("\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
@@ -5263,8 +5263,9 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
 
 /* A worker's realm is over: its code is the one its end decided, whatever teardown says. */
 static int kiln_cli_end_worker_realm(uint64_t worker_realm, kiln_graph_context *graph, int code) {
-    kiln_graph_destroy_instances(graph->realm);
+    kiln_graph_detach_instances(graph->realm);
     (void)kiln_realm_destroy(worker_realm);
+    kiln_graph_free_instances(graph->realm);
     return code;
 }
 
@@ -5571,8 +5572,9 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         if (natural < 0) status = KILN_C99_CONTROL_ERROR;
         else natural_exit_present = natural;
     }
-    kiln_graph_destroy_instances(&run->realm_state);
+    kiln_graph_detach_instances(&run->realm_state);
     destroy_status = kiln_realm_destroy(realm);
+    kiln_graph_free_instances(&run->realm_state);
     free(run);
     if (exit_asked) return (int)exit_requested;
     /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller
