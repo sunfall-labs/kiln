@@ -25,7 +25,10 @@ impl super::Compiler {
         self.scopes.push(HashMap::new());
         let mut named = class.clone();
         named.name = Some(binding.clone());
-        self.class_declaration(&named);
+        // The class expression's private name is an immutable lexical binding. A class
+        // declaration gets its ordinary mutable outer binding from the surrounding statement
+        // instantiation instead; this scope exists only for an expression's self-reference.
+        self.class_declaration_with_name_kind(&named, VariableKind::Const);
         match self.resolve(&binding) {
             Resolution::Local(local) if local.celled => {
                 self.code.push(Instruction::LoadCell(local.slot))
@@ -46,12 +49,16 @@ impl super::Compiler {
     /// compiled into whatever code surrounds the class. So the flag is raised around the whole
     /// declaration and lowered again after it.
     pub(super) fn class_declaration(&mut self, class: &Class) {
+        self.class_declaration_with_name_kind(class, VariableKind::Let);
+    }
+
+    fn class_declaration_with_name_kind(&mut self, class: &Class, name_kind: VariableKind) {
         let outer_strict = std::mem::replace(&mut self.strict, true);
-        self.strict_class_declaration(class);
+        self.strict_class_declaration(class, name_kind);
         self.strict = outer_strict;
     }
 
-    pub(super) fn strict_class_declaration(&mut self, class: &Class) {
+    pub(super) fn strict_class_declaration(&mut self, class: &Class, name_kind: VariableKind) {
         let Some(name) = class.name.clone() else {
             self.error(Some(class.span), "a class declaration requires a name");
             return;
@@ -103,7 +110,24 @@ impl super::Compiler {
         let static_home = self.declare_home_binding(class.span);
 
         // Bound before the body is compiled, so a method can refer to the class by name.
-        self.variable(VariableKind::Let, &name, None, class.span);
+        if name_kind == VariableKind::Const {
+            // The constructor is compiled below and stored directly into this self-binding once
+            // it exists. Start with `let` so declaration setup keeps the TDZ marker active for
+            // computed names; then make the captured binding immutable for assignments compiled
+            // in methods and field initializers.
+            self.variable(VariableKind::Let, &name, None, class.span);
+            let Some(local) = self
+                .scopes
+                .last_mut()
+                .and_then(|scope| scope.get_mut(&name))
+            else {
+                self.error(Some(class.span), format!("could not bind class `{name}`"));
+                return;
+            };
+            local.kind = VariableKind::Const;
+        } else {
+            self.variable(name_kind, &name, None, class.span);
+        }
 
         // A class expression with no written name still needs a binding to hold itself, and
         // `class_expression` invents one carrying a `%` that no identifier can contain. That

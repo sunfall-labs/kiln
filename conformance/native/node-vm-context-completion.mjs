@@ -1,5 +1,11 @@
 import { runInNewContext } from "node:vm";
 
+class MutableClassDeclaration {}
+MutableClassDeclaration = 1;
+if (MutableClassDeclaration !== 1) {
+  throw new Error("class declaration binding became immutable");
+}
+
 const result = runInNewContext("let n = x + 1; n * 2", { x: 4 });
 if (result !== 10) {
   throw new Error(`new-context completion was ${result}, expected 10`);
