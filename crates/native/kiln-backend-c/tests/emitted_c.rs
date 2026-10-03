@@ -1198,7 +1198,12 @@ fn runtime_prelude_size() {
     // algorithms' descriptor-aware paths add 492 lines; unconditional TDZ checks
     // add three. The 82,147-line prelude has no repeated runtime section. These
     // repair property/evaluation kernels rather than introduce public built-ins.
-    const CEILING_LINES: usize = 82_500;
+    // Reviewed 2026-10-03: Module-goal parsing/preflight and public class-field
+    // evaluation account for most of the new 1,359 lines. Raw JSON branding,
+    // shared lossless UTF-16 text assembly and call-site method metadata make up
+    // the remainder. The 83,506-line unit contains each runtime section once;
+    // public validation/formatting remains in shared TypeScript.
+    const CEILING_LINES: usize = 84_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
