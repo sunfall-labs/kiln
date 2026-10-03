@@ -4186,6 +4186,8 @@ static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, s
 static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 typedef struct kiln_dyn_object_binding {
+static int kiln_dyn_scope_has_uninitialized_own(kiln_dyn_scope *scope,
+KILN_VALUE_UNINITIALIZED;
 static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
 done:
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4213,6 +4215,7 @@ static int kiln_dyn_eval_delete_operand(kiln_host *host, kiln_dyn_lexer *lex,
 typedef enum {
 static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *scope,
 static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
+static kiln_value kiln_dyn_void_result(void) {
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_multiplicative(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_additive(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
