@@ -261,9 +261,11 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
     pub(super) realm: Realm<Scheduled, Timer>,
-    /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
-    /// clock regardless of this setting.
+    /// Policy for civil time and for advancing timer deadlines during event-loop turns.
     pub(super) clock_capability: ClockCapability,
+    /// Host clock at VM creation, used to keep scheduler time monotonic and run-relative while
+    /// the host provides the realm's wall clock.
+    pub(super) host_clock_origin_ms: Option<f64>,
     /// Canonical environmental strings resolved once when the realm is entered.
     ///
     /// Host-backed policy crosses HostOps here, never from an individual builtin. This makes the

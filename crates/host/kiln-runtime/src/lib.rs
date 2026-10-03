@@ -5176,7 +5176,8 @@ fn io_error(syscall: &str, path: String, error: std::io::Error) -> AsyncHostErro
 ///
 /// Microtasks are FIFO. Timers are ordered by `(deadline, sequence)` and each timer is followed
 /// by a complete microtask drain. The observable clock starts at the Unix epoch and is represented
-/// as elapsed virtual time from that epoch.
+/// as elapsed time from the realm's start. Deterministic realms advance it virtually; host-clock
+/// realms advance it from their host's monotonic elapsed reading at turn boundaries.
 ///
 /// Macrotasks come from three lanes, taken in the order of one turn of node's event loop (libuv's
 /// timers, poll and check phases): the timers that were due when the turn began, then the I/O
@@ -5277,7 +5278,7 @@ impl<M, T> Realm<M, T> {
         }
     }
 
-    /// Returns the realm's current virtual time from the Unix epoch.
+    /// Returns the realm's current scheduler time as elapsed time from its start.
     pub fn now(&self) -> Duration {
         self.now
     }
@@ -5402,12 +5403,12 @@ impl<M, T> Realm<M, T> {
         text
     }
 
-    /// Schedules a one-shot timer relative to the realm's current virtual time.
+    /// Schedules a one-shot timer relative to the realm's current scheduler time.
     pub fn set_timeout(&mut self, delay: Duration, work: T) -> TimerId {
         self.schedule_timer(delay, work, None)
     }
 
-    /// Schedules a repeating timer relative to the realm's current virtual time.
+    /// Schedules a repeating timer relative to the realm's current scheduler time.
     ///
     /// The next occurrence is inserted before the current occurrence is returned to the caller,
     /// so clearing `id` from its callback prevents the next run. The timer keeps the same identity
@@ -5504,7 +5505,7 @@ impl<M, T> Realm<M, T> {
 
     /// Restarts an active timeout or interval as `Timeout.prototype.refresh()` does: the same
     /// identity, callback and arguments, referenced state and delay, measured from the realm's
-    /// current virtual time. An interval restarts its current period. A timer that already
+    /// current scheduler time. An interval restarts its current period. A timer that already
     /// finished or was cleared is not re-armed. `id` must name a timeout or an interval: an
     /// immediate or an I/O callback has no delay to restart, and the caller (`Timeout`, never
     /// `Immediate`) is what keeps them apart. Returns whether `id` was restarted.
@@ -5657,7 +5658,8 @@ impl<M, T> Realm<M, T> {
     }
 
     /// Take the next macrotask -- advancing virtual time to the earliest timer when nothing is
-    /// ready before it -- re-arming an interval.
+    /// ready before it -- re-arming an interval. A host-clock caller advances the scheduler at
+    /// turn boundaries before using this method.
     pub fn run_next_timer(&mut self) -> Option<WorkItem<M, T>>
     where
         T: Clone,
@@ -5769,8 +5771,8 @@ where
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        // Tokio's paused clock has advanced to the sleep deadline. The realm's own clock remains
-        // authoritative and advances only when the corresponding timer is selected below.
+        // Tokio has reached the sleep deadline. The realm's clock remains authoritative and
+        // advances virtually only when the corresponding timer is selected below.
         let work = realm
             .run_next_timer()
             .expect("a timer was present when its deadline was selected");

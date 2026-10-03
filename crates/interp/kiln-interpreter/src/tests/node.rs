@@ -303,6 +303,9 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
     assert_eq!(
         host.calls,
         vec![
+            // Captured once when the host-clock realm is created, so timer deadlines have
+            // a stable monotonic origin before the first callback is scheduled.
+            (HostOp::ClockNow, Vec::new()),
             (HostOp::ClockNow, Vec::new()),
             (HostOp::ClockNow, Vec::new())
         ]

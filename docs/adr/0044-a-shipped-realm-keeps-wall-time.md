@@ -60,6 +60,10 @@ hour-long timer without waiting an hour.
   `HostOp::ClockNow` path all agree on the same clock.
 - The virtual realm is untouched: `now` moves only when a timer runs, Tokio time is paused on the
   first drive turn, and `Date.now()` starts at the epoch.
+- The interpreter's explicit host-clock execution uses the same split. `Date.now()` reads
+  `HostOp::ClockNow`, and each Node event-loop turn advances its run-relative monotonic scheduler
+  clock from that host reading before selecting timers. Ordinary interpreter execution keeps the
+  virtual clock, so a busy deterministic run never observes machine speed.
 
 ## Consequences
 
