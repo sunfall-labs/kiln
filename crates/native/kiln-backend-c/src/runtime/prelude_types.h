@@ -2488,6 +2488,10 @@ typedef struct kiln_array {
     int frozen;
     /* `Object.preventExtensions`. An existing index still takes a write; a new one does not. */
     int not_extensible;
+    /* Index descriptors that cannot live in the dense element vector are stored in the array's
+     * ordinary property store. This bit keeps dense readers on their fast path unless an index
+     * has an accessor or non-default attributes. */
+    int has_index_descriptors;
     int64_t match_index;
     kiln_value match_input;
     /* The `groups` object of a match with named captures, built when the match is; undefined

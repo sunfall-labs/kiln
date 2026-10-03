@@ -504,7 +504,14 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         kiln_array *array = kiln_c99_array_of(target);
         kiln_value extra;
         for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
-            if (array->elements[index] != KILN_VAL_HOLE)
+            int descriptor = 0;
+            if (array->has_index_descriptors && array->properties.tag == KILN_VALUE_OBJECT &&
+                array->elements[index] == KILN_VAL_HOLE) {
+                kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                descriptor = kiln_c99_store_has(array->properties,
+                    (const kiln_string *)key.ptr, NULL);
+            }
+            if (array->elements[index] != KILN_VAL_HOLE || descriptor)
                 status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
         }
         if (status == KILN_C99_OK)
@@ -514,8 +521,12 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
             status = kiln_c99_all_own_keys(host, array->properties, &extra, depth, thrown);
             if (status != KILN_C99_OK) return status;
             for (index = 0; index < kiln_c99_array_of(extra)->count; ++index) {
-                status = kiln_c99_array_push(built,
-                    kiln_val_to_boundary(kiln_c99_array_of(extra)->elements[index]));
+                kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(extra)->elements[index]);
+                /* Indexed descriptors were merged into the ascending element walk above. */
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0)
+                    continue;
+                status = kiln_c99_array_push(built, key);
                 if (status != KILN_C99_OK) return status;
             }
         }

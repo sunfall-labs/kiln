@@ -1166,6 +1166,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         uint64_t code;
         double element_index = kiln_c99_key_index_key(key);
         kiln_array *elements = kiln_c99_array_of(target);
+        /* Non-default index descriptors live beside named properties. Consult them before the
+         * dense element vector so accessors run with the array as their original receiver and
+         * non-default data descriptors share the same value/attribute record with reflection. */
+        if (element_index >= 0.0 && elements->properties.tag == KILN_VALUE_OBJECT) {
+            int found = 0;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+                                                &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         /* Fixed names and numeric destructuring keys use ordinary Get too. Holes continue
          * through the prototype lookup below instead of hiding inherited index properties. */
         if (element_index >= 0.0 && element_index < (double)elements->count &&

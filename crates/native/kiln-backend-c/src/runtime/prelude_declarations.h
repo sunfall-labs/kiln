@@ -292,6 +292,10 @@ extern int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
 extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value);
 extern int kiln_c99_array_push(kiln_value target, kiln_value value);
 extern int kiln_c99_array_push_val(kiln_value target, kiln_val value);
+extern int kiln_c99_array_get_index(kiln_host *host, kiln_value array, size_t index,
+                                    kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_array_has_index(kiln_host *host, kiln_value array, size_t index,
+                                    int *answer, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_inspect(kiln_value value);
 extern kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value);
 extern int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event, void *host, void *thrown);

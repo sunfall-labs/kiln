@@ -532,6 +532,11 @@ kiln_has_next_prototype:
         }
         if (index >= 0.0) {
             kiln_array *array = kiln_c99_array_of(target);
+            if (array->properties.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_store_has(array->properties, key, ikey)) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
             *answer = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE;
             return KILN_C99_OK;
         }
@@ -698,6 +703,19 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         if (kiln_c99_same_name_key(key, "length")) {
             *answer = 0;
             return KILN_C99_OK;
+        }
+        if (slot >= 0.0 && array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_property property;
+            if (kiln_c99_property_read_own_value(array->properties, key, ikey, &property)) {
+                int status = kiln_c99_delete_key(host, array->properties, key, ikey, answer,
+                                                 depth, thrown);
+                if (status == KILN_C99_OK && *answer && (size_t)slot < array->count) {
+                    kiln_c99_heap_store_val(array, &array->elements[(size_t)slot],
+                                            KILN_VAL_HOLE);
+                    array->is_numeric = 0;
+                }
+                return status;
+            }
         }
         if (slot >= 0.0 && (size_t)slot < array->count &&
             array->elements[(size_t)slot] != KILN_VAL_HOLE) {

@@ -20,6 +20,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
+    array->has_index_descriptors = 0;
     array->match_index = -1;
     kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
     kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
@@ -27,6 +28,38 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->candidate_elements = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* Array algorithms with a direct dense walk use these two helpers so their common case remains
+ * one bounds/slot read, while a sparse slot, inherited index or materialized descriptor follows
+ * the authoritative [[HasProperty]] / [[Get]] path. In particular, an accessor is called once
+ * with the array itself as receiver, even when an algorithm suspends between visits. */
+int kiln_c99_array_get_index(kiln_host *host, kiln_value value, size_t index,
+                             kiln_value *out, int depth, kiln_value *thrown) {
+    kiln_array *array;
+    if (value.tag != KILN_VALUE_ARRAY) return KILN_C99_INVALID_ARGUMENT;
+    array = kiln_c99_array_of(value);
+    if (!array->has_index_descriptors && index < array->count &&
+        array->elements[index] != KILN_VAL_HOLE) {
+        *out = kiln_val_to_boundary(array->elements[index]);
+        return KILN_C99_OK;
+    }
+    return kiln_c99_get_computed(host, value, kiln_c99_number((double)index), out, depth,
+                                 thrown);
+}
+
+int kiln_c99_array_has_index(kiln_host *host, kiln_value value, size_t index,
+                             int *answer, int depth, kiln_value *thrown) {
+    kiln_array *array;
+    if (value.tag != KILN_VALUE_ARRAY) return KILN_C99_INVALID_ARGUMENT;
+    array = kiln_c99_array_of(value);
+    if (!array->has_index_descriptors && index < array->count &&
+        array->elements[index] != KILN_VAL_HOLE) {
+        *answer = 1;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_has_computed(host, value, kiln_c99_number((double)index), answer, depth,
+                                 thrown);
 }
 
 /* Only the active isolate factory gives a new side allocation graph provenance. The common
@@ -140,6 +173,7 @@ static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
+    array->has_index_descriptors = 0;
     array->match_index = -1;
     kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
     kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());

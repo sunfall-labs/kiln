@@ -166,7 +166,7 @@ static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
         void *ptr = KILN_VAL_PTR(receiver);
         if (KILN_LIKELY(kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {
             kiln_array *arr = (kiln_array *)ptr;
-            if (KILN_LIKELY(!arr->frozen && !arr->not_extensible)) {
+            if (KILN_LIKELY(!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible)) {
                 if (arr->is_numeric && !KILN_VAL_IS_NUMBER(arg)) {
                     arr->is_numeric = 0;
                 }
@@ -1589,7 +1589,8 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
             const kiln_array *array = kiln_c99_array_of(target);
-            if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+            if (KILN_LIKELY(!array->has_index_descriptors && slot < array->count &&
+                            array->elements[slot] != KILN_VAL_HOLE)) {
                 *out = kiln_val_to_boundary(array->elements[slot]);
                 return KILN_C99_OK;
             }
@@ -1617,7 +1618,8 @@ static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
             kiln_array *array = kiln_c99_array_of(target);
-            if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+            if (KILN_LIKELY(!array->has_index_descriptors && !array->frozen &&
+                            slot < array->count)) {
                 kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(value));
                 return KILN_C99_OK;
             }
@@ -1649,7 +1651,8 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
             if (gc_kind == KILN_GC_ARRAY) {
                 const kiln_array *array = (const kiln_array *)ptr;
-                if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+                if (KILN_LIKELY(!array->has_index_descriptors && slot < array->count &&
+                                array->elements[slot] != KILN_VAL_HOLE)) {
                     *out = array->elements[slot];
                     return KILN_C99_OK;
                 }
@@ -1757,7 +1760,8 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
             uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
             if (gc_kind == KILN_GC_ARRAY) {
                 kiln_array *array = (kiln_array *)ptr;
-                if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+                if (KILN_LIKELY(!array->has_index_descriptors && !array->frozen &&
+                                slot < array->count)) {
                     if (array->is_numeric && !KILN_VAL_IS_NUMBER(value)) {
                         array->is_numeric = 0;
                     }
@@ -2133,7 +2137,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (argc == 0) {
                         *out = kiln_c99_val_from_double((double)arr->count);
                         return KILN_C99_OK;
@@ -2158,7 +2162,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (arr->count == 0) {
                         *out = KILN_VAL_UNDEFINED;
                         return KILN_C99_OK;
@@ -2174,7 +2178,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (arr->count == 0) {
                         *out = KILN_VAL_UNDEFINED;
                         return KILN_C99_OK;

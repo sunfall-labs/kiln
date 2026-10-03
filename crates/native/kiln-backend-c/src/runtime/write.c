@@ -331,6 +331,41 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         size_t slot = (size_t)index;
         size_t fill;
         int status;
+        /* A materialized index descriptor owns the [[Set]] decision before the dense element
+         * path. Accessor setters observe the array as `this`; writable data descriptors update
+         * both their reflected record and dense value so ordinary fast readers remain coherent. */
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_value text = kiln_c99_property_key(key);
+            if (text.tag == KILN_VALUE_STRING) {
+                const kiln_string *view = (const kiln_string *)text.ptr;
+                const kiln_string *stable = kiln_c99_property_ikey(key);
+                kiln_property property;
+                if (stable == NULL) stable = kiln_c99_intern_key(view);
+                if (stable == NULL) return KILN_C99_OUT_OF_MEMORY;
+                if (kiln_c99_property_read_own_value(array->properties, view, stable,
+                                                     &property)) {
+                    if (property.accessor) {
+                        kiln_value ignored;
+                        if (property.setter.tag == KILN_VALUE_UNDEFINED)
+                            return strict ? kiln_c99_throw_read_only_key(thrown, view)
+                                          : KILN_C99_OK;
+                        return kiln_c99_call(host, &ignored, property.setter, target, &value, 1,
+                                             depth, thrown);
+                    }
+                    if (!property.writable) {
+                        return strict ? kiln_c99_throw_read_only_key(thrown, view)
+                                      : KILN_C99_OK;
+                    }
+                    {
+                        int found = 0;
+                        status = kiln_c99_property_storage_assign_existing(
+                            host, target, kiln_c99_object_of(array->properties), view, stable,
+                            value, strict, depth, thrown, &found);
+                        if (status != KILN_C99_OK || !found) return status;
+                    }
+                }
+            }
+        }
         if (array->frozen) {
             kiln_value text = kiln_c99_property_key(key);
             return strict && text.tag == KILN_VALUE_STRING

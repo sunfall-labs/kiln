@@ -2561,6 +2561,28 @@
             *result = kiln_c99_undefined();
             return KILN_C99_OK;
         }
+        if (array->has_index_descriptors) {
+            size_t last = array->count - 1;
+            int present = 0;
+            int deleted = 1;
+            status = kiln_c99_array_has_index(host, receiver, last, &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            *result = kiln_c99_undefined();
+            if (present) {
+                status = kiln_c99_array_get_index(host, receiver, last, result, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            status = kiln_c99_delete_computed(host, receiver, kiln_c99_number((double)last),
+                                              &deleted, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!deleted) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot delete array element");
+            }
+            kiln_c99_heap_store_val(array, &array->elements[last], KILN_VAL_HOLE);
+            array->count = last;
+            return KILN_C99_OK;
+        }
         array->count -= 1;
         *result = kiln_val_to_boundary(array->elements[array->count]);
         return KILN_C99_OK;
@@ -2581,6 +2603,15 @@
         length = array->count;
         for (index = 0; index < length; ++index) {
             kiln_val element = index < array->count ? array->elements[index] : KILN_VAL_UNDEFINED;
+            if (array->has_index_descriptors && index < array->count) {
+                kiln_value read;
+                status = kiln_c99_array_get_index(host, receiver, index, &read, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    free(joined);
+                    return status;
+                }
+                element = kiln_val_from_boundary(read);
+            }
             if (index != 0 && kiln_c99_join_units_append(&joined, &joined_length,
                     &joined_capacity, shown_separator) != KILN_C99_OK) {
                 free(joined);
@@ -2627,6 +2658,23 @@
                                                array->count, 0);
         int found = 0;
         for (index = start; index < array->count; ++index) {
+            if (array->has_index_descriptors) {
+                int present = 0;
+                if (code == KILN_C99_METHOD_INDEX_OF) {
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) continue;
+                }
+                kiln_value elem_val;
+                status = kiln_c99_array_get_index(host, receiver, index, &elem_val, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                found = code == KILN_C99_METHOD_INCLUDES
+                            ? kiln_c99_same_value_zero(elem_val, needle)
+                            : kiln_c99_strict_equal(elem_val, needle);
+                if (found) break;
+                continue;
+            }
             if (array->elements[index] == KILN_VAL_HOLE) {
                 /* The only place `indexOf` and `includes` disagree, and the reason `includes`
                  * exists: one skips a hole and the other reads it as undefined. */
@@ -2664,8 +2712,26 @@
         }
         if (slice_len > 0) {
             kiln_array *b_arr = kiln_c99_array_of(built);
-            kiln_c99_heap_copy_vals(b_arr, b_arr->elements, array->elements + start, slice_len);
-            b_arr->count = slice_len;
+            if (!array->has_index_descriptors) {
+                kiln_c99_heap_copy_vals(b_arr, b_arr->elements, array->elements + start,
+                                        slice_len);
+                b_arr->count = slice_len;
+            } else {
+                for (index = 0; index < slice_len; ++index) {
+                    int present = 0;
+                    kiln_value element = kiln_c99_hole();
+                    status = kiln_c99_array_has_index(host, receiver, start + index, &present,
+                                                      depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (present) {
+                        status = kiln_c99_array_get_index(host, receiver, start + index,
+                                                          &element, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                    status = kiln_c99_array_push(built, element);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
         }
         *result = built;
         return KILN_C99_OK;
@@ -2678,7 +2744,19 @@
             return status;
         }
         for (index = 0; index < array->count; ++index) {
-            status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
+            kiln_value element = kiln_val_to_boundary(array->elements[index]);
+            if (array->has_index_descriptors) {
+                int present = 0;
+                status = kiln_c99_array_has_index(host, receiver, index, &present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) element = kiln_c99_hole();
+                else {
+                    status = kiln_c99_array_get_index(host, receiver, index, &element, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+            status = kiln_c99_array_push(built, element);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -2689,7 +2767,20 @@
             if (args[argument].tag == KILN_VALUE_ARRAY) {
                 kiln_array *other = kiln_c99_array_of(args[argument]);
                 for (index = 0; index < other->count; ++index) {
-                    status = kiln_c99_array_push(built, kiln_val_to_boundary(other->elements[index]));
+                    kiln_value element = kiln_val_to_boundary(other->elements[index]);
+                    if (other->has_index_descriptors) {
+                        int present = 0;
+                        status = kiln_c99_array_has_index(host, args[argument], index, &present,
+                                                          depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                        if (!present) element = kiln_c99_hole();
+                        else {
+                            status = kiln_c99_array_get_index(host, args[argument], index,
+                                                              &element, depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                        }
+                    }
+                    status = kiln_c99_array_push(built, element);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
@@ -2728,8 +2819,14 @@
             }
             /* A hole is visited as undefined here, unlike `find`: the language added the
              * last-first pair after it stopped skipping them. */
-            visit[0] = array->elements[at] == KILN_VAL_HOLE ? kiln_c99_undefined()
-                                                            : kiln_val_to_boundary(array->elements[at]);
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, at, &visit[0], depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                visit[0] = array->elements[at] == KILN_VAL_HOLE
+                               ? kiln_c99_undefined()
+                               : kiln_val_to_boundary(array->elements[at]);
+            }
             visit[1] = kiln_c99_number((double)at);
             visit[2] = receiver;
             status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
@@ -2827,7 +2924,14 @@
         } else {
             /* The seed is the last element that is *there*: an array of nothing but holes has no
              * answer to give, exactly as an empty one does not. */
-            while (at > 0 && array->elements[at - 1] == KILN_VAL_HOLE) {
+            while (at > 0) {
+                int present = array->elements[at - 1] != KILN_VAL_HOLE;
+                if (array->has_index_descriptors) {
+                    status = kiln_c99_array_has_index(host, receiver, at - 1, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+                if (present) break;
                 at -= 1;
             }
             if (at == 0) {
@@ -2835,16 +2939,30 @@
                                             "Reduce of empty array with no initial value");
             }
             at -= 1;
-            accumulator = kiln_val_to_boundary(array->elements[at]);
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, at, &accumulator, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                accumulator = kiln_val_to_boundary(array->elements[at]);
+            }
         }
         while (at > 0) {
             kiln_value visit[4];
             at -= 1;
-            if (at >= array->count || array->elements[at] == KILN_VAL_HOLE) {
-                continue;
-            }
+            if (at >= array->count) continue;
+            if (array->has_index_descriptors) {
+                int present = 0;
+                status = kiln_c99_array_has_index(host, receiver, at, &present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) continue;
+            } else if (array->elements[at] == KILN_VAL_HOLE) continue;
             visit[0] = accumulator;
-            visit[1] = kiln_val_to_boundary(array->elements[at]);
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, at, &visit[1], depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                visit[1] = kiln_val_to_boundary(array->elements[at]);
+            }
             visit[2] = kiln_c99_number((double)at);
             visit[3] = receiver;
             status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,
@@ -2923,7 +3041,7 @@
             *result = built;
             return KILN_C99_OK;
         }
-        if (code == KILN_C99_METHOD_MAP &&
+        if (code == KILN_C99_METHOD_MAP && !array->has_index_descriptors &&
             KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
             kiln_value built_val;
             status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
@@ -2952,7 +3070,8 @@
             *result = built_val;
             return KILN_C99_OK;
         }
-        if (code == KILN_C99_METHOD_FILTER && KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
+        if (code == KILN_C99_METHOD_FILTER && !array->has_index_descriptors &&
+            KILN_VAL_IS_CLOSURE(vcallee) && self_value.tag == KILN_VALUE_UNDEFINED) {
             kiln_value built_val;
             status = kiln_c99_new_array_with_capacity(&built_val, array->count, array->is_numeric);
             if (status != KILN_C99_OK) return status;
@@ -2994,7 +3113,23 @@
                 /* Every element walk skips a hole and visits an undefined. `map` still has to
                  * *leave* one: its result has an entry per input position, and skipping would
                  * shift everything after it. */
-                if (array->elements[index] == KILN_VAL_HOLE) {
+                if (array->has_index_descriptors) {
+                    int present = 0;
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) {
+                        if (code == KILN_C99_METHOD_MAP ||
+                            code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
+                            status = kiln_c99_array_push(built, kiln_c99_hole());
+                            if (status != KILN_C99_OK) return status;
+                        }
+                        continue;
+                    }
+                    status = kiln_c99_array_get_index(host, receiver, index, &visit[0], depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else if (array->elements[index] == KILN_VAL_HOLE) {
                     if (code == KILN_C99_METHOD_MAP ||
                         code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
                         status = kiln_c99_array_push(built, kiln_c99_hole());
@@ -3003,8 +3138,9 @@
                         }
                     }
                     continue;
+                } else {
+                    visit[0] = kiln_val_to_boundary(array->elements[index]);
                 }
-                visit[0] = kiln_val_to_boundary(array->elements[index]);
                 visit[1] = kiln_c99_number((double)index);
                 visit[2] = receiver;
                 status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
@@ -3077,10 +3213,19 @@
         }
         relative = trunc(relative);
         position = relative < 0.0 ? (double)array->count + relative : relative;
-        *result = position >= 0.0 && position < (double)array->count &&
-                          array->elements[(size_t)position] != KILN_VAL_HOLE
-                      ? kiln_val_to_boundary(array->elements[(size_t)position])
-                      : kiln_c99_undefined();
+        if (position >= 0.0 && position < (double)array->count) {
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, (size_t)position, result, depth,
+                                                  thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                *result = array->elements[(size_t)position] == KILN_VAL_HOLE
+                              ? kiln_c99_undefined()
+                              : kiln_val_to_boundary(array->elements[(size_t)position]);
+            }
+        } else {
+            *result = kiln_c99_undefined();
+        }
         return KILN_C99_OK;
     }
     case KILN_C99_METHOD_ARRAY_LAST_INDEX_OF: {
@@ -3108,6 +3253,22 @@
             limit = from >= (double)array->count ? array->count : (size_t)from + 1;
         }
         for (index = limit; index > 0; --index) {
+            if (array->has_index_descriptors) {
+                int present = 0;
+                kiln_value element;
+                status = kiln_c99_array_has_index(host, receiver, index - 1, &present, depth,
+                                                  thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) continue;
+                status = kiln_c99_array_get_index(host, receiver, index - 1, &element, depth,
+                                                  thrown);
+                if (status != KILN_C99_OK) return status;
+                if (kiln_c99_strict_equal(element, needle)) {
+                    found = (double)(index - 1);
+                    break;
+                }
+                continue;
+            }
             if (array->elements[index - 1] == KILN_VAL_HOLE) {
                 continue;
             }
@@ -3127,6 +3288,7 @@
         kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
         size_t length = array->count;
         int matched = 0;
+        kiln_value matched_value = kiln_c99_undefined();
         /* `IsCallable` before the walk, so an empty array throws too. */
         if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
         /* `every` is the only one that answers true for an empty array, and the only one that
@@ -3136,7 +3298,17 @@
             kiln_value produced;
             /* `find` and `findIndex` visit a hole as undefined, where `some` and `every` skip
              * it -- the same split `includes` and `indexOf` make. */
-            if (array->elements[index] == KILN_VAL_HOLE) {
+            if (array->has_index_descriptors) {
+                int present = 0;
+                if (code == KILN_C99_METHOD_ARRAY_SOME || code == KILN_C99_METHOD_ARRAY_EVERY) {
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) continue;
+                }
+                status = kiln_c99_array_get_index(host, receiver, index, &visit[0], depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            } else if (array->elements[index] == KILN_VAL_HOLE) {
                 if (code == KILN_C99_METHOD_ARRAY_SOME || code == KILN_C99_METHOD_ARRAY_EVERY) {
                     continue;
                 }
@@ -3152,16 +3324,13 @@
             }
             matched = kiln_c99_truthy(produced);
             if (code == KILN_C99_METHOD_ARRAY_EVERY ? !matched : matched) {
+                matched_value = visit[0];
                 break;
             }
         }
         switch (code) {
         case KILN_C99_METHOD_ARRAY_FIND:
-            *result = matched && index < array->count ? kiln_val_to_boundary(array->elements[index])
-                                                      : kiln_c99_undefined();
-            if (result->tag == KILN_VALUE_HOLE) {
-                *result = kiln_c99_undefined();
-            }
+            *result = matched ? matched_value : kiln_c99_undefined();
             break;
         case KILN_C99_METHOD_ARRAY_FIND_INDEX:
             *result = kiln_c99_number(matched ? (double)index : -1.0);
@@ -3399,9 +3568,14 @@
                     status = kiln_c99_array_push(pair, entry);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_array_push(pair, array->elements[index] == KILN_VAL_HOLE
-                                                           ? kiln_c99_undefined()
-                                                           : kiln_val_to_boundary(array->elements[index]));
+                    kiln_value element = array->elements[index] == KILN_VAL_HOLE
+                                             ? kiln_c99_undefined()
+                                             : kiln_val_to_boundary(array->elements[index]);
+                    if (array->has_index_descriptors) {
+                        status = kiln_c99_array_get_index(host, receiver, index, &element, depth,
+                                                          thrown);
+                    }
+                    if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, element);
                 }
                 entry = pair;
             }
@@ -3425,7 +3599,14 @@
             /* Without a seed the accumulator is the first element that is *there*: folding a
              * hole in would turn every sum over a sparse array into NaN. An array of nothing but
              * holes has no answer to give, exactly as an empty one does not. */
-            while (index < length && array->elements[index] == KILN_VAL_HOLE) {
+            while (index < length) {
+                int present = array->elements[index] != KILN_VAL_HOLE;
+                if (array->has_index_descriptors) {
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+                if (present) break;
                 index += 1;
             }
             if (index >= length) {
@@ -3434,7 +3615,13 @@
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Reduce of empty array with no initial value");
             }
-            accumulator = kiln_val_to_boundary(array->elements[index]);
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, index, &accumulator, depth,
+                                                  thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                accumulator = kiln_val_to_boundary(array->elements[index]);
+            }
             index += 1;
         }
         kiln_val vcallee = kiln_val_from_boundary(callback);
@@ -3442,12 +3629,24 @@
             kiln_val vacc = kiln_val_from_boundary(accumulator);
             kiln_val vrecv = kiln_val_from_boundary(receiver);
             for (; index < length && index < array->count; ++index) {
-                if (array->elements[index] == KILN_VAL_HOLE) {
-                    continue;
+                if (array->has_index_descriptors) {
+                    int present = 0;
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) continue;
+                } else if (array->elements[index] == KILN_VAL_HOLE) continue;
+                kiln_value element;
+                if (array->has_index_descriptors) {
+                    status = kiln_c99_array_get_index(host, receiver, index, &element, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else {
+                    element = kiln_val_to_boundary(array->elements[index]);
                 }
                 kiln_val vvisit[4];
                 vvisit[0] = vacc;
-                vvisit[1] = array->elements[index];
+                vvisit[1] = kiln_val_from_boundary(element);
                 vvisit[2] = kiln_c99_val_from_double((double)index);
                 vvisit[3] = vrecv;
                 status = kiln_c99_val_call(host, vcallee, vvisit, 4, depth, thrown, NULL, 0, NULL, &vacc);
@@ -3460,11 +3659,21 @@
         }
         for (; index < length && index < array->count; ++index) {
             kiln_value visit[4];
-            if (array->elements[index] == KILN_VAL_HOLE) {
-                continue;
+            if (array->has_index_descriptors) {
+                int present = 0;
+                status = kiln_c99_array_has_index(host, receiver, index, &present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) continue;
+            } else if (array->elements[index] == KILN_VAL_HOLE) continue;
+            kiln_value element;
+            if (array->has_index_descriptors) {
+                status = kiln_c99_array_get_index(host, receiver, index, &element, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            } else {
+                element = kiln_val_to_boundary(array->elements[index]);
             }
             visit[0] = accumulator;
-            visit[1] = kiln_val_to_boundary(array->elements[index]);
+            visit[1] = element;
             visit[2] = kiln_c99_number((double)index);
             visit[3] = receiver;
             status = kiln_c99_call(host, &accumulator, callback, kiln_c99_undefined(), visit, 4,

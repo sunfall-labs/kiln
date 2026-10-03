@@ -492,67 +492,6 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
         }
         KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, ""));
     }
-    if (target.tag == KILN_VALUE_ARRAY) {
-        /* An array index is an element, not a name. The store below holds `a.total = 1`; putting
-         * a definition of `"0"` there recorded a property nothing reads, so
-         * `Object.defineProperty(a, "0", { value: 10 })` returned the array unchanged and
-         * `a[0]` still answered what it had -- a silent wrong answer, and the shape
-         * `arguments` reaches through every ES5 test that redefines a parameter slot.
-         *
-         * Only the definition an element can actually carry is accepted. There is no per-element
-         * attribute table here, so a definition that would make one non-writable, hidden or
-         * non-configurable, or turn it into an accessor, is refused by name rather than written
-         * as an ordinary element that lies about its own flags. */
-        double at = kiln_c99_key_index_key(view);
-        if (at >= 0.0) {
-            kiln_array *array = kiln_c99_array_of(target);
-            size_t slot = (size_t)at;
-            size_t fill;
-            if (array->frozen) {
-                /* Every element of a frozen array is a non-writable, non-configurable data
-                 * property, and there is no room for a new one: the one definition it accepts
-                 * is one that changes nothing, and anything else is the language's refusal
-                 * rather than this backend's. */
-                int present = slot < array->count && array->elements[slot] != KILN_VAL_HOLE;
-                int unchanged =
-                    present && !has_getter && !has_setter &&
-                    (!has_value ||
-                     kiln_c99_strict_equal(value, kiln_val_to_boundary(array->elements[slot]))) &&
-                    (!has_writable || !kiln_c99_truthy(writable)) &&
-                    (!has_configurable || !kiln_c99_truthy(configurable)) &&
-                    (!has_enumerable || kiln_c99_truthy(enumerable));
-                if (unchanged) return KILN_C99_OK;
-                KILN_C99_DEFINE_REFUSAL(kiln_c99_throw_named_key_text(
-                    thrown, present ? "Cannot redefine property: " : "Cannot define property ",
-                    view, ""));
-            }
-            if (array->not_extensible &&
-                (slot >= array->count || array->elements[slot] == KILN_VAL_HOLE)) {
-                /* A non-extensible array takes no new element. */
-                KILN_C99_DEFINE_REFUSAL(
-                    kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, ""));
-            }
-            if (has_getter || has_setter || !has_value ||
-                (has_writable && !kiln_c99_truthy(writable)) ||
-                (has_enumerable && !kiln_c99_truthy(enumerable)) ||
-                (has_configurable && !kiln_c99_truthy(configurable))) {
-                KILN_C99_REFUSE("an array index definition that is not a plain writable value");
-            }
-            status = kiln_c99_array_reserve(array, slot + 1);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            /* Growing leaves holes, which read as undefined and are not the same thing. */
-            for (fill = array->count; fill < slot; ++fill) {
-                kiln_c99_heap_store_val(array, &array->elements[fill], KILN_VAL_HOLE);
-            }
-            kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(value));
-            if (slot + 1 > array->count) {
-                array->count = slot + 1;
-            }
-            return KILN_C99_OK;
-        }
-    }
     status = kiln_c99_definition_store(target, &store);
     if (status != KILN_C99_OK) {
         return status;
@@ -580,7 +519,9 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
      * (false, or undefined for value). Redefinitions still take the full checks below. */
     {
         kiln_object *object = kiln_c99_object_of(store);
-        if (!intrinsic_callable_name_length && object->shape != NULL && !object->frozen &&
+        if (!intrinsic_callable_name_length &&
+            !(target.tag == KILN_VALUE_ARRAY && kiln_c99_key_index_key(view) >= 0.0) &&
+            object->shape != NULL && !object->frozen &&
             !object->not_extensible && !owner_closed &&
             !object->module_namespace && !has_getter && !has_setter) {
             const kiln_string *ikey = stable != NULL ? stable : kiln_c99_intern_key(view);
@@ -607,6 +548,23 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
         kiln_object *object = kiln_c99_object_of(store);
         if (!intrinsic_callable_name_length)
             existed = kiln_c99_property_read_own(object, view, stable, &current);
+        /* A default array element lives in the dense vector until its descriptor changes. It
+         * still participates in ValidateAndApplyPropertyDescriptor as an ordinary writable,
+         * enumerable, configurable data property. Once changed, the descriptor is materialized
+         * in the array's property store and all indexed reads use that same record. */
+        if (target.tag == KILN_VALUE_ARRAY && kiln_c99_key_index_key(view) >= 0.0 && !existed) {
+            kiln_array *array = kiln_c99_array_of(target);
+            size_t slot = (size_t)kiln_c99_key_index_key(view);
+            if (slot < array->count && array->elements[slot] != KILN_VAL_HOLE) {
+                memset(&current, 0, sizeof current);
+                current.key = view;
+                current.value = kiln_val_to_boundary(array->elements[slot]);
+                current.writable = !array->frozen;
+                current.enumerable = 1;
+                current.configurable = !array->frozen;
+                existed = 1;
+            }
+        }
         if (object->module_namespace) {
             /* A namespace accepts only a descriptor that makes no semantic change. In
              * particular, export descriptors report writable=true even though [[Set]] rejects;
@@ -733,6 +691,26 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     }
     if (has_configurable) {
         next.configurable = kiln_c99_truthy(configurable);
+    }
+    if (target.tag == KILN_VALUE_ARRAY && kiln_c99_key_index_key(view) >= 0.0) {
+        kiln_array *array = kiln_c99_array_of(target);
+        size_t slot = (size_t)kiln_c99_key_index_key(view);
+        size_t fill;
+        status = kiln_c99_array_reserve(array, slot + 1);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_property_storage_commit(store, view, stable, &next);
+        if (status != KILN_C99_OK) return status;
+        for (fill = array->count; fill < slot; ++fill)
+            kiln_c99_heap_store_val(array, &array->elements[fill], KILN_VAL_HOLE);
+        kiln_c99_heap_store_val(array, &array->elements[slot],
+                                next.accessor ? KILN_VAL_HOLE
+                                              : kiln_val_from_boundary(next.value));
+        if (slot + 1 > array->count) array->count = slot + 1;
+        array->has_index_descriptors = 1;
+        array->is_numeric = 0;
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&store);
+        return KILN_C99_OK;
     }
     return kiln_c99_property_storage_commit(store, view, stable, &next);
 }
@@ -1359,6 +1337,11 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             return status;
         }
         if (at >= 0.0) {
+            if (array->properties.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_store_has(array->properties, view, canonical)) {
+                return kiln_c99_describe_property_key(host, array->properties, view, canonical,
+                                                      out, found, depth, thrown);
+            }
             if ((size_t)at >= array->count || array->elements[(size_t)at] == KILN_VAL_HOLE) {
                 return KILN_C99_OK;
             }
