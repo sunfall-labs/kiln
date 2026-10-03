@@ -1954,7 +1954,10 @@ fn render_functions(
             };
             typed_callees[index] = typed_entry_calls(body, symbol);
             let found = direct::TypedNeeds {
-                runtime: names(body, "host") || names(body, "thrown"),
+                // Instance-global lookup is emitted in the activation prologue, before block 0.
+                // Include that host use without counting the host parameter in the signature.
+                runtime: names(scratch.split_once('{').map_or("", |(_, body)| body), "host")
+                    || names(body, "thrown"),
                 upvalues: names(body, "upvalues"),
                 receiver: names(body, "receiver"),
                 row: names(body, "recv_row"),
