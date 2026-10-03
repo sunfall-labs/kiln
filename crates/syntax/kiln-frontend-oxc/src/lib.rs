@@ -33,8 +33,8 @@ use oxc_ast::{
         Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
         Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
         FormalParameters, Function, ImportDeclarationSpecifier, MethodDefinitionKind,
-        ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, VariableDeclaration,
-        VariableDeclarationKind,
+        ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, TSEnumDeclaration,
+        TSEnumMemberName, VariableDeclaration, VariableDeclarationKind,
     },
 };
 use oxc_ast_visit::{Visit, walk};
@@ -3416,6 +3416,15 @@ impl Lowerer<'_> {
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
             }
+            Statement::TSEnumDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                match self.enum_declaration(declaration, statement_span) {
+                    Ok(statements) => HirStatementKind::Block(statements),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
+                }
+            }
             Statement::TSImportEqualsDeclaration(declaration) => {
                 if declaration.import_kind.is_type() {
                     return None;
@@ -3694,6 +3703,15 @@ impl Lowerer<'_> {
             Declaration::TSTypeAliasDeclaration(_)
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => return None,
+            Declaration::TSEnumDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                match self.enum_declaration(declaration, statement_span) {
+                    Ok(statements) => HirStatementKind::Block(statements),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
+                }
+            }
             // `export function f() {}` is a declaration that also names an export. The export
             // side is read from the module record separately, so lowering only has to produce
             // the declaration -- the same one the unexported form produces.
@@ -3724,6 +3742,166 @@ impl Lowerer<'_> {
             kind,
             span: statement_span,
         })
+    }
+
+    /// Lower a TypeScript enum to ordinary binding and property operations. Keeping this
+    /// desugaring at the syntax boundary means neither bytecode nor either engine needs an enum
+    /// concept. The generated operations follow TypeScript's source-order initialization and
+    /// numeric reverse-map convention.
+    fn enum_declaration(
+        &mut self,
+        declaration: &TSEnumDeclaration<'_>,
+        statement_span: HirSpan,
+    ) -> Result<Vec<HirStatement>, String> {
+        if declaration.r#const {
+            return Err("const enum (inlining is not implemented)".to_owned());
+        }
+        let name = declaration.id.name.to_string();
+        let span = statement_span;
+        let string = |value: &str| HirExpression {
+            kind: HirExpressionKind::Literal(HirLiteral::String(StringUnits::from(value))),
+            span,
+        };
+        let identifier = |value: &str| HirExpression {
+            kind: HirExpressionKind::Identifier(value.to_owned()),
+            span,
+        };
+        let enum_object = || identifier(&name);
+        let member_read = |member: &str| HirExpression {
+            kind: HirExpressionKind::ComputedMember {
+                object: Box::new(enum_object()),
+                property: Box::new(string(member)),
+                optional: false,
+            },
+            span,
+        };
+        let mut statements = Vec::with_capacity(1 + declaration.body.members.len() * 2);
+        statements.push(HirStatement {
+            kind: HirStatementKind::Variable {
+                kind: HirVariableKind::Var,
+                declarations: vec![HirVariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier(name.clone()),
+                    initializer: Some(HirExpression {
+                        kind: HirExpressionKind::Object {
+                            members: Vec::new(),
+                        },
+                        span,
+                    }),
+                    span,
+                }],
+            },
+            span,
+        });
+        let mut previous: Option<(String, bool)> = None;
+        for member in &declaration.body.members {
+            let member_name = match &member.id {
+                TSEnumMemberName::Identifier(id) => id.name.to_string(),
+                TSEnumMemberName::String(value) | TSEnumMemberName::ComputedString(value) => {
+                    value.value.to_string()
+                }
+                TSEnumMemberName::ComputedTemplateString(_) => {
+                    return Err("computed template enum member name".to_owned());
+                }
+            };
+            let (value, auto_incrementable, needs_runtime_reverse_map) =
+                if let Some(initializer) = &member.initializer {
+                    let numeric = matches!(initializer, Expression::NumericLiteral(_));
+                    // An enum initializer that refers to a previous member needs enum-local name
+                    // resolution. Until that rewrite is available, refuse it instead of resolving
+                    // the identifier in the surrounding JavaScript scope by accident.
+                    if let Expression::Identifier(id) = initializer
+                        && previous
+                            .as_ref()
+                            .is_some_and(|(member, _)| member == id.name.as_str())
+                    {
+                        return Err("enum member reference initializer".to_owned());
+                    }
+                    (self.expression(initializer), numeric, true)
+                } else if let Some((previous_name, true)) = &previous {
+                    (
+                        HirExpression {
+                            kind: HirExpressionKind::Binary {
+                                operator: HirBinaryOperator::Add,
+                                left: Box::new(member_read(previous_name)),
+                                right: Box::new(HirExpression {
+                                    kind: HirExpressionKind::Literal(HirLiteral::Number(
+                                        1.0f64.to_bits(),
+                                    )),
+                                    span,
+                                }),
+                            },
+                            span,
+                        },
+                        true,
+                        true,
+                    )
+                } else if previous.is_none() {
+                    (
+                        HirExpression {
+                            kind: HirExpressionKind::Literal(HirLiteral::Number(0.0f64.to_bits())),
+                            span,
+                        },
+                        true,
+                        true,
+                    )
+                } else {
+                    return Err("implicit enum member after non-numeric initializer".to_owned());
+                };
+            statements.push(HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::MemberAssignment {
+                        operator: HirAssignmentOperator::Assign,
+                        object: Box::new(enum_object()),
+                        property: member_name.clone(),
+                        value: Box::new(value),
+                    },
+                    span,
+                }),
+                span,
+            });
+            if needs_runtime_reverse_map {
+                let assigned_value = member_read(&member_name);
+                let is_number = HirExpression {
+                    kind: HirExpressionKind::Binary {
+                        operator: HirBinaryOperator::StrictEqual,
+                        left: Box::new(HirExpression {
+                            kind: HirExpressionKind::Unary {
+                                operator: HirUnaryOperator::TypeOf,
+                                argument: Box::new(assigned_value.clone()),
+                            },
+                            span,
+                        }),
+                        right: Box::new(string("number")),
+                    },
+                    span,
+                };
+                let reverse = HirExpression {
+                    kind: HirExpressionKind::ComputedAssignment {
+                        operator: HirAssignmentOperator::Assign,
+                        object: Box::new(enum_object()),
+                        property: Box::new(assigned_value),
+                        value: Box::new(string(&member_name)),
+                    },
+                    span,
+                };
+                statements.push(HirStatement {
+                    kind: HirStatementKind::Expression(HirExpression {
+                        kind: HirExpressionKind::Conditional {
+                            test: Box::new(is_number),
+                            consequent: Box::new(reverse),
+                            alternate: Box::new(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::Undefined),
+                                span,
+                            }),
+                        },
+                        span,
+                    }),
+                    span,
+                });
+            }
+            previous = Some((member_name, auto_incrementable));
+        }
+        Ok(statements)
     }
 
     fn variable(&mut self, declaration: &VariableDeclaration<'_>) -> HirStatementKind {
@@ -7137,6 +7315,52 @@ mod tests {
             HirStatementKind::While { .. }
         ));
         assert!(matches!(module.body[2].kind, HirStatementKind::If { .. }));
+    }
+
+    #[test]
+    fn lowers_numeric_and_string_enums_to_ordered_runtime_operations() {
+        let module = parse(
+            "enum.ts",
+            r#"enum Fruits { Apple, Banana, "Golden Pear" = "pear" }"#,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Block(statements) = &module.body[0].kind else {
+            panic!(
+                "enum should lower to ordinary statements: {:?}",
+                module.body[0]
+            );
+        };
+        assert_eq!(statements.len(), 7); // binding, three values and their numeric reverse maps
+        assert!(matches!(
+            &statements[0].kind,
+            HirStatementKind::Variable { kind: HirVariableKind::Var, declarations }
+                if matches!(&declarations[0].pattern, kiln_hir::Pattern::Identifier(name) if name == "Fruits")
+        ));
+        assert!(matches!(
+            &statements[1].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::MemberAssignment { property, .. }, ..
+            }) if property == "Apple"
+        ));
+        assert!(matches!(
+            &statements[2].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::Conditional { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            &statements[5].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::MemberAssignment { property, .. }, ..
+            }) if property == "Golden Pear"
+        ));
+
+        let constant = parse("enum.ts", "const enum Flags { Read, Write }");
+        assert!(matches!(
+            &constant.body[0].kind,
+            HirStatementKind::Unsupported { feature } if feature == "const enum (inlining is not implemented)"
+        ));
     }
 
     /// The parameters of the single function a module declares.
