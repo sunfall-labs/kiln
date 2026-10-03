@@ -842,6 +842,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         globals.set_non_enumerable("crypto", Value::Native(Native::NodeCrypto, realm));
         globals.set_non_enumerable(
+            "__kilnWebCryptoPrimitive",
+            Value::Native(Native::WebCryptoPrimitive, realm),
+        );
+        globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor, realm),
         );

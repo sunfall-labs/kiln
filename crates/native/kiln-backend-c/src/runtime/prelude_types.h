@@ -3759,6 +3759,15 @@ int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits
 int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
                            uint8_t *output, size_t capacity, size_t *out_length);
 int kiln_crypto_key_free(uint64_t handle);
+int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
+                           const uint8_t *data, size_t data_length,
+                           const uint8_t *iv, size_t iv_length,
+                           const uint8_t *additional_data, size_t additional_data_length,
+                           size_t output_length, uint8_t *output, size_t output_capacity,
+                           size_t *required);
+int kiln_c99_webcrypto_output_array(kiln_value *out, size_t length);
+int kiln_c99_webcrypto_primitive(kiln_value *out, const kiln_value *args, size_t argc,
+                                 kiln_value *thrown);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions

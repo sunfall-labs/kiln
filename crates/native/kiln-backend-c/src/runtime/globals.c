@@ -590,6 +590,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnUrlSet", KILN_C99_METHOD_URL_SET_RAW},
                      {"__kilnUrlFast", KILN_C99_METHOD_URL_FAST_RAW},
                      {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW},
+                     {"__kilnWebCryptoPrimitive", KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW},
                      /* The transfer primitive `kiln-builtins/src/arraybuffer.ts` captures. */
                      {"__kilnArrayBufferDetach", KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW},
                      {"__kilnArrayBufferByteLength", KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW},

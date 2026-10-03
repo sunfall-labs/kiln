@@ -1319,6 +1319,9 @@ method_ids! {
     (KILN_C99_METHOD_URL_SET_RAW, 525, Direct; 0, 0),
     (KILN_C99_METHOD_URL_FAST_RAW, 526, Direct; 0, 0),
     (KILN_C99_METHOD_URL_ADOPT_RAW, 527, Direct; 0, 0),
+    // Shared WebCrypto algorithms are implemented by kiln-webcrypto; this is its private byte
+    // bridge, captured and deleted by the TypeScript facade before user code runs.
+    (KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW, 582, Direct; 0, 0),
     // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
     // deleted by `kiln-builtins/src/arraybuffer.ts`.
     (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),
@@ -2774,6 +2777,7 @@ macro_rules! runtime_part_manifest {
             "runtime/generators.c",
             "runtime/methods.c",
             "runtime/web.c",
+            "runtime/webcrypto.c",
             "runtime/ryu_tables.c",
             "runtime/numbers.c",
             "runtime/builtins.c",

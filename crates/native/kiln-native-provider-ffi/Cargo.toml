@@ -49,6 +49,7 @@ gui = ["ffi", "dep:kiln-host-gui"]
 kiln-native-provider-contract = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-key-core = { workspace = true }
+kiln-webcrypto = { workspace = true }
 kiln-date-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 hashbrown = { version = "0.16.1", default-features = false, features = ["equivalent"] }

@@ -1,0 +1,15 @@
+[package]
+name = "kiln-webcrypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes = { version = "0.8.4", default-features = false }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc", "pkcs8", "zeroize"] }
+getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
+hkdf = { version = "0.12.4", default-features = false }
+hmac = { workspace = true }
+sha2 = { workspace = true }

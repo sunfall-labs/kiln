@@ -244,6 +244,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeCryptoKeyInfo => Some("__kilnCryptoKeyInfo"),
         Native::NodeCryptoKeyExport => Some("__kilnCryptoKeyExport"),
         Native::NodeCryptoKeyFree => Some("__kilnCryptoKeyFree"),
+        Native::WebCryptoPrimitive => Some("__kilnWebCryptoPrimitive"),
         Native::NodeHashUpdate => Some("update"),
         Native::NodeHashDigest => Some("digest"),
         _ => None,
@@ -493,6 +494,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeCryptoKeyInfo => node_crypto_key_info(arguments),
             Native::NodeCryptoKeyExport => node_crypto_key_export(arguments),
             Native::NodeCryptoKeyFree => node_crypto_key_free(arguments),
+            Native::WebCryptoPrimitive => webcrypto_primitive(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();
@@ -714,4 +716,42 @@ fn crypto_key_type_error(message: &str) -> ExecutionError {
     ExecutionError::TypeErrorMessage {
         message: message.into(),
     }
+}
+
+fn webcrypto_primitive(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let operation = arguments.first().map_or(f64::NAN, Value::as_number);
+    if !operation.is_finite() || operation.fract() != 0.0 || !(1.0..=12.0).contains(&operation) {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Invalid internal WebCrypto operation".into(),
+        });
+    }
+    let bytes_at = |index: usize| -> Result<Vec<u8>, ExecutionError> {
+        match arguments.get(index) {
+            None | Some(Value::Undefined) => Ok(Vec::new()),
+            Some(value) => view_or_buffer_bytes(value),
+        }
+    };
+    let key = bytes_at(1)?;
+    let data = bytes_at(2)?;
+    let iv = bytes_at(3)?;
+    let additional_data = bytes_at(4)?;
+    let length = arguments.get(5).map_or(0.0, Value::as_number);
+    let maximum = if operation == 12.0 { 65_536.0 } else { 8_160.0 };
+    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 || length > maximum {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Invalid internal WebCrypto output length".into(),
+        });
+    }
+    let result = kiln_webcrypto::execute(
+        operation as u32,
+        &key,
+        &data,
+        &iv,
+        &additional_data,
+        length as usize,
+    )
+    .map_err(|_| ExecutionError::TypeErrorMessage {
+        message: "WebCrypto primitive rejected its input".into(),
+    })?;
+    Ok(crate::buffer::plain_bytes_value(result))
 }

@@ -268,6 +268,7 @@ macro_rules! provider_abi_registry {
             (crypto, kiln_crypto_key_info, crypto_key_info);
             (crypto, kiln_crypto_key_export, crypto_key_export);
             (crypto, kiln_crypto_key_free, crypto_key_free);
+            (crypto, kiln_webcrypto_execute, webcrypto_execute);
             (parallel, kiln_parallel_map, parallel_map);
             (parallel, kiln_parallel_sort, parallel_sort);
             (parallel, kiln_parallel_threads, parallel_threads);
@@ -289,7 +290,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 77;
+pub const PROVIDER_ABI_VERSION: u32 = 78;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -308,6 +309,8 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 78 and 189 exports: stateless SHA-256, HKDF, AES-GCM and Ed25519 operations joined
+        // `kiln-webcrypto`; the TypeScript facade owns WebCrypto keys and policy. Before that,
         // 76 and 185 exports: `kiln_realm_rearm_timeout` joined, so a `Timeout` that already ran
         // restarts under its own identity on `refresh()`, as node's does. Before that,
         // 75 and 184 exports: `kiln_realm_refresh_timer` joined, `Timeout.prototype.refresh()`:
@@ -366,8 +369,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 77);
-        assert_eq!(PROVIDER_EXPORTS.len(), 188);
+        assert_eq!(PROVIDER_ABI_VERSION, 78);
+        assert_eq!(PROVIDER_EXPORTS.len(), 189);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

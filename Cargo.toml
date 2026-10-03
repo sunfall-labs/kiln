@@ -49,6 +49,7 @@ kiln-native-toolchain = { path = "crates/native/kiln-native-toolchain" }
 kiln-node-path = { path = "crates/semantics/kiln-node-path" }
 kiln-url = { path = "crates/semantics/kiln-url" }
 kiln-encoding = { path = "crates/semantics/kiln-encoding" }
+kiln-webcrypto = { path = "crates/semantics/kiln-webcrypto" }
 kiln-conformance = { path = "crates/tools/kiln-conformance" }
 kiln-proto = { path = "crates/foundation/kiln-proto" }
 kiln-daemon = { path = "crates/tools/kiln-daemon" }
@@ -215,6 +216,7 @@ digest = { version = "0.10", default-features = false, features = ["std"] }
 md-5 = { version = "0.10", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", default-features = false, features = ["std"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+hmac = { version = "0.12.1", default-features = false }
 
 [profile.release]
 debug = 1

@@ -300,6 +300,9 @@ macro_rules! assert_root_provider_export {
     (crypto, kiln_crypto_key_free, crypto_key_free) => {
         const _: extern "C" fn(u64) -> i32 = kiln_crypto_key_free;
     };
+    (crypto, kiln_webcrypto_execute, webcrypto_execute) => {
+        const _: unsafe extern "C" fn(u32, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize, usize, *mut u8, usize, *mut usize) -> i32 = kiln_webcrypto_execute;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -322,6 +325,10 @@ use keys::{
     kiln_crypto_key_export, kiln_crypto_key_free, kiln_crypto_key_import, kiln_crypto_key_info,
     kiln_crypto_key_public,
 };
+
+#[path = "provider/webcrypto.rs"]
+mod webcrypto;
+use webcrypto::kiln_webcrypto_execute;
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can

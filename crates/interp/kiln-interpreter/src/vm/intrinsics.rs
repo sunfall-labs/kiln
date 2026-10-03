@@ -500,6 +500,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeCryptoKeyInfo
             | Native::NodeCryptoKeyExport
             | Native::NodeCryptoKeyFree
+            | Native::WebCryptoPrimitive
             | Native::NodeCryptoCreateHash
             | Native::NodeCryptoCreateHmac
             | Native::NodeHashUpdate

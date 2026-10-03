@@ -7,105 +7,84 @@
     }
     throw new TypeError('Expected an ArrayBuffer or ArrayBufferView');
   }
-  function sha256(input: Uint8Array): Uint8Array {
-    const constants = [
-      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-      0xe49b69c1, 0xefbe4784, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-    const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
-    const padded = new Uint8Array(paddedLength);
-    padded.set(input);
-    padded[input.length] = 0x80;
-    const bitLength = input.length * 8;
-    const tail = new DataView(padded.buffer);
-    tail.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000));
-    tail.setUint32(paddedLength - 4, bitLength >>> 0);
-    const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    const w = new Int32Array(64);
-    const rotr = (n: number, b: number) => (n >>> b) | (n << (32 - b));
-    for (let block = 0; block < paddedLength; block += 64) {
-      for (let i = 0; i < 16; i++) w[i] = tail.getInt32(block + i * 4);
-      for (let i = 16; i < 64; i++) {
-        const x = w[i - 15], y = w[i - 2];
-        const s0 = rotr(x, 7) ^ rotr(x, 18) ^ (x >>> 3);
-        const s1 = rotr(y, 17) ^ rotr(y, 19) ^ (y >>> 10);
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
-      }
-      let [a, b, c, d, e, f, g, z] = h;
-      for (let i = 0; i < 64; i++) {
-        const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        const ch = (e & f) ^ (~e & g);
-        const t1 = (z + s1 + ch + constants[i] + w[i]) | 0;
-        const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        const maj = (a & b) ^ (a & c) ^ (b & c);
-        const t2 = (s0 + maj) | 0;
-        z = g; g = f; f = e; e = (d + t1) | 0;
-        d = c; c = b; b = a; a = (t1 + t2) | 0;
-      }
-      h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
-      h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + z) | 0;
+  const typedArrayTagGetter = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
+  const webcryptoPrimitive = (globalThis as any).__kilnWebCryptoPrimitive;
+  try { delete (globalThis as any).__kilnWebCryptoPrimitive; } catch (_) {}
+  const OP = { SHA256: 1, HKDF: 2, AES_ENCRYPT: 3, AES_DECRYPT: 4, ED_GENERATE: 5, ED_PUBLIC: 6, ED_SIGN: 7, ED_VERIFY: 8, ED_VALIDATE: 9, HMAC_SIGN: 10, HMAC_VERIFY: 11, RANDOM_BYTES: 12 };
+  function primitive(op: number, key?: Uint8Array, data?: Uint8Array, iv?: Uint8Array, aad?: Uint8Array, length = 0): Uint8Array {
+    if (typeof webcryptoPrimitive !== 'function') throw new Error('WebCrypto provider is unavailable');
+    return webcryptoPrimitive(op, key || new Uint8Array(0), data || new Uint8Array(0), iv || new Uint8Array(0), aad || new Uint8Array(0), length);
+  }
+  function provider(op: number, key?: Uint8Array, data?: Uint8Array, iv?: Uint8Array, aad?: Uint8Array, length = 0): Uint8Array {
+    try { return primitive(op, key, data, iv, aad, length); } catch (error) { throw new DOMException(String(error), 'OperationError'); }
+  }
+  function exactBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer as ArrayBuffer; }
+  function algorithmName(value: any): string { return typeof value === 'string' ? value : value && value.name; }
+  function hashName(value: any): string {
+    const hash = value && typeof value === 'object' ? value.hash : undefined;
+    return String(typeof hash === 'string' ? hash : hash && hash.name || '').toUpperCase().replace('-', '');
+  }
+  const keyRecords = new WeakMap<object, any>(), keyToken = {};
+  class CryptoKey {
+    constructor(token: any, value: any) { if (token !== keyToken) throw new TypeError('Illegal constructor'); keyRecords.set(this, value); }
+    get type(): string { return keyRecords.get(this).type; }
+    get extractable(): boolean { return keyRecords.get(this).extractable; }
+    get algorithm(): any {
+      const algorithm = keyRecords.get(this).algorithm;
+      return algorithm.hash ? Object.assign({}, algorithm, { hash: Object.assign({}, algorithm.hash) }) : Object.assign({}, algorithm);
     }
-    const result = new Uint8Array(32);
-    const output = new DataView(result.buffer);
-    for (let i = 0; i < 8; i++) output.setInt32(i * 4, h[i]);
+    get usages(): string[] { return keyRecords.get(this).usages.slice(); }
+    get [Symbol.toStringTag](): string { return 'CryptoKey'; }
+  }
+  Object.defineProperty(globalThis, 'CryptoKey', { value: CryptoKey, writable: true, configurable: true });
+  function record(key: any, usage: string, name?: string): any {
+    const value = key && (typeof key === 'object' || typeof key === 'function') ? keyRecords.get(key) : undefined;
+    if (!value || (name && value.name !== name) || !value.usages.includes(usage)) throw new DOMException('Invalid key or usage', 'InvalidAccessError');
+    return value;
+  }
+  function makeKey(value: any): any { return new CryptoKey(keyToken, value); }
+  function usagesOf(usages: any, allowed: string[]): string[] {
+    if (!Array.isArray(usages)) throw new TypeError('Key usages must be an array');
+    const result = usages.slice();
+    for (let i = 0; i < result.length; i++) if (!allowed.includes(result[i]) || result.indexOf(result[i]) !== i) throw new DOMException('Invalid key usage', 'SyntaxError');
     return result;
   }
-  function hmacSha256(key: Uint8Array, data: Uint8Array): Uint8Array {
-    let material = key.length > 64 ? sha256(key) : key;
-    const inner = new Uint8Array(64 + data.length);
-    const outer = new Uint8Array(64 + 32);
-    for (let i = 0; i < 64; i++) {
-      const byte = i < material.length ? material[i] : 0;
-      inner[i] = byte ^ 0x36;
-      outer[i] = byte ^ 0x5c;
-    }
-    inner.set(data, 64);
-    outer.set(sha256(inner), 64);
-    return sha256(outer);
-  }
-  function hmacForUsage(algorithm: any, key: any, data: any, usage: string): Uint8Array {
-    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
-    if (name !== 'HMAC' || !key || key.type !== 'secret' || !key.usages.includes(usage)) {
-      throw new DOMException('Invalid key or algorithm', 'InvalidAccessError');
-    }
-    return hmacSha256(key._key, bytesOf(data));
-  }
-  const subtle = {
-    async importKey(format: string, keyData: any, algorithm: any, extractable: boolean, usages: string[]): Promise<any> {
-      const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
-      const hash = algorithm && typeof algorithm === 'object' && algorithm.hash;
-      const hashName = typeof hash === 'string' ? hash : hash && hash.name;
-      if (format !== 'raw' || name !== 'HMAC' || String(hashName || '').toUpperCase().replace('-', '') !== 'SHA256') {
-        throw new DOMException('Unsupported key format or algorithm', 'NotSupportedError');
-      }
-      return { type: 'secret', algorithm: { name: 'HMAC', hash: { name: 'SHA-256' } },
-        extractable: !!extractable, usages: usages.slice(), _key: bytesOf(keyData).slice(),
-        [Symbol.toStringTag]: 'CryptoKey' };
+  function base64url(bytes: Uint8Array): string { return bytes.toBase64({ alphabet: 'base64url', omitPadding: true }); }
+  const subtle: any = {
+    async importKey(format: string, keyData: any, algorithm: any, extractable: boolean, requested: string[]): Promise<any> {
+      const name = algorithmName(algorithm), raw = bytesOf(keyData).slice();
+      let type = 'secret', allowed: string[], publicKey: Uint8Array | undefined;
+      if (name === 'AES-GCM') { if (format !== 'raw') throw new DOMException('Unsupported format', 'NotSupportedError'); if (![16,24,32].includes(raw.length)) throw new DOMException('Invalid AES key length', 'DataError'); allowed = ['encrypt','decrypt']; }
+      else if (name === 'HKDF') { if (format !== 'raw') throw new DOMException('Unsupported format', 'NotSupportedError'); allowed = ['deriveKey','deriveBits']; }
+      else if (name === 'HMAC') { if (format !== 'raw' || hashName(algorithm) !== 'SHA256') throw new DOMException('Unsupported HMAC parameters', 'NotSupportedError'); allowed = ['sign','verify']; }
+      else if (name === 'Ed25519') {
+        if (format === 'raw') { if (raw.length !== 32) throw new DOMException('Invalid Ed25519 public key', 'DataError'); provider(OP.ED_VALIDATE,raw); type='public'; allowed=['verify']; publicKey=raw; }
+        else if (format === 'pkcs8') { publicKey=provider(OP.ED_PUBLIC,raw); type='private'; allowed=['sign']; }
+        else throw new DOMException('Unsupported format', 'NotSupportedError');
+      } else throw new DOMException('Unsupported algorithm', 'NotSupportedError');
+      const keyUsages = usagesOf(requested, allowed!); if (!keyUsages.length) throw new DOMException('At least one usage is required','SyntaxError');
+      const spec = name === 'AES-GCM' ? {name,length:raw.length*8} : name === 'HMAC' ? {name,hash:{name:'SHA-256'},length:raw.length*8} : {name};
+      return makeKey({type,name,algorithm:spec,extractable:!!extractable,usages:keyUsages,bytes:raw,publicKey});
     },
-    async sign(algorithm: any, key: any, data: any): Promise<ArrayBuffer> {
-      return hmacForUsage(algorithm, key, data, 'sign').buffer as ArrayBuffer;
+    async generateKey(algorithm: any, extractable: boolean, requested: string[]): Promise<any> {
+      if (algorithmName(algorithm)!=='Ed25519') throw new DOMException('Unsupported algorithm','NotSupportedError');
+      const uses=usagesOf(requested,['sign','verify']); if(!uses.length) throw new DOMException('At least one usage is required','SyntaxError');
+      const data=provider(OP.ED_GENERATE), n=(data[0]<<8)|data[1], priv=data.slice(2,2+n), pub=data.slice(2+n);
+      return {publicKey:makeKey({type:'public',name:'Ed25519',algorithm:{name:'Ed25519'},extractable:true,usages:uses.filter(x=>x==='verify'),bytes:pub,publicKey:pub}),privateKey:makeKey({type:'private',name:'Ed25519',algorithm:{name:'Ed25519'},extractable:!!extractable,usages:uses.filter(x=>x==='sign'),bytes:priv,publicKey:pub})};
     },
-    async verify(algorithm: any, key: any, signature: any, data: any): Promise<boolean> {
-      const expected = hmacForUsage(algorithm, key, data, 'verify');
-      const actual = bytesOf(signature);
-      if (actual.length !== expected.length) return false;
-      let difference = 0;
-      for (let i = 0; i < actual.length; i++) difference |= actual[i] ^ expected[i];
-      return difference === 0;
+    async deriveBits(algorithm:any,baseKey:any,length:number|null):Promise<ArrayBuffer>{
+      const v=record(baseKey,'deriveBits','HKDF'); if(algorithmName(algorithm)!=='HKDF'||hashName(algorithm)!=='SHA256') throw new DOMException('Unsupported derivation','NotSupportedError');
+      const bits=Number(length); if(!Number.isFinite(bits)||bits<0||bits%8!==0||bits>65280) throw new DOMException('Invalid bit length','OperationError');
+      return exactBuffer(provider(OP.HKDF,v.bytes,bytesOf(algorithm.salt),bytesOf(algorithm.info),undefined,bits/8));
     },
-    async digest(algorithm: any, data: any): Promise<ArrayBuffer> {
-      const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
-      if (String(name || '').toUpperCase().replace('-', '') !== 'SHA256') {
-        throw new DOMException('Unsupported digest algorithm', 'NotSupportedError');
-      }
-      return sha256(bytesOf(data)).buffer as ArrayBuffer;
-    },
+    async deriveKey(algorithm:any,baseKey:any,target:any,extractable:boolean,uses:string[]):Promise<any>{const n=algorithmName(target),bits=n==='AES-GCM'?Number(target.length):n==='HMAC'?Number(target.length||256):0;if(!bits||bits%8)throw new DOMException('Unsupported key algorithm','NotSupportedError');const raw=await subtle.deriveBits(algorithm,baseKey,bits);return subtle.importKey('raw',raw,target,extractable,uses);},
+    async encrypt(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const v=record(key,'encrypt','AES-GCM');if(algorithmName(algorithm)!=='AES-GCM')throw new DOMException('Unsupported algorithm','NotSupportedError');if((algorithm.tagLength===undefined?128:Number(algorithm.tagLength))!==128)throw new DOMException('Unsupported tag length','NotSupportedError');return exactBuffer(provider(OP.AES_ENCRYPT,v.bytes,bytesOf(data),bytesOf(algorithm.iv),algorithm.additionalData===undefined?undefined:bytesOf(algorithm.additionalData)));},
+    async decrypt(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const v=record(key,'decrypt','AES-GCM');if(algorithmName(algorithm)!=='AES-GCM')throw new DOMException('Unsupported algorithm','NotSupportedError');if((algorithm.tagLength===undefined?128:Number(algorithm.tagLength))!==128)throw new DOMException('Unsupported tag length','NotSupportedError');return exactBuffer(provider(OP.AES_DECRYPT,v.bytes,bytesOf(data),bytesOf(algorithm.iv),algorithm.additionalData===undefined?undefined:bytesOf(algorithm.additionalData)));},
+    async sign(algorithm:any,key:any,data:any):Promise<ArrayBuffer>{const n=algorithmName(algorithm),v=record(key,'sign',n==='Ed25519'?'Ed25519':'HMAC'),op=n==='Ed25519'?OP.ED_SIGN:n==='HMAC'?OP.HMAC_SIGN:0;if(!op)throw new DOMException('Unsupported algorithm','NotSupportedError');return exactBuffer(provider(op,v.bytes,bytesOf(data)));},
+    async verify(algorithm:any,key:any,signature:any,data:any):Promise<boolean>{const n=algorithmName(algorithm),v=record(key,'verify',n==='Ed25519'?'Ed25519':'HMAC'),op=n==='Ed25519'?OP.ED_VERIFY:n==='HMAC'?OP.HMAC_VERIFY:0;if(!op)throw new DOMException('Unsupported algorithm','NotSupportedError');return provider(op,n==='Ed25519'?v.publicKey:v.bytes,bytesOf(data),bytesOf(signature))[0]===1;},
+    async exportKey(format:string,key:any):Promise<any>{const v=key&&keyRecords.get(key);if(!v)throw new DOMException('Invalid CryptoKey','InvalidAccessError');if(!v.extractable)throw new DOMException('Key is not extractable','InvalidAccessError');if(format==='raw'&&v.name==='Ed25519'&&v.type==='public')return exactBuffer(v.publicKey);if(format==='raw'&&v.type==='secret')return exactBuffer(v.bytes);if(format==='pkcs8'&&v.name==='Ed25519'&&v.type==='private')return exactBuffer(v.bytes);if(format==='jwk'&&v.name==='Ed25519'){const j:any={kty:'OKP',crv:'Ed25519',x:base64url(v.publicKey),key_ops:v.usages.slice(),ext:true};if(v.type==='private')j.d=base64url(v.bytes.slice(-32));return j;}if(format==='jwk'&&v.type==='secret')return{kty:'oct',k:base64url(v.bytes),alg:v.name==='AES-GCM'?`A${v.bytes.length*8}GCM`:'HS256',key_ops:v.usages.slice(),ext:true};throw new DOMException('Unsupported export','NotSupportedError');},
+    async digest(algorithm:any,data:any):Promise<ArrayBuffer>{if(String(algorithmName(algorithm)||'').toUpperCase().replace('-','')!=='SHA256')throw new DOMException('Unsupported digest','NotSupportedError');return exactBuffer(provider(OP.SHA256,undefined,bytesOf(data)));},
   };
   function invalidCharacter(): never {
     throw new DOMException('Invalid character', 'InvalidCharacterError');
@@ -137,17 +116,16 @@
   {
     const crypto = {
       getRandomValues(view: any): any {
-        const kind = Object.prototype.toString.call(view);
-        if (!ArrayBuffer.isView(view) || kind === '[object DataView]' ||
-            kind === '[object Float32Array]' || kind === '[object Float64Array]' ||
-            kind === '[object Float16Array]') {
+        const kind = view && typedArrayTagGetter ? Reflect.apply(typedArrayTagGetter, view, []) : undefined;
+        if (!ArrayBuffer.isView(view) || kind === undefined ||
+            kind === 'Float32Array' || kind === 'Float64Array' || kind === 'Float16Array') {
           throw new DOMException('Expected an integer TypedArray', 'TypeMismatchError');
         }
         if (view.byteLength > 65536) {
           throw new DOMException('The requested length exceeds 65,536 bytes', 'QuotaExceededError');
         }
         const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+        bytes.set(provider(OP.RANDOM_BYTES, undefined, undefined, undefined, undefined, bytes.length));
         return view;
       },
       randomUUID(): string {

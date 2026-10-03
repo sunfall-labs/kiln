@@ -24,6 +24,8 @@ crates/semantics/kiln-native-provider-contract/Cargo.toml
 crates/semantics/kiln-native-provider-contract/src/abi.rs
 crates/semantics/kiln-node-path/Cargo.toml
 crates/semantics/kiln-node-path/src/lib.rs
+crates/semantics/kiln-webcrypto/Cargo.toml
+crates/semantics/kiln-webcrypto/src/lib.rs
 crates/semantics/kiln-temporal/Cargo.toml
 crates/semantics/kiln-temporal/src/lib.rs
 crates/semantics/kiln-intl/Cargo.toml
@@ -100,6 +102,7 @@ crates/semantics/kiln-regexp/src/lib.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/workers.rs
+crates/native/kiln-native-provider-ffi/src/provider/webcrypto.rs
 crates/semantics/kiln-native-provider-contract/src/gui.rs
 crates/host/kiln-host-gui/Cargo.toml
 crates/host/kiln-host-gui/src/appkit.rs

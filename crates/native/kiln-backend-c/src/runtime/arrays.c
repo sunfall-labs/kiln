@@ -1230,6 +1230,11 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     return kiln_c99_typed_alloc_ex(out, kind, count, 1);
 }
 
+/* The shared WebCrypto bridge writes a Rust-provider result straight into this fresh Uint8Array. */
+int kiln_c99_webcrypto_output_array(kiln_value *out, size_t length) {
+    return kiln_c99_typed_alloc_ex(out, KILN_TYPED_UINT8, length, 1);
+}
+
 /* `new DataView(buffer[, byteOffset[, byteLength]])`.
  *
  * The two failures are different errors and a program tells them apart: a first argument that is

@@ -2830,6 +2830,7 @@ pub(crate) fn call_native(
         | Native::NodeCryptoKeyInfo
         | Native::NodeCryptoKeyExport
         | Native::NodeCryptoKeyFree
+        | Native::WebCryptoPrimitive
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder
