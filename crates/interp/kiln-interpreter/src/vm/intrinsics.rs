@@ -16,21 +16,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         debug_assert_eq!(native, Native::FunctionApply);
         let rest = match arguments.get(1) {
-            Some(Value::Array(items)) => dense_items(&items.borrow()),
             Some(Value::Undefined | Value::Null) | None => Vec::new(),
-            Some(other) => {
-                let length = self.read_property(other, "length", instruction)?;
-                let length = length.as_number();
-                let mut list = Vec::new();
-                for index in 0..(if length.is_finite() {
-                    length.max(0.0) as usize
-                } else {
-                    0
-                }) {
-                    list.push(self.read_property(other, &index.to_string(), instruction)?);
-                }
-                list
-            }
+            other => self.argument_list(other, instruction)?,
         };
         Ok((this_value, rest))
     }

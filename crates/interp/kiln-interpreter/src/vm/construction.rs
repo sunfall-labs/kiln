@@ -37,7 +37,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
         };
-        if let Value::Array(items) = &list {
+        if let Value::Array(items) = &list
+            && array_walks_densely(items)
+            && items.length.get() == items.borrow().len()
+        {
             return Ok(dense_items(&items.borrow()));
         }
         let length = self
