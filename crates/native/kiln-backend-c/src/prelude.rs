@@ -15,6 +15,33 @@ const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
 /// receiver rows. The member's arity still comes from `kiln_builtin_surface`; this table only
 /// connects the C dispatch ID to that public identity.
 const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "KILN_C99_METHOD_QUEUE_MICROTASK",
+        "globalThis",
+        "queueMicrotask",
+    ),
+    ("KILN_C99_METHOD_SET_TIMEOUT", "globalThis", "setTimeout"),
+    ("KILN_C99_METHOD_SET_INTERVAL", "globalThis", "setInterval"),
+    (
+        "KILN_C99_METHOD_CLEAR_TIMEOUT",
+        "globalThis",
+        "clearTimeout",
+    ),
+    (
+        "KILN_C99_METHOD_CLEAR_INTERVAL",
+        "globalThis",
+        "clearInterval",
+    ),
+    (
+        "KILN_C99_METHOD_SET_IMMEDIATE",
+        "globalThis",
+        "setImmediate",
+    ),
+    (
+        "KILN_C99_METHOD_CLEAR_IMMEDIATE",
+        "globalThis",
+        "clearImmediate",
+    ),
     ("KILN_C99_METHOD_REGEXP_TEST", "RegExp.prototype", "test"),
     ("KILN_C99_METHOD_GET_TIME", "Date.prototype", "getTime"),
     (

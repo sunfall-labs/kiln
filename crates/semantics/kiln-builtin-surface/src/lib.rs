@@ -109,6 +109,13 @@ pub const BOOTSTRAP_STATICS: &[(&str, &str)] = &[
 /// surface prevents the interpreter and native callable facade from maintaining separate
 /// reflection metadata.
 pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
+    ("globalThis", "queueMicrotask", 1),
+    ("globalThis", "setTimeout", 2),
+    ("globalThis", "setInterval", 2),
+    ("globalThis", "clearTimeout", 1),
+    ("globalThis", "clearInterval", 1),
+    ("globalThis", "setImmediate", 1),
+    ("globalThis", "clearImmediate", 1),
     ("AbortSignal", "abort", 0),
     ("AbortSignal", "any", 1),
     ("AbortSignal", "timeout", 1),

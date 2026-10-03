@@ -1098,6 +1098,20 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
             Some(length) => length as f64,
             None => 1.0,
         },
+        N::QueueMicrotask | N::SetTimeout | N::SetInterval | N::ClearTimeout | N::ClearInterval
+        | N::SetImmediate | N::ClearImmediate => {
+            let member = match native {
+                N::QueueMicrotask => "queueMicrotask",
+                N::SetTimeout => "setTimeout",
+                N::SetInterval => "setInterval",
+                N::ClearTimeout => "clearTimeout",
+                N::ClearInterval => "clearInterval",
+                N::SetImmediate => "setImmediate",
+                _ => "clearImmediate",
+            };
+            kiln_builtin_surface::native_function_length("globalThis", member)
+                .expect("timer callable has a shared arity") as f64
+        }
         N::ObjectGetOwnPropertyDescriptor => {
             match kiln_builtin_surface::native_function_length("Object", "getOwnPropertyDescriptor") {
                 Some(length) => length as f64,
