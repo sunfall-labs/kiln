@@ -514,11 +514,28 @@ function bodyContentType(body: any): string | null {
 
 // A body as Request and Response keep it: a string (kept as text until something needs bytes),
 // bytes, or null for none. A Uint8Array (a Buffer included) is kept as given.
-function bodyValue(body: any): string | Uint8Array {
+interface BodyReadable {
+  readonly locked: boolean;
+  readonly _disturbed: boolean;
+  getReader(): any;
+  tee(): [BodyReadable, BodyReadable];
+}
+type StoredBody = string | Uint8Array | BodyReadable | null;
+
+function isBodyReadable(body: any): body is BodyReadable {
+  const RS = (globalThis as any).ReadableStream;
+  return typeof RS === "function" && body instanceof RS;
+}
+
+function bodyValue(body: any): Exclude<StoredBody, null> {
   if (typeof body === "string") return body;
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
   if (body instanceof Blob) return body._data;
+  if (isBodyReadable(body)) {
+    if (body.locked || body._disturbed) throw new TypeError("Body stream is locked or disturbed");
+    return body;
+  }
   return String(body);
 }
 
@@ -565,42 +582,71 @@ function newBodyExtra(): BodyExtra {
 }
 
 // The body of a Request or Response for a read that consumes it: throws once it has been read.
-function consumeBody(self: any): string | Uint8Array | null {
+function consumeBody(self: any): StoredBody {
+  if (self._body === null) return null;
   let extra: BodyExtra | null = self._extra;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream :
+    isBodyReadable(self._body) ? self._body : null;
+  if (bodyUsed(self) || (stream !== null && stream.locked)) {
+    throw new TypeError("Body has already been consumed or is locked");
+  }
   if (extra === null) {
     extra = newBodyExtra();
     self._extra = extra;
-  } else if (extra.bodyUsed) {
-    throw new TypeError("Body has already been consumed");
   }
   extra.bodyUsed = true;
-  return self._body;
+  return stream === null ? self._body : stream;
 }
 
-function bodyText(self: any): string {
+async function readBodyStream(stream: BodyReadable): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    if (!(next.value instanceof Uint8Array)) {
+      throw new TypeError("Body stream chunks must be Uint8Array values");
+    }
+    chunks.push(next.value);
+    length += next.value.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function bodyText(self: any): Promise<string> {
   const body = consumeBody(self);
   if (body === null) return "";
   if (typeof body === "string") return body;
+  const bytes = isBodyReadable(body) ? await readBodyStream(body) : body;
   const dec = getSharedDecoder();
-  if (dec) return dec.decode(body);
+  if (dec) return dec.decode(bytes);
   let res = "";
-  for (let i = 0; i < body.length; i++) res += String.fromCharCode(body[i]);
+  for (let i = 0; i < bytes.length; i++) res += String.fromCharCode(bytes[i]);
   return res;
 }
 
-function bodyBytes(self: any): Uint8Array {
+async function bodyBytes(self: any): Promise<Uint8Array> {
   const body = consumeBody(self);
   if (body === null) return new Uint8Array(0);
   if (typeof body === "string") {
     const enc = getSharedEncoder();
     return enc ? enc.encode(body) : new Uint8Array(0);
   }
-  return body;
+  return isBodyReadable(body) ? readBodyStream(body) : body;
 }
 
 function bodyUsed(self: any): boolean {
   const extra: BodyExtra | null = self._extra;
-  return extra !== null && extra.bodyUsed;
+  if (extra !== null && extra.bodyUsed) return true;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream : self._body;
+  return isBodyReadable(stream) && stream._disturbed;
 }
 
 // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
@@ -616,20 +662,59 @@ function bodyStream(self: any): any {
     extra.bodyStream = null;
     return null;
   }
+  if (isBodyReadable(self._body)) {
+    extra.bodyStream = self._body;
+    return self._body;
+  }
   const RS = (globalThis as any).ReadableStream;
   if (typeof RS !== "function") return null;
   const state = extra;
   const body = self._body;
   extra.bodyStream = new RS({
     pull(controller: any) {
-      state.bodyUsed = true;
       const bytes =
         typeof body === "string" ? (getSharedEncoder()?.encode(body) || new Uint8Array(0)) : body;
       if (bytes.length > 0) controller.enqueue(bytes);
       controller.close();
     },
-  });
+  }, { highWaterMark: 0 });
+  if (state.bodyUsed) {
+    // The optimized byte/text read already consumed this body before its stream was requested.
+    // Materialize its closed, disturbed stream only when this otherwise rare getter is used.
+    extra.bodyStream.cancel();
+    extra.bodyStream.getReader();
+  }
   return extra.bodyStream;
+}
+
+// Fetch's body clone tees only an already-materialized stream. Byte sources can retain the
+// lazy stream optimization until either branch is read. https://fetch.spec.whatwg.org/#concept-body-clone
+function cloneBody(self: any): StoredBody {
+  const extra: BodyExtra | null = self._extra;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream : self._body;
+  if (bodyUsed(self) || (isBodyReadable(stream) && stream.locked)) {
+    throw new TypeError("Body has already been consumed or is locked");
+  }
+  if (!isBodyReadable(stream)) return self._body;
+  const branches = stream.tee();
+  self._body = branches[0];
+  if (extra !== null) extra.bodyStream = branches[0];
+  return branches[1];
+}
+
+function transferBody(self: any): StoredBody {
+  const body = consumeBody(self);
+  if (!isBodyReadable(body)) return body;
+  const reader = body.getReader();
+  const RS = (globalThis as any).ReadableStream;
+  return new RS({
+    async pull(controller: any) {
+      const next = await reader.read();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel(reason: any) { return reader.cancel(reason); },
+  }, { highWaterMark: 0 });
 }
 
 // A `status` the Response constructor accepts: WebIDL's `unsigned short` conversion, then the
@@ -685,13 +770,13 @@ function readResponseInit(init: any, caller: string): void {
 const MADE_RESPONSE: any = {};
 let madeStatus = 200;
 let madeList = "";
-let madeBody: string | Uint8Array | null = null;
+let madeBody: StoredBody = null;
 let madeExtra: BodyExtra | null = null;
 
 function makeResponse(
   status: number,
   list: string,
-  body: string | Uint8Array | null,
+  body: StoredBody,
   extra: BodyExtra | null
 ): Response {
   madeStatus = status;
@@ -726,7 +811,7 @@ interface Response {
   // `Headers` view exists; once `headers` has been read, the view owns the list.
   _list: string;
   _headers: Headers | null;
-  _body: string | Uint8Array | null;
+  _body: StoredBody;
   // statusText, type, url and redirected when any is not the default, and the body's state
   // once it has been read; null for nearly every Response a server makes.
   _extra: BodyExtra | null;
@@ -736,7 +821,7 @@ class Response {
   constructor(body?: any, init?: any) {
     let status = 200;
     let list = "";
-    let stored: string | Uint8Array | null = null;
+    let stored: StoredBody = null;
     let extra: BodyExtra | null = null;
     if (body === MADE_RESPONSE) {
       status = madeStatus;
@@ -818,23 +903,23 @@ class Response {
   }
 
   async json(): Promise<any> {
-    return JSON.parse(bodyText(this));
+    return JSON.parse(await bodyText(this));
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async bytes(): Promise<Uint8Array> {
     const body = this._body;
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     // Bytes the Response was given are copied; bytes just encoded are already this call's own.
     return bytes === body ? new Uint8Array(bytes) : bytes;
   }
 
   async blob(): Promise<Blob> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     const type = headerListGet(responseHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
   }
@@ -845,7 +930,7 @@ class Response {
     return makeResponse(
       this._status,
       responseHeaderList(this),
-      this._body,
+      cloneBody(this),
       extra === null ? null : responseExtra(extra.statusText, extra.type, extra.url, extra.redirected)
     );
   }
@@ -927,7 +1012,7 @@ interface Request {
   // it from then on.
   _list: string;
   _headers: Headers | null;
-  _body: string | Uint8Array | null;
+  _body: StoredBody;
   // signal and redirect when either is not the default, and the body's state once read.
   _extra: BodyExtra | null;
 }
@@ -939,6 +1024,8 @@ function requestHeaderList(request: Request): string {
 }
 
 class Request {
+  #duplex: string = "half";
+
   constructor(input: any, init?: any) {
     if (input === SERVED_REQUEST) {
       this._method = servedMethod;
@@ -962,6 +1049,13 @@ class Request {
     const initMethod = hasInit ? init.method : undefined;
     const initSignal = hasInit ? init.signal : undefined;
     const initRedirect = hasInit ? init.redirect : undefined;
+    const initDuplex = hasInit ? init.duplex : undefined;
+    if (initDuplex !== undefined && String(initDuplex) !== "half") {
+      throw new TypeError("Request constructor: duplex must be 'half'");
+    }
+    if (isBodyReadable(initBody) && initDuplex === undefined) {
+      throw new TypeError("Request constructor: duplex is required for a stream body");
+    }
     if (input instanceof Request) {
       url = input._url;
       method = initMethod !== undefined ? requestMethod(initMethod) : input._method;
@@ -979,9 +1073,9 @@ class Request {
         if (bodyUsed(input)) {
           throw new TypeError("Request constructor: Cannot construct a Request with a Request object that has already been used.");
         }
-        bodySource = consumeBody(input);
+        bodySource = transferBody(input);
       } else {
-        bodySource = input._body;
+        bodySource = requestCloning ? cloneBody(input) : input._body;
       }
     } else {
       url = String(input);
@@ -1037,6 +1131,8 @@ class Request {
     return extra === null ? "follow" : extra.redirect;
   }
 
+  get duplex(): string { return this.#duplex; }
+
   get body(): any {
     return bodyStream(this);
   }
@@ -1050,22 +1146,22 @@ class Request {
   }
 
   async json(): Promise<any> {
-    return JSON.parse(bodyText(this));
+    return JSON.parse(await bodyText(this));
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async bytes(): Promise<Uint8Array> {
     const body = this._body;
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes === body ? new Uint8Array(bytes) : bytes;
   }
 
   async blob(): Promise<Blob> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     const type = headerListGet(requestHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
   }
@@ -1313,8 +1409,12 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
       });
     }
 
+    let requestReader: any = null;
     if (req.signal) {
       const onAbort = () => {
+        if (requestReader !== null) {
+          requestReader.cancel(req.signal.reason).catch(() => {});
+        }
         if (clientReq && typeof clientReq.destroy === "function") {
           clientReq.destroy();
         }
@@ -1326,11 +1426,37 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
     }
 
     {
-      try {
-        const body = req._body;
+      const sendBody = async () => {
+        const body = consumeBody(req);
         if (typeof body === "string") {
           if (clientReq && typeof clientReq.write === "function") {
             clientReq.write(body);
+          }
+        } else if (isBodyReadable(body)) {
+          const reader = body.getReader();
+          requestReader = reader;
+          try {
+            while (true) {
+              const next = await reader.read();
+              if (req.signal?.aborted) throw req.signal.reason;
+              if (next.done) break;
+              if (!(next.value instanceof Uint8Array)) {
+                throw new TypeError("Body stream chunks must be Uint8Array values");
+              }
+              if (clientReq.write(next.value) === false) {
+                await new Promise<void>((resolve, reject) => {
+                  const onDrain = () => { clientReq.off("error", onError); resolve(); };
+                  const onError = (error: any) => { clientReq.off("drain", onDrain); reject(error); };
+                  clientReq.once("drain", onDrain);
+                  clientReq.once("error", onError);
+                });
+              }
+            }
+          } catch (error) {
+            await reader.cancel(error).catch(() => {});
+            throw error;
+          } finally {
+            requestReader = null;
           }
         } else if (body !== null) {
           const bodyBytes = body;
@@ -1344,12 +1470,13 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
         if (clientReq && typeof clientReq.end === "function") {
           clientReq.end();
         }
-      } catch (err) {
+      };
+      sendBody().catch((err: any) => {
         if (clientReq && typeof clientReq.destroy === "function") {
           clientReq.destroy();
         }
         reject(err);
-      }
+      });
     }
   });
 }
@@ -1436,6 +1563,17 @@ function serve(
     }
     try {
       const body = response._body;
+      if (isBodyReadable(body)) {
+        bodyBytes(response).then(
+          (bytes: Uint8Array) => {
+            const headers = response._headers;
+            respond(resource, id, response._status,
+              headers === null ? response._list : headers._list, bytes);
+          },
+          (err: any) => fail(resource, id, err)
+        );
+        return;
+      }
       const headers = response._headers;
       respond(
         resource,

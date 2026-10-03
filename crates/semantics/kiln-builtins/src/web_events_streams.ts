@@ -1711,6 +1711,7 @@ delete (globalThis as any).__kilnPortWait;
     read(): Promise<{ value: any; done: boolean }> {
       const stream = this._stream;
       if (!stream) return Promise.reject(new TypeError("Invalid state: The reader is not attached to a stream"));
+      stream._disturbed = true;
       if (stream._state === "closed") return Promise.resolve({ value: undefined, done: true });
       if (stream._state === "errored") return Promise.reject(stream._storedError);
       const controller = stream._controller!;
