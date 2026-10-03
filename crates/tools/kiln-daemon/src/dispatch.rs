@@ -898,6 +898,11 @@ pub(crate) fn execute_prepared_run(
     wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
+    if wall_clock && !node {
+        return Response::Error {
+            message: "wall-clock scheduling requires the Node host adapter".to_owned(),
+        };
+    }
     #[cfg(test)]
     wait_for_run_gate(prepared.path());
 

@@ -319,6 +319,11 @@ where
             "--clock only applies to interpreted `kiln run`; native launchers use their build clock policy",
         ));
     }
+    if wall_clock && !node {
+        return Err(Error::usage(
+            "--clock wall requires --node for host-clock scheduling",
+        ));
+    }
     if shared && name != "build" {
         return Err(Error::usage("--shared only applies to `kiln build`"));
     }
@@ -865,6 +870,34 @@ mod tests {
         let inline = run(&["--socket=/tmp/k.sock", "stats"]);
         assert_eq!(split, inline);
         assert_eq!(split.socket, Some(PathBuf::from("/tmp/k.sock")));
+    }
+
+    #[test]
+    fn wall_clock_requires_its_host_adapter() {
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "wall"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "wall", "--node"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_ok()
+        );
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "virtual"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_ok()
+        );
     }
 
     #[test]

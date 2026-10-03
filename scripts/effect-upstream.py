@@ -284,7 +284,7 @@ def main():
                     cmd = ['bun', '--preload', str(workspace / 'bun-support.mjs'), '--tsconfig-override', str(workspace / 'tsconfig.json'), str(entries[name])]
                 else:
                     limiter = [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(args.kiln_memory_mb)]
-                    cmd = [*limiter, str(kiln), '--one-shot', 'run', str(entries[name]), '--node']
+                    cmd = [*limiter, str(kiln), '--one-shot', 'run', str(entries[name]), '--node', '--clock', 'wall']
                 build = None
                 if engine == 'native':
                     # A shipped executable has the host-clock policy. Native run's
