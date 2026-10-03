@@ -1170,7 +1170,10 @@ fn runtime_prelude_size() {
     // its parse-only grammar walk. Reviewed: 324 net runtime source lines account
     // for the 329 emitted lines (80,060 -> 80,389); sections remain emitted once.
     // The ABI snapshot adds three private preflight helpers and a parser label.
-    const CEILING_LINES: usize = 80_550;
+    // The syntax-only allocation guards and generic external-owner tracing/finalization
+    // add 263 emitted lines (80,389 -> 80,652). Reviewed the separate dynamic/heap/
+    // value sections and host context edges; no section is duplicated or built-in added.
+    const CEILING_LINES: usize = 80_800;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
