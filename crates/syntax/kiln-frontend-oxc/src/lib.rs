@@ -2270,6 +2270,7 @@ fn parse_source_in_context_with_units(
         && !has_unexported_top_level_class_heritage(&parsed.program)
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+        dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
         // Oxc's side-effect model assumes coercions are pure and that some global functions
         // never throw; guard what the language can observe before it runs (issue 19).
         dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
@@ -2598,16 +2599,9 @@ fn lower_parsed_in_context(
         }
         diagnostics.extend(early);
     }
-    let inline_eval_calls = global_literal_eval_call_spans(parsed);
-    // Enum member identifiers are references in an Oxc-owned enum scope. Build that scope only
-    // for sources that may contain enums; ordinary JavaScript and TypeScript avoid this extra
-    // semantic pass.
-    let enum_semantic = source.contains("enum").then(|| {
-        SemanticBuilder::new()
-            .with_build_nodes(true)
-            .build(&parsed.program)
-            .semantic
-    });
+    // Reuse the semantic graph already built for literal-eval recognition. It also carries
+    // Oxc's resolved enum-member bindings and constant values for the TypeScript lowering below.
+    let (inline_eval_calls, semantic) = global_literal_eval_call_spans(parsed);
     let mut lowerer = Lowerer {
         text: source,
         path,
@@ -2615,7 +2609,7 @@ fn lower_parsed_in_context(
         source_units: source_units.map(|(units, _)| units),
         source_map: source_units.map(|(_, map)| map),
         inline_eval_calls,
-        enum_scoping: enum_semantic.as_ref().map(|semantic| semantic.scoping()),
+        enum_scoping: semantic.as_ref().map(|semantic| semantic.scoping()),
         active_enum_members: None,
         active_enum_name: None,
         enum_merge: false,
@@ -2847,23 +2841,29 @@ fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
     }
 }
 
-fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> HashSet<(u32, u32)> {
+fn global_literal_eval_call_spans<'a>(
+    parsed: &'a oxc_parser::ParserReturn<'a>,
+) -> (HashSet<(u32, u32)>, Option<oxc_semantic::Semantic<'a>>) {
     if parsed.panicked || !parsed.diagnostics.is_empty() {
-        return HashSet::new();
+        return (HashSet::new(), None);
     }
     let semantic = SemanticBuilder::new()
         .with_build_nodes(true)
         .build(&parsed.program)
         .semantic;
     let scoping = semantic.scoping();
+    let has_enum = semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::TSEnumDeclaration(_)));
     if semantic
         .nodes()
         .iter()
         .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
     {
-        return HashSet::new();
+        return (HashSet::new(), has_enum.then_some(semantic));
     }
-    semantic
+    let spans = semantic
         .nodes()
         .iter()
         .filter_map(|node| {
@@ -2884,7 +2884,8 @@ fn global_literal_eval_call_spans(parsed: &oxc_parser::ParserReturn<'_>) -> Hash
             }
             Some((call.span.start, call.span.end))
         })
-        .collect()
+        .collect();
+    (spans, has_enum.then_some(semantic))
 }
 
 fn inline_eval_syntax(expression: &HirExpression) -> bool {
@@ -6250,6 +6251,30 @@ mod tests {
         let hir = format!("{:?}", module.body);
         assert!(hir.contains("ProcessObject"), "{hir}");
         assert!(!hir.contains("property: \"process\""), "{hir}");
+    }
+
+    #[test]
+    fn native_dce_erases_typescript_expression_wrappers_before_optional_chain_folding() {
+        let module = parse_dce_native(
+            "optional-chain.ts",
+            r#"
+                export function read(value: { child?: { read?: number } }) {
+                    return (value.child as { read?: number } | null)?.read;
+                }
+            "#,
+            &BTreeSet::from(["read".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Chain"),
+            "optional chain should remain intact: {hir}"
+        );
+        assert!(
+            !hir.contains("TypeScript instantiation expression"),
+            "{hir}"
+        );
     }
 
     #[test]

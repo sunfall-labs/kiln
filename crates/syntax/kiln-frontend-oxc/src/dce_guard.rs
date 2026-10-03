@@ -49,6 +49,48 @@ use oxc_span::SPAN;
 /// wrapper ever survived to lowering it would be a loud `ReferenceError`, never a wrong value.
 pub(crate) const OBSERVABLE: &str = "kiln:observable";
 
+/// Remove TypeScript expression wrappers that have no runtime representation before handing the
+/// tree to Oxc's JavaScript-only minifier. Oxc's optional-chain fold unwraps these nodes to inspect
+/// the inner expression, then attempts to reinterpret the outer node as a member expression; a
+/// wrapped chain member consequently panics. Owned HIR already erases these same wrappers, so this
+/// normalization changes no runtime expression and does not lower enums or namespaces.
+pub(crate) fn erase_expression_types_for_dce<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+) {
+    ExpressionTypeEraser {
+        builder: AstBuilder::new(allocator),
+    }
+    .visit_program(program);
+}
+
+struct ExpressionTypeEraser<'a> {
+    builder: AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for ExpressionTypeEraser<'a> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        let inner = match expression {
+            Expression::TSAsExpression(wrapper) => Some(wrapper.expression.take_in(&self.builder)),
+            Expression::TSSatisfiesExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            Expression::TSTypeAssertion(wrapper) => Some(wrapper.expression.take_in(&self.builder)),
+            Expression::TSNonNullExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            Expression::TSInstantiationExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            _ => None,
+        };
+        if let Some(inner) = inner {
+            *expression = inner;
+        }
+    }
+}
+
 /// Wrap every expression in `program` that Oxc could wrongly judge free of effects.
 pub(crate) fn guard_observable_effects<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
     FunctionSemanticsGuard {
