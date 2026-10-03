@@ -1626,6 +1626,18 @@ int main(void) {{
     status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
     if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 23;
 
+    // 8. Var patterns may bind the same identifier more than once; the last property wins.
+    const char var_alias_body[] = "var {{x:a,y:a}}={{x:1,y:2}}; return a;";
+    kiln_value var_alias_args[1] = {{
+        kiln_c99_copy_text(var_alias_body, sizeof var_alias_body - 1)
+    }};
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_dynamic_new_function(NULL, &result, var_alias_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 24;
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status != KILN_C99_OK || call_res.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(call_res) != 2.0) return 25;
+
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
 }}

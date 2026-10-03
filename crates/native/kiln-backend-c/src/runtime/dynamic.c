@@ -2194,14 +2194,16 @@ static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_dyn_lexer_next(lex);
     kiln_dyn_scope *decl_scope = is_var && scope->var_target != NULL
                                      ? scope->var_target : scope;
-    for (size_t index = 0; index < count; ++index) {
-        for (size_t prior = 0; prior < index; ++prior) {
-            if (bindings[index].name_len == bindings[prior].name_len &&
-                memcmp(bindings[index].name, bindings[prior].name,
-                       bindings[index].name_len) == 0) {
-                status = kiln_dyn_throw_parse_error(lex, thrown,
-                                                    "Duplicate binding name in object pattern");
-                goto done;
+    if (!is_var) {
+        for (size_t index = 0; index < count; ++index) {
+            for (size_t prior = 0; prior < index; ++prior) {
+                if (bindings[index].name_len == bindings[prior].name_len &&
+                    memcmp(bindings[index].name, bindings[prior].name,
+                           bindings[index].name_len) == 0) {
+                    status = kiln_dyn_throw_parse_error(
+                        lex, thrown, "Duplicate binding name in object pattern");
+                    goto done;
+                }
             }
         }
     }

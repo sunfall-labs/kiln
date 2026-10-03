@@ -382,4 +382,14 @@ mod tests {
         assert!(modules.spy_export(realm, &b_namespace, "run", Value::Number(4.0), "/spy.mjs"));
         assert_eq!(read_through_cell(&a_imports_b), Value::Number(4.0));
     }
+
+    #[test]
+    fn cyclic_cell_aliases_stay_in_the_dead_zone_instead_of_looping() {
+        let cell = Rc::new(RefCell::new(Value::Undefined));
+        *cell.borrow_mut() = Value::Cell(Rc::clone(&cell));
+        assert_eq!(
+            read_through_cell(&Value::Cell(cell)),
+            Value::Native(Native::Uninitialized, RealmId::PRIMARY)
+        );
+    }
 }

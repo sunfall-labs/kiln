@@ -430,7 +430,13 @@ pub(super) fn is_async_generator(state: &Rc<GeneratorData>) -> bool {
 /// wanted instead -- a namespace object, a star expansion -- goes through this.
 pub fn read_through_cell(value: &Value) -> Value {
     let mut current = value.clone();
+    let mut visited = Vec::new();
     while let Value::Cell(cell) = current {
+        let address = Rc::as_ptr(&cell);
+        if visited.contains(&address) {
+            return Value::Native(Native::Uninitialized, RealmId::PRIMARY);
+        }
+        visited.push(address);
         current = cell.borrow().clone();
     }
     current
