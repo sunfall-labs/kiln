@@ -197,7 +197,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 4;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 5;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -568,7 +568,7 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #define KILN_NATIVE_RUNTIME_VERSION 14
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 4
+#define KILN_HOST_ABI_VERSION 5
 #define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0
@@ -1720,7 +1720,7 @@ int main(void) {
 #include "kiln_module.h"
 
 int main(void) {
-    kiln_host host = {0, 0};
+    kiln_host host = {0, 0, 0};
     kiln_value result;
     result.tag = 0;
     result.flags = 0;

@@ -449,7 +449,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{host_call, NULL}};
+    kiln_host host = {{host_call, NULL, NULL}};
     kiln_value result = kiln_c99_undefined();
     int status = {symbol}(&host, &result);
     if (value_of_calls != {expected_value_of_calls}) return 10;
@@ -790,7 +790,7 @@ int main(void) {{
         "fr_FR.UTF-8", "fr_FR.utf8", "fr_FR",
         "it_IT.UTF-8", "es_ES.UTF-8", "pt_BR.UTF-8"
     }};
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
     size_t index;
     int found = 0;
@@ -1031,7 +1031,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    kiln_host host = {{host_call, NULL}};
+    kiln_host host = {{host_call, NULL, NULL}};
     kiln_value result;
     if ({symbol}(&host, &result) != KILN_C99_OK) return 2;
     return calls == 2 ? 0 : 3;
@@ -1547,7 +1547,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return 0;
 }}
 int main(void) {{
-    kiln_host host = {{host_call, NULL}};
+    kiln_host host = {{host_call, NULL, NULL}};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
 }}

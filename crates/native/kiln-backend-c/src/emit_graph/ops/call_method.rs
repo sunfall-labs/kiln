@@ -1225,7 +1225,7 @@ fn emit_map_typed(
                      kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                      kiln_val prod = KILN_VAL_UNDEFINED; \
                      int status; \
-                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                     if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                      else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                      if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ {check} }} \
                      if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) built_arr->is_numeric = 0; \
@@ -1306,7 +1306,7 @@ fn emit_map_typed(
                          kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -1421,7 +1421,7 @@ fn emit_filter_typed(
                          kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -1507,7 +1507,7 @@ fn emit_reduce_typed(
                          kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)4, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -4188,7 +4188,7 @@ pub(super) fn emit_call_method(
                                 kiln_c99_normalize_closure_receiver(&vreceiver, plain); \
                                 v{v} = KILN_VAL_UNDEFINED; \
                                 int status; \
-                                if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
+                                if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
                                 else {{ {prep_args}status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); }} \
                                 if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
                                     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \

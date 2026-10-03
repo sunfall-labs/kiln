@@ -6,7 +6,7 @@
 use kiln_string::StringUnits;
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 4;
+pub const HOST_ABI_VERSION: u32 = 5;
 
 /// Internal native runtime operation that returns a realm-owned GC callable. It intentionally
 /// lives outside [`HostOp`], whose result is the scalar `HostValue` ABI.

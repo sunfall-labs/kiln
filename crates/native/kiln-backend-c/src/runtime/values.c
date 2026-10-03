@@ -296,6 +296,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
         kiln_c99_heap_copy_vals(closure, upvalues, captured, count);
     }
     closure->body = body;
+    closure->module_host = NULL;
     closure->generator = generator;
     closure->asynchronous = asynchronous;
     closure->local_count = local_count;
@@ -377,6 +378,7 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
         kiln_closure *closure = (kiln_closure *)kiln_c99_region_alloc(KILN_GC_CLOSURE, sizeof *closure);
         if (closure != NULL) {
             closure->body = body;
+            closure->module_host = NULL;
             closure->generator = generator;
             closure->asynchronous = asynchronous;
             closure->local_count = local_count;
@@ -518,7 +520,9 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
     kiln_value saved_callee = kiln_c99_frame_callee;
     int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
     kiln_js_frame js_frame;
+    kiln_host closure_host;
     int status;
+    host = kiln_c99_closure_host(host, closure, &closure_host);
     if (!inherit_new_target) {
         kiln_c99_new_target =
             closure->arrow ? kiln_val_to_boundary(closure->captured_new_target) : kiln_c99_undefined();
@@ -623,6 +627,8 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
         int saved_depth = kiln_c99_diagnostic_active_depth;
         int quick;
         kiln_js_frame js_frame;
+        kiln_host closure_host;
+        host = kiln_c99_closure_host(host, closure, &closure_host);
         kiln_c99_diagnostic_active_depth = depth + 1;
         kiln_c99_js_frame_enter(&js_frame, closure);
         kiln_call_context ctx;

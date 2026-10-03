@@ -3383,6 +3383,7 @@ typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t arg
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    void *module_context;
 } kiln_host;
 
 static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *path, size_t path_len) {
@@ -5157,6 +5158,7 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
     graph->instance->entry_result.tag = KILN_VALUE_UNDEFINED;
     graph->host.call = kiln_graph_host_call;
     graph->host.context = graph;
+    graph->host.module_context = graph;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);

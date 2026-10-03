@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn generated_closures_retain_their_host_context_without_rebinding_plain_closures() {
+    let mut closure_program = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    closure_program
+        .functions
+        .push(function(vec![Instruction::Return]));
+    let generated = emit(&closure_program).expect("closure module emits");
+    assert!(
+        generated
+            .source
+            .contains("kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host);")
+    );
+
+    let wrapper = r#"
+int main(void) {
+    kiln_host old_host = { NULL, (void *)(uintptr_t)1, NULL };
+    kiln_host current_host = { NULL, (void *)(uintptr_t)2, NULL };
+    kiln_host unused_storage;
+    kiln_closure module_closure = {0};
+    kiln_closure plain_closure = {0};
+    module_closure.module_host = &old_host;
+    if (kiln_c99_closure_host(&current_host, &module_closure, &unused_storage) != &old_host) return 1;
+    if (old_host.call != current_host.call) return 2;
+    plain_closure.module_host = NULL;
+    if (kiln_c99_closure_host(&current_host, &plain_closure, &unused_storage) != &current_host) return 3;
+    if (kiln_c99_module_host(&current_host) != NULL) return 4;
+    old_host.module_context = &old_host;
+    if (kiln_c99_module_host(&old_host) != &old_host) return 5;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "closure-module-host-context");
+    assert!(
+        run.status.success(),
+        "closure host binding failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generated_entry_refuses_a_failed_root_registration_before_running() {
     let generated = emit(&program(
         vec![Constant::Number(42.0f64.to_bits())],

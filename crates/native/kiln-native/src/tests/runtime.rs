@@ -1404,7 +1404,7 @@ static int malformed_call(void *context, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    kiln_host host = {{malformed_call, NULL}};
+    kiln_host host = {{malformed_call, NULL, NULL}};
     const kiln_module_api_v2 *api = {api_symbol}();
     kiln_result_v2 *owned = NULL;
     if (api == NULL) return 1;

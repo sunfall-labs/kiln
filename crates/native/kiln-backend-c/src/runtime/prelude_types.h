@@ -678,6 +678,8 @@ typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t arg
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    /* Non-null only when this host explicitly carries generated module-instance provenance. */
+    void *module_context;
 } kiln_host;
 
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
@@ -871,6 +873,8 @@ enum kiln_c99_function_kind {
 
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* Generated module closures stay bound to their graph instance across later resets. */
+    kiln_host *module_host;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
@@ -954,6 +958,18 @@ typedef struct kiln_closure {
     kiln_val inline_upvalues[4];
     kiln_val *upvalues;
 } kiln_closure;
+
+/* Reuse realm host services while routing generated module code through its captured graph. */
+static inline kiln_host *kiln_c99_closure_host(kiln_host *host,
+                                                const kiln_closure *closure,
+                                                kiln_host *storage) {
+    (void)storage;
+    return closure != NULL && closure->module_host != NULL ? closure->module_host : host;
+}
+
+static inline kiln_host *kiln_c99_module_host(kiln_host *host) {
+    return host != NULL && host->module_context != NULL ? host : NULL;
+}
 
 /* A JavaScript activation retained for Error.captureStackTrace. This is an explicit language
  * frame, not a C unwind frame: generated C records the module and IR instruction at each call

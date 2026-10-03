@@ -4777,7 +4777,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;\n\
             kiln_c99_normalize_closure_receiver(&recv, plain);\n\
-            kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+            kiln_host call_host; kiln_call_context ctx_call = { kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 };\n\
             kiln_val res = KILN_VAL_UNDEFINED;\n\
             kiln_js_frame call_frame;\n\
             kiln_c99_js_frame_enter(&call_frame, plain);\n\
@@ -4834,7 +4834,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
                     kiln_val vreceiver = plain->arrow ? plain->captured_this : ku_recv;\n\
                     kiln_c99_normalize_closure_receiver(&vreceiver, plain);\n\
-                    kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+                    kiln_host call_host; kiln_call_context ctx_call = { kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 };\n\
                     kiln_val res = KILN_VAL_UNDEFINED;\n\
                     kiln_js_frame call_frame;\n\
                     kiln_c99_js_frame_enter(&call_frame, plain);\n\

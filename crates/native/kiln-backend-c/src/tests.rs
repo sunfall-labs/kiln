@@ -1335,7 +1335,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return 0;
 }}
 int main(void) {{
-    kiln_host host = {{host_call, NULL}};
+    kiln_host host = {{host_call, NULL, NULL}};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
 }}

@@ -1045,7 +1045,7 @@ pub(super) fn emit_graph_op(
                             String::new()
                         };
                         format!(
-                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
                             n = argc.max(1),
                             boxed_upvalues = boxed_upvalues,
                             fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
@@ -1136,7 +1136,7 @@ pub(super) fn emit_graph_op(
                 let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
                     fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
@@ -1235,7 +1235,7 @@ pub(super) fn emit_graph_op(
             let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL && plain != NULL) { kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0; kiln_c99_diagnostic_function_key = plain->name; }";
             writeln!(
                 output,
-                "    {{ kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}); kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; kiln_c99_normalize_closure_receiver(&recv, plain); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); {indirect} kiln_c99_js_frame_leave(&js_frame); {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
+                "    {{ kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}); kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; kiln_c99_normalize_closure_receiver(&recv, plain); kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); {indirect} kiln_c99_js_frame_leave(&js_frame); {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
@@ -1534,7 +1534,7 @@ pub(super) fn emit_graph_op(
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status;{publish} v{v} = kiln_val_from_boundary(built); }}"
+                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host);{publish} v{v} = kiln_val_from_boundary(built); }}"
                 )
                 .unwrap();
             }

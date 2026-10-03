@@ -955,7 +955,7 @@ static int write_host_call(void *context, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    kiln_host host = {{ write_host_call, NULL }};
+    kiln_host host = {{ write_host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
@@ -1066,7 +1066,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
@@ -3436,7 +3436,7 @@ struct capture {
 
 int main(void) {
     struct capture capture = {{0}, 0, 0};
-    kiln_host host = {capture_host_call, &capture};
+    kiln_host host = {capture_host_call, &capture, NULL};
     kiln_value result;
     int status = "#,
     );
@@ -3713,6 +3713,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     assert!(launcher[..main].contains("kiln_graph_module_instance module_instance;"));
     assert!(launcher[..main].contains("kiln_graph_module_instance *instance;"));
     assert!(launcher[..main].contains("graph->instance = &run->module_instance;"));
+    assert!(launcher[..main].contains("graph->host.module_context = graph;"));
     assert!(launcher[..main].contains("(graph->instance->exports_"));
     assert!(launcher[..main].contains("&graph->instance->module_states[index].result"));
     assert!(launcher[..main].contains("kiln_graph_realm_state realm_state;"));
@@ -4384,7 +4385,7 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
 
 int main(void) {{
     host_context context = {{0, {{0}}, {{0, 0, NULL}}}};
-    kiln_host host = {{host_call, &context}};
+    kiln_host host = {{host_call, &context, NULL}};
     kiln_value result;
     int index;
     for (index = 0; index < 64; ++index) {{
@@ -5253,7 +5254,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
