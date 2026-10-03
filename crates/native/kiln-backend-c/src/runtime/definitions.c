@@ -1718,11 +1718,14 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                 }
             }
         }
-        if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
-            /* Object.prototype is the one prototype whose own-key authority is complete here:
+        if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
+            target.bits == KILN_C99_BUILTIN_OBJECT) {
+            /* Object and Object.prototype have complete canonical own-key authority here:
              * its seven static rows, the stored Annex B methods, the stored runtime overrides,
              * and the special __proto__ accessor above. An unknown string or symbol is therefore
-             * absent by construction; other builtins may still have unlisted exotic keys. */
+             * absent by construction. Object's constructor keys and standard static rows are
+             * likewise complete; additions are read from its store above. Other builtins may
+             * still have unlisted exotic keys. */
             return names_status;
         }
         KILN_C99_REFUSE("an own-property question about a built-in member the surface table does "
