@@ -2241,15 +2241,39 @@ delete (globalThis as any).__kilnPortWait;
         {
           start: () => startResult.promise,
           write: (chunk: any) => {
-            const method = t.transform;
-            if (typeof method === "function") return method.call(t, chunk, controller);
-            controller.enqueue(chunk);
-            return undefined;
+            // Transform rejection errors both sides, including a pending read.
+            // WritableStream's sink rejection alone cannot settle the readable side.
+            let transformed: Promise<any>;
+            try {
+              const method = t.transform;
+              if (typeof method === "function") transformed = Promise.resolve(method.call(t, chunk, controller));
+              else {
+                controller.enqueue(chunk);
+                transformed = Promise.resolve();
+              }
+            } catch (error) {
+              controller.error(error);
+              throw error;
+            }
+            return transformed.then(undefined, (error) => {
+              controller.error(error);
+              throw error;
+            });
           },
           close: () => {
-            return Promise.resolve(typeof t.flush === "function" ? t.flush.call(t, controller) : undefined).then(() => {
+            let flushed: Promise<any>;
+            try {
+              flushed = Promise.resolve(typeof t.flush === "function" ? t.flush.call(t, controller) : undefined);
+            } catch (error) {
+              controller.error(error);
+              throw error;
+            }
+            return flushed.then(() => {
               const readableController = this._readableController!;
               if (!readableController._closeRequested && this.readable._state === "readable") readableController.close();
+            }, (error) => {
+              controller.error(error);
+              throw error;
             });
           },
           abort: (reason: any) => {
