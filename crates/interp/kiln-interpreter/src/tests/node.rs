@@ -1678,6 +1678,47 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         .expect("TextDecoder decode succeeds");
     assert_eq!(decoded_utf16le, Value::String("Hi".to_owned().into()));
 
+    // Streaming keeps both a split BOM and an incomplete UTF-8 scalar on this decoder only.
+    let decoder_streaming = vm
+        .dispatch_native(
+            Native::TextDecoderConstructor,
+            &Value::Undefined,
+            &[Value::String("utf-8".to_owned().into())],
+            0,
+        )
+        .expect("streaming TextDecoder succeeds");
+    let stream_options = ordinary_object([("stream".to_owned(), Value::Boolean(true))]);
+    let first_chunk = test_buffer(&[0xEF], None, false);
+    let first_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[first_chunk, stream_options.clone()],
+            0,
+        )
+        .expect("partial BOM is buffered");
+    assert_eq!(first_result, Value::String("".to_owned().into()));
+    let second_chunk = test_buffer(&[0xBB, 0xBF, 0xF0, 0x9F], None, false);
+    let second_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[second_chunk, stream_options],
+            0,
+        )
+        .expect("BOM and partial scalar are buffered");
+    assert_eq!(second_result, Value::String("".to_owned().into()));
+    let final_chunk = test_buffer(&[0x98, 0x80], None, false);
+    let final_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[final_chunk],
+            0,
+        )
+        .expect("final chunk completes the scalar");
+    assert_eq!(final_result, Value::String("😀".to_owned().into()));
+
     // 4. TextDecoder invalid label throws RangeError
     let invalid = vm.dispatch_native(
         Native::TextDecoderConstructor,

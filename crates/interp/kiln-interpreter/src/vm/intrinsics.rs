@@ -557,28 +557,50 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::to_display_string,
                     );
                 // Label resolution is `kiln-encoding`'s, which the native provider calls too.
-                let encoding_name = kiln_encoding::canonical_name(&label).map_err(|error| {
-                    ExecutionError::RangeErrorMessage {
-                        message: error.message(),
-                    }
+                let decoder = kiln_encoding::StreamingDecoder::new(
+                    &label,
+                    arguments
+                        .get(1)
+                        .and_then(|options| own_data_property(options, "fatal"))
+                        .is_some_and(|v| v.is_truthy()),
+                    arguments
+                        .get(1)
+                        .and_then(|options| own_data_property(options, "ignoreBOM"))
+                        .is_some_and(|v| v.is_truthy()),
+                )
+                .map_err(|error| ExecutionError::RangeErrorMessage {
+                    message: error.message(),
                 })?;
-                let fatal = arguments
-                    .get(1)
-                    .and_then(|options| own_data_property(options, "fatal"))
-                    .is_some_and(|v| v.is_truthy());
-                let ignore_bom = arguments
-                    .get(1)
-                    .and_then(|options| own_data_property(options, "ignoreBOM"))
-                    .is_some_and(|v| v.is_truthy());
-                return Ok(ordinary_object([
+                let encoding_name = decoder.encoding_name().to_ascii_lowercase();
+                let object = ordinary_object([
                     ("encoding".to_owned(), Value::String(encoding_name.into())),
-                    ("fatal".to_owned(), Value::Boolean(fatal)),
-                    ("ignoreBOM".to_owned(), Value::Boolean(ignore_bom)),
+                    (
+                        "fatal".to_owned(),
+                        Value::Boolean(
+                            arguments
+                                .get(1)
+                                .and_then(|options| own_data_property(options, "fatal"))
+                                .is_some_and(|v| v.is_truthy()),
+                        ),
+                    ),
+                    (
+                        "ignoreBOM".to_owned(),
+                        Value::Boolean(
+                            arguments
+                                .get(1)
+                                .and_then(|options| own_data_property(options, "ignoreBOM"))
+                                .is_some_and(|v| v.is_truthy()),
+                        ),
+                    ),
                     (
                         "decode".to_owned(),
                         Value::Native(Native::TextDecoderDecode, RealmId::PRIMARY),
                     ),
-                ]));
+                ]);
+                if let Value::Object(instance) = &object {
+                    instance.borrow_mut().text_decoder = Some(Rc::new(RefCell::new(decoder)));
+                }
+                return Ok(object);
             }
             Native::TextDecoderDecode => {
                 let bytes = match arguments.first() {
@@ -594,24 +616,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                let encoding_label = own_data_property(receiver, "encoding")
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "utf-8".to_owned().into());
-                let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
-                let ignore_bom =
-                    own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
-                let decoded = kiln_encoding::decode(
-                    &encoding_label.to_lossy_string(),
-                    &bytes,
-                    fatal,
-                    ignore_bom,
-                )
-                .map_err(|error| ExecutionError::TypeErrorMessage {
-                    message: error.message(),
+                let decoder = match receiver {
+                    Value::Object(object) => object.borrow().text_decoder.clone(),
+                    _ => None,
+                }
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "TextDecoder.decode called on an incompatible receiver".into(),
                 })?;
+                let stream = arguments
+                    .get(1)
+                    .and_then(|options| own_data_property(options, "stream"))
+                    .is_some_and(|value| value.is_truthy());
+                let decoded = decoder
+                    .borrow_mut()
+                    .decode(&bytes, stream)
+                    .map_err(|error| ExecutionError::TypeErrorMessage {
+                        message: error.message(),
+                    })?;
                 return Ok(Value::String(decoded.into()));
             }
             Native::NodeHttpsCreateServer => {
