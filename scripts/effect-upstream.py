@@ -17,6 +17,7 @@ import time
 REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / 'conformance/effect-upstream'
 PIN = json.loads((HARNESS / 'corpus.json').read_text())
+RUNTIME_TARGETS = json.loads((HARNESS / 'runtime-targets.json').read_text())
 PREFIX = 'KILN_EFFECT '
 
 
@@ -106,6 +107,19 @@ def entry_for(workspace, source, name):
     # unconditional. Optional adapters add their real library implementations.
     features = ['expect']
     if re.search(r'\brequire\s*\(', text):
+        targets = RUNTIME_TARGETS['require'].get(name)
+        if not targets:
+            raise RuntimeError(f'{name}: require targets are not declared')
+        # These original literal targets stay lazy. A finite adapter-owned dispatch
+        # makes the native linker retain them without evaluating them during setup.
+        # The genuine createRequire resolves each against the original test file.
+        loaders = ',\n'.join(json.dumps(target) + ':()=>require(' + json.dumps(target) + ')'
+                             for target in targets)
+        (directory / 'node-support.mjs').write_text(
+            "import {createRequire} from 'node:module';\n"
+            + 'const require=createRequire(' + json.dumps(test.as_uri()) + ');\n'
+            + 'const loaders={' + loaders + '};\n'
+            + 'globalThis.require=specifier=>Object.hasOwn(loaders,specifier)?loaders[specifier]():require(specifier);\n')
         features.insert(0, 'node-support')
     if re.search(r'\b(?:vi|vitest)\s*\.', text):
         features.append('spy')
@@ -113,7 +127,7 @@ def entry_for(workspace, source, name):
         features.append('timers')
     if 'toMatchInlineSnapshot' in text:
         features.append('snapshot')
-    imports = ''.join('import ' + json.dumps(str(workspace / (f + '.mjs'))) + ';\n' for f in features)
+    imports = ''.join('import ' + json.dumps(str((directory if f == 'node-support' else workspace) / (f + '.mjs'))) + ';\n' for f in features)
     entry = directory / 'entry.ts'
     entry.write_text(imports + 'import ' + json.dumps(str(source / 'vitest.setup.ts')) + ';\n'
                      + 'import ' + json.dumps(str(test)) + ';\n'

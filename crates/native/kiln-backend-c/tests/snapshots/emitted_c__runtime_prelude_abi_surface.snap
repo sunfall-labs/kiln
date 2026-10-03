@@ -2802,7 +2802,7 @@ static int kiln_c99_text_decoder_visit(void *context, kiln_gc_visit_root_fn visi
 static void kiln_c99_text_decoder_release(void *context) {
 static int kiln_c99_text_decoder_state_provider(void **out_state, const uint8_t *label,
 static int kiln_c99_text_decoder_state_decode_provider(kiln_value *out, void *state,
-static void *kiln_c99_text_decoder_state(kiln_value receiver) {
+void *kiln_c99_text_decoder_state(kiln_value receiver) {
 static int kiln_c99_text_decoder_utf8(kiln_value value, uint8_t **owned, size_t *len) {
 static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int depth,
 static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
