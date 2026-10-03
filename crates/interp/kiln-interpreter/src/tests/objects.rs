@@ -2704,3 +2704,84 @@ fn child_vm_property_definition_invalidates_callers_numeric_write_guard() {
         assert!(caller.intrinsics.indexed_array_prototype.get());
     }
 }
+
+#[test]
+fn module_namespace_definitions_compare_live_bindings_with_same_value() {
+    let intrinsics = Intrinsics::default();
+    let cell = Rc::new(RefCell::new(Value::Number(1.0)));
+    let namespace = namespace_object([("value".to_owned(), Value::Cell(cell.clone()))]);
+    let define = |descriptor: Descriptor| {
+        define_own_property_key(
+            &intrinsics,
+            &namespace,
+            PropertyKeyRef::Utf8("value"),
+            &descriptor,
+        )
+    };
+    assert_eq!(define(Descriptor::default()), Ok(true));
+    assert_eq!(
+        define(Descriptor {
+            value: Some(Value::Number(2.0)),
+            ..Default::default()
+        }),
+        Ok(false)
+    );
+    *cell.borrow_mut() = Value::Number(2.0);
+    assert_eq!(
+        define(Descriptor {
+            value: Some(Value::Number(2.0)),
+            ..Default::default()
+        }),
+        Ok(true)
+    );
+    for descriptor in [
+        Descriptor {
+            writable: Some(false),
+            ..Default::default()
+        },
+        Descriptor {
+            enumerable: Some(false),
+            ..Default::default()
+        },
+        Descriptor {
+            configurable: Some(true),
+            ..Default::default()
+        },
+        Descriptor {
+            get: Some(Value::Undefined),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(define(descriptor), Ok(false));
+    }
+    *cell.borrow_mut() = Value::Number(f64::NAN);
+    assert_eq!(
+        define(Descriptor {
+            value: Some(Value::Number(f64::NAN)),
+            ..Default::default()
+        }),
+        Ok(true)
+    );
+    *cell.borrow_mut() = Value::Number(-0.0);
+    assert_eq!(
+        define(Descriptor {
+            value: Some(Value::Number(0.0)),
+            ..Default::default()
+        }),
+        Ok(false)
+    );
+    *cell.borrow_mut() = Value::Native(Native::Uninitialized, RealmId::default());
+    assert!(matches!(
+        define(Descriptor::default()),
+        Err(ExecutionError::ReferenceErrorMessage { .. })
+    ));
+    assert_eq!(
+        define_own_property_key(
+            &intrinsics,
+            &namespace,
+            PropertyKeyRef::Utf8("missing"),
+            &Descriptor::default()
+        ),
+        Ok(false)
+    );
+}

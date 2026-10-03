@@ -622,8 +622,16 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
                 current.value = kiln_val_to_boundary(*cell);
             }
             {
+                int same = kiln_c99_strict_equal(value, current.value);
+                if (has_value && value.tag == KILN_VALUE_NUMBER &&
+                    current.value.tag == KILN_VALUE_NUMBER) {
+                    double left = kiln_c99_as_number(value);
+                    double right = kiln_c99_as_number(current.value);
+                    same = (isnan(left) && isnan(right)) ||
+                           (left == right && (left != 0.0 || signbit(left) == signbit(right)));
+                }
                 int refused = (has_getter || has_setter) ||
-                              (has_value && !kiln_c99_strict_equal(value, current.value)) ||
+                              (has_value && !same) ||
                               (has_writable &&
                                (kiln_c99_truthy(writable) != 0) != (current.writable != 0)) ||
                               (has_enumerable &&

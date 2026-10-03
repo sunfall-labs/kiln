@@ -1289,6 +1289,30 @@ pub(super) fn define_own_property_key(
     key: PropertyKeyRef<'_>,
     descriptor: &Descriptor,
 ) -> Result<bool, ExecutionError> {
+    // Module exports report writable descriptors because their live bindings can change,
+    // but [[DefineOwnProperty]] may only acknowledge the current value and flags.
+    // Refresh first: a descriptor compares against the binding now, not its link-time value.
+    if let Value::Object(object) = target
+        && object.borrow().is_module_namespace()
+        && !key.is_symbol()
+    {
+        object.borrow_mut().refresh_namespace();
+        let Some((Property::Value(current), _)) = own_property_state_key(intrinsics, target, key)
+        else {
+            return Ok(false);
+        };
+        if matches!(current, Value::Native(Native::Uninitialized, _)) {
+            return Err(uninitialized_export_error(&key.owned().to_lossy_string()));
+        }
+        return Ok(descriptor.configurable != Some(true)
+            && descriptor.enumerable != Some(false)
+            && descriptor.writable != Some(false)
+            && !descriptor.is_accessor()
+            && descriptor
+                .value
+                .as_ref()
+                .is_none_or(|wanted| same_value(wanted, &current)));
+    }
     if let Value::Shared(facade) = target {
         let Some((Property::Value(current), attributes)) = facade.own_property(key) else {
             return Ok(false);
