@@ -59,6 +59,9 @@
 
 #![forbid(unsafe_code)]
 
+mod bindings;
+pub use bindings::GlobalBuiltin;
+
 /// The members this implementation serves with *another* member's function.
 ///
 /// A static's `.name` is its member key -- `Object.keys.name` is `"keys"` -- and node makes that

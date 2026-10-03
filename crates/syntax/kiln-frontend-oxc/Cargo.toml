@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-kiln-ir = { workspace = true }
+kiln-builtin-surface = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-host-abi = { workspace = true }
 oxc_allocator = { workspace = true }
