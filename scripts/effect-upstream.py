@@ -217,7 +217,7 @@ def main():
                 if engine == 'bun':
                     cmd = ['bun', '--tsconfig-override', str(workspace / 'tsconfig.json'), str(entries[name])]
                 else:
-                    cmd = [str(kiln), 'run', str(entries[name]), '--node']
+                    cmd = [str(kiln), '--one-shot', 'run', str(entries[name]), '--node']
                     if engine == 'native':
                         cmd += ['--backend', 'native-dev']
                     cmd = [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(args.kiln_memory_mb), *cmd]
