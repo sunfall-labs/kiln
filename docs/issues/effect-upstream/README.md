@@ -10,8 +10,15 @@ Node/Vitest runner checks runner fidelity separately.
 `67ba4e46a11ccda0b6761578bfd22c04ae00167d`, including all 322 test files.
 The official Node/Vitest run registers 11,019 cases: 10,974 pass and 45 skip.
 Evidence: `.scratch/effect-oracle/all.json` in the owned effect-complete worktree.
-The Porffor page's published denominator and runner differ; its percentage is
-not interchangeable with this inventory.
+The [Porffor page](https://porffor-effect.porch.page/) uses Effect's own
+`effect@4.0.0` test files and links back to that upstream tag. Its October 2 run
+lists 322 files and 3,454/8,592 passing cases (40.2%), using Porffor `72d048d7`
+and Node 26.3.0. The published metadata says `bundled: false`. The page counts
+only cases passing under its Node runner, excludes unavailable packages/files
+that fail under Node, and polyfills TextEncoder/TextDecoder. Its denominator
+and adapter therefore differ from our complete official Vitest inventory;
+the percentages are not matched coverage. `porffor-reference.json` retains
+the retrieved metadata and evidence digests.
 
 The complete Bun 1.4.2 direct-source reference registers the same 11,019 cases:
 10,936 pass, 28 fail and 55 skip across all 322 files, with no incomplete files.
