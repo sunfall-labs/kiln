@@ -5095,6 +5095,48 @@ typedef struct kiln_dyn_public_field_source {
     size_t initializer_len;
 } kiln_dyn_public_field_source;
 
+static int kiln_dyn_define_class_data_property(kiln_host *host, kiln_value target,
+                                                const char *key, size_t key_len,
+                                                kiln_value value, int writable,
+                                                int enumerable, int configurable,
+                                                int depth, kiln_value *thrown) {
+    kiln_value descriptor = kiln_c99_undefined();
+    int status = kiln_c99_new_object(&descriptor);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "value", 5, value, 0, NULL);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "writable", 8,
+                              kiln_c99_boolean(writable), 0, NULL);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "enumerable", 10,
+                              kiln_c99_boolean(enumerable), 0, NULL);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, descriptor, "configurable", 12,
+                              kiln_c99_boolean(configurable), 0, NULL);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_property(host, target, key, key_len, descriptor,
+                                          depth, thrown);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&value);
+    kiln_c99_gc_keep_alive(&descriptor);
+    return status;
+}
+
 /* The dynamic evaluator shares this parser for class expressions created by eval and the Node
  * VM adapter. This first class-body production covers public instance fields; initializers are
  * parsed now, then evaluated at construction in the class's captured lexical environment. */
@@ -5236,11 +5278,132 @@ static int kiln_dyn_eval_class_expression(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_c99_gc_keep_alive(&environment);
     kiln_c99_gc_keep_alive(&field_metadata);
     if (status != KILN_C99_OK) goto done;
+    /* A class body is strict even when it was created by sloppy indirect eval. The same
+     * captured-environment marker drives the constructor's field initializer scope. */
+    const char strict_marker[] = {'\003'};
+    status = kiln_c99_put(host, environment, strict_marker, sizeof strict_marker,
+                          kiln_c99_boolean(1), depth, thrown);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_gc_keep_alive(&environment);
+    if (status != KILN_C99_OK) goto done;
     if (class_name != NULL) {
         status = kiln_c99_put(host, environment, class_name, class_name_len,
                               *out, depth, thrown);
         kiln_c99_gc_keep_alive(out);
         kiln_c99_gc_keep_alive(&environment);
+        if (status != KILN_C99_OK) goto done;
+        char *readonly_marker = (char *)malloc(class_name_len + 1);
+        if (readonly_marker == NULL) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        readonly_marker[0] = '\001';
+        memcpy(readonly_marker + 1, class_name, class_name_len);
+        status = kiln_c99_put(host, environment, readonly_marker,
+                              class_name_len + 1, kiln_c99_boolean(1), depth, thrown);
+        free(readonly_marker);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        if (status != KILN_C99_OK) goto done;
+
+        /* The trampoline prefers the ordered lexical record chain over the flattened capture.
+         * Prepend a record for the class's inner name binding so field initializers resolve it
+         * before any same-named outer binding. The flattened environment keeps the read-only
+         * marker used by the assignment path above. */
+        const char records_marker[] = {'\004'};
+        kiln_value inherited_records = kiln_c99_undefined();
+        int records_present = 0;
+        status = kiln_dyn_private_environment_get(environment, records_marker,
+                                                  sizeof records_marker,
+                                                  &inherited_records, &records_present);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        if (status != KILN_C99_OK || !records_present ||
+            inherited_records.tag != KILN_VALUE_ARRAY) {
+            if (status == KILN_C99_OK)
+                status = kiln_c99_internal_status(
+                    "dynamic class capture has no ordered environment records");
+            goto done;
+        }
+        kiln_value self_environment = kiln_c99_undefined();
+        status = kiln_dyn_new_environment(&self_environment);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, self_environment, class_name, class_name_len,
+                                  *out, depth, thrown);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        char *self_readonly_marker = (char *)malloc(class_name_len + 1);
+        if (status == KILN_C99_OK && self_readonly_marker == NULL)
+            status = KILN_C99_OUT_OF_MEMORY;
+        if (status == KILN_C99_OK) {
+            self_readonly_marker[0] = '\001';
+            memcpy(self_readonly_marker + 1, class_name, class_name_len);
+            status = kiln_c99_put(host, self_environment, self_readonly_marker,
+                                  class_name_len + 1, kiln_c99_boolean(1), depth, thrown);
+        }
+        free(self_readonly_marker);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        if (status != KILN_C99_OK) goto done;
+        kiln_value self_record = kiln_c99_undefined();
+        status = kiln_c99_new_array(&self_record);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        kiln_c99_gc_keep_alive(&self_record);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(self_record, kiln_c99_boolean(0));
+        kiln_c99_gc_keep_alive(&self_record);
+        kiln_c99_gc_keep_alive(&self_environment);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(self_record, self_environment);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        kiln_c99_gc_keep_alive(&self_record);
+        if (status != KILN_C99_OK) goto done;
+        kiln_value records = kiln_c99_undefined();
+        status = kiln_c99_new_array(&records);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        kiln_c99_gc_keep_alive(&self_environment);
+        kiln_c99_gc_keep_alive(&self_record);
+        kiln_c99_gc_keep_alive(&records);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(records, self_record);
+        kiln_c99_gc_keep_alive(&records);
+        kiln_c99_gc_keep_alive(&self_record);
+        kiln_c99_gc_keep_alive(&inherited_records);
+        for (size_t record_index = 0;
+             status == KILN_C99_OK && record_index < kiln_c99_array_of(inherited_records)->count;
+             ++record_index) {
+            kiln_value record = kiln_val_to_boundary(
+                kiln_c99_array_of(inherited_records)->elements[record_index]);
+            status = kiln_c99_array_push(records, record);
+            kiln_c99_gc_keep_alive(&records);
+            kiln_c99_gc_keep_alive(&record);
+            kiln_c99_gc_keep_alive(&inherited_records);
+        }
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&self_environment);
+        kiln_c99_gc_keep_alive(&self_record);
+        kiln_c99_gc_keep_alive(&records);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, environment, records_marker, sizeof records_marker,
+                                  records, depth, thrown);
+        kiln_c99_gc_keep_alive(out);
+        kiln_c99_gc_keep_alive(&environment);
+        kiln_c99_gc_keep_alive(&records);
         if (status != KILN_C99_OK) goto done;
     }
 
@@ -5251,11 +5414,13 @@ static int kiln_dyn_eval_class_expression(kiln_host *host, kiln_dyn_lexer *lex,
     kiln_c99_gc_keep_alive(&field_metadata);
     kiln_c99_gc_keep_alive(&prototype);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(host, prototype, "constructor", 11, *out, depth, thrown);
+        status = kiln_dyn_define_class_data_property(host, prototype, "constructor", 11,
+                                                     *out, 1, 0, 1, depth, thrown);
     kiln_c99_gc_keep_alive(out);
     kiln_c99_gc_keep_alive(&prototype);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(host, *out, "prototype", 9, prototype, depth, thrown);
+        status = kiln_dyn_define_class_data_property(host, *out, "prototype", 9,
+                                                     prototype, 0, 0, 0, depth, thrown);
     kiln_c99_gc_keep_alive(out);
     kiln_c99_gc_keep_alive(&prototype);
     if (status == KILN_C99_OK) kiln_c99_closure_of(*out)->is_class = 1;

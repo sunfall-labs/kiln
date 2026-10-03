@@ -49,6 +49,18 @@ if (dynamicClass.a !== 1 || !Object.hasOwn(dynamicClass, "a") ||
     dynamicClass.constructor.name !== "A") {
   throw new Error("new-context class expression did not initialize a public field");
 }
+const namedClassConstructor = runInNewContext("(class Named { self = Named })", {});
+const classConstructor = namedClassConstructor.prototype.constructor;
+const prototypeWriteAccepted = Reflect.set(namedClassConstructor, "prototype", {});
+const constructorIsEnumerable = Object.keys(namedClassConstructor.prototype).includes("constructor");
+namedClassConstructor.prototype.constructor = 42;
+const constructorIsWritable = namedClassConstructor.prototype.constructor === 42;
+const constructorIsConfigurable = delete namedClassConstructor.prototype.constructor;
+if (new namedClassConstructor().self !== namedClassConstructor ||
+    prototypeWriteAccepted || constructorIsEnumerable || !constructorIsWritable ||
+    !constructorIsConfigurable || typeof classConstructor !== "function") {
+  throw new Error("new-context class identity or constructor descriptors were incorrect");
+}
 let inheritedFieldSetterCalls = 0;
 const fieldContext = { inheritedFieldSetterCalls };
 const fieldResult = runInNewContext(
@@ -83,6 +95,14 @@ const nestedClassCallCaught = runInNewContext(
 );
 if (nestedClassCallCaught !== true) {
   throw new Error("class field initializer bypassed class-call protection");
+}
+const strictClassInitializerCaught = runInNewContext(
+  "let caught = false; try { new (class Named { field = (Named = null) })() } " +
+    "catch (error) { caught = error?.name === 'TypeError' }; caught",
+  {},
+);
+if (strictClassInitializerCaught !== true) {
+  throw new Error("named class field initializer did not use strict immutable class scope");
 }
 const dynamicClassContext = {};
 runInNewContext("C = class A {}", dynamicClassContext);
