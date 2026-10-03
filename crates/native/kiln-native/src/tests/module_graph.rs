@@ -3710,6 +3710,10 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     // The linkage arrays are the realm's graph context's fields (realms issue 04 step 5).
     assert!(launcher[..main].contains("    kiln_value exports_"));
     assert!(launcher[..main].contains("    kiln_value imports_"));
+    assert!(launcher[..main].contains("kiln_graph_realm_state realm_state;"));
+    assert!(launcher[..main].contains("kiln_graph_realm_state *realm;"));
+    assert!(launcher[..main].contains("graph->realm = &run->realm_state;"));
+    assert!(launcher[..main].contains("graph->realm->cli"));
     assert!(!launcher.contains("static kiln_value kiln_exports_"));
     assert!(!launcher.contains("static kiln_value kiln_imports_"));
     assert!(!launcher[main..].contains("kiln_value exports_"));
