@@ -310,6 +310,38 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
 }
 
 #[test]
+fn ordinary_node_execution_keeps_a_virtual_clock_without_reading_the_host() {
+    let program = Rc::new(Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: Vec::new(),
+    });
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+
+    execute_node_with_strictness(
+        program.clone(),
+        Rc::new(Strictness::sloppy(&program)),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("Node APIs do not require a wall clock by default");
+
+    assert!(host.calls.is_empty());
+}
+
+#[test]
 fn virtual_clock_never_calls_the_host() {
     let program = Program {
         source: "".into(),

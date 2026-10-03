@@ -64,6 +64,13 @@ pub trait ModuleGraphExecution {
         limits: ExecutionLimits,
         capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleEvaluationError>;
+    fn execute_node_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError>;
     fn import_plan(&self) -> Result<ModulePlan, ModuleEvaluationError>;
     fn import_plan_for(&self, entry: impl AsRef<Path>)
     -> Result<ModulePlan, ModuleEvaluationError>;
@@ -90,6 +97,15 @@ impl ModuleGraphExecution for ModuleGraph {
         capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
         GraphExecutor(self).execute_node(host, limits, capabilities)
+    }
+    fn execute_node_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        GraphExecutor(self).execute_node_with_clock(host, limits, capabilities, clock)
     }
     fn import_plan(&self) -> Result<ModulePlan, ModuleEvaluationError> {
         GraphExecutor(self).import_plan()
@@ -1214,7 +1230,20 @@ impl GraphExecutor<'_> {
         limits: ExecutionLimits,
         capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
-        self.execute_mode(host, limits, capabilities, true)
+        self.execute_node_with_clock(host, limits, capabilities, ClockCapability::Virtual)
+    }
+
+    /// Execute this graph with Node host APIs and an explicit clock policy. Node I/O remains
+    /// available under either clock; wall-clock scheduling is opt-in for workloads that need to
+    /// observe elapsed real time.
+    pub fn execute_node_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        self.execute_mode_with_clock(host, limits, capabilities, true, clock)
     }
 
     fn execute_mode<H: HostOps + ?Sized>(
@@ -1223,6 +1252,17 @@ impl GraphExecutor<'_> {
         limits: ExecutionLimits,
         capabilities: ExecutionCapabilities,
         node: bool,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        self.execute_mode_with_clock(host, limits, capabilities, node, ClockCapability::Virtual)
+    }
+
+    fn execute_mode_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        node: bool,
+        clock: ClockCapability,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
         // Every realm this graph runs in -- the one the modules share and any a module makes --
         // runs the shared built-ins first, in the set this mode has (see `realm_bootstrap`).
@@ -1241,7 +1281,7 @@ impl GraphExecutor<'_> {
         };
         // A program run on a main thread numbers its workers from 1, as a node process does.
         kiln_runtime::workers::begin_program();
-        let outcome = self.execute_mode_in(host, limits, capabilities, node);
+        let outcome = self.execute_mode_in(host, limits, capabilities, node, clock);
         // The realm is over, and so are the workers it started and did not wait for.
         kiln_runtime::workers::finish_children();
         // And so are its signal subscriptions (realms issue 23): a daemon or a test runner goes
@@ -1256,6 +1296,7 @@ impl GraphExecutor<'_> {
         limits: ExecutionLimits,
         capabilities: ExecutionCapabilities,
         node: bool,
+        clock: ClockCapability,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
         // Allocated for every CommonJS node before any body runs. This is the module cache's
         // identity seam: every require edge names the same mutable export cell.
@@ -1272,13 +1313,9 @@ impl GraphExecutor<'_> {
             .collect();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
-        let realm_capabilities = if node {
-            RealmCapabilities {
-                clock: ClockCapability::Host,
-                ..RealmCapabilities::default()
-            }
-        } else {
-            RealmCapabilities::default()
+        let realm_capabilities = RealmCapabilities {
+            clock,
+            ..RealmCapabilities::default()
         };
         let mut runtime = RealmRuntime::with_capabilities(realm_capabilities).map_err(|error| {
             ModuleEvaluationError::Execution {

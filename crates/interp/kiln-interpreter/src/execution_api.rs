@@ -181,8 +181,28 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
+    execute_node_with_clock_and_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        capabilities,
+        ClockCapability::Virtual,
+    )
+}
+
+/// Execute Node code under an explicit clock policy. Deterministic callers use the ordinary
+/// `execute_node_with_strictness` entry point; wall-clock workloads opt in here.
+pub fn execute_node_with_clock_and_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
+    clock: ClockCapability,
+) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities {
-        clock: ClockCapability::Host,
+        clock,
         ..RealmCapabilities::default()
     })
     .map_err(|error| ExecutionError::Host {
