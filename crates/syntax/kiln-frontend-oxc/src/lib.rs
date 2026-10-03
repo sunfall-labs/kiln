@@ -2643,6 +2643,25 @@ fn lower_parsed_in_context(
     module
 }
 
+/// Type-only wrappers and parentheses do not change an assignment's Reference. Keep their
+/// erasure shared by member references, updates and assignments so nested wrappers cannot change evaluation
+/// order or turn an identifier target into a member read.
+fn erased_reference_expression<'a, 'ast>(
+    mut expression: &'a Expression<'ast>,
+) -> &'a Expression<'ast> {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(wrapper) => &wrapper.expression,
+            Expression::TSAsExpression(wrapper) => &wrapper.expression,
+            Expression::TSSatisfiesExpression(wrapper) => &wrapper.expression,
+            Expression::TSTypeAssertion(wrapper) => &wrapper.expression,
+            Expression::TSNonNullExpression(wrapper) => &wrapper.expression,
+            Expression::TSInstantiationExpression(wrapper) => &wrapper.expression,
+            _ => return expression,
+        };
+    }
+}
+
 /// Whether a namespace is guaranteed to disappear during TypeScript erasure. Empty namespaces
 /// are intentionally excluded: even an empty runtime namespace emits an object binding.
 fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -> bool {
@@ -4365,6 +4384,21 @@ impl Lowerer<'_> {
                     SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
                 ) =>
             {
+                if let Some(expression) = update.argument.get_expression() {
+                    return match self.update_wrapped_target(
+                        expression,
+                        update.operator,
+                        update.prefix,
+                    ) {
+                        Some(kind) => HirExpression {
+                            kind,
+                            span: expression_span,
+                        },
+                        None => {
+                            self.unsupported_expression("update of that target", expression_span)
+                        }
+                    };
+                }
                 let (object, property) = match &update.argument {
                     SimpleAssignmentTarget::StaticMemberExpression(member) => (
                         self.expression(&member.object),
@@ -4381,74 +4415,6 @@ impl Lowerer<'_> {
                         self.expression(&member.object),
                         kiln_hir::ObjectKey::Private(member.field.name.to_string()),
                     ),
-                    SimpleAssignmentTarget::TSAsExpression(wrapper) => {
-                        if let Some(kind) = self.update_wrapped_target(
-                            &wrapper.expression,
-                            update.operator,
-                            update.prefix,
-                        ) {
-                            return HirExpression {
-                                kind,
-                                span: expression_span,
-                            };
-                        }
-                        let Some(target) = self.member_reference(&wrapper.expression) else {
-                            return self
-                                .unsupported_expression("update of that target", expression_span);
-                        };
-                        target
-                    }
-                    SimpleAssignmentTarget::TSSatisfiesExpression(wrapper) => {
-                        if let Some(kind) = self.update_wrapped_target(
-                            &wrapper.expression,
-                            update.operator,
-                            update.prefix,
-                        ) {
-                            return HirExpression {
-                                kind,
-                                span: expression_span,
-                            };
-                        }
-                        let Some(target) = self.member_reference(&wrapper.expression) else {
-                            return self
-                                .unsupported_expression("update of that target", expression_span);
-                        };
-                        target
-                    }
-                    SimpleAssignmentTarget::TSNonNullExpression(wrapper) => {
-                        if let Some(kind) = self.update_wrapped_target(
-                            &wrapper.expression,
-                            update.operator,
-                            update.prefix,
-                        ) {
-                            return HirExpression {
-                                kind,
-                                span: expression_span,
-                            };
-                        }
-                        let Some(target) = self.member_reference(&wrapper.expression) else {
-                            return self
-                                .unsupported_expression("update of that target", expression_span);
-                        };
-                        target
-                    }
-                    SimpleAssignmentTarget::TSTypeAssertion(wrapper) => {
-                        if let Some(kind) = self.update_wrapped_target(
-                            &wrapper.expression,
-                            update.operator,
-                            update.prefix,
-                        ) {
-                            return HirExpression {
-                                kind,
-                                span: expression_span,
-                            };
-                        }
-                        let Some(target) = self.member_reference(&wrapper.expression) else {
-                            return self
-                                .unsupported_expression("update of that target", expression_span);
-                        };
-                        target
-                    }
                     _ => {
                         return self
                             .unsupported_expression("update of that target", expression_span);
@@ -4699,29 +4665,12 @@ impl Lowerer<'_> {
         }
     }
 
-    /// An assignment target read as a binding pattern.
-    ///
-    /// `None` when the target holds something a [`kiln_hir::Pattern`] cannot say. What remains
-    /// in that bucket is narrow -- an optional chain in target position, which is not a valid
-    /// assignment target anyway -- because a pattern leaf may now be a reference as well as a
-    /// name.
+    /// Preserve the member Reference after erasing type-only and parenthesized wrappers.
     fn member_reference(
         &mut self,
         expression: &Expression<'_>,
     ) -> Option<(HirExpression, kiln_hir::ObjectKey)> {
-        match expression {
-            Expression::ParenthesizedExpression(wrapper) => {
-                self.member_reference(&wrapper.expression)
-            }
-            Expression::TSAsExpression(wrapper) => self.member_reference(&wrapper.expression),
-            Expression::TSSatisfiesExpression(wrapper) => {
-                self.member_reference(&wrapper.expression)
-            }
-            Expression::TSTypeAssertion(wrapper) => self.member_reference(&wrapper.expression),
-            Expression::TSNonNullExpression(wrapper) => self.member_reference(&wrapper.expression),
-            Expression::TSInstantiationExpression(wrapper) => {
-                self.member_reference(&wrapper.expression)
-            }
+        match erased_reference_expression(expression) {
             Expression::StaticMemberExpression(member) => Some((
                 self.expression(&member.object),
                 kiln_hir::ObjectKey::Static(member.property.name.to_string().into()),
@@ -4744,27 +4693,7 @@ impl Lowerer<'_> {
         operator: UpdateOperator,
         prefix: bool,
     ) -> Option<HirExpressionKind> {
-        match expression {
-            Expression::ParenthesizedExpression(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            Expression::TSAsExpression(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            Expression::TSSatisfiesExpression(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            Expression::TSTypeAssertion(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            Expression::TSNonNullExpression(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            Expression::TSInstantiationExpression(wrapper) => {
-                return self.update_wrapped_target(&wrapper.expression, operator, prefix);
-            }
-            _ => {}
-        }
+        let expression = erased_reference_expression(expression);
         if let Expression::Identifier(identifier) = expression {
             return Some(HirExpressionKind::Update {
                 increment: matches!(operator, UpdateOperator::Increment),
@@ -4787,6 +4716,7 @@ impl Lowerer<'_> {
         operator: HirAssignmentOperator,
         value: HirExpression,
     ) -> Option<HirExpressionKind> {
+        let expression = erased_reference_expression(expression);
         if let Expression::Identifier(identifier) = expression {
             return Some(HirExpressionKind::Assignment {
                 operator,
@@ -4812,7 +4742,7 @@ impl Lowerer<'_> {
                 operator,
                 object: Box::new(object),
                 name,
-                value: Box::new(value.clone()),
+                value: Box::new(value),
             },
         })
     }
@@ -4833,56 +4763,17 @@ impl Lowerer<'_> {
         value: HirExpression,
         span: HirSpan,
     ) -> HirExpression {
+        if let Some(expression) = target.get_expression() {
+            return match self.assign_erased_member(expression, operator, value) {
+                Some(kind) => HirExpression { kind, span },
+                None => self.unsupported_expression("non-identifier assignment", span),
+            };
+        }
         let kind = match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
                 HirExpressionKind::Assignment {
                     operator,
                     target: identifier.name.to_string(),
-                    value: Box::new(value),
-                }
-            }
-            AssignmentTarget::TSAsExpression(wrapper) => {
-                let Some(kind) = self.assign_erased_member(&wrapper.expression, operator, value)
-                else {
-                    return self.unsupported_expression("non-identifier assignment", span);
-                };
-                kind
-            }
-            AssignmentTarget::TSSatisfiesExpression(wrapper) => {
-                let Some(kind) = self.assign_erased_member(&wrapper.expression, operator, value)
-                else {
-                    return self.unsupported_expression("non-identifier assignment", span);
-                };
-                kind
-            }
-            AssignmentTarget::TSNonNullExpression(wrapper) => {
-                let Some(kind) = self.assign_erased_member(&wrapper.expression, operator, value)
-                else {
-                    return self.unsupported_expression("non-identifier assignment", span);
-                };
-                kind
-            }
-            AssignmentTarget::TSTypeAssertion(wrapper) => {
-                let Some(kind) = self.assign_erased_member(&wrapper.expression, operator, value)
-                else {
-                    return self.unsupported_expression("non-identifier assignment", span);
-                };
-                kind
-            }
-            AssignmentTarget::ComputedMemberExpression(member)
-                if !member.optional && matches!(member.object, Expression::Super(_)) =>
-            {
-                HirExpressionKind::SuperComputedAssignment {
-                    operator,
-                    property: Box::new(self.expression(&member.expression)),
-                    value: Box::new(value),
-                }
-            }
-            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
-                HirExpressionKind::ComputedAssignment {
-                    operator,
-                    object: Box::new(self.expression(&member.object)),
-                    property: Box::new(self.expression(&member.expression)),
                     value: Box::new(value),
                 }
             }
@@ -7199,6 +7090,27 @@ mod tests {
             HirExpressionKind::Assignment { target, value, .. }
                 if target == "count" && matches!(value.kind, HirExpressionKind::Call { .. })
         ));
+    }
+
+    #[test]
+    fn nested_typescript_wrappers_preserve_identifier_assignment_references() {
+        let module = parse(
+            "module.ts",
+            "let count = 1; (count as number)! += 2; (count as number)!++;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Expression(assignment) = &module.body[1].kind else {
+            panic!("expected assignment");
+        };
+        assert!(
+            matches!(&assignment.kind, HirExpressionKind::Assignment { target, .. } if target == "count")
+        );
+        let HirStatementKind::Expression(update) = &module.body[2].kind else {
+            panic!("expected update");
+        };
+        assert!(
+            matches!(&update.kind, HirExpressionKind::Update { target, .. } if target == "count")
+        );
     }
 
     #[test]
