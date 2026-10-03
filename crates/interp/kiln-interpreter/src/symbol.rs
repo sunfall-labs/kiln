@@ -49,6 +49,16 @@ impl Symbol {
             .map_or_else(String::new, |description| description.to_lossy_string())
     }
 
+    /// SymbolDescriptiveString for language conversions, preserving UTF-16 code units.
+    pub(crate) fn descriptive_string_units(&self) -> StringUnits {
+        let description = self.description_units().unwrap_or_default();
+        let mut units = Vec::with_capacity(description.unit_len() + 8);
+        units.extend("Symbol(".encode_utf16());
+        units.extend(description.units());
+        units.push(u16::from(b')'));
+        StringUnits::from_units(&units)
+    }
+
     /// The serial in a unique symbol's reserved key, or `None` for any other key.
     ///
     /// The inverse of the `@@symbol:{serial}` half of [`Self::property_key`]. The serial alone

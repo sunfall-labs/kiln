@@ -334,7 +334,7 @@ pub(crate) fn call_native(
                     }
                 },
             };
-            Value::String(symbol.to_display_string().into())
+            Value::String(symbol.to_string_units_checked()?)
         }
         // `Function.prototype.toString` is one of the few built-ins that checks what it was
         // called on: the specification throws for a receiver that is not callable rather than

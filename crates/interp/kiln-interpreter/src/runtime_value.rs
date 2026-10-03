@@ -639,6 +639,7 @@ impl Value {
     pub(super) fn to_string_units_checked(&self) -> Result<StringUnits, ExecutionError> {
         match self {
             Self::String(value) => Ok(value.clone()),
+            Self::Symbol(symbol) => Ok(symbol.descriptive_string_units()),
             Self::Function(closure) => Ok(closure.source_units()),
             Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
             Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
