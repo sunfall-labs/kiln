@@ -42,6 +42,8 @@ const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
         "globalThis",
         "clearImmediate",
     ),
+    ("KILN_C99_METHOD_JSON_RAW_CREATE", "JSON", "rawJSON"),
+    ("KILN_C99_METHOD_JSON_IS_RAW", "JSON", "isRawJSON"),
     ("KILN_C99_METHOD_REGEXP_TEST", "RegExp.prototype", "test"),
     ("KILN_C99_METHOD_GET_TIME", "Date.prototype", "getTime"),
     (
@@ -1365,6 +1367,8 @@ method_ids! {
     (KILN_C99_METHOD_SYMBOL_VALUE_OF, 550, Generic; 0, 0),
     (KILN_C99_METHOD_COLLECTION_SIZE_RAW, 551, Direct; 0, 0),
     (KILN_C99_METHOD_JSON_UNBOX_RAW, 552, Direct; 0, 0),
+    (KILN_C99_METHOD_JSON_RAW_CREATE, 580, Generic; 0, 0),
+    (KILN_C99_METHOD_JSON_IS_RAW, 581, Generic; 0, 0),
     (KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW, 555, Direct; 0, 0),
     (KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE, 556, Direct; 0, 0),
     (KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR, 557, Direct; 0, 0),
@@ -2046,9 +2050,9 @@ builtin_backlog! {
     ("Promise", "try",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("JSON", "rawJSON",
-     "not implemented; the raw-JSON marker has no representation in this value kernel"),
+     "answered by the shared JSON bootstrap through the private raw-JSON carrier primitive"),
     ("JSON", "isRawJSON",
-     "not implemented; the raw-JSON marker has no representation in this value kernel"),
+     "answered by the shared JSON bootstrap through the private raw-JSON brand primitive"),
     ("Reflect", "setPrototypeOf",
      "answered by the runtime bootstrap in TypeScript, from the namespace's store; no row"),
     ("Reflect", "isExtensible",
@@ -2317,6 +2321,16 @@ pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
         function: "kiln_c99_json_document",
         sites: 1,
         converted_by: "JSON.parse's SyntaxError, or a data module's materialization",
+    },
+    InternalRefusal {
+        function: "kiln_c99_json_value",
+        sites: 1,
+        converted_by: "JSON.stringify, which propagates the serializer's internal status",
+    },
+    InternalRefusal {
+        function: "kiln_c99_json_raw_create",
+        sites: 1,
+        converted_by: "the private JSON.rawJSON primitive, which propagates the carrier-construction status",
     },
 ];
 

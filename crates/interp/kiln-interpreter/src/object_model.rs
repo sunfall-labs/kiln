@@ -204,6 +204,9 @@ pub struct ObjectData {
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     pub(super) error_brand: bool,
+    /// The internal slot of a `%JSON.rawJSON%` carrier. The visible `rawJSON` data property is
+    /// kept in the ordinary property list; this slot is the unforgeable brand and source text.
+    pub(super) raw_json_text: Option<StringUnits>,
     /// Frames captured for the lazy Error stack accessor; not a property of the object.
     pub(super) error_stack_frames: Option<Value>,
     /// The `arguments` brand: `[[Class]]` is "Arguments", which only
@@ -327,6 +330,7 @@ impl Default for ObjectData {
             weak_ref_object_target: None,
             finalization_cells: Vec::new(),
             error_brand: false,
+            raw_json_text: None,
             error_stack_frames: None,
             arguments_brand: false,
             buffer_brand: false,

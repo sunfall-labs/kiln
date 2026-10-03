@@ -11,6 +11,11 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                         kiln_value value, int depth, kiln_value *thrown);
 int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value key,
                                   kiln_value value, int depth, kiln_value *thrown);
+/* JSON dispatch is emitted before `json.c` in the frozen prelude ordering. */
+int kiln_c99_json_raw_create(kiln_host *host, uint16_t argc, const kiln_value *args,
+                             kiln_value *result, int depth, kiln_value *thrown);
+int kiln_c99_json_is_raw(uint16_t argc, const kiln_value *args, kiln_value *result);
+kiln_value kiln_c99_json_text_value(kiln_text *text);
 
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);

@@ -256,11 +256,21 @@ pub(super) fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError
         return Err(ExecutionError::InvalidJson);
     }
     let mut object = ObjectData::default();
-    object.set(RAW_JSON_TEXT, Value::String(text.clone()));
-    object.set_non_enumerable(RAW_JSON_MARK, Value::Boolean(true));
+    object.define_value(
+        RAW_JSON_TEXT,
+        Value::String(text.clone()),
+        Attributes {
+            writable: false,
+            enumerable: true,
+            configurable: false,
+        },
+    );
+    object.raw_json_text = Some(text.clone());
     // A null prototype, so the object cannot answer to `toJSON`, `toString` or anything else a
     // program might have put on `Object.prototype` -- it is a carrier, not a participant.
     object.set_prototype(Value::Null);
+    object.frozen = true;
+    object.extensible = false;
     Ok(Value::Object(Rc::new(RefCell::new(object))))
 }
 
@@ -439,13 +449,8 @@ pub(super) fn finalization_registry_method(name: &str) -> Value {
     }
 }
 
-/// The slot that marks a raw JSON object, and the property that carries its text.
-///
-/// Two, because the text is a property a program reads -- `JSON.rawJSON(1).rawJSON` is `"1"` --
-/// while the mark is not: the object is required to have exactly one own property, so the thing
-/// that says "this is raw JSON" has to be invisible to `Object.getOwnPropertyNames`. The
-/// reserved prefix is what makes it so.
-pub(super) const RAW_JSON_MARK: &str = "@@raw-json";
+/// The public carrier slot. Authenticity lives in `ObjectData.raw_json_text`, not in a
+/// user-visible property, so a lookalike object cannot forge the raw JSON brand.
 pub(super) const RAW_JSON_TEXT: &str = "rawJSON";
 
 /// The slot a `WeakRef` keeps its target in, and the two a registry keeps its state in.

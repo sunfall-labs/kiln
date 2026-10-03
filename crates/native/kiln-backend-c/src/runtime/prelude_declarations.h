@@ -76,6 +76,10 @@ extern KILN_COLD int kiln_c99_refuse(const char *lacked);
 extern KILN_COLD int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
 extern KILN_COLD int kiln_c99_internal_status(const char *converted_by);
 static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);
+extern int kiln_c99_json_raw_create(kiln_host *host, uint16_t argc, const kiln_value *args,
+                                    kiln_value *result, int depth, kiln_value *thrown);
+extern int kiln_c99_json_is_raw(uint16_t argc, const kiln_value *args, kiln_value *result);
+extern kiln_value kiln_c99_json_text_value(kiln_text *text);
 
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \

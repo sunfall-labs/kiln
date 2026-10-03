@@ -1288,6 +1288,9 @@ typedef struct kiln_object {
     int arguments_brand;
     /* An error, by the same rule as `arguments_brand`: the brand is not a property. */
     int error_brand;
+    /* `%JSON.rawJSON%`'s unforgeable raw-text carrier brand. The source text itself is the
+     * immutable enumerable `rawJSON` property, so the collector already traces it with slots. */
+    int raw_json_brand;
     /* Error stack activation records are engine metadata, not own properties. */
     kiln_value error_stack_frames;
     /* How many of `properties` currently have `accessor` set. `kiln_c99_put_mode`'s chain walk

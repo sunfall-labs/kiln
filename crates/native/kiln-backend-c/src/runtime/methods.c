@@ -275,6 +275,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_SHARED_WEAK_RAW: return "__kilnSharedWeak";
     case KILN_C99_METHOD_COLLECTION_SIZE_RAW: return "__kilnCollectionSize";
     case KILN_C99_METHOD_JSON_UNBOX_RAW: return "__kilnJsonUnbox";
+    case KILN_C99_METHOD_JSON_RAW_CREATE: return "__kilnJsonRawCreate";
+    case KILN_C99_METHOD_JSON_IS_RAW: return "__kilnJsonIsRaw";
     case KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE: return "__kilnFunctionKindPrototype";
     case KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR: return "__kilnFunctionKindConstructor";
     case KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW: return "__kilnRegExpLegacyCapture";

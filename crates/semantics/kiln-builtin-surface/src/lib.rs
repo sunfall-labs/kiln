@@ -136,6 +136,8 @@ pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
     ("Error", "captureStackTrace", 2),
     ("Iterator", "from", 1),
     ("JSON", "parse", 2),
+    ("JSON", "rawJSON", 1),
+    ("JSON", "isRawJSON", 1),
     ("JSON", "stringify", 3),
     ("Math", "abs", 1),
     ("Math", "acos", 1),

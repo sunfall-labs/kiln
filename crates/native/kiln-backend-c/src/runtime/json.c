@@ -274,6 +274,70 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
     return 0;
 }
 
+/* A raw carrier's sole slot is fixed at creation. Reading it by slot rather than through the
+ * property protocol keeps serialization free of user code and makes the private brand the only
+ * authority for interpreting the visible `rawJSON` property as source text. */
+static const kiln_string *kiln_c99_json_raw_source(const kiln_object *object) {
+    static const char name[] = "rawJSON";
+    kiln_string view = {.unit_len = 7, .flags = KILN_STRING_LATIN1, .data = name};
+    const kiln_string *key = kiln_c99_intern_key(&view);
+    uint32_t slot;
+    if (object == NULL || object->shape == NULL || key == NULL ||
+        !kiln_c99_shape_find_slot(object->shape, key, &slot) || slot >= object->slot_capacity ||
+        !KILN_VAL_IS_STRING(object->slots[slot])) {
+        return NULL;
+    }
+    return (const kiln_string *)KILN_VAL_PTR(object->slots[slot]);
+}
+
+/* Preserve UTF-16 source code units. The text builder is UTF-8, so an unpaired surrogate uses a
+ * byte sequence impossible in valid UTF-8 JSON as an internal sentinel. The JSON-specific text
+ * escape in text.c restores it when the final JavaScript string is built. */
+static int kiln_c99_json_append_raw_source(kiln_text *text, const kiln_string *source) {
+    size_t index;
+    for (index = 0; index < source->unit_len; ++index) {
+        uint32_t point = kiln_string_unit_at(source, index);
+        char bytes[4];
+        size_t length;
+        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < source->unit_len) {
+            uint32_t low = kiln_string_unit_at(source, index + 1);
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                point = UINT32_C(0x10000) + ((point - 0xD800) << 10) + (low - 0xDC00);
+                ++index;
+            }
+        }
+        if (point >= 0xD800 && point <= 0xDFFF) {
+            unsigned char marker[3] = {0xFF, (unsigned char)(point & 0xFF),
+                                       (unsigned char)(point >> 8)};
+            if (kiln_c99_text_append(text, (const char *)marker, sizeof marker) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point <= 0x7F) {
+            bytes[0] = (char)point;
+            length = 1;
+        } else if (point <= 0x7FF) {
+            bytes[0] = (char)(0xC0 | (point >> 6));
+            bytes[1] = (char)(0x80 | (point & 0x3F));
+            length = 2;
+        } else if (point <= 0xFFFF) {
+            bytes[0] = (char)(0xE0 | (point >> 12));
+            bytes[1] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[2] = (char)(0x80 | (point & 0x3F));
+            length = 3;
+        } else {
+            bytes[0] = (char)(0xF0 | (point >> 18));
+            bytes[1] = (char)(0x80 | ((point >> 12) & 0x3F));
+            bytes[2] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[3] = (char)(0x80 | (point & 0x3F));
+            length = 4;
+        }
+        if (kiln_c99_text_append(text, bytes, length) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+    }
+    return KILN_C99_OK;
+}
+
 /* True when no object in `value`'s own store or its prototype chain owns a property named
  * "toJSON" -- the common case for a plain object literal, whose chain is just Object.prototype.
  * `JSON.stringify`'s real question is `IsCallable(GetV(value, "toJSON"))`, and `GetV` walks every
@@ -334,6 +398,18 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     size_t index;
     int status;
     *serialised = 1;
+
+    /* A raw carrier is an immutable internal value. The public `toJSON`/replacer sequence has
+     * already run before this serializer is entered; emit its validated source directly. */
+    if (value.tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(value);
+        if (object != NULL && object->raw_json_brand) {
+            const kiln_string *source = kiln_c99_json_raw_source(object);
+            if (source == NULL)
+                KILN_C99_REFUSE_INTERNAL("the JSON.rawJSON carrier's validated rawJSON source");
+            return kiln_c99_json_append_raw_source(text, source);
+        }
+    }
 
     /* The `toJSON` step, before anything else is decided about the value.
      *
@@ -1477,4 +1553,138 @@ static int kiln_c99_json_document(const kiln_string *source, kiln_val *out) {
         return KILN_C99_INVALID_ARGUMENT;
     }
     return kiln_c99_json_build(nodes, count, &text, out);
+}
+
+/* Convert JSON's internal invalid-UTF-8 surrogate markers back into JavaScript UTF-16 units.
+ * Most stringify results take the ordinary fast path; only raw source containing a literal lone
+ * surrogate needs this conversion. */
+kiln_value kiln_c99_json_text_value(kiln_text *text) {
+    size_t offset = 0;
+    size_t unit_count = 0;
+    int has_surrogate = 0;
+    kiln_string *string;
+    uint16_t *units;
+    size_t output = 0;
+    while (offset < text->len) {
+        unsigned char byte = (unsigned char)text->bytes[offset];
+        if (byte == 0xFF) {
+            if (text->len - offset < 3) goto malformed;
+            has_surrogate = 1;
+            unit_count++;
+            offset += 3;
+        } else {
+            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
+            unit_count += point > 0xFFFF ? 2 : 1;
+        }
+    }
+    if (!has_surrogate) return kiln_c99_text_value(text);
+    string = kiln_c99_gc_alloc_units(unit_count, KILN_STRING_UTF16);
+    if (string == NULL) {
+        free(text->bytes);
+        text->bytes = NULL;
+        text->len = text->capacity = 0;
+        return kiln_c99_undefined();
+    }
+    units = (uint16_t *)(uintptr_t)string->data;
+    offset = 0;
+    while (offset < text->len) {
+        unsigned char byte = (unsigned char)text->bytes[offset];
+        if (byte == 0xFF) {
+            units[output++] = (uint16_t)((unsigned char)text->bytes[offset + 1] |
+                                         ((uint16_t)(unsigned char)text->bytes[offset + 2] << 8));
+            offset += 3;
+        } else {
+            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
+            if (point > 0xFFFF) {
+                point -= 0x10000;
+                units[output++] = (uint16_t)(0xD800 | (point >> 10));
+                units[output++] = (uint16_t)(0xDC00 | (point & 0x3FF));
+            } else {
+                units[output++] = (uint16_t)point;
+            }
+        }
+    }
+    free(text->bytes);
+    text->bytes = NULL;
+    text->len = text->capacity = 0;
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, string->unit_len);
+
+malformed:
+    free(text->bytes);
+    text->bytes = NULL;
+    text->len = text->capacity = 0;
+    return kiln_c99_undefined();
+}
+
+int kiln_c99_json_is_raw(uint16_t argc, const kiln_value *args, kiln_value *result) {
+    int branded = 0;
+    if (argc != 0 && args != NULL && args[0].tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(args[0]);
+        branded = object != NULL && object->raw_json_brand;
+    }
+    *result = kiln_c99_boolean(branded);
+    return KILN_C99_OK;
+}
+
+int kiln_c99_json_raw_create(kiln_host *host, uint16_t argc, const kiln_value *args,
+                             kiln_value *result, int depth, kiln_value *thrown) {
+    kiln_value primitive = kiln_c99_undefined();
+    kiln_value source_value;
+    kiln_value invalid;
+    kiln_val parsed = KILN_VAL_UNDEFINED;
+    const kiln_string *source;
+    kiln_object *object;
+    const kiln_string *key;
+    int status;
+    size_t index;
+    if (argc == 0 || args == NULL) primitive = kiln_c99_undefined();
+    else {
+        status = kiln_c99_to_primitive(host, args[0], 1 /* string */, &primitive, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (primitive.tag == KILN_VALUE_SYMBOL)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a Symbol value to a string");
+    source_value = kiln_c99_text(primitive);
+    source = source_value.tag == KILN_VALUE_STRING ? (const kiln_string *)source_value.ptr : NULL;
+    if (source == NULL || source->unit_len == 0)
+        goto invalid_json;
+    /* JSON.rawJSON preserves the exact source. Surrounding JSON whitespace therefore makes a
+     * valid JSON document invalid as a raw value. */
+    for (index = 0; index < source->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(source, index);
+        if (index == 0 || index + 1 == source->unit_len) {
+            if (unit == ' ' || (unit >= '\t' && unit <= '\r')) goto invalid_json;
+        }
+    }
+    status = kiln_c99_json_document(source, &parsed);
+    if (status == KILN_C99_CONTROL_ERROR) goto invalid_json;
+    if (status != KILN_C99_OK) return status;
+    invalid = kiln_val_to_boundary(parsed);
+    if (invalid.tag != KILN_VALUE_NULL && invalid.tag != KILN_VALUE_BOOLEAN &&
+        invalid.tag != KILN_VALUE_NUMBER && invalid.tag != KILN_VALUE_STRING)
+        goto invalid_json;
+    status = kiln_c99_new_object(result);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(*result);
+    if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
+    key = kiln_c99_intern_key(&(kiln_string){.unit_len = 7, .flags = KILN_STRING_LATIN1,
+                                             .data = "rawJSON"});
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = KILN_C99_OK;
+    if (!kiln_c99_shape_define_new(object, key, kiln_val_from_boundary(source_value),
+                                   KILN_C99_ATTR_READONLY | KILN_C99_ATTR_FIXED, NULL, &status)) {
+        if (status != KILN_C99_OK) return status;
+        KILN_C99_REFUSE_INTERNAL("the empty shaped object used by JSON.rawJSON");
+    }
+    if (status != KILN_C99_OK) return status;
+    object->raw_json_brand = 1;
+    kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_null());
+    object->frozen = 1;
+    object->not_extensible = 1;
+    return KILN_C99_OK;
+
+invalid_json:
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                "Invalid value for JSON.rawJSON");
 }

@@ -600,6 +600,8 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnJsonSerialize", KILN_C99_METHOD_JSON_STRINGIFY},
                      {"__kilnJsonParse", KILN_C99_METHOD_JSON_PARSE},
                      {"__kilnJsonUnbox", KILN_C99_METHOD_JSON_UNBOX_RAW},
+                     {"__kilnJsonRawCreate", KILN_C99_METHOD_JSON_RAW_CREATE},
+                     {"__kilnJsonIsRaw", KILN_C99_METHOD_JSON_IS_RAW},
                      {"__kilnRegExpLegacyCapture", KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW},
                      {"__kilnFunctionKindPrototype", KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE},
                      {"__kilnFunctionKindConstructor", KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR},

@@ -473,6 +473,21 @@ fn json_indent_argument_is_capped() {
 fn json_raw_json_and_indent_keep_units() {
     let raw_text = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
     let raw = build_raw_json(&raw_text).expect("valid raw JSON string");
+    let Value::Object(raw_object) = &raw else {
+        panic!("raw JSON is an object");
+    };
+    let raw_object = raw_object.borrow();
+    assert_eq!(raw_object.raw_json_text.as_ref(), Some(&raw_text));
+    assert!(raw_object.frozen && !raw_object.extensible);
+    assert_eq!(raw_object.prototype, Some(Value::Null));
+    assert_eq!(
+        raw_object.get_own_attributes(RAW_JSON_TEXT),
+        Some(Attributes {
+            writable: false,
+            enumerable: true,
+            configurable: false,
+        })
+    );
     let raw_output = serialize_units(&raw, &StringUnits::default())
         .expect("serialize")
         .expect("raw result");
@@ -500,6 +515,16 @@ fn json_raw_json_and_indent_keep_units() {
             b'}' as u16
         ]
     );
+}
+
+#[test]
+fn json_raw_json_brand_cannot_be_forged_with_public_properties() {
+    let lookalike = object(&[(RAW_JSON_TEXT, Value::String("1".into()))]);
+    let Value::Object(lookalike_object) = &lookalike else {
+        panic!("lookalike object");
+    };
+    assert!(lookalike_object.borrow().raw_json_text.is_none());
+    assert_eq!(json(&lookalike).as_deref(), Some(r#"{"rawJSON":"1"}"#));
 }
 
 #[test]

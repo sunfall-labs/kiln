@@ -325,8 +325,7 @@ pub(super) fn json_stringify(
         }
         // A primitive wrapper is serialised as its primitive value, not as an empty object.
         Value::Object(object)
-            if object.borrow().primitive().is_some()
-                && object.borrow().get_own(RAW_JSON_MARK).is_none() =>
+            if object.borrow().primitive().is_some() && object.borrow().raw_json_text.is_none() =>
         {
             let inner = object.borrow().primitive().cloned();
             return match inner {
@@ -338,15 +337,8 @@ pub(super) fn json_stringify(
         }
         // Raw JSON has already been validated. Its units must be emitted verbatim, including
         // unpaired surrogates, because preserving the source text is the purpose of rawJSON.
-        Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
-            let raw = object
-                .borrow()
-                .get_own(RAW_JSON_TEXT)
-                .and_then(|value| match value {
-                    Value::String(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| StringUnits::from("null"));
+        Value::Object(object) if object.borrow().raw_json_text.is_some() => {
+            let raw = object.borrow().raw_json_text.clone().unwrap_or_default();
             Some(raw)
         }
         Value::Object(object) => {

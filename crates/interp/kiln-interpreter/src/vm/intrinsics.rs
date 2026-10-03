@@ -242,7 +242,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::JsonIsRawJson => {
                 return Ok(Value::Boolean(matches!(
                     arguments.first(),
-                    Some(Value::Object(object)) if object.borrow().get_own(RAW_JSON_MARK).is_some()
+                    Some(Value::Object(object)) if object.borrow().raw_json_text.is_some()
                 )));
             }
             // Both of these need the machine for `CanBeHeldWeakly`, which asks the realm's

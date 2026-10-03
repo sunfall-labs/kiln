@@ -5,9 +5,25 @@
   const serialize = G.__kilnJsonSerialize;
   const parse = G.__kilnJsonParse;
   const unboxPrimitive = G.__kilnJsonUnbox;
+  const rawCreate = G.__kilnJsonRawCreate;
+  const isRaw = G.__kilnJsonIsRaw;
   delete G.__kilnJsonSerialize;
   delete G.__kilnJsonParse;
   delete G.__kilnJsonUnbox;
+  delete G.__kilnJsonRawCreate;
+  delete G.__kilnJsonIsRaw;
+  if (typeof rawCreate === "function" && typeof isRaw === "function") {
+    Object.defineProperties(G.JSON, {
+      rawJSON: {
+        value: function rawJSON(text: any): object { return rawCreate(text); },
+        writable: true, enumerable: false, configurable: true,
+      },
+      isRawJSON: {
+        value: function isRawJSON(value: any): boolean { return isRaw(value); },
+        writable: true, enumerable: false, configurable: true,
+      },
+    });
+  }
   if (typeof serialize !== "function") return;
 
   function unbox(value: any): any {

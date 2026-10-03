@@ -1318,13 +1318,17 @@
             }
             /* `JSON.stringify(undefined)` is `undefined`, not the string. */
             if (wrote) {
-                *result = kiln_c99_text_value(&text);
+                *result = kiln_c99_json_text_value(&text);
             } else {
                 free(text.bytes);
                 *result = kiln_c99_undefined();
             }
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_JSON_RAW_CREATE:
+            return kiln_c99_json_raw_create(host, argc, args, result, depth, thrown);
+        case KILN_C99_METHOD_JSON_IS_RAW:
+            return kiln_c99_json_is_raw(argc, args, result);
         case KILN_C99_METHOD_JSON_PARSE: {
             kiln_value source = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_undefined();
             kiln_val parsed;

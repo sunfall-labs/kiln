@@ -1402,6 +1402,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->error_brand = 0;
+    object->raw_json_brand = 0;
     kiln_c99_heap_store_value(object, &object->error_stack_frames, kiln_c99_undefined());
     object->layout_token = 0;
     object->sealed = NULL;
