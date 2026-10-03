@@ -2679,6 +2679,7 @@ int kiln_c99_finalization_registry_register(kiln_value owner, kiln_value target,
 int kiln_c99_finalization_registry_unregister(kiln_value owner, kiln_value token,
 static void kiln_c99_gc_weak_resources_dispose_all(kiln_gc_heap *heap) {
 static void kiln_c99_gc_weak_ephemerons(kiln_gc_heap *heap) {
+static void kiln_c99_gc_weak_ephemerons_prune(kiln_gc_heap *heap) {
 static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk, const char *limit) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
