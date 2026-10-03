@@ -406,6 +406,49 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     }
 }
 
+#[test]
+fn node_host_clock_waits_for_the_timer_deadline() {
+    struct WallClockHost {
+        started: std::time::SystemTime,
+        output: Vec<String>,
+    }
+    impl HostOps for WallClockHost {
+        fn call(
+            &mut self,
+            operation: HostOp,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            match operation {
+                HostOp::ClockNow => {
+                    let elapsed = self.started.elapsed().unwrap_or_default().as_secs_f64();
+                    Ok(HostValue::number(1_725_000_000_000.0 + elapsed * 1000.0))
+                }
+                HostOp::WriteStdout => {
+                    self.output
+                        .extend(arguments.iter().map(HostValue::to_console_string));
+                    Ok(HostValue::Undefined)
+                }
+                _ => Ok(HostValue::Undefined),
+            }
+        }
+    }
+
+    let mut host = WallClockHost {
+        started: std::time::SystemTime::now(),
+        output: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    execute_node(
+        Rc::new(timer_program(&[("fired", 70.0)])),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("Node timer completes");
+    assert_eq!(host.output, ["fired"]);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+}
+
 /// `({ mark: "receiver", step: function* () { yield this.mark; } }).step().next().value`,
 /// compiled by hand, printed.
 fn generator_receiver_program() -> Program {

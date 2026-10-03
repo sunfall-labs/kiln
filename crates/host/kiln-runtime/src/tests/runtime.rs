@@ -1,6 +1,33 @@
 use crate::*;
 
 #[test]
+fn host_scheduler_origin_is_shared_and_virtual_policy_stays_unchanged() {
+    let capabilities = RealmCapabilities {
+        clock: ClockCapability::Host,
+        ..RealmCapabilities::default()
+    };
+    let mut runtime =
+        RealmRuntime::with_capabilities(capabilities).expect("host-clock runtime builds");
+    let mut scheduler = Realm::<WorkId, WorkId>::new();
+    runtime.initialize_host_clock_origin(1_725_000_000_000.0);
+    // A later module VM must not reset the common scheduler epoch.
+    runtime.initialize_host_clock_origin(1_725_000_500_000.0);
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_030.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(30));
+    // Backward wall-clock movement cannot move an already advanced scheduler backward.
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_010.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(30));
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_050.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(50));
+
+    let mut virtual_runtime = RealmRuntime::new().expect("virtual runtime builds");
+    let mut virtual_scheduler = Realm::<WorkId, WorkId>::new();
+    virtual_runtime.initialize_host_clock_origin(1_725_000_000_000.0);
+    virtual_runtime.advance_host_clock(&mut virtual_scheduler, 1_725_000_100_000.0);
+    assert_eq!(virtual_scheduler.now(), std::time::Duration::ZERO);
+}
+
+#[test]
 fn two_lanes_run_local_tasks_on_one_wall_reactor() {
     let reactor = Reactor::shared_wall().expect("shared reactor builds");
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));

@@ -43,9 +43,9 @@ builds never share an artifact.
 Every realm the runtime archive creates starts on the virtual clock. A launcher emitted under the
 host-clock policy calls `kiln_realm_use_wall_clock(realm)` between `kiln_realm_create` and
 `kiln_realm_enter`, so no timer is ever armed against a clock that later jumps. The archive
-refuses the call for an entered realm. In-process tests, the interpreter and every launcher built
-under the default policy never make the call, which is why an archive test can still arm an
-hour-long timer without waiting an hour.
+refuses the call for an entered realm. In-process tests, ordinary interpreter execution and every
+launcher built under the default policy never make the call, which is why an archive test can still
+arm an hour-long timer without waiting an hour.
 
 ### What a wall-clock realm does differently
 
@@ -62,8 +62,9 @@ hour-long timer without waiting an hour.
   first drive turn, and `Date.now()` starts at the epoch.
 - The interpreter's explicit host-clock execution uses the same split. `Date.now()` reads
   `HostOp::ClockNow`, and each Node event-loop turn advances its run-relative monotonic scheduler
-  clock from that host reading before selecting timers. Ordinary interpreter execution keeps the
-  virtual clock, so a busy deterministic run never observes machine speed.
+  clock from that host reading before selecting timers. The origin belongs to the shared runtime,
+  so short-lived VMs for modules do not reset scheduler time. Ordinary interpreter execution keeps
+  the virtual clock, so a busy deterministic run never observes machine speed.
 
 ## Consequences
 
@@ -74,9 +75,8 @@ hour-long timer without waiting an hour.
 - `kiln build` and `kiln run --native` of the same source produce different binaries. That was
   already implied by ADR 0031's policy being part of program identity; it is now something a
   user can observe by printing the date.
-- The interpreter still has only the virtual clock. Giving it wall time is a separate decision
-  with its own harness consequences, and `performance.now()` for the native backend, now that
-  there is a clock worth reading, is separate work.
+- Ordinary interpreter execution still has the virtual clock. `performance.now()` for the native
+  backend, now that there is a clock worth reading, is separate work.
 
 ## Alternatives rejected
 

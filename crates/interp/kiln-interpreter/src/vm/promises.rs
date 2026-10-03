@@ -908,7 +908,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     fn run_event_loop_turns(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
         loop {
-            self.advance_host_scheduler_clock(self.instruction)?;
+            self.advance_host_scheduler_clock(runtime, self.instruction)?;
             self.drain_microtasks(runtime)?;
             // Before asking for a timer, because settling a wait queues reactions and those are
             // microtasks: going straight on to the timer -- or worse, to the return below --

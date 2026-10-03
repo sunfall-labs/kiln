@@ -1205,6 +1205,8 @@ pub async fn yield_to_tasks() {
 pub struct RealmState<H> {
     host: H,
     capabilities: RealmCapabilities,
+    /// Epoch sample shared by every VM that participates in this realm's scheduler.
+    host_clock_origin_ms: Option<f64>,
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
     #[cfg(feature = "http")]
@@ -1233,9 +1235,10 @@ pub struct RealmState<H> {
 /// that drives it, for callers that are entered from outside the executor (the interpreter,
 /// the daemon, conformance, the worker pool).
 ///
-/// The runtime starts Tokio time paused on the first call to [`Self::drive`]. A drive advances
-/// automatically to each realm's next timer only after all currently-ready microtasks have been
-/// exhausted. This makes a timer's delay virtual: a one-hour timer costs no wall-clock hour.
+/// A virtual-clock runtime starts Tokio time paused on the first call to [`Self::drive`], and a
+/// drive advances automatically to each realm's next timer only after all currently-ready
+/// microtasks have been exhausted. This makes a timer's delay virtual: a one-hour timer costs no
+/// wall-clock hour. A host-clock runtime leaves Tokio time running and waits for future deadlines.
 ///
 /// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
 /// [`Clone`] when driven because an interval re-arms the same callback before returning it.
@@ -1588,6 +1591,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         Self {
             host,
             capabilities,
+            host_clock_origin_ms: None,
             http_agent: HttpAgent::default(),
             #[cfg(feature = "http")]
             http_server: HttpServerEngine::default(),
@@ -1992,6 +1996,31 @@ impl<H: RealmHostProvider> RealmState<H> {
 
     pub fn capabilities(&self) -> &RealmCapabilities {
         &self.capabilities
+    }
+
+    /// Record the host epoch for this realm once, before any VM can arm a timer.
+    /// Subsequent module VMs share this origin instead of resetting scheduler time.
+    pub fn initialize_host_clock_origin(&mut self, epoch_ms: f64) {
+        if self.capabilities.clock == ClockCapability::Host
+            && self.host_clock_origin_ms.is_none()
+            && epoch_ms.is_finite()
+        {
+            self.host_clock_origin_ms = Some(epoch_ms);
+        }
+    }
+
+    pub fn has_host_clock_origin(&self) -> bool {
+        self.host_clock_origin_ms.is_some()
+    }
+
+    /// Advance an interpreter scheduler from the shared realm's original host epoch.
+    pub fn advance_host_clock<M, T>(&self, realm: &mut Realm<M, T>, epoch_ms: f64) {
+        if self.capabilities.clock != ClockCapability::Host || !epoch_ms.is_finite() {
+            return;
+        }
+        if let Some(origin_ms) = self.host_clock_origin_ms {
+            realm.advance_to(duration_from_milliseconds((epoch_ms - origin_ms).max(0.0)));
+        }
     }
 
     #[cfg(test)]

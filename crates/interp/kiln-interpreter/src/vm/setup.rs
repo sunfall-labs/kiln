@@ -16,10 +16,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     ) -> Result<Self, ExecutionError> {
         let timezone = resolve_timezone(host, &capabilities.timezone)?;
         let default_locale = resolve_locale(host, &capabilities.locale)?;
-        let host_clock_origin_ms = match capabilities.clock {
-            ClockCapability::Virtual => None,
-            ClockCapability::Host => Some(host_clock_milliseconds(host, 0)?),
-        };
         let entropy = capabilities.entropy;
         // One group per execution, made here so that every entry point gets it and none has to
         // remember to. An agent's own machine replaces this with the group it was started from;
@@ -75,7 +71,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_serial: 0,
             realm: Realm::new(),
             clock_capability: capabilities.clock,
-            host_clock_origin_ms,
             timezone,
             default_locale,
             source_compiler: execution.source_compiler(),
@@ -142,14 +137,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// monotonic clock, matching the native wall-clock realm without changing virtual executions.
     pub(super) fn advance_host_scheduler_clock(
         &mut self,
+        runtime: &RealmRuntime,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        let Some(origin_ms) = self.host_clock_origin_ms else {
+        if self.clock_capability != ClockCapability::Host {
             return Ok(());
-        };
+        }
         let now_ms = host_clock_milliseconds(self.host, instruction)?;
-        let elapsed = kiln_runtime::duration_from_milliseconds((now_ms - origin_ms).max(0.0));
-        self.with_realm_mut(|realm| realm.advance_to(elapsed));
+        self.with_realm_mut(|realm| runtime.advance_host_clock(realm, now_ms));
         Ok(())
     }
 
@@ -242,7 +237,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     }
 }
 
-fn host_clock_milliseconds<H: HostOps + ?Sized>(
+pub(crate) fn host_clock_milliseconds<H: HostOps + ?Sized>(
     host: &mut H,
     instruction: usize,
 ) -> Result<f64, ExecutionError> {

@@ -7,6 +7,17 @@ pub(super) fn realm_runtime() -> Result<RealmRuntime, ExecutionError> {
     })
 }
 
+fn initialize_host_clock<H: HostOps + ?Sized>(
+    runtime: &mut RealmRuntime,
+    host: &mut H,
+) -> Result<(), ExecutionError> {
+    if runtime.capabilities().clock == ClockCapability::Host && !runtime.has_host_clock_origin() {
+        let epoch_ms = crate::vm_setup::host_clock_milliseconds(host, 0)?;
+        runtime.initialize_host_clock_origin(epoch_ms);
+    }
+    Ok(())
+}
+
 pub(super) fn realm_host_string<H: HostOps + ?Sized>(
     host: &mut H,
     operation: HostOp,
@@ -196,6 +207,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     if let Some(fs) = host.clone_fs() {
         runtime.set_fs(fs);
     }
+    initialize_host_clock(runtime, host)?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -743,6 +755,8 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             actual: import_values.len(),
         });
     }
+
+    initialize_host_clock(runtime, host)?;
 
     let commonjs_module = import_values.get(2).cloned();
     let mut locals = vec![Value::Undefined; module.program.local_count as usize];
