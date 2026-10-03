@@ -2380,6 +2380,8 @@ fn lower_parsed_in_context(
                 .then_some((statement.span().start, statement.span().end))
         })
         .collect::<HashSet<_>>();
+    let (erased_namespace_names, runtime_value_names) =
+        top_level_namespace_binding_kinds(&parsed.program);
     let import_binding_spans = parsed
         .program
         .body
@@ -2540,6 +2542,10 @@ fn lower_parsed_in_context(
                     .contains(&(entry.statement_span.start, entry.statement_span.end)))
                 && !erased_namespace_spans
                     .contains(&(entry.statement_span.start, entry.statement_span.end))
+                && !entry.local_name.name().is_some_and(|name| {
+                    erased_namespace_names.contains(name.as_str())
+                        && !runtime_value_names.contains(name.as_str())
+                })
                 && demanded_exports.is_none_or(|demanded| match &entry.export_name {
                     ExportExportName::Name(name) => demanded.contains(name.name.as_str()),
                     ExportExportName::Default(_) => demanded.contains("default"),
@@ -2662,7 +2668,107 @@ fn erased_reference_expression<'a, 'ast>(
     }
 }
 
-/// Whether a namespace disappears during TypeScript erasure, including empty namespaces.
+/// Top-level namespaces are bindings in TypeScript's namespace space. Named exports may
+/// reference them later (`export { N as Alias }`), so remember which namespace bindings have no
+/// runtime declaration and which names also have an emitted value declaration. TypeScript's
+/// function/class/enum namespace merges keep the value export alive.
+fn top_level_namespace_binding_kinds(
+    program: &oxc_ast::ast::Program<'_>,
+) -> (HashSet<String>, HashSet<String>) {
+    use oxc_ast::ast::{Declaration, Statement};
+    let mut erased_names = HashSet::new();
+    let mut runtime_names = HashSet::new();
+
+    fn declaration_name<'a>(declaration: &'a Declaration<'_>) -> Option<&'a str> {
+        match declaration {
+            Declaration::VariableDeclaration(declaration) if !declaration.declare => {
+                declaration.declarations.iter().find_map(|declarator| {
+                    declarator
+                        .id
+                        .get_binding_identifier()
+                        .map(|id| id.name.as_str())
+                })
+            }
+            Declaration::FunctionDeclaration(declaration)
+                if !declaration.declare && declaration.body.is_some() =>
+            {
+                declaration.id.as_ref().map(|id| id.name.as_str())
+            }
+            Declaration::ClassDeclaration(declaration) if !declaration.declare => {
+                declaration.id.as_ref().map(|id| id.name.as_str())
+            }
+            Declaration::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
+            Declaration::TSImportEqualsDeclaration(declaration)
+                if !declaration.import_kind.is_type() =>
+            {
+                Some(declaration.id.name.as_str())
+            }
+            Declaration::TSNamespaceDeclaration(declaration)
+                if !type_only_namespace(declaration) =>
+            {
+                Some(declaration.id.name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    for statement in &program.body {
+        match statement {
+            Statement::TSNamespaceDeclaration(declaration) => {
+                let target = if type_only_namespace(declaration) {
+                    &mut erased_names
+                } else {
+                    &mut runtime_names
+                };
+                target.insert(declaration.id.name.to_string());
+            }
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::TSNamespaceDeclaration(declaration) = &export.declaration {
+                    let target = if type_only_namespace(declaration) {
+                        &mut erased_names
+                    } else {
+                        &mut runtime_names
+                    };
+                    target.insert(declaration.id.name.to_string());
+                } else if let Some(name) = declaration_name(&export.declaration) {
+                    runtime_names.insert(name.to_owned());
+                }
+            }
+            Statement::VariableDeclaration(declaration) if !declaration.declare => {
+                for declarator in &declaration.declarations {
+                    if let Some(id) = declarator.id.get_binding_identifier() {
+                        runtime_names.insert(id.name.to_string());
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(declaration)
+                if !declaration.declare && declaration.body.is_some() =>
+            {
+                if let Some(id) = &declaration.id {
+                    runtime_names.insert(id.name.to_string());
+                }
+            }
+            Statement::ClassDeclaration(declaration) if !declaration.declare => {
+                if let Some(id) = &declaration.id {
+                    runtime_names.insert(id.name.to_string());
+                }
+            }
+            Statement::TSEnumDeclaration(declaration) => {
+                runtime_names.insert(declaration.id.name.to_string());
+            }
+            Statement::TSImportEqualsDeclaration(declaration)
+                if !declaration.import_kind.is_type() =>
+            {
+                runtime_names.insert(declaration.id.name.to_string());
+            }
+            _ => {}
+        }
+    }
+    (erased_names, runtime_names)
+}
+
+/// Whether a namespace is guaranteed to disappear during TypeScript erasure. Bun 1.4.2 erases
+/// empty namespaces as well as namespaces containing only type declarations.
 fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -> bool {
     use oxc_ast::ast::{TSNamespaceDeclarationBody, TSNamespaceDeclarationBody as NamespaceBody};
 
@@ -6827,11 +6933,16 @@ mod tests {
                     export namespace Nested { export interface Item { id: number } }
                 }
                 export namespace Runtime { export const value = 1; }
+                namespace TypesOnly { export interface Shape {} }
+                export { TypesOnly, TypesOnly as TypeAlias };
+                function Merged() {}
+                namespace Merged { export interface Shape {} }
+                export { Merged as RuntimeAlias };
             "#,
         );
 
         assert_eq!(module.source_kind, SourceKind::TypeScript);
-        assert_eq!(module.runtime_export_names(), ["Runtime"]);
+        assert_eq!(module.runtime_export_names(), ["Runtime", "RuntimeAlias"]);
         let declared_member = parse(
             "declared.ts",
             "export namespace Declared { export declare const value: number; }",
