@@ -683,16 +683,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     "TimeoutError",
                     instruction,
                 )?;
-                let timer = Timer {
-                    callback: Value::Bound(Rc::new(BoundFunction {
+                let timer = Timer::plain(
+                    Value::Bound(Rc::new(BoundFunction {
                         target: Value::Native(Native::AbortSignalSettle, RealmId::PRIMARY),
                         this_value: signal.clone(),
                         arguments: vec![reason],
                         properties: RefCell::new(ObjectData::default()),
                     })),
-                    arguments: Vec::new(),
-                    context: Rc::clone(&self.async_context),
-                };
+                    Vec::new(),
+                    Rc::clone(&self.async_context),
+                );
                 // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
                 // It never keeps the program alive, as in node, where its timer is unreferenced.
                 self.with_realm_mut(|realm| {
@@ -1461,16 +1461,41 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             message: error.to_string(),
                         })?;
                 }
-                let timer = Timer {
-                    callback: arguments.first().cloned().unwrap_or(Value::Undefined),
-                    // Everything after the delay is handed to the callback, which is how a
-                    // timer carries state without a closure.
-                    arguments: arguments
-                        .get(if undelayed { 1.. } else { 2.. })
-                        .unwrap_or_default()
-                        .to_vec(),
-                    // Captured where the timer was set, not where it fires.
-                    context: Rc::clone(&self.async_context),
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // Everything after the delay is handed to the callback, which is how a timer
+                // carries state without a closure.
+                let carried = arguments
+                    .get(if undelayed { 1.. } else { 2.. })
+                    .unwrap_or_default()
+                    .to_vec();
+                // Captured where the timer was set, not where it fires.
+                let context = Rc::clone(&self.async_context);
+                // A realm whose bootstrap published the timer prototypes gets a handle: an
+                // object that is the timer's own record, with `ref`/`unref`/`hasRef`/`refresh`
+                // as in node. Any other gets the bare identity.
+                let prototype = (!matches!(native, Native::QueueIoRaw))
+                    .then(|| self.timer_prototype(matches!(native, Native::SetImmediate)))
+                    .flatten();
+                let handle = prototype.map(|prototype| {
+                    let mut data = ObjectData::default();
+                    data.set_prototype(prototype);
+                    data.node_object = Some(NodeObject::TimerHandle(Box::new(TimerRecord {
+                        id: 0,
+                        delay,
+                        interval: matches!(native, Native::SetInterval),
+                        immediate: matches!(native, Native::SetImmediate),
+                        callback: callback.clone(),
+                        arguments: carried.clone(),
+                        context: Rc::clone(&context),
+                        ran: false,
+                        unreferenced: false,
+                        cleared: false,
+                    })));
+                    Rc::new(RefCell::new(data))
+                });
+                let timer = match &handle {
+                    Some(handle) => Timer::Handle(Rc::clone(handle)),
+                    None => Timer::plain(callback, carried, context),
                 };
                 let id = self.with_realm_mut(|realm| match native {
                     Native::SetInterval => realm.set_interval(delay, timer),
@@ -1478,23 +1503,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Native::QueueIoRaw => realm.queue_io(timer),
                     _ => realm.set_timeout(delay, timer),
                 });
-                // A realm whose bootstrap installed the timer handles gets an object with
-                // `ref`/`unref`/`hasRef`, as in node; any other, the bare identity.
-                let kind = match native {
-                    Native::SetInterval => 1.0,
-                    Native::SetImmediate => 2.0,
-                    _ => 0.0,
-                };
-                self.timer_handle(id.get() as f64, kind, instruction)
+                match handle {
+                    Some(handle) => {
+                        if let Some(NodeObject::TimerHandle(record)) =
+                            &mut handle.borrow_mut().node_object
+                        {
+                            record.id = id.get();
+                        }
+                        Ok(Value::Object(handle))
+                    }
+                    None => Ok(Value::Number(id.get() as f64)),
+                }
             }
             Native::TimerRefRaw => {
                 let op = arguments.get(1).map_or(f64::NAN, Value::as_number);
-                Ok(self.timer_op(arguments.first(), op))
+                Ok(self.timer_op(arguments, op))
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
                 // A timer object clears by its identity, which is how `toPrimitive` reads it.
+                if let Some(handle) = arguments.first()
+                    && Self::timer_handle_id(Some(handle)).is_some()
+                {
+                    return Ok(self.clear_timer_handle(handle));
+                }
                 let id = match (Self::timer_handle_id(arguments.first()), arguments.first()) {
-                    // A handle this engine made holds its identity where it can be read directly.
                     (Some(id), _) => id,
                     (None, Some(handle @ Value::Object(_))) => self
                         .as_number_argument(Some(handle), instruction)

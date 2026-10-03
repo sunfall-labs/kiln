@@ -5,29 +5,28 @@
 // per timer that the runtime's timer queue owns (`Realm::set_timer_referenced`), the same in the
 // interpreter and the native backend.
 //
-// The engine allocates the handle itself -- no script runs when a timer is armed, which a
-// program that arms a million of them (a thousand sleeping tasks, each waking ten times) pays for
-// otherwise. All it needs from here is the two prototypes below, published on the realm's
-// engine-private object (`kilnPrivate`, captured in `extensions.ts`; ADR 0068), the one channel a
-// program cannot see. The handle holds the timer's identity and whether the program unreferenced
-// it in reserved slots that only the engine reads, so the methods here are thin: each asks the
-// engine through `__kilnTimerRef(handle, op)`. A realm that publishes no prototypes gets the bare
-// numeric identity. `clearTimeout` and friends accept either, reading a handle's slot directly
-// and anything else through its `Symbol.toPrimitive`.
+// The handle IS the timer's record, and the engine allocates it: it holds the callback, the
+// arguments, the delay and the flags in engine-only slots, the realm's queue entry refers to it
+// rather than to a copy, and firing reads the callback from it. So no script runs when a timer
+// is armed, which a program that arms a million of them (a thousand sleeping tasks, each waking
+// ten times) pays for otherwise, and a timeout that already ran keeps its callback for as long as
+// the program holds the handle. That is what lets `refresh()` arm it again, from outside or from
+// inside its own callback, exactly as node's does, and a cleared timer drop everything.
 //
-// `Timeout.prototype.refresh()` holds no copy of the callback, arguments or delay: the runtime's
-// timer queue owns the entry, and the engine restarts it in place from the realm's current
-// (virtual) time, keeping its identity and referenced state. A timer that already ran or was
-// cleared is not re-armed.
+// All the engine needs from here is the two prototypes below, adopted once by
+// `__kilnTimerRef(Timeout.prototype, 5, Immediate.prototype)`; the methods ask the engine
+// through `__kilnTimerRef(handle, op)`. A realm that does not install it gets the bare numeric
+// identity. `clearTimeout` and friends accept either, reading a handle's slot directly and
+// anything else through its `Symbol.toPrimitive`.
 
 (function installTimers() {
   const G = globalThis as any;
-  const timerRef: (handle: object, op: number) => any = G.__kilnTimerRef;
+  const timerRef: (handle: object, op: number, prototype?: object) => any = G.__kilnTimerRef;
   delete G.__kilnTimerRef;
   if (typeof timerRef !== "function") return;
 
   // The operations of `__kilnTimerRef`.
-  const ID = 0, HAS_REF = 1, REF = 2, UNREF = 3, REFRESH = 4;
+  const ID = 0, HAS_REF = 1, REF = 2, UNREF = 3, REFRESH = 4, ADOPT = 5;
 
   class Timeout {
     ref() {
@@ -83,6 +82,5 @@
     });
   }
 
-  kilnPrivate.timeoutPrototype = Timeout.prototype;
-  kilnPrivate.immediatePrototype = Immediate.prototype;
+  timerRef(Timeout.prototype, ADOPT, Immediate.prototype);
 })();

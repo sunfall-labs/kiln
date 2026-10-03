@@ -6193,15 +6193,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 }
                 RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
                     // As for a microtask: the context is the one the timer was *set* in.
-                    self.async_context = timer.context;
-                    runtime.enter(|| {
-                        self.call_value(
-                            &timer.callback,
-                            Value::Undefined,
-                            timer.arguments,
-                            self.instruction,
-                        )
-                    })?;
+                    if let Some((callback, arguments, context)) = timer.into_call() {
+                        self.async_context = context;
+                        runtime.enter(|| {
+                            self.call_value(
+                                &callback,
+                                Value::Undefined,
+                                arguments,
+                                self.instruction,
+                            )
+                        })?;
+                    }
                 }
                 RuntimeTurn::Timer(WorkItem::Microtask(_)) => {
                     unreachable!("next_turn selects timers after microtasks are drained")

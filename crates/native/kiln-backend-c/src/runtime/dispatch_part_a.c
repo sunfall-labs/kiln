@@ -2882,23 +2882,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
                                        *result);
             if (status != KILN_C99_OK) return status;
-            entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
-            if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
-            kiln_c99_heap_store_value(entry, &entry->callback, callback);
-            entry->argc = 1;
-            entry->args = (kiln_value *)malloc(sizeof *entry->args);
-            if (entry->args == NULL) {
-                kiln_c99_gc_release(entry);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            kiln_c99_heap_store_value(entry, &entry->args[0], reason);
             if (!(isfinite(delay) && delay > 0.0)) delay = 0.0;
+            entry = kiln_c99_timer_new(callback, &reason, 1, delay, KILN_C99_TIMER_INTERNAL);
+            if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
             status = kiln_realm_set_timeout(delay, kiln_c99_run_timer, kiln_c99_drop_timer,
                                             entry, &id);
-            if (status != KILN_C99_OK) {
-                kiln_c99_drop_timer(entry);
-                return status;
-            }
+            if (status != KILN_C99_OK) return status;
+            entry->id = id;
             /* As in node, this timer never keeps the program alive. */
             return kiln_realm_set_timer_ref(id, 0);
         }
@@ -3009,10 +2999,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
             }
             uint64_t id = 0;
-            {
-                /* No arguments past the delay, and a heap function: the function is the work
-                 * (see `kiln_c99_timer_direct_run`). */
-                size_t extra = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
+            size_t extra = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
+            if (code == KILN_C99_METHOD_QUEUE_IO_RAW) {
+                /* Internal, and a message port's delivery is hot: no arguments past the callback
+                 * and a heap function make the function the work, with no record around it (see
+                 * `kiln_c99_timer_direct_run`). */
                 void *work = NULL;
                 int (*direct)(void *, void *, void *) =
                     extra == 0 && argc > 0 ? kiln_c99_timer_direct_run(args[0], &work) : NULL;
@@ -3020,55 +3011,42 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     status = kiln_c99_arm_timer(code, delay, direct, kiln_c99_drop_timer_value,
                                                 work, &id);
                     if (status != KILN_C99_OK) return status;
-                    return kiln_c99_timer_handle(host, id, code, result, depth, thrown);
+                    return kiln_c99_timer_handle(NULL, id, code, result);
                 }
             }
-            entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
-            if (entry == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            kiln_c99_heap_store_value(entry, &entry->callback, argc > 0 ? args[0] : kiln_c99_undefined());
-            /* Everything after the delay is handed to the callback, which is how a timer carries
-             * state without a closure. */
-            entry->argc = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
-            entry->args = NULL;
-            if (entry->argc != 0) {
-                entry->args = (kiln_value *)malloc(entry->argc * sizeof *entry->args);
-                if (entry->args == NULL) {
-                    kiln_c99_gc_release(entry);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                for (size_t index = 0; index < entry->argc; ++index)
-                    kiln_c99_heap_store_value(entry, &entry->args[index],
-                                              args[index + (undelayed ? 1 : 2)]);
-            }
+            /* The record is the realm's work and the program's handle. Everything after the
+             * delay is handed to the callback, which is how a timer carries state without a
+             * closure. */
+            entry = kiln_c99_timer_new(argc > 0 ? args[0] : kiln_c99_undefined(),
+                                       extra == 0 ? NULL : args + (undelayed ? 1 : 2),
+                                       extra, delay,
+                                       code == KILN_C99_METHOD_SET_INTERVAL    ? KILN_C99_TIMER_INTERVAL
+                                       : code == KILN_C99_METHOD_SET_IMMEDIATE ? KILN_C99_TIMER_IMMEDIATE
+                                       : code == KILN_C99_METHOD_QUEUE_IO_RAW  ? KILN_C99_TIMER_INTERNAL
+                                                                               : KILN_C99_TIMER_TIMEOUT);
+            if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
             status = kiln_c99_arm_timer(code, delay, kiln_c99_run_timer, kiln_c99_drop_timer,
                                         entry, &id);
-            if (status != KILN_C99_OK) {
-                kiln_c99_drop_timer(entry);
-                return status;
-            }
-            return kiln_c99_timer_handle(host, id, code, result, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            entry->id = id;
+            return kiln_c99_timer_handle(entry, id, code, result);
         }
         case KILN_C99_METHOD_TIMER_REF_RAW: {
-            double op = argc > 1 && args[1].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[1])
-                                                                     : 0.0 / 0.0;
-            return kiln_c99_timer_op(host, result, argc > 0 ? args[0] : kiln_c99_undefined(), op,
-                                     depth, thrown);
+            return kiln_c99_timer_op(result, args, argc);
         }
         case KILN_C99_METHOD_CLEAR_TIMEOUT:
         case KILN_C99_METHOD_CLEAR_INTERVAL:
         case KILN_C99_METHOD_CLEAR_IMMEDIATE: {
             double id = 0.0 / 0.0;
-            int held = 0;
-            /* A handle this engine made holds its identity where it can be read directly. */
-            if (argc > 0) {
-                status = kiln_c99_timer_handle_id(host, args[0], &id, &held, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
+            /* A handle this engine made holds its identity, and clearing it also drops what it
+             * carries; a bare identity or any other value is converted as it always was. */
+            if (argc > 0 && args[0].tag == KILN_VALUE_TIMER) {
+                status = kiln_c99_timer_clear(args[0]);
+                if (status != KILN_C99_OK) return status;
+                *result = kiln_c99_undefined();
+                return KILN_C99_OK;
             }
-            if (argc > 0 && !held) {
+            if (argc > 0) {
                 status = kiln_c99_to_number_checked(host, args[0], &id, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;

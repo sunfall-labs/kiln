@@ -1388,6 +1388,14 @@
                 *result = kiln_c99_builtin(KILN_C99_BUILTIN_STRING_PROTOTYPE);
                 return KILN_C99_OK;
             }
+            if (subject.tag == KILN_VALUE_TIMER) {
+                /* The prototype its store carries, which is `Timeout.prototype` until a program
+                 * relinks it. */
+                status = kiln_c99_timer_materialize(subject);
+                if (status != KILN_C99_OK) return status;
+                *result = kiln_c99_object_of(kiln_c99_timer_of(subject)->properties)->prototype;
+                return KILN_C99_OK;
+            }
             if (subject.tag == KILN_VALUE_TYPED_ARRAY) {
                 if (kiln_c99_typed_array_of(subject)->is_buffer) {
                     kiln_value proto;
@@ -2265,6 +2273,7 @@
                                 subject.tag == KILN_VALUE_TEMPORAL ||
                                 subject.tag == KILN_VALUE_COMMONJS_REQUIRE ||
                                 subject.tag == KILN_VALUE_COLLECTION ||
+                                subject.tag == KILN_VALUE_TIMER ||
                                 subject.tag == KILN_VALUE_PROMISE;
                 /* A primitive has nothing to freeze and is already as frozen as it gets. */
                 *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject

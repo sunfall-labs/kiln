@@ -294,6 +294,10 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload);
+static int kiln_c99_timer_materialize(kiln_value target);
+static void kiln_c99_timer_drop_state(kiln_timer *timer);
+static kiln_timer *kiln_c99_timer_new(kiln_value callback, const kiln_value *args, size_t argc,
+                                      double delay, int kind);
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
@@ -1063,6 +1067,10 @@ typedef struct kiln_c99_realm_state {
     struct kiln_ffi_function_meta *ffi_functions;
     struct kiln_ffi_callback_meta *ffi_callbacks;
     uint32_t ffi_next_root;
+    /* The realm's bootstrap adopted the `Timeout` and `Immediate` prototypes
+     * (`kiln_c99_timer_op`, op 5), so `setTimeout` and the others hand back a timer record.
+     * Plain data: the prototypes themselves are in value slots, which are roots. */
+    uint32_t timer_handles;
     /* `Array.prototype[Symbol.unscopables]`, built on first read. */
     kiln_value array_unscopables;
     /* The prototype of each native constructor, at its index in `kiln_c99_native_constructors`,

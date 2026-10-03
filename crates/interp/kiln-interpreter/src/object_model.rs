@@ -281,14 +281,33 @@ pub(super) enum NodeObject {
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
     Zlib(Rc<zlib::ZlibState>),
-    /// A `Timeout` or `Immediate` the engine allocated (`Vm::timer_handle`): the timer's identity,
-    /// and whether the program has unreferenced it, which `hasRef` reports after the timer is
-    /// gone. A slot rather than properties, so arming a timer costs one allocation and no key
-    /// lookups, and a program cannot see it.
-    TimerHandle {
-        id: u64,
-        unreferenced: bool,
-    },
+    /// A `Timeout` or `Immediate` the engine allocated: the timer's whole record. A slot rather
+    /// than properties, so a program cannot see it and arming a timer costs no key lookups.
+    TimerHandle(Box<TimerRecord>),
+}
+
+/// What a timer handle is: the timer's whole record. The realm's queue entry refers to the
+/// handle (`Timer::Handle`) instead of copying the callback, firing reads it from here, and a
+/// timeout that already ran keeps it for as long as the program holds the handle, so a
+/// `refresh()` after the fact -- or from inside its own callback -- arms it again as node's does.
+#[derive(Clone, Debug)]
+pub(super) struct TimerRecord {
+    /// The realm's identity for the timer, the same for its whole life, a refresh included.
+    pub(super) id: u64,
+    /// The delay it was armed with, after node's clamp: what a refresh arms again.
+    pub(super) delay: std::time::Duration,
+    pub(super) interval: bool,
+    pub(super) immediate: bool,
+    pub(super) callback: Value,
+    pub(super) arguments: Vec<Value>,
+    /// The async context in force when the timer was *set*, restored while its callback runs.
+    pub(super) context: AsyncContext,
+    /// A timeout or immediate ran and has not been armed since.
+    pub(super) ran: bool,
+    /// `unref()`, which `hasRef` still reports after the timer is gone.
+    pub(super) unreferenced: bool,
+    /// Cleared: the callback and arguments are dropped and `refresh()` does nothing.
+    pub(super) cleared: bool,
 }
 
 impl Default for ObjectData {

@@ -894,7 +894,16 @@ int kiln_realm_clear_timer(uint64_t id) {
 }
 int kiln_realm_refresh_timer(uint64_t id) {
     (void)id;
-    return KILN_C99_OK;
+    return 0;
+}
+int kiln_realm_rearm_timeout(uint64_t id, double delay_ms, kiln_realm_work_fn run,
+                             kiln_realm_drop_fn drop, void *work) {
+    (void)id;
+    (void)delay_ms;
+    (void)run;
+    (void)drop;
+    (void)work;
+    return 1;
 }
 int kiln_realm_set_timer_ref(uint64_t id, int referenced) {
     (void)id;

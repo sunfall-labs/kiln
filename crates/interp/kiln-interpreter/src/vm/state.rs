@@ -2,15 +2,63 @@ use super::*;
 
 /// The language payload attached to a Realm Runtime timer.
 #[derive(Clone, Debug)]
-pub(super) struct Timer {
-    pub(super) callback: Value,
-    pub(super) arguments: Vec<Value>,
-    /// The async context in force when the timer was *set*, restored while its callback runs.
-    ///
-    /// Captured at scheduling rather than read at firing, which is the whole of what makes an
-    /// `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned by the
-    /// time `f` runs, and `f` must still see the store.
-    pub(super) context: AsyncContext,
+pub(super) enum Timer {
+    /// A timer that has no handle of its own (`AbortSignal.timeout`, an `Atomics.waitAsync`
+    /// deadline, a realm whose bootstrap published no handles): the callback is held here.
+    Plain {
+        callback: Value,
+        arguments: Vec<Value>,
+        /// The async context in force when the timer was *set*, restored while its callback
+        /// runs.
+        ///
+        /// Captured at scheduling rather than read at firing, which is the whole of what makes
+        /// an `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned
+        /// by the time `f` runs, and `f` must still see the store.
+        context: AsyncContext,
+    },
+    /// A `Timeout` or `Immediate`: the handle object is the record (`TimerRecord`), and this is
+    /// the queue's one reference to it. An interval's re-arm clones the reference, not the
+    /// callback.
+    Handle(Rc<RefCell<ObjectData>>),
+}
+
+impl Timer {
+    pub(super) fn plain(callback: Value, arguments: Vec<Value>, context: AsyncContext) -> Self {
+        Self::Plain {
+            callback,
+            arguments,
+            context,
+        }
+    }
+
+    /// What to call when the timer fires, or nothing when it was cleared. A timeout marks its
+    /// record as having run first, so a `refresh()` inside the callback arms it again.
+    pub(super) fn into_call(self) -> Option<(Value, Vec<Value>, AsyncContext)> {
+        match self {
+            Self::Plain {
+                callback,
+                arguments,
+                context,
+            } => Some((callback, arguments, context)),
+            Self::Handle(handle) => {
+                let mut data = handle.borrow_mut();
+                let Some(NodeObject::TimerHandle(record)) = &mut data.node_object else {
+                    return None;
+                };
+                if record.cleared {
+                    return None;
+                }
+                if !record.interval {
+                    record.ran = true;
+                }
+                Some((
+                    record.callback.clone(),
+                    record.arguments.clone(),
+                    Rc::clone(&record.context),
+                ))
+            }
+        }
+    }
 }
 
 /// One `AsyncLocalStorage`, whose identity is the whole of it.

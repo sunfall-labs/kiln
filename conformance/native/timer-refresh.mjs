@@ -1,13 +1,9 @@
 // `Timeout.prototype.refresh()`: the same timer restarted with its own delay from now, keeping
 // its callback, arguments and referenced state. It returns the Timeout, restarts an interval's
-// current period, and does nothing to a cleared timer. Every comparison is between deadlines at
-// least 20 ms apart, so node's real clock and kiln's virtual one order them the same way.
-//
-// Two differences are deliberately not probed. Node (25.9) re-arms a timeout that has already run
-// when it is refreshed, including from inside its own callback, which needs the callback to
-// outlive the run; kiln's runtime hands a one-shot timer's work to the callback when it runs, so
-// a refresh after that is a no-op (see `refresh_timer` in kiln-runtime). The `done` timer below
-// has an empty callback, so the difference cannot show.
+// current period, re-arms a timeout that already ran -- after the fact, or from inside its own
+// callback, the keep-alive pattern -- and does nothing to a cleared timer. Every comparison is
+// between deadlines at least 20 ms apart, so node's real clock and kiln's virtual one order them
+// the same way.
 const log = (...parts) => console.log(...parts);
 
 // 1. Refreshing pushes the deadline back: `slow` is due at 50, but refreshed at 30 it is due at
@@ -19,9 +15,10 @@ setTimeout(() => {
   log("same handle after refresh", slow.hasRef());
 }, 30);
 
-// 2. Refreshing a timer that already ran is harmless and still returns the handle.
-const done = setTimeout(() => {}, 10);
-setTimeout(() => log("refreshed after it ran, returns the handle", done.refresh() === done), 40);
+// 2. Refreshing a timeout that already ran arms it again, with the same callback and arguments:
+// it ran at 15, is refreshed at 45, and runs a second time at 60.
+const done = setTimeout((a, b) => log("done fired", a, b), 15, "p", "q");
+setTimeout(() => log("refreshed after it ran, returns the handle", done.refresh() === done), 45);
 
 // 3. Refreshing a cleared timer does not arm it either.
 const cleared = setTimeout(() => log("cleared timer fired"), 20);
@@ -54,6 +51,23 @@ const interval = setInterval(() => {
 setTimeout(() => interval.refresh(), 60);
 setTimeout(() => log("marker at 90"), 90);
 
+// 6. A keep-alive: a timeout that refreshes itself from inside its own callback, a bounded
+// number of times, runs at 20, 40 and 60 and is not re-armed after the third.
+let keep = 0;
+const alive = setTimeout(() => {
+  keep++;
+  log("keep-alive run", keep);
+  if (keep < 3) alive.refresh();
+}, 20);
+
+// 7. A timeout cleared after it ran, with its callback dropped, does not come back.
+let revived = 0;
+const gone = setTimeout(() => revived++, 10);
 setTimeout(() => {
-  log("ticks", ticks);
+  clearTimeout(gone);
+  gone.refresh();
+}, 30);
+
+setTimeout(() => {
+  log("ticks", ticks, "revived", revived);
 }, 500);

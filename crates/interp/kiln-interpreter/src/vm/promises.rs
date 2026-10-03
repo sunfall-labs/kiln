@@ -943,14 +943,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             WorkItem::Timer { work: timer, .. } => {
                                 // The Realm Runtime has already rearmed an interval under the same id,
                                 // so clearing it inside this callback cancels the next occurrence.
-                                runtime.enter(|| {
-                                    self.call_value(
-                                        &timer.callback,
-                                        Value::Undefined,
-                                        timer.arguments,
-                                        self.instruction,
-                                    )
-                                })?;
+                                if let Some((callback, arguments, _)) = timer.into_call() {
+                                    runtime.enter(|| {
+                                        self.call_value(
+                                            &callback,
+                                            Value::Undefined,
+                                            arguments,
+                                            self.instruction,
+                                        )
+                                    })?;
+                                }
                             }
                             WorkItem::Microtask(_) => {
                                 // Microtasks are drained at the top of the loop.
@@ -981,13 +983,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             // The Realm Runtime has already rearmed an interval under the same id, so clearing
             // it inside this callback cancels the next occurrence.
+            let Some((callback, arguments, _)) = timer.into_call() else {
+                continue;
+            };
             runtime.enter(|| {
-                self.call_value(
-                    &timer.callback,
-                    Value::Undefined,
-                    timer.arguments,
-                    self.instruction,
-                )
+                self.call_value(&callback, Value::Undefined, arguments, self.instruction)
             })?;
         }
     }

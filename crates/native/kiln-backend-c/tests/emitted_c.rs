@@ -1160,7 +1160,13 @@ fn runtime_prelude_size() {
     // species-aware filter/flatMap, the Reflect refusal paths; method 494 removed) and the
     // engine-private channel's overlay and realm slot (ADR 0068) added reviewed runtime lines:
     // 79,797 measured with all three. Keep ~120 lines of headroom.
-    const CEILING_LINES: usize = 79_920;
+    // The timer record as the handle (`KILN_VALUE_TIMER`): the record carries its callback,
+    // arguments and flags, a program's `Timeout` is that record, and a timeout that already ran
+    // re-arms under its own identity on `refresh()`. Reviewed: the tag's arms in the object
+    // predicates, the exotic store, `in`, `delete`, spread and the prototype read, and 140 net
+    // lines over the previous ceiling for the record's run, drop, op and re-arm functions; no
+    // runtime section is duplicated and no built-in is added. 80,060 measured; ~140 headroom.
+    const CEILING_LINES: usize = 80_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

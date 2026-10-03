@@ -2416,7 +2416,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 37,
+        sites: 38,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2437,7 +2437,9 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them. An explicit \
                     null [[Prototype]] ends lookup, so every inherited property is absent; and a \
-                    generator instance explicitly linked to null has no inherited iterator members",
+                    generator instance explicitly linked to null has no inherited iterator members; \
+                    a timer handle has no member beyond its own store and the Timeout/Immediate \
+                    prototype chain, which kiln_c99_store_get_key has just walked in full",
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",
@@ -3432,7 +3434,13 @@ enum kiln_value_tag {
     KILN_VALUE_DATA_VIEW = 27,
     KILN_VALUE_RETURN_SIGNAL = 28,
     /* A realm-local facade over an ADR 0073 sealed graph; bits holds a GC payload. */
-    KILN_VALUE_SHARED = 29
+    KILN_VALUE_SHARED = 29,
+    /* A `Timeout` or `Immediate`: the timer's own record. bits holds a kiln_timer*, the block the
+     * realm's timer queue holds as its work, so the handle a program keeps and the entry the
+     * queue runs are one allocation. An ordinary object to the language, whose properties and
+     * prototype (`Timeout.prototype`, published by `kiln-builtins/src/timers.ts`) live in a store
+     * made on first use, so a timer nothing touches costs the record alone. */
+    KILN_VALUE_TIMER = 30
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15

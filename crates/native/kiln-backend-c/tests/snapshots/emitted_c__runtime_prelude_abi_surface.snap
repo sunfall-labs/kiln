@@ -193,7 +193,8 @@ KILN_VALUE_TEMPORAL = 25,
 KILN_VALUE_COMMONJS_REQUIRE = 26,
 KILN_VALUE_DATA_VIEW = 27,
 KILN_VALUE_RETURN_SIGNAL = 28,
-KILN_VALUE_SHARED = 29
+KILN_VALUE_SHARED = 29,
+KILN_VALUE_TIMER = 30
 #define KILN_C99_BUILTIN_PROMISE 15
 #define KILN_C99_BUILTIN_BOOLEAN 16
 #define KILN_C99_BUILTIN_REFLECT 17
@@ -1370,6 +1371,8 @@ typedef struct kiln_commonjs_require {
 typedef struct kiln_microtask {
 typedef struct kiln_next_tick {
 typedef struct kiln_timer {
+enum { KILN_C99_TIMER_TIMEOUT = 0, KILN_C99_TIMER_INTERVAL = 1, KILN_C99_TIMER_IMMEDIATE = 2,
+#define kiln_c99_timer_of(value) ((kiln_timer *)(uintptr_t)(value).bits)
 typedef struct kiln_node_server kiln_node_server;
 typedef struct kiln_node_socket kiln_node_socket;
 struct kiln_node_server {
@@ -1500,6 +1503,7 @@ int kiln_realm_queue_io(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *w
 int kiln_realm_clear_timer(uint64_t id);
 int kiln_realm_set_timer_ref(uint64_t id, int referenced);
 int kiln_realm_refresh_timer(uint64_t id);
+int kiln_realm_rearm_timeout(uint64_t id, double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown, uint32_t *kind, uint64_t *delay_ns);
 int kiln_realm_destroy(uint64_t realm);
@@ -1696,6 +1700,9 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key);
 static int kiln_c99_new_object(kiln_value *out);
 static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload);
+static int kiln_c99_timer_materialize(kiln_value target);
+static void kiln_c99_timer_drop_state(kiln_timer *timer);
+static kiln_timer *kiln_c99_timer_new(kiln_value callback, const kiln_value *args, size_t argc,
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_object_tenured(kiln_value *out);
 static int kiln_c99_new_object_with_capacity_tenured(kiln_value *out, size_t capacity);
@@ -2463,6 +2470,7 @@ static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
 #define KILN_C99_HOST_FS_FIELDS(V, P, A) V(promise)
 #define KILN_C99_HOST_PROCESS_FIELDS(V, P, A) \
 #define KILN_C99_HOST_CALLBACK_FIELDS(V, P, A) V(callback) A(args, argc)
+#define KILN_C99_HOST_TIMER_FIELDS(V, P, A) V(callback) V(properties) A(args, argc)
 #define KILN_C99_HOST_LAYOUTS(CASE) \
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 #define KILN_C99_HOST_INCOMING_VALUE(field) \
@@ -2778,10 +2786,14 @@ static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int 
 static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
 static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *message,
-static int kiln_c99_private_object(kiln_value *out);
-static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
-static int kiln_c99_timer_handle_id(kiln_host *host, kiln_value handle, double *id, int *found,
-static int kiln_c99_timer_op(kiln_host *host, kiln_value *result, kiln_value handle, double op,
+static int kiln_c99_timer_handle(kiln_timer *entry, uint64_t id, uint64_t code,
+#define KILN_C99_REALM_SLOT_TIMEOUT_PROTOTYPE UINT32_C(14)
+#define KILN_C99_REALM_SLOT_IMMEDIATE_PROTOTYPE UINT32_C(15)
+static int kiln_c99_timer_materialize(kiln_value target) {
+static int kiln_c99_timer_handle_id(kiln_value handle, double *id, int *found) {
+static int kiln_c99_timer_rearm(kiln_timer *timer) {
+static int kiln_c99_timer_op(kiln_value *result, const kiln_value *args, size_t argc) {
+static int kiln_c99_timer_clear(kiln_value handle) {
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
 static int kiln_c99_buffer_encoding_is(const char *name, size_t length, const char *wanted) {
@@ -4031,7 +4043,9 @@ int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown) {
 static void kiln_c99_uncount_next_tick(kiln_next_tick *task) {
 static void kiln_c99_drop_next_tick(void *work) {
 static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
+static void kiln_c99_timer_drop_state(kiln_timer *timer) {
 static void kiln_c99_drop_timer(void *work) {
+static kiln_timer *kiln_c99_timer_new(kiln_value callback, const kiln_value *args, size_t argc,
 static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
 static int kiln_c99_run_timer_value(kiln_value callback, void *host_pointer,
 static int kiln_c99_run_timer_function(void *work, void *host, void *thrown) {

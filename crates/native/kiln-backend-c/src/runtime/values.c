@@ -170,6 +170,7 @@ static int kiln_c99_has_intrinsic_text(kiln_value value) {
     switch (value.tag) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_ARRAY_BUFFER:

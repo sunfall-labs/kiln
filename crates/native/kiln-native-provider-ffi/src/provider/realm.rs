@@ -5500,7 +5500,9 @@ pub extern "C" fn kiln_realm_set_timer_ref(id: u64, referenced: i32) -> i32 {
 
 /// Restarts a timeout or interval on the active Realm as `Timeout.prototype.refresh()` does: the
 /// same identity, callback, arguments, referenced state and delay, measured from the Realm's
-/// current (virtual) time. A timer that already ran or was cleared is left alone.
+/// current (virtual) time. Answers 1 when it restarted a timer that is still pending, and 0 when
+/// there is none under `id` (it already ran, or was cleared): the caller decides whether a
+/// finished one is armed again (`kiln_realm_rearm_timeout`).
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_realm_refresh_timer(id: u64) -> i32 {
     ffi(|| {
@@ -5510,7 +5512,52 @@ pub extern "C" fn kiln_realm_refresh_timer(id: u64) -> i32 {
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
-        queue.refresh_timer(TimerId::new(id));
+        i32::from(queue.refresh_timer(TimerId::new(id)))
+    })
+}
+
+/// Arms a timeout under the identity `id` of one that already ran, so a `Timeout` that fired can
+/// restart as node's `refresh()` does and `clearTimeout(id)` still finds it. Answers 0 when it
+/// took `work` (the realm now owns it, as `kiln_realm_set_timeout`'s), and 1 when it did not --
+/// the identity is still pending, or was cleared -- and the caller keeps `work`.
+///
+/// # Safety
+///
+/// `work` must satisfy the callback ownership contract when the answer is 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_rearm_timeout(
+    id: u64,
+    delay_ms: f64,
+    run: Option<RunWork>,
+    drop: Option<DropWork>,
+    work: *mut c_void,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let id = TimerId::new(id);
+        if !queue.is_rearmable(id) {
+            return 1;
+        }
+        let Some(work) = NativeWork::new(work, run, drop, false) else {
+            return INVALID_ARGUMENT;
+        };
+        let (delay, warning) = queue.node_timer_delay(Some(delay_ms));
+        if let Some(warning) = warning {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(warning.as_bytes());
+        }
+        queue.rearm_timeout(id, delay, work);
+        std::mem::drop(queue);
+        if let Some(realm) = active_realm()
+            && let Ok(state) = realm.runtime.state.try_borrow()
+        {
+            state.wake_drive();
+        }
         0
     })
 }
@@ -7130,6 +7177,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_refresh_timer, realm_clear_timer) => {
             const _: extern "C" fn(u64) -> i32 = kiln_realm_refresh_timer;
+        };
+        (realm, kiln_realm_rearm_timeout, realm_rearm_timer) => {
+            const _: unsafe extern "C" fn(u64, f64, Option<RunWork>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_rearm_timeout;
         };
         (realm, kiln_realm_drive, realm_drive) => {
             const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;

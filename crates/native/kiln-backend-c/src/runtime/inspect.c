@@ -404,6 +404,10 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
     }
     case KILN_VALUE_GENERATOR:
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
+    case KILN_VALUE_TIMER:
+        return kiln_c99_text_append_c(
+            text, kiln_c99_timer_of(value)->kind == KILN_C99_TIMER_IMMEDIATE ? "Immediate {}"
+                                                                              : "Timeout {}");
     case KILN_VALUE_DATA_VIEW: {
         /* `DataView { byteLength: 8, byteOffset: 0 }`, which is what a console shows and what the
          * interpreter prints. Two numbers and no list: a DataView holds no elements to walk, and

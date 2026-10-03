@@ -5448,11 +5448,16 @@ impl<M, T> Realm<M, T> {
     }
 
     fn schedule_timer(&mut self, delay: Duration, work: T, interval: Option<Duration>) -> TimerId {
+        let id = self.new_timer_id();
+        self.push_timer(id, delay, work, interval);
+        id
+    }
+
+    fn push_timer(&mut self, id: TimerId, delay: Duration, work: T, interval: Option<Duration>) {
         // Saturating arithmetic gives callers the same well-defined behaviour as a timer delay
         // clamped to the largest representable duration, without allowing an integer overflow to
         // become a scheduler panic.
         let deadline = self.now.saturating_add(delay);
-        let id = self.new_timer_id();
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.timers.push(
@@ -5466,7 +5471,6 @@ impl<M, T> Realm<M, T> {
                 delay,
             },
         );
-        id
     }
 
     /// Cancels a pending timer, returning whether `id` was still active.
@@ -5515,6 +5519,25 @@ impl<M, T> Realm<M, T> {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.refreshed_timers.insert(id, (self.now, sequence));
         true
+    }
+
+    /// Whether `rearm_timeout` can arm `id` again: it ran (or is running) and has not been
+    /// cleared, so nothing of it is left in the queue or the sets.
+    pub fn is_rearmable(&self, id: TimerId) -> bool {
+        id.get() != 0
+            && id.get() < self.next_timer_id
+            && !self.active_timers.contains(&id)
+            && !self.cancelled_timers.contains(&id)
+    }
+
+    /// Arms a timeout under an identity that already ran, as node's `Timeout.prototype.refresh()`
+    /// does for a timeout that fired: the same timer object restarts, so `clearTimeout` of its
+    /// identity still finds it. The caller checks `is_rearmable` first and keeps ownership of
+    /// `work` when it is not.
+    pub fn rearm_timeout(&mut self, id: TimerId, delay: Duration, work: T) {
+        debug_assert!(self.is_rearmable(id));
+        self.active_timers.insert(id);
+        self.push_timer(id, delay, work, None);
     }
 
     /// Whether any active timer keeps the loop alive: the loop is finished, as far as timers

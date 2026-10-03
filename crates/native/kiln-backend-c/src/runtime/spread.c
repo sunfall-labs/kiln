@@ -1333,6 +1333,11 @@ static int kiln_c99_spread_object_inner(kiln_host *host, kiln_value target, kiln
         }
     } else if (source.tag == KILN_VALUE_OBJECT) {
         named = source;
+    } else if (source.tag == KILN_VALUE_TIMER) {
+        /* What a program hung on a timer handle is in its own store, which is undefined until it
+         * hung something. */
+        named = kiln_c99_timer_of(source)->properties;
+        if (named.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
     } else if (source.tag == KILN_VALUE_FUNCTION || source.tag == KILN_VALUE_METHOD ||
                source.tag == KILN_VALUE_BOUND) {
         /* A function is an object, and a static a program hung on one is an own enumerable

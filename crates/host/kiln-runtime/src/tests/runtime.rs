@@ -2539,6 +2539,32 @@ fn refreshed_timers_restart_from_now() {
     assert!(realm.clear_timeout(tick));
 }
 
+/// A timeout that already ran is armed again under its own identity (`Timeout.refresh()` after
+/// it fired, or from inside its callback), and one that was cleared or is still pending is not.
+#[test]
+fn a_timeout_that_ran_can_be_armed_again_under_its_identity() {
+    let mut realm: Realm = Realm::new();
+    let id = realm.set_timeout(Duration::from_millis(10), WorkId::new(1));
+    assert!(!realm.is_rearmable(id), "pending");
+    let Some(WorkItem::Timer { id: ran, .. }) = realm.run_next_timer() else {
+        panic!("a timer was due");
+    };
+    assert_eq!(ran, id);
+    assert!(realm.is_rearmable(id), "ran");
+    realm.rearm_timeout(id, Duration::from_millis(10), WorkId::new(2));
+    assert!(!realm.is_rearmable(id), "pending again");
+    assert!(realm.refresh_timer(id));
+    let Some(WorkItem::Timer { id: again, work }) = realm.run_next_timer() else {
+        panic!("it runs a second time");
+    };
+    assert_eq!((again, work), (id, WorkId::new(2)));
+    assert_eq!(realm.now(), Duration::from_millis(20));
+    // Cleared before it ran: never again.
+    let doomed = realm.set_timeout(Duration::from_millis(5), WorkId::new(3));
+    assert!(realm.clear_timeout(doomed));
+    assert!(!realm.is_rearmable(doomed));
+}
+
 /// An unreferenced timer never keeps the loop open and never moves the virtual clock by
 /// itself, but runs in its turn while a referenced one keeps the loop going.
 #[test]

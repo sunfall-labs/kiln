@@ -1616,6 +1616,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         return kiln_c99_own_property_present(host, store, key, found, depth, thrown);
     }
     case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_PROMISE: {
         /* Maps, Sets and promises can carry ordinary user properties alongside their
          * built-in surface. Their writes and reads already share this exotic store; presence

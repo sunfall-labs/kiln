@@ -3303,7 +3303,28 @@ typedef struct kiln_timer {
     kiln_value callback;
     kiln_value *args;
     size_t argc;
+    /* The handle's own properties, an ordinary object whose prototype is `Timeout.prototype`:
+     * undefined until a program touches the handle (`kiln_c99_timer_materialize`). */
+    kiln_value properties;
+    /* The delay it was armed with, in milliseconds as the program gave it, which is what a
+     * `refresh()` of a timeout that already ran arms again. */
+    double delay;
+    /* The realm's identity for it; the same one for the life of the record, a refresh included. */
+    uint64_t id;
+    /* How many entries in the realm's queue name this record: one, and two for the moment a
+     * timeout re-arms itself from inside its own callback. */
+    uint32_t owners;
+    uint8_t kind;
+    /* The timeout or immediate ran and has not been armed since. */
+    uint8_t ran;
+    /* `unref()`, which survives the timer's end because `hasRef` still answers. */
+    uint8_t unreferenced;
+    /* Cleared: its callback and arguments are dropped and `refresh()` does nothing. */
+    uint8_t cleared;
 } kiln_timer;
+enum { KILN_C99_TIMER_TIMEOUT = 0, KILN_C99_TIMER_INTERVAL = 1, KILN_C99_TIMER_IMMEDIATE = 2,
+       KILN_C99_TIMER_INTERNAL = 3 };
+#define kiln_c99_timer_of(value) ((kiln_timer *)(uintptr_t)(value).bits)
 typedef struct kiln_node_server kiln_node_server;
 typedef struct kiln_node_socket kiln_node_socket;
 

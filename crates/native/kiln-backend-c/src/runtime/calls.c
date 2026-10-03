@@ -14,6 +14,7 @@ static int kiln_c99_is_object_value(kiln_value value) {
     case KILN_VALUE_DATE:
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_SETTLER:
     case KILN_VALUE_BOUND:
     case KILN_VALUE_REGEXP:
@@ -897,7 +898,8 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
            value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_PROMISE ||
            value.tag == KILN_VALUE_REGEXP || value.tag == KILN_VALUE_ARRAY_BUFFER ||
            value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_DATA_VIEW ||
-           value.tag == KILN_VALUE_PROXY || value.tag == KILN_VALUE_GENERATOR;
+           value.tag == KILN_VALUE_PROXY || value.tag == KILN_VALUE_GENERATOR ||
+           value.tag == KILN_VALUE_TIMER;
 }
 
 /* `class D extends C` links two pairs of things: the prototype objects, so an instance of `D`
@@ -1336,6 +1338,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
     /* A DataView, listed rather than left to fall through: the `default:` below answers

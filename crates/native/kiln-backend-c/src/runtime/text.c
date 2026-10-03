@@ -131,6 +131,7 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
     /* A DataView is an object and objects are truthy. Listed rather than left to `default:` for
@@ -955,6 +956,11 @@ static kiln_value kiln_c99_text(kiln_value value) {
     }
     case KILN_VALUE_PROMISE:
         return kiln_c99_copy_text("[object Promise]", 16);
+    /* A timer handle reduces through its own `Symbol.toPrimitive` first, which answers its
+     * identity; this is what a handle that has none (a program deleted it from the prototype)
+     * says, as an ordinary object does. */
+    case KILN_VALUE_TIMER:
+        return kiln_c99_copy_text("[object Object]", 15);
     case KILN_VALUE_GENERATOR:
         return kiln_c99_copy_text("[object Generator]", 18);
     /* The remaining callables, each of which `kiln_c99_is_callable` already answers `1` for.

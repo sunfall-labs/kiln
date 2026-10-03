@@ -151,6 +151,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_clear_timer, realm_clear_timer);
             (realm, kiln_realm_set_timer_ref, realm_set_timer_ref);
             (realm, kiln_realm_refresh_timer, realm_clear_timer);
+            (realm, kiln_realm_rearm_timeout, realm_rearm_timer);
             (realm, kiln_realm_drive, realm_drive);
             (realm, kiln_realm_drive_step, realm_drive_step);
             (realm, kiln_realm_destroy, realm_destroy);
@@ -285,7 +286,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 75;
+pub const PROVIDER_ABI_VERSION: u32 = 76;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -304,6 +305,8 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 76 and 185 exports: `kiln_realm_rearm_timeout` joined, so a `Timeout` that already ran
+        // restarts under its own identity on `refresh()`, as node's does. Before that,
         // 75 and 184 exports: `kiln_realm_refresh_timer` joined, `Timeout.prototype.refresh()`:
         // the realm's timer queue restarts the timer it already owns from the realm's current time.
         // Before that, 74 and 183 exports: `kiln_realm_set_timer_ref` joined, the per-timer flag behind
@@ -360,8 +363,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 75);
-        assert_eq!(PROVIDER_EXPORTS.len(), 184);
+        assert_eq!(PROVIDER_ABI_VERSION, 76);
+        assert_eq!(PROVIDER_EXPORTS.len(), 185);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

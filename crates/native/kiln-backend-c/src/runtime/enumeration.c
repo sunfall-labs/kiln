@@ -344,6 +344,13 @@ kiln_has_next_prototype:
                                     KILN_C99_METHOD_GENERATOR_SELF) != 0;
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_TIMER) {
+        /* Its own store and the `Timeout.prototype` chain behind it, like any ordinary object. */
+        int status = kiln_c99_timer_materialize(target);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_has_property_key(host, kiln_c99_timer_of(target)->properties, key, ikey,
+                                         answer, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_PROMISE) {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         /* Mirrors the promise read: its own store first, then the three methods and
@@ -756,6 +763,13 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         /* A Date's timestamp is its internal slot; properties created by the program live in its
          * separate ordinary store and can be deleted there like any other configurable own key. */
         kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+                   ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown)
+                   : KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TIMER) {
+        /* What a program hung on a timer handle lives in its own store. */
+        kiln_value store = kiln_c99_timer_of(target)->properties;
         return store.tag == KILN_VALUE_OBJECT
                    ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown)
                    : KILN_C99_OK;

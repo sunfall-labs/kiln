@@ -275,13 +275,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // No agents: nothing can ever reach the waiter list, so the wait can only
                     // run out. A realm timer is what says so without hanging.
                     _ => {
-                        let timer = Timer {
+                        let timer = Timer::plain(
                             // The resolve half of the promise's own pair, called with the answer:
                             // a timer carries its state in its arguments rather than in a closure.
-                            callback: Value::Settler(Rc::clone(&promise), false),
-                            arguments: vec![Value::String("timed-out".to_owned().into())],
-                            context: Rc::clone(&self.async_context),
-                        };
+                            Value::Settler(Rc::clone(&promise), false),
+                            vec![Value::String("timed-out".to_owned().into())],
+                            Rc::clone(&self.async_context),
+                        );
                         let delay = duration_from_milliseconds(if timeout.is_finite() {
                             timeout
                         } else {

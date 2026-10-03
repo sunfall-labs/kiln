@@ -115,6 +115,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
                 case KILN_GC_COMMONJS_REQUIRE:  val_tag = KILN_VALUE_COMMONJS_REQUIRE; break;
                 case KILN_GC_CLOSURE:           val_tag = KILN_VALUE_FUNCTION; break;
                 case KILN_GC_CELL:              val_tag = KILN_VALUE_CELL; break;
+                case KILN_GC_TIMER:             val_tag = KILN_VALUE_TIMER; break;
                 default: break;
             }
             return kiln_c99_value(val_tag, (uint64_t)(uintptr_t)ptr, NULL, 0);

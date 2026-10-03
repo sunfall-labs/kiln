@@ -3329,7 +3329,7 @@ static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
     return k == KILN_GC_NODE_SERVER || k == KILN_GC_NODE_SOCKET ||
            k == KILN_GC_NODE_CLIENT_REQUEST || k == KILN_GC_NODE_RESPONSE ||
            k == KILN_GC_NODE_COMPLETION || k == KILN_GC_NODE_FS_COMPLETION ||
-           k == KILN_GC_TIMER || k == KILN_GC_SHARED_FACADE;
+           k == KILN_GC_SHARED_FACADE;
 }
 
 #include <setjmp.h>
@@ -5327,6 +5327,7 @@ static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
 #define KILN_C99_HOST_PROCESS_FIELDS(V, P, A) \
     V(promise) V(result) V(stdout_value) V(stderr_value)
 #define KILN_C99_HOST_CALLBACK_FIELDS(V, P, A) V(callback) A(args, argc)
+#define KILN_C99_HOST_TIMER_FIELDS(V, P, A) V(callback) V(properties) A(args, argc)
 #define KILN_C99_HOST_LAYOUTS(CASE) \
     CASE(KILN_GC_NODE_SERVER, kiln_node_server, KILN_C99_HOST_SERVER_FIELDS) \
     CASE(KILN_GC_NODE_SOCKET, kiln_node_socket, KILN_C99_HOST_SOCKET_FIELDS) \
@@ -5336,7 +5337,7 @@ static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
     CASE(KILN_GC_NODE_FS_COMPLETION, kiln_node_fs_completion, KILN_C99_HOST_FS_FIELDS) \
     CASE(KILN_GC_NODE_PROCESS_COMPLETION, kiln_node_process_completion, KILN_C99_HOST_PROCESS_FIELDS) \
     CASE(KILN_GC_NEXT_TICK, kiln_next_tick, KILN_C99_HOST_CALLBACK_FIELDS) \
-    CASE(KILN_GC_TIMER, kiln_timer, KILN_C99_HOST_CALLBACK_FIELDS)
+    CASE(KILN_GC_TIMER, kiln_timer, KILN_C99_HOST_TIMER_FIELDS)
 
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,

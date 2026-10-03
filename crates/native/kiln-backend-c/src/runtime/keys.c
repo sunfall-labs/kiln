@@ -476,6 +476,8 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         target = kiln_c99_generator_of(target)->properties;
     } else if (target.tag == KILN_VALUE_PROMISE) {
         target = kiln_c99_promise_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_TIMER) {
+        target = kiln_c99_timer_of(target)->properties;
     }
     status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {
@@ -634,6 +636,9 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
     }
     if (target.tag == KILN_VALUE_PROMISE) {
         return &kiln_c99_promise_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_TIMER) {
+        return &kiln_c99_timer_of(target)->properties;
     }
     if (target.tag == KILN_VALUE_REGEXP) {
         return &kiln_c99_regexp_of(target)->properties;

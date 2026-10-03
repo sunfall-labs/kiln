@@ -249,86 +249,127 @@ static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *
     return status;
 }
 
-/* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id` (`code` says
- * which): an object allocated here, with the prototype the bootstrap published on the realm's
- * engine-private object (`kiln-builtins/src/timers.ts`) and the identity in a reserved slot, or
- * the bare identity where no prototype was published. No script runs to make one, which is what
- * keeps arming a timer cheap. Its methods ask the engine about the slot through
- * `__kilnTimerRef` (`kiln_c99_timer_op`); the private object is never a property a program can
- * find (`kiln_c99_private_object`). */
-static int kiln_c99_private_object(kiln_value *out);
-static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
-                                 int depth, kiln_value *thrown) {
-    kiln_value private_object = kiln_c99_undefined();
-    kiln_value prototype = kiln_c99_undefined();
-    int status = kiln_c99_private_object(&private_object);
+/* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `entry`, armed
+ * under `id` (`code` says which): the record itself as a `Timeout` or `Immediate`
+ * (`KILN_VALUE_TIMER`), or the bare identity where the realm's bootstrap never adopted the
+ * prototypes (`kiln_c99_timer_op`, op 5) or the timer is an internal one (`__kilnQueueIo`). No
+ * script runs and nothing else is allocated, which is what keeps arming a timer cheap. */
+static int kiln_c99_timer_handle(kiln_timer *entry, uint64_t id, uint64_t code,
+                                 kiln_value *result) {
     *result = kiln_c99_number((double)id);
-    if (status == KILN_C99_OK)
-        status = code == KILN_C99_METHOD_SET_IMMEDIATE
-                     ? kiln_c99_get(host, private_object, "immediatePrototype", 18, &prototype,
-                                    depth, thrown)
-                     : kiln_c99_get(host, private_object, "timeoutPrototype", 16, &prototype,
-                                    depth, thrown);
-    if (status != KILN_C99_OK || prototype.tag != KILN_VALUE_OBJECT) return status;
-    status = kiln_c99_new_object(result);
-    if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*result, prototype);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *result, "@@kiln:timer:id", 15, kiln_c99_number((double)id), 0,
-                              NULL);
+    if (entry == NULL || code == KILN_C99_METHOD_QUEUE_IO_RAW ||
+        !kiln_c99_realm()->timer_handles)
+        return KILN_C99_OK;
+    *result = kiln_c99_value(KILN_VALUE_TIMER, (uint64_t)(uintptr_t)entry, NULL, 0);
+    return KILN_C99_OK;
+}
+
+#define KILN_C99_REALM_SLOT_TIMEOUT_PROTOTYPE UINT32_C(14)
+#define KILN_C99_REALM_SLOT_IMMEDIATE_PROTOTYPE UINT32_C(15)
+
+/* The store a timer handle keeps its own properties in, made on first use: an ordinary object
+ * whose prototype is `Timeout.prototype` (or `Immediate.prototype`), so every member read, write
+ * and `in` goes through the machinery arrays and promises already use for theirs. A timer nothing
+ * touches never makes one. */
+static int kiln_c99_timer_materialize(kiln_value target) {
+    kiln_timer *timer = kiln_c99_timer_of(target);
+    kiln_value *slot;
+    int status;
+    if (timer->properties.tag == KILN_VALUE_OBJECT) return KILN_C99_OK;
+    status = kiln_c99_new_object_for_owner(&timer->properties, timer);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_realm_value_slot(timer->kind == KILN_C99_TIMER_IMMEDIATE
+                                           ? KILN_C99_REALM_SLOT_IMMEDIATE_PROTOTYPE
+                                           : KILN_C99_REALM_SLOT_TIMEOUT_PROTOTYPE,
+                                       &slot);
+    if (status == KILN_C99_OK && slot->tag == KILN_VALUE_OBJECT)
+        status = kiln_c99_set_prototype(timer->properties, *slot);
     return status;
 }
 
-/* The identity a timer handle holds, when `handle` is one this engine made. */
-static int kiln_c99_timer_handle_id(kiln_host *host, kiln_value handle, double *id, int *found,
-                                    int depth, kiln_value *thrown) {
-    kiln_value slot = kiln_c99_undefined();
-    int status = KILN_C99_OK;
+/* The identity a timer handle holds, when `handle` is one. */
+static int kiln_c99_timer_handle_id(kiln_value handle, double *id, int *found) {
     *found = 0;
-    if (handle.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
-    status = kiln_c99_get(host, handle, "@@kiln:timer:id", 15, &slot, depth, thrown);
-    if (status == KILN_C99_OK && slot.tag == KILN_VALUE_NUMBER) {
-        *id = kiln_c99_as_number(slot);
-        *found = 1;
-    }
-    return status;
+    if (handle.tag != KILN_VALUE_TIMER) return KILN_C99_OK;
+    *id = (double)kiln_c99_timer_of(handle)->id;
+    *found = 1;
+    return KILN_C99_OK;
+}
+
+/* A timeout that already ran, armed again under its own identity: `refresh()` after the fact, or
+ * from inside its own callback. The realm answers 1 when it did not take the work. */
+static int kiln_c99_timer_rearm(kiln_timer *timer) {
+    int status;
+    if (timer->cleared || timer->ran == 0 || timer->kind != KILN_C99_TIMER_TIMEOUT)
+        return KILN_C99_OK;
+    status = kiln_realm_rearm_timeout(timer->id, timer->delay, kiln_c99_run_timer,
+                                      kiln_c99_drop_timer, timer);
+    if (status != 0) return status == 1 ? KILN_C99_OK : status;
+    timer->owners += 1;
+    timer->ran = 0;
+    if (timer->unreferenced) return kiln_realm_set_timer_ref(timer->id, 0);
+    return KILN_C99_OK;
 }
 
 /* What a timer handle's methods ask of the engine, `__kilnTimerRef(handle, op)`: `op` 0 its
  * identity, 1 whether it is referenced, 2 and 3 to reference or unreference it, 4 to restart it
- * from now. The referenced flag the program sees lives on the handle, so it survives the timer's
- * end as node's does; the one the loop reads lives in the realm's timer queue. */
-static int kiln_c99_timer_op(kiln_host *host, kiln_value *result, kiln_value handle, double op,
-                             int depth, kiln_value *thrown) {
-    kiln_value slot = kiln_c99_undefined();
-    double id = 0.0;
-    int found = 0;
-    int unreferenced;
-    int status = kiln_c99_timer_handle_id(host, handle, &id, &found, depth, thrown);
+ * from now, and 5 (`__kilnTimerRef(Timeout.prototype, 5, Immediate.prototype)`, once, from the
+ * bootstrap) to adopt the prototypes handles are made with. The referenced flag the program sees
+ * is on the record, so it survives the timer's end as node's does; the one the loop reads lives
+ * in the realm's timer queue. */
+static int kiln_c99_timer_op(kiln_value *result, const kiln_value *args, size_t argc) {
+    kiln_value handle = argc > 0 ? args[0] : kiln_c99_undefined();
+    double op = argc > 1 && args[1].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[1])
+                                                             : 0.0 / 0.0;
+    kiln_timer *timer;
+    int status = KILN_C99_OK;
     *result = kiln_c99_undefined();
-    if (status != KILN_C99_OK) return status;
-    if (!found) {
+    if (op == 5.0) {
+        kiln_value *slot;
+        if (argc < 3 || args[0].tag != KILN_VALUE_OBJECT || args[2].tag != KILN_VALUE_OBJECT)
+            return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_TIMEOUT_PROTOTYPE, &slot);
+        if (status != KILN_C99_OK) return status;
+        *slot = args[0];
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_IMMEDIATE_PROTOTYPE, &slot);
+        if (status != KILN_C99_OK) return status;
+        *slot = args[2];
+        kiln_c99_realm()->timer_handles = 1;
+        return KILN_C99_OK;
+    }
+    if (handle.tag != KILN_VALUE_TIMER) {
         if (op != 0.0) *result = kiln_c99_boolean(1);
         return KILN_C99_OK;
     }
-    status = kiln_c99_get(host, handle, "@@kiln:timer:unref", 18, &slot, depth, thrown);
-    if (status != KILN_C99_OK) return status;
-    unreferenced = slot.tag == KILN_VALUE_BOOLEAN && kiln_c99_truthy(slot);
+    timer = kiln_c99_timer_of(handle);
     if (op == 0.0) {
-        *result = kiln_c99_number(id);
+        *result = kiln_c99_number((double)timer->id);
     } else if (op == 2.0 || op == 3.0) {
         int unref = op == 3.0;
-        if (unref != unreferenced) {
-            status = kiln_c99_put(NULL, handle, "@@kiln:timer:unref", 18, kiln_c99_boolean(unref),
-                                  0, NULL);
-            if (status == KILN_C99_OK)
-                status = kiln_realm_set_timer_ref((uint64_t)id, !unref);
+        if (unref != (timer->unreferenced != 0)) {
+            timer->unreferenced = (uint8_t)unref;
+            status = kiln_realm_set_timer_ref(timer->id, !unref);
         }
         *result = kiln_c99_boolean(!unref);
     } else if (op == 4.0) {
-        status = kiln_realm_refresh_timer((uint64_t)id);
+        if (!timer->cleared) {
+            /* 1 when a pending timer was restarted in place; otherwise it already ran. */
+            status = kiln_realm_refresh_timer(timer->id);
+            if (status == 0) status = kiln_c99_timer_rearm(timer);
+            else if (status == 1) status = KILN_C99_OK;
+        }
     } else {
-        *result = kiln_c99_boolean(!unreferenced);
+        *result = kiln_c99_boolean(!timer->unreferenced);
     }
+    return status;
+}
+
+/* `clearTimeout(handle)`: the realm drops its entry, and the record drops its callback and
+ * arguments, which is what makes a later `refresh()` do nothing. */
+static int kiln_c99_timer_clear(kiln_value handle) {
+    kiln_timer *timer = kiln_c99_timer_of(handle);
+    int status = kiln_realm_clear_timer(timer->id);
+    if (status == KILN_C99_OK) kiln_c99_timer_drop_state(timer);
     return status;
 }
 

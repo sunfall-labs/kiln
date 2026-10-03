@@ -275,6 +275,13 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_clear_timer) => {
         concat!("int ", stringify!($name), "(uint64_t id);\n")
     };
+    ($group:ident, $name:ident, realm_rearm_timer) => {
+        concat!(
+            "int ",
+            stringify!($name),
+            "(uint64_t id, double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);\n"
+        )
+    };
     ($group:ident, $name:ident, realm_set_timer_ref) => {
         concat!("int ", stringify!($name), "(uint64_t id, int referenced);\n")
     };
