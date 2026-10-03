@@ -1,3 +1,4 @@
+// kiln-native: clock=wall
 // The same events as worker-events-during-tla.mjs, from an async function rather than the
 // entry's top-level await: a pending timer must not keep a parked realm from hearing a worker
 // on another thread. The guard is long, so a drive that slept until it would be slow, and a

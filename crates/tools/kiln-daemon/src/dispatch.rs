@@ -307,6 +307,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             args: _,
             profile,
             node,
+            wall_clock,
             source_view: _,
             static_link,
             pgo_generate,
@@ -323,6 +324,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         project_root,
                         profile,
                         node,
+                        wall_clock,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -2340,6 +2342,7 @@ pub(crate) fn native_run_graph(
     project_root: String,
     profile: NativeProfile,
     node: bool,
+    wall_clock: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -2361,7 +2364,7 @@ pub(crate) fn native_run_graph(
             // A directly-run native Node program has the same host-backed clock policy as a
             // node-enabled launcher built for later execution. Keep plain native scripts on
             // the deterministic clock.
-            realm: if node {
+            realm: if wall_clock {
                 kiln_native::NativeRealmPolicy::host_clock()
             } else {
                 kiln_native::NativeRealmPolicy::default()

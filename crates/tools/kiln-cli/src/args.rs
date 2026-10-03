@@ -314,10 +314,8 @@ where
     if native && name != "run" {
         return Err(Error::usage("--native only applies to `kiln run`"));
     }
-    if clock_specified && (name != "run" || native) {
-        return Err(Error::usage(
-            "--clock only applies to interpreted `kiln run`; native launchers use their build clock policy",
-        ));
+    if clock_specified && name != "run" {
+        return Err(Error::usage("--clock only applies to `kiln run`"));
     }
     if wall_clock && !node {
         return Err(Error::usage(
@@ -694,7 +692,7 @@ options:
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
     --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
-    --clock <policy>   with interpreted `run`, choose `virtual` (default) or `wall` time
+    --clock <policy>   choose `virtual` (default) or `wall` timer scheduling for `run`
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
@@ -1131,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_policy_is_available_only_for_interpreted_runs() {
+    fn clock_policy_applies_to_both_run_engines() {
         assert!(matches!(
             run(&["run", "server.ts", "--node", "--clock", "wall"]).command,
             Command::Run {
@@ -1149,11 +1147,33 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            run(&["run", "server.ts", "--node", "--native", "--clock", "wall"]).command,
+            Command::Run {
+                node: true,
+                wall_clock: true,
+                native: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&[
+                "run",
+                "server.ts",
+                "--node",
+                "--native",
+                "--clock",
+                "virtual"
+            ])
+            .command,
+            Command::Run {
+                node: true,
+                wall_clock: false,
+                native: true,
+                ..
+            }
+        ));
         assert!(usage_error(&["test", "suite", "--clock", "virtual"]).contains("only applies"));
-        assert!(
-            usage_error(&["run", "server.ts", "--native", "--clock", "virtual"])
-                .contains("only applies")
-        );
     }
 
     #[test]

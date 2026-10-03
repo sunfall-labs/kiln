@@ -1,3 +1,4 @@
+// kiln-native: clock=wall
 // A port transferred into a worker closes when that worker ends -- by `process.exit`, an
 // uncaught error or `terminate()` -- and its partner here sees `close`, as in node. The runtime
 // closes every port a worker holds when its realm ends; a port in transit is held by no realm.

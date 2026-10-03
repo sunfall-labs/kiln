@@ -1,3 +1,4 @@
+// kiln-native: clock=wall
 // An actor realm that ends -- an uncaught error, `process.exit` -- rejects every call still
 // waiting on it with ActorClosedError (ADR 0072), including one already in flight when the realm
 // died. The reply port a call waits on lives in the dead realm, so this rests on the runtime

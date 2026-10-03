@@ -1,3 +1,4 @@
+// kiln-native: clock=wall
 // A worker's message, a transferred port's `close` and the worker's `exit` reach the entry
 // module while its top-level await is still pending, ahead of a guard timer that would
 // otherwise win. The worker runs this same module (no `eval: true`: a natively built program

@@ -1,3 +1,4 @@
+// kiln-native: clock=wall
 // A message posted to a worker that is mid-turn and about to park must keep every virtual clock
 // held from the moment it is sent, not from the moment the worker next runs. The parent holds a
 // long guard timer on every round; if the worker went idle on its way to park while the message

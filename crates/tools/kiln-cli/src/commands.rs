@@ -594,6 +594,7 @@ pub fn native_run(
     args: &[String],
     profile: NativeProfile,
     node: bool,
+    wall_clock: bool,
     static_link: bool,
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
@@ -621,6 +622,7 @@ pub fn native_run(
         args.to_vec(),
         profile,
         node,
+        wall_clock,
         static_link,
         pgo_gen.clone(),
         pgo_u.clone(),
@@ -638,6 +640,7 @@ pub fn native_run(
                 args.to_vec(),
                 profile,
                 node,
+                wall_clock,
                 static_link,
                 pgo_gen,
                 pgo_u,
@@ -2258,7 +2261,8 @@ mod tests {
             &root,
             &[],
             NativeProfile::Dev,
-            false,
+            true,
+            true,
             false,
             None,
             None,
@@ -2282,10 +2286,17 @@ mod tests {
         };
         assert_eq!(path, &canonical);
         assert_eq!(text, captured);
-        let Request::NativeRun { path, .. } = &backend.inner.seen[3] else {
+        let Request::NativeRun {
+            path, wall_clock, ..
+        } = &backend.inner.seen[3]
+        else {
             panic!("third request must execute the captured snapshot");
         };
         assert_eq!(path, &canonical);
+        assert!(
+            wall_clock,
+            "native runs preserve the requested clock policy"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

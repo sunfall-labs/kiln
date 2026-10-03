@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 39;
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -685,6 +685,10 @@ pub enum Request {
         profile: NativeProfile,
         /// Enable the typed Node resolver and native runtime-module materializers.
         node: bool,
+        /// Schedule native timers against elapsed host time instead of deterministic virtual time.
+        /// Protocol clients may omit it and retain the deterministic default.
+        #[serde(default)]
+        wall_clock: bool,
         source_view: SourceView,
         #[serde(default)]
         static_link: bool,
@@ -1127,7 +1131,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+        assert_eq!(PROTOCOL_VERSION, 40);
 
         let requests = [
             (
@@ -1240,6 +1244,34 @@ mod tests {
                     "static_link": false,
                     "pgo_generate": null,
                     "pgo_use": null
+                }}),
+            ),
+            (
+                Request::NativeRun {
+                    path: "server.mjs".to_owned(),
+                    project_root: "/project".to_owned(),
+                    args: Vec::new(),
+                    profile: NativeProfile::Dev,
+                    node: true,
+                    wall_clock: false,
+                    source_view: SourceView(12),
+                    static_link: false,
+                    pgo_generate: None,
+                    pgo_use: None,
+                    stream_output: false,
+                },
+                serde_json::json!({"NativeRun": {
+                    "path": "server.mjs",
+                    "project_root": "/project",
+                    "args": [],
+                    "profile": "Dev",
+                    "node": true,
+                    "wall_clock": false,
+                    "source_view": 12,
+                    "static_link": false,
+                    "pgo_generate": null,
+                    "pgo_use": null,
+                    "stream_output": false
                 }}),
             ),
             (

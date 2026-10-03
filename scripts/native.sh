@@ -143,11 +143,14 @@ run_probe() {
 	name="$(basename -- "$probe")"
 	local adapter=""
 	local -a clock_policy=()
+	local native_directive
+	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
 	# `.mjs` too: an application-shaped ES module imports `node:` builtins, and only the adapter
-	# resolves those. Node programs need their host-backed clock policy for timer and worker
-	# scheduling; deterministic virtual time remains the default for non-Node probes.
+	# resolves those. The clock remains virtual unless a probe explicitly requests host progress.
 	if [[ $name == *.cjs || $name == *.mjs ]]; then
 		adapter="--node"
+	fi
+	if [[ $native_directive =~ clock=wall ]]; then
 		clock_policy=(--clock wall)
 	fi
 	name="${name%.*}"
@@ -186,14 +189,15 @@ run_probe() {
 	# A probe may also ask for more than the default build in its first lines:
 	#
 	#   // kiln-native: profile=native-release parallelism=1,2,max
+	#   // kiln-native: clock=wall
 	#
 	# `profile` is passed to `--profile` (the development profile emits generic bodies only, so
-	# the parallel lowering of `parallelMap` exists only in a release build), and `parallelism`
-	# runs the one binary once per KILN_PARALLELISM value (`max` is the core count). Every run
-	# must print the interpreter's bytes: a result that depends on how many threads computed it
-	# is a divergence like any other.
-	local native_directive profile="" parallelism="default"
-	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
+	# the parallel lowering of `parallelMap` exists only in a release build), `parallelism` runs
+	# the one binary once per KILN_PARALLELISM value (`max` is the core count), and `clock=wall`
+	# opts both engines into host-backed timer progress for probes that require external workers.
+	# Every run must print the interpreter's bytes: a result that depends on how many threads
+	# computed it is a divergence like any other.
+	local profile="" parallelism="default"
 	if [[ $native_directive =~ profile=([a-z-]+) ]]; then
 		profile="${BASH_REMATCH[1]}"
 	fi
@@ -234,7 +238,7 @@ run_probe() {
 		local native_timeout_marker="$WORK_DIR/$name.native-$threads.timeout"
 		native="$(run_invocation "$native_timeout_marker" \
 			env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot \
-			${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+			${adapter:+"$adapter"} "${clock_policy[@]}" run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
 		if [[ -f "$native_timeout_marker.interrupted" ]]; then
 			printf '%s\n' "$native" > "$WORK_DIR/$name.interrupted"
 			return 0
