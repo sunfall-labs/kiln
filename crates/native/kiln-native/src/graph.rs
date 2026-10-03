@@ -4527,7 +4527,72 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     {
         writeln!(output, "    {{ const uint8_t *bytes = NULL; uint64_t length = 0; if (kiln_realm_argv_at(0, &bytes, &length) == KILN_C99_OK && kiln_c99_filename_matches(arguments[0], (const char *)bytes, (size_t)length)) {{ graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->instance->require_contexts[{base_index}], kiln_graph_gc_visit_registered_roots, graph); }} }}").unwrap();
     }
-    output.push_str("    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_registered_roots, graph);\n}\n\nstatic int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    if (graph == NULL || graph->instance == NULL || argc != 2 || arguments == NULL || result == NULL || arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str(r#"    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_registered_roots, graph);
+}
+
+/* Resolve filesystem imports from generated modules only to already linked code.
+ * realpath supplies the same canonical identity used when the graph was captured;
+ * it never makes a new source file executable. */
+static int kiln_graph_runtime_import_path(kiln_value specifier, kiln_value importer,
+                                          uint8_t **canonical, uint64_t *canonical_len) {
+    uint8_t *text = NULL;
+    size_t length = 0, path_len = 0;
+    char *path = NULL;
+    int32_t fs_error = 0;
+    int status = kiln_c99_dynamic_module_text(specifier, &text, &length);
+    if (status != KILN_C99_OK) return status;
+    path = (char *)malloc(length + 1);
+    if (path == NULL) return KILN_C99_OUT_OF_MEMORY;
+    size_t start = 0;
+    if (length >= 7 && memcmp(text, "file://", 7) == 0) {
+        if (length < 8 || text[7] != '/') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+        start = 7;
+    }
+        for (size_t index = start; index < length; ++index) {
+            unsigned char current = text[index];
+            /* A suffix needs a distinct module instance, not the linked namespace. */
+            if (current == '?' || current == '#') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            if (current == '%') {
+                if (index + 2 >= length) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+                unsigned char hi = text[++index], lo = text[++index];
+                int high = hi >= '0' && hi <= '9' ? hi - '0' :
+                           hi >= 'A' && hi <= 'F' ? hi - 'A' + 10 :
+                           hi >= 'a' && hi <= 'f' ? hi - 'a' + 10 : -1;
+                int low = lo >= '0' && lo <= '9' ? lo - '0' :
+                          lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 :
+                          lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
+                if (high < 0 || low < 0) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+                current = (unsigned char)((high << 4) | low);
+                if (current == '/' || current == '\\') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            }
+            if (current == 0) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            path[path_len++] = (char)current;
+        }
+    path[path_len] = '\0';
+    if (path_len != 0 && path[0] != '/') {
+        uint8_t *base = NULL;
+        size_t base_len = 0;
+        status = kiln_c99_dynamic_module_text(importer, &base, &base_len);
+        if (status != KILN_C99_OK) { free(path); return status; }
+        while (base_len != 0 && base[base_len - 1] != '/') --base_len;
+        if (base_len > SIZE_MAX - path_len - 1) { free(path); return KILN_C99_OUT_OF_MEMORY; }
+        char *joined = (char *)malloc(base_len + path_len + 1);
+        if (joined == NULL) { free(path); return KILN_C99_OUT_OF_MEMORY; }
+        memcpy(joined, base, base_len);
+        memcpy(joined + base_len, path, path_len + 1);
+        free(path);
+        path = joined;
+        path_len += base_len;
+    }
+    status = kiln_node_fs_realpath_sync((const uint8_t *)path, path_len,
+                                      canonical, canonical_len, &fs_error);
+    free(path);
+    return status == 0 && fs_error == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
+
+static int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {
+    if (graph == NULL || graph->instance == NULL || argc != 2 || arguments == NULL || result == NULL || arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+"#);
     let mut linked_module_indices = std::collections::HashMap::new();
     for (index, (node, _)) in modules.iter().enumerate() {
         linked_module_indices.insert(node.path.clone(), index);
@@ -4564,6 +4629,33 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         writeln!(output, "    if ({root_guard} && kiln_c99_string_equals_ascii(arguments[0], {specifier}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){index}); if (status != KILN_C99_OK) {{ *result = *kiln_graph_module_result(graph, (size_t){index}); return status; }} *result = graph->instance->namespaces[{index}]; return KILN_C99_OK; }}",
             alias.specifier.len()).unwrap();
     }
+    output.push_str(
+        r#"    if (arguments[0].len != 0 &&
+        (kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "./", 2) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "../", 3) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "/", 1) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "file://", 7))) {
+        uint8_t *canonical = NULL;
+        uint64_t canonical_len = 0;
+        int path_status = kiln_graph_runtime_import_path(arguments[0], arguments[1],
+                                                       &canonical, &canonical_len);
+        if (path_status == KILN_C99_OUT_OF_MEMORY) return path_status;
+        if (path_status == KILN_C99_OK) {
+"#,
+    );
+    let mut canonical_targets = BTreeSet::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if namespace_plans[index].is_none() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&node.path).unwrap_or_else(|_| node.path.clone());
+        if !canonical_targets.insert(canonical.clone()) {
+            continue;
+        }
+        let path = canonical.to_string_lossy();
+        writeln!(output, "            if (canonical_len == (uint64_t){} && memcmp(canonical, {}, (size_t){}) == 0) {{ kiln_node_fs_free_bytes(canonical, canonical_len); int status = kiln_graph_ensure_module(graph, (size_t){index}); if (status != KILN_C99_OK) {{ *result = *kiln_graph_module_result(graph, (size_t){index}); return status; }} *result = graph->instance->namespaces[{index}]; return KILN_C99_OK; }}", path.len(), native_c_string(&path), path.len()).unwrap();
+    }
+    output.push_str("        }\n        if (canonical != NULL) kiln_node_fs_free_bytes(canonical, canonical_len);\n    }\n");
     output.push_str(r#"    (void)kiln_c99_new_type_error(result, "runtime module import is outside the linked package graph");
     return KILN_C99_THROWN;
 }

@@ -3096,7 +3096,7 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
             "import {{ writeFileSync }} from 'node:fs';\n\
              import {{ value }} from 'pkg/runtime';\n\
              const path = '{}';\n\
-             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; import * as runtime from 'pkg/runtime'; function helper() {{ return runtime.value + value - value; }} export let count = 0; export function answer() {{ return helper(); }} export function bump() {{ count++; return count; }}\");\n\
+             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; import * as runtime from './node_modules/pkg/src/runtime.js'; function helper() {{ return runtime.value + value - value; }} export let count = 0; export function answer() {{ return helper(); }} export function bump() {{ count++; return count; }}\");\n\
              const url = 'file://' + path;\n\
              const first = await import(url);\n\
              const second = await import(url);\n\

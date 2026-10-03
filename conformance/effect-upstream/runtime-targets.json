@@ -11,6 +11,10 @@
     "schema/jsonSchemaRoundTrip": ["ajv/dist/2020"],
     "schema/representation/toJsonSchemaMultiDocument": ["ajv"]
   },
+  "include": {
+    "schema/SchemaAOTCompiler": ["effect/schema/SchemaCompiler/runtime"],
+    "schema/SchemaAOTCompilerBuild": ["effect/schema/SchemaCompiler/runtime"]
+  },
   "importActual": {
     "Config": ["../src/ConfigProvider.ts"],
     "rpc/RpcClient": ["../../src/rpc/RpcClientError.ts"],

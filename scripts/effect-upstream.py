@@ -103,6 +103,18 @@ def entry_for(workspace, source, name):
     text = test.read_text()
     directory = workspace / 'files' / name
     directory.mkdir(parents=True, exist_ok=True)
+    includes = RUNTIME_TARGETS.get('include', {}).get(name, [])
+    if includes:
+        # Generated modules can name dependencies that occur only in erased type
+        # imports. Declare those finite roots through the compiler's existing
+        # closed-world include policy, without executing them during setup.
+        # This standalone workspace boundary keeps each file's declarations local
+        # even when builds run concurrently inside the shared dependency workspace.
+        write_json(directory / 'package.json', {
+            'private': True, 'type': 'module', 'workspaces': [],
+            'dependencies': json.loads((workspace / 'package.json').read_text())['dependencies'],
+            'kiln': {'include': includes},
+        })
     # The official upstream setup installs Effect equality testers, so expect is
     # unconditional. Optional adapters add their real library implementations.
     features = ['expect']
