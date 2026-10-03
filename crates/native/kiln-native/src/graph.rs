@@ -3882,6 +3882,17 @@ static kiln_val *kiln_graph_unit_values(void *opaque, const kiln_c99_unit *unit)
     let reloadable_units = modules
         .iter()
         .filter(|(node, _)| matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs))
+        // A source module does not necessarily emit a unit descriptor: modules with no module
+        // locals, template sites, or compact cells have nothing to store. Keep this whitelist in
+        // lockstep with the extern declarations above rather than naming nonexistent `_unit`s.
+        .filter(|(_, module)| {
+            let unit_declaration = format!("kiln_c99_unit {}_unit", module.symbol);
+            module.source.contains(&unit_declaration)
+                || module
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.contains(&unit_declaration))
+        })
         .map(|(_, module)| format!("unit == &{}_unit", module.symbol))
         .collect::<Vec<_>>();
     if reloadable_units.is_empty() {
