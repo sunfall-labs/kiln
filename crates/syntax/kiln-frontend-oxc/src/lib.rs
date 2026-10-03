@@ -2662,8 +2662,7 @@ fn erased_reference_expression<'a, 'ast>(
     }
 }
 
-/// Whether a namespace is guaranteed to disappear during TypeScript erasure. Empty namespaces
-/// are intentionally excluded: even an empty runtime namespace emits an object binding.
+/// Whether a namespace disappears during TypeScript erasure, including empty namespaces.
 fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -> bool {
     use oxc_ast::ast::{TSNamespaceDeclarationBody, TSNamespaceDeclarationBody as NamespaceBody};
 
@@ -2682,11 +2681,11 @@ fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
     match statement {
         Statement::EmptyStatement(_) => true,
-        Statement::VariableDeclaration(declaration) => declaration.declare,
-        Statement::FunctionDeclaration(declaration) => {
-            declaration.declare || declaration.body.is_none()
-        }
-        Statement::ClassDeclaration(declaration) => declaration.declare,
+        // A `declare` value member still causes TypeScript-compatible emitters to materialize
+        // the containing namespace object, even though the member itself has no implementation.
+        Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_) => false,
         Statement::TSImportEqualsDeclaration(declaration) => declaration.import_kind.is_type(),
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
@@ -2707,11 +2706,9 @@ fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
         }
         Statement::ExportDeclaration(export) => match &export.declaration {
             Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => true,
-            Declaration::VariableDeclaration(declaration) => declaration.declare,
-            Declaration::FunctionDeclaration(declaration) => {
-                declaration.declare || declaration.body.is_none()
-            }
-            Declaration::ClassDeclaration(declaration) => declaration.declare,
+            Declaration::VariableDeclaration(_)
+            | Declaration::FunctionDeclaration(_)
+            | Declaration::ClassDeclaration(_) => false,
             Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
             _ => false,
         },
@@ -6835,6 +6832,18 @@ mod tests {
 
         assert_eq!(module.source_kind, SourceKind::TypeScript);
         assert_eq!(module.runtime_export_names(), ["Runtime"]);
+        let declared_member = parse(
+            "declared.ts",
+            "export namespace Declared { export declare const value: number; }",
+        );
+        assert_eq!(declared_member.runtime_export_names(), ["Declared"]);
+        assert!(
+            declared_member
+                .body
+                .iter()
+                .any(|statement| matches!(&statement.kind, HirStatementKind::Unsupported { .. })),
+            "declared value members materialize a runtime namespace object"
+        );
         assert!(
             module
                 .body
