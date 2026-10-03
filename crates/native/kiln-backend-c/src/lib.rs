@@ -11,7 +11,9 @@ use std::{
     sync::Arc,
 };
 
-use kiln_host_abi::{HOST_ABI_VERSION, HOST_OP_MODULE_CREATE_REQUIRE, HostOp};
+use kiln_host_abi::{
+    HOST_ABI_VERSION, HOST_OP_MODULE_CREATE_REQUIRE, HOST_OP_MODULE_LOADER, HostOp,
+};
 use kiln_ir::{
     BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
     UnaryOp, Upvalue,
@@ -24,6 +26,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// Internal host callback code for realm-owned `createRequire` values. The emitted C macro and
 /// generated launchers mirror the typed host-ABI authority rather than defining another number.
 pub const C99_HOST_MODULE_CREATE_REQUIRE: u16 = HOST_OP_MODULE_CREATE_REQUIRE;
+pub const C99_HOST_MODULE_LOADER: u16 = HOST_OP_MODULE_LOADER;
 
 /// Revision of the complete generated translation-unit format.
 ///

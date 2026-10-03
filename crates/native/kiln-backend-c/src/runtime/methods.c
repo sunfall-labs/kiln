@@ -252,6 +252,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
     case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
     case KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE: return "__kilnHostModuleCreateRequire";
+    case KILN_C99_METHOD_MODULE_LOADER_RAW: return "__kilnHostModuleLoader";
     case KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE: return "__kilnHostModuleRequireResolve";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
     case KILN_C99_METHOD_STRING_LOCALE_CASE_RAW: return "__kilnHostStringLocaleCase";

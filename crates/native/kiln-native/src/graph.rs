@@ -3192,7 +3192,7 @@ pub(super) fn render_graph_roots(
     }
     writeln!(output, "    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if (visit(visit_context, &graph->instance->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
     // Collection and ownership inspection enumerate precisely the same root slots.
-    output.push_str("\nstatic int kiln_graph_gc_mark_root(void *heap, const void *pointer, uint32_t kind) {\n    if (kind != KILN_GC_VISIT_VALUE) return KILN_C99_INVALID_ARGUMENT;\n    (void)kiln_realm_gc_mark_value(heap, pointer);\n    return KILN_C99_OK;\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL) return;\n    (void)kiln_graph_gc_visit_roots(graph, kiln_graph_gc_mark_root, heap);\n    if (graph->host.module_owner != NULL) { owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner }; (void)kiln_realm_gc_mark_value(heap, &owner_root); }\n}\n");
+    output.push_str("\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase);\nstatic void kiln_graph_release_module_instance(void *context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_graph_context **link;\n    if (graph == NULL) return;\n    if (graph->realm != NULL) {\n        link = &graph->realm->instances;\n        while (*link != NULL && *link != graph) link = &(*link)->next_instance;\n        if (*link == graph) *link = graph->next_instance;\n        if (graph->realm->current_graph == graph) graph->realm->current_graph = graph->realm->instances;\n    }\n    if (graph->instance != NULL && graph->instance->roots_registered)\n        (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n    free(graph->instance);\n    free(graph);\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL ||\n        graph->realm == NULL || graph->host.module_owner == NULL ||\n        (graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active)) return;\n    owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner };\n    (void)kiln_realm_gc_mark_value(heap, &owner_root);\n}\n");
 }
 
 #[cfg(test)]
@@ -3564,6 +3564,7 @@ extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
              kiln_gc_visit_roots_fn visit_roots, void *context, uint32_t flags);
 extern void *kiln_c99_external_owner_create(void *context,
              kiln_gc_visit_roots_fn visit_roots, void (*release_instance)(void *context));
+extern void kiln_c99_external_owner_detach(void *owner);
 extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
@@ -3581,6 +3582,7 @@ extern int kiln_c99_process_object(kiln_value *result);
 extern int kiln_c99_node_incoming_message_prototype(kiln_value *result);
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
+#define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
 #define KILN_C99_HINT_STRING 1
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
@@ -3832,9 +3834,9 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         "typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
-         typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n}} kiln_graph_realm_state;\n\n\
-         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
-         struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n}};\n{linkage_names}",
+         typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *instances;\n    int host_initialized;\n    int reset_requested;\n}} kiln_graph_realm_state;\n\n\
+         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
+         struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
     );
@@ -4225,7 +4227,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         writeln!(output, "    {{ const uint8_t *bytes = NULL; uint64_t length = 0; if (kiln_realm_argv_at(0, &bytes, &length) == KILN_C99_OK && kiln_c99_filename_matches(arguments[0], (const char *)bytes, (size_t)length)) {{ graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->instance->require_contexts[{base_index}], kiln_graph_gc_visit_roots, graph); }} }}").unwrap();
     }
     output.push_str(
-        "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_roots, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->realm->cli : NULL, operation, argc, arguments, result);\n}\n",
+        "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_roots, graph);\n}\n\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    int status;\n    if (graph == NULL || graph->instance == NULL) return KILN_C99_HOST_ERROR;\n    graph->instance->active_calls++;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) status = kiln_graph_create_require(graph, argc, arguments, result);\n    else if (operation == KILN_C99_HOST_MODULE_LOADER) status = kiln_graph_module_loader(graph, argc, arguments, result);\n    else status = kiln_cli_host_call(&graph->realm->cli, operation, argc, arguments, result);\n    graph->instance->active_calls--;\n    return status;\n}\n",
     );
     // The module a worker names by its path (`new Worker(path)`, realms issue 06), or -1: every
     // module of the program a realm can run as its entry. Matched by its project-relative path at
@@ -4500,8 +4502,9 @@ static int kiln_graph_enter_inner(void *opaque) {
         if (status != 0) return status;
         graph->instance->roots_registered = 1;
         graph->host.module_owner = kiln_c99_external_owner_create(
-            graph, kiln_graph_gc_visit_roots, NULL);
+            graph, kiln_graph_gc_visit_roots, kiln_graph_release_module_instance);
         if (graph->host.module_owner == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (!graph->realm->host_initialized) {
         /* A realm hosted beside others writes its standard streams where its host said. */
         if (graph->realm->cli.output != NULL)
             kiln_c99_realm_capture_output(graph->realm->cli.output, graph->realm->cli.error_output);
@@ -4521,6 +4524,7 @@ static int kiln_graph_enter_inner(void *opaque) {
         )
         .unwrap();
     }
+    output.push_str("        graph->realm->host_initialized = 1;\n        }\n");
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
             let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
@@ -5083,6 +5087,34 @@ static int kiln_graph_enter_inner(void *opaque) {
         .unwrap();
     }
     output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
+    output.push_str("\nstatic void kiln_graph_destroy_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n        if (graph->instance != NULL && graph->instance->roots_registered) (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n        free(graph->instance); free(graph); graph = next;\n    }\n}\n");
+    output.push_str("\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if ((!kiln_c99_string_equals_ascii(arguments[0], \"importActual\", 12) && !kiln_c99_string_equals_ascii(arguments[0], \"import\", 6)) || argc != 4) return KILN_C99_INVALID_ARGUMENT;\n    if (arguments[1].tag != KILN_VALUE_STRING || arguments[2].tag != KILN_VALUE_STRING || arguments[3].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+            continue;
+        }
+        let path = node.path.to_string_lossy();
+        let url = Url::from_file_path(&node.path)
+            .ok()
+            .map(|value| value.to_string());
+        if let Some(url) = url {
+            writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[3], {}, (size_t){})) target = {index};",
+                native_c_string(&url), url.len()).unwrap();
+            writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){})) referrer_valid = 1;",
+                native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+        }
+    }
+    output.push_str("    if (target < 0 || !referrer_valid) return KILN_C99_CONTROL_ERROR; /* The adapter resolves specifiers; this capability only instantiates compiled targets. */\n    selected = graph->realm->current_graph;\n    if (selected == NULL) return KILN_C99_CONTROL_ERROR;\n    if (graph->realm->reset_requested) {\n        kiln_graph_context *fresh = (kiln_graph_context *)calloc(1, sizeof *fresh);\n        if (fresh == NULL) return KILN_C99_OUT_OF_MEMORY;\n        fresh->instance = (kiln_graph_module_instance *)calloc(1, sizeof *fresh->instance);\n        if (fresh->instance == NULL) { free(fresh); return KILN_C99_OUT_OF_MEMORY; }\n        fresh->realm = graph->realm; fresh->host = graph->host; fresh->host.context = fresh; fresh->host.module_context = fresh; fresh->host.module_owner = NULL;\n        fresh->instance->result.tag = KILN_VALUE_UNDEFINED; fresh->instance->entry_result.tag = KILN_VALUE_UNDEFINED; fresh->instance->worker_entry = (size_t)target + 1;\n        fresh->next_instance = fresh->realm->instances; fresh->realm->instances = fresh; fresh->realm->current_graph = fresh;\n        fresh->realm->reset_requested = 0;\n        status = kiln_graph_enter(fresh);\n        if (status != KILN_C99_OK) { fresh->realm->current_graph = selected; return status; }\n        selected = fresh;\n    } else {\n        status = kiln_graph_ensure_module(selected, (size_t)target);\n        if (status != KILN_C99_OK) return status;\n    }\n    if (selected->instance->module_states[target].module_settling && selected->instance->module_states[target].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */) { *result = selected->instance->module_states[target].completion_promise; return KILN_C99_OK; }\n    switch (target) {\n");
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+            writeln!(
+                output,
+                "        case {index}: *result = selected->instance->namespaces[{index}]; return KILN_C99_OK;"
+            )
+            .unwrap();
+        }
+    }
+    output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
     output.push_str(
         r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
  * already has the command line. The strings are copied on the other side of this call. `output`
@@ -5096,8 +5128,8 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
 
 /* A worker's realm is over: its code is the one its end decided, whatever teardown says. */
 static int kiln_cli_end_worker_realm(uint64_t worker_realm, kiln_graph_context *graph, int code) {
+    kiln_graph_destroy_instances(graph->realm);
     (void)kiln_realm_destroy(worker_realm);
-    free(graph);
     return code;
 }
 
@@ -5169,7 +5201,6 @@ typedef struct kiln_cli_realm_run {
     kiln_graph_context *graph;
     /* Realm services and module-instance values have separate owners. */
     kiln_graph_realm_state realm_state;
-    kiln_graph_module_instance module_instance;
     uint64_t realm;
     const char *phase;
     int status;
@@ -5197,7 +5228,15 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
         return;
     }
     graph->realm = &run->realm_state;
-    graph->instance = &run->module_instance;
+    graph->instance = (kiln_graph_module_instance *)calloc(1, sizeof *graph->instance);
+    if (graph->instance == NULL) {
+        free(graph);
+        run->graph = NULL;
+        kiln_cli_warn("kiln: out of memory for the module instance", NULL);
+        return;
+    }
+    graph->realm->instances = graph;
+    graph->realm->current_graph = graph;
     graph->realm->cli.output = output;
     graph->realm->cli.error_output = error_output;
     graph->instance->worker_entry = worker_entry;
@@ -5392,8 +5431,8 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         if (natural < 0) status = KILN_C99_CONTROL_ERROR;
         else natural_exit_present = natural;
     }
+    kiln_graph_destroy_instances(&run->realm_state);
     destroy_status = kiln_realm_destroy(realm);
-    free(graph);
     free(run);
     if (exit_asked) return (int)exit_requested;
     /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller

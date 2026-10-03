@@ -1113,6 +1113,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ASSERT_OK, 385, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR, 386, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE, 387, Direct; 0, 0),
+    (KILN_C99_METHOD_MODULE_LOADER_RAW, 574, Direct; 0, 0),
     // `require("node:module")`, which node answers with the `Module` class rather than with a
     // namespace. It gets a code of its own rather than borrowing the unmaterialized placeholder
     // above: two values sharing a code are `===` in this runtime, and `require("node:module")`
@@ -3005,6 +3006,7 @@ macro_rules! header_prefix {
  * This is an operation number, not a field in kiln_host, so the two-word host ABI remains
  * stable across the standalone and generated runtimes. */
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
+#define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)

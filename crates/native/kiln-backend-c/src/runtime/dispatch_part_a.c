@@ -2221,6 +2221,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         return kiln_c99_commonjs_require_value(result, kiln_c99_default_require, NULL);
     }
+    if (code == KILN_C99_METHOD_MODULE_LOADER_RAW) {
+        if (host == NULL || host->call == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "module loader capability is unavailable");
+        return host->call(host->context, KILN_C99_HOST_MODULE_LOADER,
+                          (uint16_t)argc, args, result);
+    }
     /* The `Module` class `require("node:module")` hands back. It exists so that `typeof` and
      * `module.createRequire` answer -- which is the whole of what a program reads off it here --
      * and constructing a module record is not something this backend has: its graph is resolved

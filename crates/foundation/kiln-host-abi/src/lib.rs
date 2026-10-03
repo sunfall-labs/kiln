@@ -6,14 +6,16 @@
 use kiln_string::StringUnits;
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 6;
+pub const HOST_ABI_VERSION: u32 = 7;
 
 /// Internal native runtime operation that returns a realm-owned GC callable. It intentionally
 /// lives outside [`HostOp`], whose result is the scalar `HostValue` ABI.
 pub const HOST_OP_MODULE_CREATE_REQUIRE: u16 = 0x7FF0;
+pub const HOST_OP_MODULE_LOADER: u16 = 0x7FF1;
 
 const _: () = {
     assert!(HOST_OP_MODULE_CREATE_REQUIRE > HostOp::TransferRegion as u16);
+    assert!(HOST_OP_MODULE_LOADER > HostOp::TransferRegion as u16);
 };
 
 /// Operations a compiled program can request from its host.

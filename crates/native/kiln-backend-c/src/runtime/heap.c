@@ -4103,6 +4103,14 @@ void *kiln_c99_external_owner_create(void *context, kiln_gc_visit_roots_fn visit
     return owner;
 }
 
+void kiln_c99_external_owner_detach(void *opaque) {
+    kiln_gc_external_owner *owner = (kiln_gc_external_owner *)opaque;
+    if (owner == NULL) return;
+    owner->context = NULL;
+    owner->visit_roots = NULL;
+    owner->release_context = NULL;
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     return kiln_c99_gc_alloc_ex(kind, size, 1);
 }

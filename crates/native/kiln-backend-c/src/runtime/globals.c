@@ -137,6 +137,10 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleCreateRequire", sizeof("__kilnHostModuleCreateRequire") - 1,
                                           kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
                                           0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleLoader", sizeof("__kilnHostModuleLoader") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_MODULE_LOADER_RAW),
+                                          0, 1, 1);
 #if KILN_RETAIN_GROUP_NODE_CRYPTO
     if (status == KILN_C99_OK)
         status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyImport", sizeof("__kilnCryptoKeyImport") - 1,

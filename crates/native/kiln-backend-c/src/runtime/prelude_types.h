@@ -2327,6 +2327,7 @@ typedef struct kiln_gc_cell {
 extern void *kiln_c99_external_owner_create(void *context,
                                           kiln_gc_visit_roots_fn visit_roots,
                                           kiln_gc_release_external_context_fn release_context);
+extern void kiln_c99_external_owner_detach(void *owner);
 extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
 extern void kiln_c99_closure_set_external_owner(kiln_closure *closure, void *owner);
 extern int kiln_c99_val_make_cell_owned(kiln_val *slot, void *owner);
