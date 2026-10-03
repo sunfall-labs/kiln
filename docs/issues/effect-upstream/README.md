@@ -13,6 +13,14 @@ Evidence: `.scratch/effect-oracle/all.json` in the owned effect-complete worktre
 The Porffor page's published denominator and runner differ; its percentage is
 not interchangeable with this inventory.
 
+The complete Bun 1.4.2 direct-source reference registers the same 11,019 cases:
+10,936 pass, 28 fail and 55 skip across all 322 files, with no incomplete files.
+Ten failures name unimplemented loader/reset capabilities; the remaining failures
+retain genuine runtime, formatting, assertion or child-process differences from
+the official Node run. `bun-reference.json` records the case IDs, pin, adapter
+digests and full report digest. These are correctness counts, not performance
+measurements. Runtime-specific skip modes are preserved and compared explicitly.
+
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
 `vitest.setup.ts`, retains per-file logs and case IDs, and records timeouts,
