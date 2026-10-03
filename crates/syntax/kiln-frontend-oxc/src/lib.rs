@@ -2263,38 +2263,39 @@ fn parse_source_in_context_with_units(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
-    let has_unshadowed_eval = if !parsed.panicked && parsed.diagnostics.is_empty() {
-        let semantic = SemanticBuilder::new()
-            .with_build_nodes(true)
-            .build(&parsed.program)
-            .semantic;
-        let scoping = semantic.scoping();
-        semantic.nodes().iter().any(|node| {
-            let AstKind::CallExpression(call) = node.kind() else {
-                return false;
-            };
-            matches!(&call.callee, Expression::Identifier(identifier)
-                if identifier.name == "eval" && identifier.is_global_reference(scoping))
-        })
-    } else {
-        false
-    };
-
     if let Some(demanded_exports) = demanded_exports
         && !parsed.panicked
         && parsed.diagnostics.is_empty()
         && early_errors_with_source_units(&parsed, source_units).is_empty()
         && !has_unexported_top_level_class_heritage(&parsed.program)
-        && !has_unshadowed_eval
     {
-        expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
-        dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
-        // Oxc's side-effect model assumes coercions are pure and that some global functions
-        // never throw; guard what the language can observe before it runs (issue 19).
-        dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
-        Compressor::new(&allocator)
-            .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
-        dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+        // Direct eval can resolve any lexical binding in its caller, including when a local
+        // parameter named `eval` holds the intrinsic function. The static analyzer cannot prove
+        // the callee value, so any syntactic identifier call named eval makes DCE unsafe here.
+        let has_eval_call = if parsed.panicked || !parsed.diagnostics.is_empty() {
+            false
+        } else {
+            let semantic = SemanticBuilder::new()
+                .with_build_nodes(true)
+                .build(&parsed.program)
+                .semantic;
+            semantic.nodes().iter().any(|node| {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    return false;
+                };
+                matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "eval")
+            })
+        };
+        if !has_eval_call {
+            expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+            dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
+            // Oxc's side-effect model assumes coercions are pure and that some global functions
+            // never throw; guard what the language can observe before it runs (issue 19).
+            dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
+            Compressor::new(&allocator)
+                .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+            dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+        }
     }
     let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
         Vec::new()
