@@ -65,7 +65,14 @@ function matchesExpectedError(err: any, expected: any): boolean {
   return false;
 }
 
-function isDeepEqual(a: any, b: any, strict: boolean): boolean {
+type ComparedPairs = { left: any[]; right: any[] };
+
+function isDeepEqual(
+  a: any,
+  b: any,
+  strict: boolean,
+  compared: ComparedPairs,
+): boolean {
   if (strict ? Object.is(a, b) : a == b) {
     return true;
   }
@@ -75,12 +82,21 @@ function isDeepEqual(a: any, b: any, strict: boolean): boolean {
   if (Array.isArray(a) !== Array.isArray(b)) {
     return false;
   }
+  // Deep equality is defined over object graphs, not just trees. Remember
+  // object pairs before descending so self references and mutual cycles end.
+  for (let i = 0; i < compared.left.length; i++) {
+    if (compared.left[i] === a && compared.right[i] === b) {
+      return true;
+    }
+  }
+  compared.left.push(a);
+  compared.right.push(b);
   if (Array.isArray(a)) {
     if (a.length !== b.length) {
       return false;
     }
     for (let i = 0; i < a.length; i++) {
-      if (!isDeepEqual(a[i], b[i], strict)) {
+      if (!isDeepEqual(a[i], b[i], strict, compared)) {
         return false;
       }
     }
@@ -96,11 +112,15 @@ function isDeepEqual(a: any, b: any, strict: boolean): boolean {
     if (!Object.prototype.hasOwnProperty.call(b, key)) {
       return false;
     }
-    if (!isDeepEqual(a[key], b[key], strict)) {
+    if (!isDeepEqual(a[key], b[key], strict, compared)) {
       return false;
     }
   }
   return true;
+}
+
+function deepEqualGraph(a: any, b: any, strict: boolean): boolean {
+  return isDeepEqual(a, b, strict, { left: [], right: [] });
 }
 
 export function fail(
@@ -219,7 +239,7 @@ export function notStrictEqual(actual: any, expected: any, message?: any): void 
 }
 
 export function deepEqual(actual: any, expected: any, message?: any): void {
-  if (!isDeepEqual(actual, expected, false)) {
+  if (!deepEqualGraph(actual, expected, false)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -237,7 +257,7 @@ export function deepEqual(actual: any, expected: any, message?: any): void {
 }
 
 export function notDeepEqual(actual: any, expected: any, message?: any): void {
-  if (isDeepEqual(actual, expected, false)) {
+  if (deepEqualGraph(actual, expected, false)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -255,7 +275,7 @@ export function notDeepEqual(actual: any, expected: any, message?: any): void {
 }
 
 export function deepStrictEqual(actual: any, expected: any, message?: any): void {
-  if (!isDeepEqual(actual, expected, true)) {
+  if (!deepEqualGraph(actual, expected, true)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -273,7 +293,7 @@ export function deepStrictEqual(actual: any, expected: any, message?: any): void
 }
 
 export function notDeepStrictEqual(actual: any, expected: any, message?: any): void {
-  if (isDeepEqual(actual, expected, true)) {
+  if (deepEqualGraph(actual, expected, true)) {
     if (message instanceof Error) {
       throw message;
     }
