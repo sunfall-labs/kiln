@@ -2178,10 +2178,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
             }
             if (kiln_c99_error_name(target.bits) != NULL) {
-                *out = kiln_c99_builtin(target.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
-                                            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
-                                            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
-                return KILN_C99_OK;
+                return kiln_c99_error_prototype(target.bits, out);
             }
             {
                 kiln_typed_kind typed_kind;

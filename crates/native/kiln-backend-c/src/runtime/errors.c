@@ -42,6 +42,38 @@ static uint64_t kiln_c99_error_kind(kiln_value value) {
     return 0;
 }
 
+/* A built-in error constructor's public `prototype` may be replaced during shared TypeScript
+ * bootstrap (errors.ts builds the ordinary per-kind objects). Internal throws must consult that
+ * same callable store so they use exactly the prototype the language exposes. Before bootstrap
+ * has installed one, the historical Error.prototype fallback is safe. */
+int kiln_c99_error_prototype(uint64_t kind, kiln_value *out) {
+    kiln_value store;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kind == KILN_C99_BUILTIN_ERROR) {
+        *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+        return KILN_C99_OK;
+    }
+    if (kind == KILN_C99_BUILTIN_AGGREGATE_ERROR) {
+        *out = kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE);
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_error_name(kind) == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_callable_store(kiln_c99_builtin(kind), &store, 0);
+    if (status == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT) {
+        kiln_value candidate;
+        status = kiln_c99_get(NULL, store, "prototype", 9, &candidate, 0, NULL);
+        if (status == KILN_C99_OK &&
+            (candidate.tag == KILN_VALUE_OBJECT || candidate.tag == KILN_VALUE_BUILTIN)) {
+            *out = candidate;
+            return KILN_C99_OK;
+        }
+    }
+    if (status != KILN_C99_OK && status != KILN_C99_THROWN) return status;
+    *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_error_stack_accessors(kiln_value *getter, kiln_value *setter) {
     void *getter_slot = NULL;
     void *setter_slot = NULL;
@@ -121,6 +153,7 @@ int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value messag
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
     kiln_value frames;
+    kiln_value prototype;
     kiln_value text = message.tag == KILN_VALUE_UNDEFINED ? kiln_c99_from_units(NULL, 0)
                                                           : kiln_c99_text(message);
     int status;
@@ -146,10 +179,10 @@ int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value messag
     /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
      * does afterwards can add or remove it. */
     kiln_c99_object_of(error)->error_brand = 1;
-    kiln_c99_object_of(error)->prototype = kiln_c99_builtin(
-        kind == KILN_C99_BUILTIN_AGGREGATE_ERROR
-            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
-            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+    status = kiln_c99_error_prototype(kind, &prototype);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_heap_store_value(kiln_c99_object_of(error),
+                              &kiln_c99_object_of(error)->prototype, prototype);
     status = capture_enabled ? kiln_c99_capture_error_frames(&frames, frame_limit)
                              : (frames = kiln_c99_undefined(), KILN_C99_OK);
     if (status == KILN_C99_OK)

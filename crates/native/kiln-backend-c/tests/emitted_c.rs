@@ -1188,6 +1188,7 @@ fn runtime_prelude_size() {
     // dynamic object binding initialization, literal callback search patterns and correct
     // Proxy object-tag reads bring the prelude to 81,432 lines. Error formatting and brand
     // policy remain shared TypeScript; these are activation, binding and property kernels.
+    // Implicit errors reuse the subtype prototypes installed by shared TypeScript.
     const CEILING_LINES: usize = 81_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
