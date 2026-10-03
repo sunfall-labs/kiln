@@ -52,6 +52,15 @@ replacement, text encoding and WebCrypto. Focused results from those fixes must
 not be added to this older run. A fresh complete run on one frozen compiler is
 required for an updated comparison.
 
+Later focused runs on frozen compilers pass all 115 selected compression and
+SchemaAST cases, and all 206 selected Crypto and SchemaBinary cases, under both
+native and Bun. Generated-schema tests pass 14 of 15 under both runtimes; native
+still misses the linked child runner's completion output, while Bun's child fails
+in its internal stream initialization. Matching outcome counts do not resolve
+those different failures. `native-focused-reference.json` retains the separate
+compiler identities, source/adapter/report digests and failing case evidence.
+These subsets are not an updated whole-suite score.
+
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
 `vitest.setup.ts`, retains per-file logs and case IDs, and records timeouts,
