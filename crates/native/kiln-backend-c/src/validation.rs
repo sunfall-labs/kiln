@@ -395,9 +395,17 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Performance
             | kiln_ir::Builtin::StructuredClone,
         ) => Ok(()),
-        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Eval | kiln_ir::Builtin::TypeError) => {
-            Ok(())
-        }
+        // These have canonical native values in builtin_load. Compiler-created private
+        // references do not read the replaceable source-level global binding.
+        Instruction::LoadIntrinsicBuiltin(
+            kiln_ir::Builtin::Eval
+            | kiln_ir::Builtin::TypeError
+            | kiln_ir::Builtin::Math
+            | kiln_ir::Builtin::Number
+            | kiln_ir::Builtin::String
+            | kiln_ir::Builtin::Date
+            | kiln_ir::Builtin::ParseInt,
+        ) => Ok(()),
         Instruction::LoadIntrinsicBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the intrinsic `{builtin:?}` builtin in the native backend"),
         }),
