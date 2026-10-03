@@ -1218,7 +1218,7 @@ fn emitted_async_module_emits_publish_exports() {
     ))
     .expect("async module emits");
     assert!(generated.source.contains(&format!(
-        "void {}_publish_exports(kiln_value *exports)",
+        "void {}_publish_exports(kiln_host *host, kiln_value *exports)",
         generated.symbol
     )));
     assert!(

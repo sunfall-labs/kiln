@@ -52,6 +52,11 @@ int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise,
                                    0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                    KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
     if (status != KILN_C99_OK) return status;
+    /* Promise reactions run later, when the scheduler's host may belong to another module
+     * generation. Keep this continuation bound to the graph that created the completion job. */
+    kiln_c99_closure_of(fulfilled)->module_host = kiln_c99_module_host(host);
+    kiln_c99_closure_set_external_owner(kiln_c99_closure_of(fulfilled),
+                                        host != NULL ? host->module_owner : NULL);
     kiln_c99_gc_keep_alive(&fulfilled);
     kiln_c99_gc_keep_alive(&input_promise);
     captured[1] = kiln_val_from_boundary(kiln_c99_number(1.0));
@@ -60,6 +65,9 @@ int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise,
                                    0, 1, 0, 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
                                    KILN_VAL_UNDEFINED, 0, 16, 0, 0, captured, 2);
     if (status != KILN_C99_OK) return status;
+    kiln_c99_closure_of(rejected)->module_host = kiln_c99_module_host(host);
+    kiln_c99_closure_set_external_owner(kiln_c99_closure_of(rejected),
+                                        host != NULL ? host->module_owner : NULL);
     kiln_c99_gc_keep_alive(&fulfilled);
     kiln_c99_gc_keep_alive(&rejected);
     kiln_c99_gc_keep_alive(&input_promise);

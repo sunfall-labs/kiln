@@ -373,6 +373,8 @@ static inline uint64_t kiln_c99_realm_generation(void) {
 
 /* A unit's realm block (see `kiln_c99_unit` in `prelude_types.h`). */
 extern kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache);
+extern kiln_val *kiln_c99_unit_vals_for_host(kiln_host *host, kiln_c99_unit *unit,
+                                              kiln_c99_unit_cache *cache);
 #ifndef KILN_C99_UNIT_VALS_DEFINED
 #define KILN_C99_UNIT_VALS_DEFINED
 static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {

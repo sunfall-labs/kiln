@@ -939,7 +939,7 @@ fn render_prepare_module_cells(
         .collect::<BTreeMap<_, _>>();
     writeln!(
         output,
-        "int {prepare_symbol}(kiln_value *cells, size_t count) {{"
+        "int {prepare_symbol}(kiln_host *host, kiln_value *cells, size_t count) {{"
     )
     .unwrap();
     writeln!(output, "    if (count != (size_t){} || (count != 0 && cells == NULL)) return KILN_C99_INVALID_ARGUMENT;", module.exports.len()).unwrap();
@@ -956,7 +956,7 @@ fn render_prepare_module_cells(
             }
         )
         .unwrap();
-        writeln!(output, "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}").unwrap();
+        writeln!(output, "    {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}").unwrap();
     }
     for (index, binding) in module.exports.iter().enumerate() {
         if slots.contains_key(&binding.local_slot) {
@@ -3135,7 +3135,7 @@ fn render_entry(
                 if boxed_imports.contains(&slot) {
                     writeln!(
                         output,
-                        "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+                        "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int cell_status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (cell_status != KILN_C99_OK) return cell_status; }}"
                     )
                     .unwrap();
                 }
@@ -3167,6 +3167,9 @@ fn render_entry(
         0, NULL, 0
     );
     if (status != KILN_C99_OK) return status;
+    kiln_c99_closure_of(entry_closure)->module_host = kiln_c99_module_host(host);
+    kiln_c99_closure_set_external_owner(kiln_c99_closure_of(entry_closure),
+                                        host != NULL ? host->module_owner : NULL);
     status = kiln_c99_call(host, result, entry_closure, kiln_c99_undefined(), NULL, 0, depth, thrown);
     if (status == KILN_C99_THROWN) {{
         *result = kiln_c99_text(*thrown);
@@ -3366,7 +3369,7 @@ fn render_publish_exports(
         if module_scope {
             writeln!(
                 output,
-                "void {public_symbol}_publish_exports(kiln_value *exports) {{\n    if (exports == NULL) return;"
+                "void {public_symbol}_publish_exports(kiln_host *host, kiln_value *exports) {{\n    if (exports == NULL) return;"
             )
             .unwrap();
             for (index, binding) in module_prog.exports.iter().enumerate() {
@@ -4152,23 +4155,27 @@ fn render_unit_state(
     writeln!(
         output,
         "static _Thread_local kiln_c99_unit_cache {symbol}_unit_cached;\n\
-         static inline __attribute__((unused)) kiln_val *{symbol}_unit_vals(void) {{ return kiln_c99_unit_vals(&{symbol}_unit, &{symbol}_unit_cached); }}"
+         static inline __attribute__((unused)) kiln_val *{symbol}_unit_vals(kiln_host *host) {{ return kiln_c99_unit_vals_for_host(host, &{symbol}_unit, &{symbol}_unit_cached); }}"
     )
     .unwrap();
     if globals > 0 {
-        writeln!(output, "#define {symbol}_globals ({symbol}_unit_vals())").unwrap();
+        writeln!(
+            output,
+            "#define {symbol}_globals ({symbol}_unit_vals(host))"
+        )
+        .unwrap();
     }
     if template_sites > 0 {
         writeln!(
             output,
-            "#define {symbol}_template_sites ({symbol}_unit_vals() + {globals})"
+            "#define {symbol}_template_sites ({symbol}_unit_vals(host) + {globals})"
         )
         .unwrap();
     }
     if compact_cells > 0 {
         writeln!(
             output,
-            "#define {symbol}_cell_slots ({symbol}_unit_vals() + {})",
+            "#define {symbol}_cell_slots ({symbol}_unit_vals(host) + {})",
             globals + template_sites
         )
         .unwrap();
@@ -5756,7 +5763,7 @@ fn render_runtime_module(
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
     writeln!(
         output,
-        "void {symbol}_publish_exports(kiln_value *exports) {{\n    (void)exports;\n}}"
+        "void {symbol}_publish_exports(kiln_host *host, kiln_value *exports) {{\n    (void)host; (void)exports;\n}}"
     )
     .unwrap();
     render_namespace_wrapper(&mut output, symbol);

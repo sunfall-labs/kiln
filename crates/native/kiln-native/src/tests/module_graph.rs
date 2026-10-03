@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native module-instance integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-module-instance-reset");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+import * as old from "./target.mjs";
+const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+const retained = old.retained;
+loader("reset");
+const current = await import("./target.mjs");
+console.log(old.value, current.value, old === current, retained());
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        r#"
+const generation = (globalThis.__moduleInstanceGeneration ?? 0) + 1;
+globalThis.__moduleInstanceGeneration = generation;
+export const value = generation;
+export function retained() { return generation; }
+"#,
+    )
+    .expect("write target");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("module-instance graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("module-instance graph builds and runs");
+    assert_eq!(report.stdout, b"1 2 false 1\n");
+}
+
+#[test]
 fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

@@ -6546,9 +6546,9 @@ fn two_realms_running_one_unit_keep_their_own_module_globals() {
     let generated = emit(&top).expect("a unit with a module global emits");
     let symbol = &generated.symbol;
     assert!(
-        generated
-            .source
-            .contains(&format!("#define {symbol}_globals ({symbol}_unit_vals())")),
+        generated.source.contains(&format!(
+            "#define {symbol}_globals ({symbol}_unit_vals(host))"
+        )),
         "module globals are reached through the realm's block"
     );
     assert!(
@@ -6570,6 +6570,7 @@ static void kiln_test_enter(kiln_gc_heap *heap) {{
     kiln_test_generation += 1;
 }}
 int main(void) {{
+    kiln_host *host = NULL;
     kiln_gc_heap *first;
     kiln_gc_heap *second;
     kiln_value closure_one, closure_two, read_one, read_two, thrown = kiln_c99_undefined();

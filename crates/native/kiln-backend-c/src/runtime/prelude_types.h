@@ -675,6 +675,9 @@ typedef struct kiln_data_view {
  * interpretation of operation numbers and may replace *result. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_c99_unit kiln_c99_unit;
+typedef kiln_val *(*kiln_host_unit_values_fn)(void *module_context,
+                                              const kiln_c99_unit *unit);
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
@@ -682,6 +685,9 @@ typedef struct kiln_host {
     void *module_context;
     /* GC-managed owner for module-context storage, null for ordinary embedding hosts. */
     void *module_owner;
+    /* Optional per-module-instance state resolver; absent on ordinary hosts. */
+    kiln_host_unit_values_fn module_unit_values;
+    uint64_t module_instance_id;
 } kiln_host;
 
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
@@ -839,6 +845,7 @@ extern int kiln_realm_gc_mark_roots(void *heap);
 typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
 #define KILN_GC_VISIT_BLOCK 1u
 #define KILN_GC_VISIT_VALUE 2u
+#define KILN_GC_VISIT_COMPACT 3u
 extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
                                               void *context);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
@@ -1019,14 +1026,16 @@ typedef struct kiln_native_constructor {
  * the unit and marks, and frees with its heap. `id` names the unit's row in every realm's table;
  * it is assigned once per process, the first time any realm asks. The cache is per thread and
  * trusted only under the realm generation it was filled in, exactly like `kiln_c99_gc_heap`'s. */
-typedef struct kiln_c99_unit {
+struct kiln_c99_unit {
     uint32_t id;
     uint32_t val_count;
-} kiln_c99_unit;
+};
 
 typedef struct kiln_c99_unit_cache {
     const uint64_t *generation_slot;
     uint64_t generation;
+    const void *module_context;
+    uint64_t module_instance_id;
     kiln_val *vals;
 } kiln_c99_unit_cache;
 

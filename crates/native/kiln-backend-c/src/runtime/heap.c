@@ -2113,6 +2113,38 @@ static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_ca
 }
 #endif
 
+/* Module-backed generated code may have more than one instance of the same compiled unit in a
+ * realm. Keep its lexical slots/template sites in the owning graph instance; standalone modules
+ * and embedders without module provenance continue to use the realm's ordinary unit block. */
+kiln_val *kiln_c99_unit_vals_for_host(kiln_host *host, kiln_c99_unit *unit,
+                                      kiln_c99_unit_cache *cache) {
+    const uint64_t *slot;
+    kiln_val *values;
+    if (unit == NULL || cache == NULL) return NULL;
+    if (host != NULL && host->module_context != NULL && host->module_unit_values != NULL) {
+        slot = cache->generation_slot;
+        if (slot == NULL) {
+            cache->generation_slot = kiln_realm_generation_slot();
+            slot = cache->generation_slot;
+        }
+        if (slot != NULL && cache->generation == *slot &&
+            cache->module_context == host->module_context &&
+            cache->module_instance_id == host->module_instance_id && cache->vals != NULL)
+            return cache->vals;
+        values = host->module_unit_values(host->module_context, unit);
+        if (values != NULL) {
+            cache->generation = slot != NULL ? *slot : 0;
+            cache->module_context = host->module_context;
+            cache->module_instance_id = host->module_instance_id;
+            cache->vals = values;
+            return values;
+        }
+    }
+    cache->module_context = NULL;
+    cache->module_instance_id = 0;
+    return kiln_c99_unit_vals(unit, cache);
+}
+
 /* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
  * pointer under, for any other cache in compiled C that must not outlive the realm it learned
  * from. */
@@ -5319,6 +5351,11 @@ static int kiln_c99_graph_visit_root(void *opaque, const void *pointer,
         visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count, pointer);
         visit->alias |= kiln_c99_graph_value_in_batch(visit->heap, visit->chunks, visit->count,
                                                       (const kiln_value *)pointer);
+    } else if (kind == KILN_GC_VISIT_COMPACT && pointer != NULL) {
+        kiln_val value = *(const kiln_val *)pointer;
+        if (!KILN_VAL_IS_NUMBER(value) && value >= KILN_TAG_STRING_PREFIX)
+            visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count,
+                                                    (const void *)(uintptr_t)KILN_VAL_PTR(value));
     } else {
         visit->invalid = 1;
         return 1;
@@ -7975,6 +8012,8 @@ static int kiln_c99_gc_owner_visit(void *opaque, const void *pointer, uint32_t k
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     if (kind == KILN_GC_VISIT_VALUE) kiln_c99_gc_mark_value(heap, (const kiln_value *)pointer);
     else if (kind == KILN_GC_VISIT_BLOCK) kiln_c99_gc_mark_block(heap, pointer);
+    else if (kind == KILN_GC_VISIT_COMPACT && pointer != NULL)
+        kiln_c99_gc_mark_val(heap, *(const kiln_val *)pointer);
     else return KILN_C99_INVALID_ARGUMENT;
     return KILN_C99_OK;
 }

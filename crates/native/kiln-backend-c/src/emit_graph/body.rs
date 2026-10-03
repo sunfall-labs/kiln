@@ -161,7 +161,11 @@ fn cache_module_globals(output: &mut String, context_start: usize, symbol: &str)
     }
     let body = output[context_start..].replace(&needle, "kiln_mg[");
     output.truncate(context_start);
-    writeln!(output, "    kiln_val *const kiln_mg = {symbol}_globals;").unwrap();
+    writeln!(
+        output,
+        "    kiln_val *const kiln_mg = {symbol}_unit_vals(ctx->host);"
+    )
+    .unwrap();
     output.push_str(&body);
 }
 
