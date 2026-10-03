@@ -194005,8 +194005,8 @@
             },
             {
               "return_type": "Unknown",
-              "pure": true,
-              "can_throw": false,
+              "pure": false,
+              "can_throw": true,
               "reads_arguments": false
             },
             {

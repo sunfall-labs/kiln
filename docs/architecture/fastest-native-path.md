@@ -248,10 +248,18 @@ Two things make that sound, and both are cheap:
   flagged object bumps one realm counter; the PIC entry records the counter it was filled under.
   V8 calls this a validity cell; one word does it here.
 - **Intrinsics under a realm epoch.** `Math.sqrt`, `Math.round`, `Array.prototype.push`,
-  `.length` on an array or a string: the emitter knows the receiver is the builtin (it emitted
-  `LoadBuiltin(Math)`) and the method is the intrinsic unless the program has written to that
-  builtin. The same counter, bumped by a write to any builtin object, guards `sqrt(a*a + b*b)`
-  emitted as exactly that.
+  `.length` on an array or a string: a compiler-proven intrinsic receiver and the method are
+  intrinsic unless the program has written to that builtin. The same counter, bumped by a write
+  to any builtin object, guards `sqrt(a*a + b*b)` emitted as exactly that. A source spelling
+  such as `Math` or `Array` is an ordinary mutable global-object read; it can invoke an accessor
+  or throw after deletion, so native specialization must preserve or guard that lookup before
+  using builtin identity. Compiler-generated language errors use intrinsic constructors instead
+  of redirecting through a replaced global binding.
+
+  This distinction is visible in the facts snapshot: PostCSS function #9 is the `() => String`
+  fallback at `conformance/thirdparty/postcss.bundle.js:52`. Its read of the source-level `String`
+  binding may invoke a getter or throw if the global was deleted, so the baseline records that
+  function as impure and throwable.
 
 ### The differentiator: a closed world
 
