@@ -827,6 +827,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // bootstrap captures it from the global name and deletes the name before any program
         // line runs; a realm that runs no bootstrap never publishes the name at all.
         let private = new_engine_private(realm);
+        if let Value::Object(object) = &private {
+            object
+                .borrow_mut()
+                .set_non_enumerable("process", self.process_object());
+        }
         globals.define_value(ENGINE_PRIVATE_SLOT, private.clone(), Attributes::BUILT_IN);
         if self.realm_bootstrap.is_some() {
             globals.set_non_enumerable("__kilnPrivate", private);

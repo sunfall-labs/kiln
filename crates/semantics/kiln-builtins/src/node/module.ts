@@ -70,7 +70,7 @@ export const constants = {
 
 // Capture the host capability while the builtin module is initialized so later writes to the
 // public process object cannot redirect createRequire.
-const hostCreateRequire = process?.__kilnNativeModules
+const hostCreateRequire = (globalThis as any).__kilnPrivate.process?.__kilnNativeModules
   ?.__kilnHostModuleCreateRequire;
 
 // In a kiln native binary every module is ahead-of-time compiled, so the

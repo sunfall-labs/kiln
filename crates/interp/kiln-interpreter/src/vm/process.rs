@@ -17,13 +17,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(existing) = &self.process_object {
             return existing.clone();
         }
-        // A realm shared by several machines (a module graph's) has one `process`: the one its
-        // global object was given when the first machine built it. A second machine reaching
-        // `process` must find that one, or a change made through one -- a worker's `env`,
-        // set by the bootstrap before the program runs -- is invisible through the other.
+        // A shared realm keeps its original host identity in the private channel. The
+        // public global may have been replaced between module evaluations.
         if let Some(Some(Value::Object(global))) =
             self.global_objects.get(self.current_realm.0 as usize)
-            && let Some(existing @ Value::Object(_)) = global.borrow().get_own("process").cloned()
+            && let Some(Value::Object(private)) =
+                global.borrow().get_own(ENGINE_PRIVATE_SLOT).cloned()
+            && let Some(existing @ Value::Object(_)) = private.borrow().get_own("process").cloned()
         {
             self.process_object = Some(existing.clone());
             return existing;

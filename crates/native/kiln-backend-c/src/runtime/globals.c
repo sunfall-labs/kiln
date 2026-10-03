@@ -761,6 +761,13 @@ static int kiln_c99_private_object(kiln_value *out) {
     }
     status = kiln_c99_new_object(slot);
     if (status != KILN_C99_OK) return status;
+    {
+        kiln_value process;
+        status = kiln_c99_process_object(&process);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "process", 7, process, 0, 0, 0);
+        if (status != KILN_C99_OK) return status;
+    }
     status = kiln_c99_commit_own_data(*slot, "extensions", 10,
                                       kiln_c99_boolean(kiln_c99_kiln_extensions_on()), 0, 1, 1);
     /* A developer switch for the conformance probes that drive the actor protocol directly: the
