@@ -8107,7 +8107,19 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
                         ppos++;
                         while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t')) ppos++;
                         size_t vstart = ppos;
-                        if (ppos < plen && (p[ppos] == '"' || p[ppos] == '\'')) {
+                        if (ppos + 1 < plen && p[ppos] == '{' && p[ppos + 1] == '}') {
+                            /* Function-constructor parameter binding is source-backed. An empty
+                             * object default is a value, not an unresolved identifier. */
+                            int object_status = kiln_c99_new_object(&dval);
+                            if (object_status != KILN_C99_OK) {
+                                free(params_owned);
+                                kiln_dyn_scope_destroy(&scope);
+                                kiln_dyn_scope_destroy(&captured_scope);
+                                return object_status;
+                            }
+                            kiln_c99_gc_keep_alive(&dval);
+                            ppos += 2;
+                        } else if (ppos < plen && (p[ppos] == '"' || p[ppos] == '\'')) {
                             char q = p[ppos++];
                             vstart = ppos;
                             while (ppos < plen && p[ppos] != q) ppos++;
