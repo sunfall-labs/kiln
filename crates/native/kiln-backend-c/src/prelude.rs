@@ -2900,7 +2900,7 @@ const _: () = assert_refusals_name_themselves(
 // The two collection-cache scans moved from boxed.c into the shared prelude_types.h
 // authority, outside this domain-C manifest. Both still measure the fixed native method
 // registry names, never JavaScript property keys with explicit stored unit lengths.
-pub const C_STRING_LENGTH_SITES: usize = 83;
+pub const C_STRING_LENGTH_SITES: usize = 82;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

@@ -204,6 +204,8 @@ pub struct ObjectData {
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     pub(super) error_brand: bool,
+    /// Frames captured for the lazy Error stack accessor; not a property of the object.
+    pub(super) error_stack_frames: Option<Value>,
     /// The `arguments` brand: `[[Class]]` is "Arguments", which only
     /// `Object.prototype.toString` can see.
     ///
@@ -325,6 +327,7 @@ impl Default for ObjectData {
             weak_ref_object_target: None,
             finalization_cells: Vec::new(),
             error_brand: false,
+            error_stack_frames: None,
             arguments_brand: false,
             buffer_brand: false,
             // Objects start open; closing one is always something a program asked for.

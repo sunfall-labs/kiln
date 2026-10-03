@@ -95,10 +95,14 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
  * beside the `toString` and `constructor` that already work that way. `message` has the same
  * shape: own only when one was passed, and "" from the kind otherwise. */
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
+    return kiln_c99_new_error_limited(out, kind, message, 10);
+}
+
+int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
+                                size_t frame_limit) {
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
-    kiln_value stack;
-    kiln_value prefix;
+    kiln_value frames;
     kiln_value text = message.tag == KILN_VALUE_UNDEFINED ? kiln_c99_from_units(NULL, 0)
                                                           : kiln_c99_text(message);
     int status;
@@ -112,18 +116,13 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
      * does afterwards can add or remove it. */
     kiln_c99_object_of(error)->error_brand = 1;
-    prefix = kiln_c99_static_text(name, strlen(name));
-    if (text.len != 0) {
-        stack = kiln_c99_concat(kiln_c99_concat(prefix, kiln_c99_static_text(": ", 2)), text);
-    } else {
-        stack = prefix;
-    }
-    if (stack.tag != KILN_VALUE_STRING) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
-    /* `stack` first, because that is the order the own keys come out in: the header is attached
-     * by the constructor before the message is. */
-    status = kiln_c99_put(NULL, error, "stack", 5, stack, 0, NULL);
+    kiln_c99_object_of(error)->prototype = kiln_c99_builtin(
+        kind == KILN_C99_BUILTIN_AGGREGATE_ERROR
+            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+    status = kiln_c99_capture_error_frames(&frames, frame_limit);
+    if (status == KILN_C99_OK)
+        kiln_c99_object_of(error)->error_stack_frames = frames;
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }
@@ -134,8 +133,8 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
         return status;
     }
     {
-        /* None of them is enumerated. The reserved one is hidden by its prefix anyway; the
-         * others have to be marked. */
+        /* None of them is enumerated. The reserved ones are hidden by their prefix anyway; the
+         * message has to be marked. */
         kiln_object *object = kiln_c99_object_of(error);
         size_t index;
         if (object->shape != NULL) {

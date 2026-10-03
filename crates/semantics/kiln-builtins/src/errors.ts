@@ -29,7 +29,6 @@
     "AggregateError",
     "Error",
   ];
-
   for (let i = 0; i < errorSubclasses.length; i++) {
     const name = errorSubclasses[i];
     const Ctor = G[name];
@@ -51,15 +50,11 @@
   // The engine-owned primitive returns only activation metadata. Keep public CallSite methods
   // here so both execution engines expose the same ordinary JavaScript facade.
   const ErrorCtor = G.Error || Error;
-  if (ErrorCtor.stackTraceLimit === undefined) defineHidden(ErrorCtor, "stackTraceLimit", 10);
   const captureFrameSnapshots = ErrorCtor.captureStackTrace;
+  if (ErrorCtor.stackTraceLimit === undefined) defineHidden(ErrorCtor, "stackTraceLimit", 10);
   if (typeof captureFrameSnapshots === "function") {
-    function captureStackTrace(target: any, constructorOpt?: Function): void {
-      const frames = captureFrameSnapshots(target, constructorOpt) || [];
+    function stackSites(frames: any[], limit: number): any[] {
       const sites: any[] = [];
-      const configuredLimit = ErrorCtor.stackTraceLimit;
-      const limit = typeof configuredLimit === "number"
-        ? Math.max(0, Math.floor(configuredLimit)) : 0;
       for (let i = 0; i < frames.length && i < limit; i++) {
         const frame = frames[i];
         const site: any = {};
@@ -82,10 +77,24 @@
           : `at ${frame.fileName}`);
         sites.push(site);
       }
+      return sites;
+    }
+
+    function renderStackTrace(target: any, frames: any[], capturedLimit?: number): any {
+      const configuredLimit = ErrorCtor.stackTraceLimit;
+      const limit = capturedLimit === undefined
+        ? (typeof configuredLimit === "number" ? Math.max(0, Math.floor(configuredLimit)) : 0)
+        : capturedLimit;
+      const sites = stackSites(frames, limit);
       const prepare = ErrorCtor.prepareStackTrace;
-      const stack = typeof prepare === "function"
+      return typeof prepare === "function"
         ? prepare.call(ErrorCtor, target, sites)
         : `${target.name || "Error"}${target.message ? `: ${target.message}` : ""}${sites.map((site) => `\n    ${site.toString()}`).join("")}`;
+    }
+
+    function captureStackTrace(target: any, constructorOpt?: Function): void {
+      const frames = captureFrameSnapshots(target, constructorOpt) || [];
+      const stack = renderStackTrace(target, frames);
       Object.defineProperty(target, "stack", {
         value: stack,
         writable: true,
@@ -93,10 +102,38 @@
         configurable: true,
       });
     }
+
     for (let i = 0; i < errorSubclasses.length; i++) {
       const Ctor = G[errorSubclasses[i]];
       if (typeof Ctor === "function") defineHidden(Ctor, "captureStackTrace", captureStackTrace);
     }
+
+    const stackGetter = function (this: any): any {
+      const frames = captureFrameSnapshots(this, undefined, true);
+      if (frames === undefined) return undefined;
+      const stack = renderStackTrace(this, frames, frames.length);
+      Object.defineProperty(this, "stack", {
+        value: stack,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+      return stack;
+    };
+    const stackSetter = function (this: any, value: any): void {
+      Object.defineProperty(this, "stack", {
+        value,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    };
+    Object.defineProperty(ErrorCtor.prototype, "stack", {
+      get: stackGetter,
+      set: stackSetter,
+      configurable: true,
+      enumerable: false,
+    });
   }
 
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).

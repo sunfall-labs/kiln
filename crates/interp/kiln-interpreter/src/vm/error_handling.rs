@@ -139,6 +139,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if matches!(arguments.get(2), Some(Value::Boolean(true)))
+            && let Value::Object(object) = &target
+            && object.borrow().error_brand
+        {
+            return Ok(object
+                .borrow()
+                .error_stack_frames
+                .clone()
+                .unwrap_or(Value::Undefined));
+        }
         if !is_object_type(&target) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "invalid argument to Error.captureStackTrace".to_owned(),
@@ -263,6 +273,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .collect(),
                 )),
             );
+            object.error_stack_frames = Some(Value::Array(ArrayData::new(
+                self.trace()
+                    .into_iter()
+                    .map(|function_name| {
+                        ordinary_object([
+                            ("fileName".to_owned(), Value::String("<kiln>".into())),
+                            (
+                                "functionName".to_owned(),
+                                Value::String(function_name.into()),
+                            ),
+                            ("instruction".to_owned(), Value::Number(0.0)),
+                        ])
+                    })
+                    .collect(),
+            )));
         }
         error
     }

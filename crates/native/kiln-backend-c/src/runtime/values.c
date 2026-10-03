@@ -33,7 +33,7 @@ void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction) 
     kiln_c99_js_frame_top->instruction = instruction;
 }
 
-static kiln_value kiln_c99_builtin(uint64_t code) {
+kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
 
@@ -83,6 +83,32 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
     return status;
 }
 
+/* Error construction records activation metadata while the frames are still live. The public
+ * stack formatting policy belongs to errors.ts; this kernel primitive only copies source/name
+ * data into ordinary values, just like Error.captureStackTrace does. */
+int kiln_c99_capture_error_frames(kiln_value *result, size_t limit) {
+    kiln_value frames;
+    size_t count = 0;
+    if (limit == 0) {
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    int status = kiln_c99_new_array(&frames);
+    if (status != KILN_C99_OK) return status;
+    for (kiln_js_frame *frame = kiln_c99_js_frame_top; frame != NULL;
+         frame = frame->previous) {
+        if (count >= limit) break;
+        kiln_value snapshot;
+        status = kiln_c99_new_frame_snapshot(NULL, &snapshot, frame, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(frames, snapshot);
+        if (status != KILN_C99_OK) return status;
+        ++count;
+    }
+    *result = frames;
+    return KILN_C99_OK;
+}
+
 int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
                                        const kiln_value *args, size_t argc, int depth,
                                        kiln_value *thrown) {
@@ -92,6 +118,13 @@ int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
     int skipping = constructor.tag != KILN_VALUE_UNDEFINED;
     int skipping_facade = 1;
     int status;
+    /* errors.ts uses the already-captured primitive in this internal mode when the public lazy
+     * stack getter is first read. Reserved frame metadata never becomes a reflectable property. */
+    if (argc > 2 && args[2].tag == KILN_VALUE_BOOLEAN && args[2].bits != 0 &&
+        target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand) {
+        *result = kiln_c99_object_of(target)->error_stack_frames;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||
         target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
         target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_SYMBOL ||

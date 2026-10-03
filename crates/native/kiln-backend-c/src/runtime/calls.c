@@ -333,11 +333,34 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     }
     if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_error_name(callee.bits) != NULL) {
         int present = 0;
-        status = kiln_c99_new_error(result, callee.bits,
-                                    argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_value stack_limit_value;
+        size_t frame_limit = 0;
+        status = kiln_c99_get(host, kiln_c99_builtin(KILN_C99_BUILTIN_ERROR),
+                              "stackTraceLimit", 15, &stack_limit_value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (stack_limit_value.tag == KILN_VALUE_NUMBER) {
+            double configured = kiln_c99_as_number(stack_limit_value);
+            if (configured > 0.0) {
+                frame_limit = isinf(configured) || configured >= (double)SIZE_MAX
+                                  ? SIZE_MAX
+                                  : (size_t)floor(configured);
+            }
+        }
+        status = kiln_c99_new_error_limited(result, callee.bits,
+                                            argc > 0 ? args[0] : kiln_c99_undefined(),
+                                            frame_limit);
         if (status != KILN_C99_OK) {
             return status;
         }
+        status = kiln_c99_get_prototype_from_constructor(
+            host, callee,
+            kiln_c99_builtin(callee.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                 ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                 : KILN_C99_BUILTIN_ERROR_PROTOTYPE),
+            &prototype, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_set_prototype(*result, prototype);
+        if (status != KILN_C99_OK) return status;
         /* `new Error(message, { cause })` carries the cause *by identity*, which is the whole
          * reason it exists: a wrapper has to be able to hand back the error it wrapped. Dropping
          * the options argument left the wrapping looking entirely right -- message, name and

@@ -8051,6 +8051,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_trace_object_properties(heap, object);
         kiln_c99_gc_mark_value(heap, &object->prototype);
         kiln_c99_gc_mark_value(heap, &object->boxed_primitive);
+        kiln_c99_gc_mark_value(heap, &object->error_stack_frames);
         kiln_c99_gc_mark_block(heap, object->external_owner);
         break;
     }

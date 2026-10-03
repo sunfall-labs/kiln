@@ -1283,6 +1283,8 @@ typedef struct kiln_object {
     int arguments_brand;
     /* An error, by the same rule as `arguments_brand`: the brand is not a property. */
     int error_brand;
+    /* Error stack activation records are engine metadata, not own properties. */
+    kiln_value error_stack_frames;
     /* How many of `properties` currently have `accessor` set. `kiln_c99_put_mode`'s chain walk
      * exists to find an inherited setter; when a prototype level's count is zero, it has none,
      * and the level costs one pointer follow instead of a scan of its whole property list.

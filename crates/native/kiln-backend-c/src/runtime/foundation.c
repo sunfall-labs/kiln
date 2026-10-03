@@ -593,6 +593,8 @@ static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
                                     int depth, kiln_value *thrown);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
+int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
+                               size_t frame_limit);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
                                                const kiln_value *args, size_t argc, int depth,
