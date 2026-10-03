@@ -43,6 +43,81 @@ delete (globalThis as any).__kilnPortWait;
   const weakSet = WeakMap.prototype.set;
   const weakGet = WeakMap.prototype.get;
   const apply = Reflect.apply;
+  const ByteArray = Uint8Array;
+  const byteLengthGetter = (prototype: any, name: string): any => {
+    if (prototype === undefined) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    return descriptor === undefined ? undefined : descriptor.get;
+  };
+  const TypedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype);
+  const typedArrayBuffer = byteLengthGetter(TypedArrayPrototype, "buffer");
+  const typedArrayByteOffset = byteLengthGetter(TypedArrayPrototype, "byteOffset");
+  const typedArrayByteLength = byteLengthGetter(TypedArrayPrototype, "byteLength");
+  const dataViewPrototype = typeof DataView === "function" ? DataView.prototype : undefined;
+  const dataViewBuffer = byteLengthGetter(dataViewPrototype, "buffer");
+  const dataViewByteOffset = byteLengthGetter(dataViewPrototype, "byteOffset");
+  const dataViewByteLength = byteLengthGetter(dataViewPrototype, "byteLength");
+  const arrayBufferByteLength = byteLengthGetter(ArrayBuffer.prototype, "byteLength");
+  const arrayBufferSlice = ArrayBuffer.prototype.slice;
+  const isArrayBufferView = ArrayBuffer.isView;
+  const sharedArrayBufferByteLength = typeof SharedArrayBuffer === "function"
+    ? byteLengthGetter(SharedArrayBuffer.prototype, "byteLength")
+    : undefined;
+
+  // BufferSource extraction uses captured intrinsic getters, so subclasses, cross-realm views,
+  // and own properties named `buffer`/`byteOffset` cannot spoof the byte window.
+  function bufferSourceBytes(value: any): Uint8Array {
+    if (typedArrayBuffer !== undefined && typedArrayByteOffset !== undefined &&
+        typedArrayByteLength !== undefined) {
+      try {
+        const buffer = apply(typedArrayBuffer, value, []);
+        const offset = apply(typedArrayByteOffset, value, []);
+        const length = apply(typedArrayByteLength, value, []);
+        return new ByteArray(buffer, offset, length);
+      } catch (_) {}
+    }
+    if (dataViewBuffer !== undefined && dataViewByteOffset !== undefined &&
+        dataViewByteLength !== undefined) {
+      try {
+        const buffer = apply(dataViewBuffer, value, []);
+        const offset = apply(dataViewByteOffset, value, []);
+        const length = apply(dataViewByteLength, value, []);
+        return new ByteArray(buffer, offset, length);
+      } catch (_) {}
+    }
+    // The native backend exposes some view fields through branded synthetic reads before it
+    // materializes getter descriptors. Use the engine's internal view predicate before those
+    // fallback reads; JavaScript engines with accessors use the intrinsic path above.
+    if (apply(isArrayBufferView, ArrayBuffer, [value])) {
+      try {
+        return new ByteArray(value.buffer, value.byteOffset, value.byteLength);
+      } catch (_) {}
+    }
+    if (arrayBufferByteLength !== undefined) {
+      try {
+        const length = apply(arrayBufferByteLength, value, []);
+        return new ByteArray(value, 0, length);
+      } catch (_) {}
+    } else {
+      try {
+        apply(arrayBufferSlice, value, [0, 0]);
+        return new ByteArray(value);
+      } catch (_) {}
+    }
+    if (sharedArrayBufferByteLength !== undefined) {
+      try {
+        const length = apply(sharedArrayBufferByteLength, value, []);
+        return new ByteArray(value, 0, length);
+      } catch (_) {}
+    }
+    if (typeof SharedArrayBuffer === "function") {
+      try {
+        apply(SharedArrayBuffer.prototype.slice, value, [0, 0]);
+        return new ByteArray(value);
+      } catch (_) {}
+    }
+    throw new TypeError("CompressionStream chunks must be BufferSource values");
+  }
 
   // The host primitive owns cancellation transport. Public controller identity, WebIDL
   // descriptors and brand checks belong to this ordinary class in both engines.
@@ -2349,8 +2424,8 @@ delete (globalThis as any).__kilnPortWait;
       compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 1);
       const transform = new TransformStream({
         transform: (chunk: any, controller: TransformStreamDefaultController) => {
-          if (!(chunk instanceof Uint8Array)) throw new TypeError("CompressionStream chunks must be Uint8Array values");
-          const result = compressionPrimitive(this, 1, chunk, false) as Uint8Array;
+          const bytes = bufferSourceBytes(chunk);
+          const result = compressionPrimitive(this, 1, bytes, false) as Uint8Array;
           if (result.length) controller.enqueue(result);
         },
         flush: (controller: TransformStreamDefaultController) => {
@@ -2372,8 +2447,8 @@ delete (globalThis as any).__kilnPortWait;
       compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 2);
       const transform = new TransformStream({
         transform: (chunk: any, controller: TransformStreamDefaultController) => {
-          if (!(chunk instanceof Uint8Array)) throw new TypeError("DecompressionStream chunks must be Uint8Array values");
-          const result = compressionPrimitive(this, 1, chunk, false) as Uint8Array;
+          const bytes = bufferSourceBytes(chunk);
+          const result = compressionPrimitive(this, 1, bytes, false) as Uint8Array;
           if (result.length) controller.enqueue(result);
         },
         flush: (controller: TransformStreamDefaultController) => {
