@@ -3,6 +3,9 @@ use kiln_module_resolver::NodeBuiltin;
 #[derive(Debug, Default)]
 pub(super) struct NativeGraphPlan {
     pub(super) excluded: BTreeSet<PathBuf>,
+    /// Resolver-approved runtime alias targets and their static dependency closures. These are
+    /// linked lazily so runtime-generated ESM can import them without making them entry-evaluated.
+    pub(super) runtime_alias_live: BTreeSet<PathBuf>,
     pub(super) failures: BTreeMap<(PathBuf, String), String>,
     pub(super) runtime_failures: BTreeMap<(PathBuf, PathBuf, String), String>,
 }
@@ -22,6 +25,7 @@ pub(super) fn native_graph_plan_with_validator(
         captured_importer: PathBuf,
         target: PathBuf,
         runtime: bool,
+        runtime_alias: bool,
     }
 
     let mut static_reachable = graph.statically_reachable();
@@ -48,6 +52,7 @@ pub(super) fn native_graph_plan_with_validator(
     validate_native_builtins_in_paths(graph, &static_reachable, validate)?;
     let mut plan = NativeGraphPlan::default();
     let mut retained = static_reachable.clone();
+    let mut runtime_alias_live = BTreeSet::new();
     let mut pending = static_reachable
         .iter()
         .flat_map(|path| {
@@ -60,6 +65,7 @@ pub(super) fn native_graph_plan_with_validator(
                     captured_importer: path.clone(),
                     target: dependency.target.clone(),
                     runtime: false,
+                    runtime_alias: false,
                 });
             let runtime = graph.module(path).into_iter().flat_map(move |node| {
                 node.runtime_dependencies
@@ -71,18 +77,38 @@ pub(super) fn native_graph_plan_with_validator(
                         captured_importer: dependency.importer.clone(),
                         target: dependency.target.clone(),
                         runtime: true,
+                        runtime_alias: false,
                     })
             });
             dynamic.chain(runtime)
         })
         .collect::<Vec<_>>();
+    // Runtime-generated module source can import a resolver-approved alias whose target is in
+    // the graph but has no static value edge (for example a type-only source dependency used by
+    // a compiler that emits JavaScript ESM). Treat those aliases like lazy imports so their
+    // target and ordinary dependency closure remain available to the native graph loader.
+    pending.extend(
+        graph
+            .runtime_package_aliases()
+            .iter()
+            .map(|alias| LazyEdge {
+                owner: graph.entry().to_path_buf(),
+                specifier: alias.specifier.clone(),
+                captured_importer: alias.package_root.clone(),
+                target: alias.target.clone(),
+                runtime: true,
+                runtime_alias: true,
+            }),
+    );
     let mut processed = BTreeSet::new();
     while let Some(edge) = pending.pop() {
         if !processed.insert((
             edge.owner.clone(),
             edge.captured_importer.clone(),
             edge.specifier.clone(),
+            edge.target.clone(),
             edge.runtime,
+            edge.runtime_alias,
         )) {
             continue;
         }
@@ -115,6 +141,9 @@ pub(super) fn native_graph_plan_with_validator(
             }
             continue;
         }
+        if edge.runtime_alias {
+            runtime_alias_live.extend(closure.iter().cloned());
+        }
         for path in &closure {
             retained.insert(path.clone());
             for nested in graph.dynamic_dependencies(path) {
@@ -124,6 +153,7 @@ pub(super) fn native_graph_plan_with_validator(
                     captured_importer: path.clone(),
                     target: nested.target.clone(),
                     runtime: false,
+                    runtime_alias: false,
                 });
             }
             if let Some(node) = graph.module(path) {
@@ -137,6 +167,7 @@ pub(super) fn native_graph_plan_with_validator(
                         captured_importer: nested.importer.clone(),
                         target: nested.target.clone(),
                         runtime: true,
+                        runtime_alias: false,
                     });
                 }
             }
@@ -147,7 +178,34 @@ pub(super) fn native_graph_plan_with_validator(
         .map(|node| node.path.clone())
         .filter(|path| !retained.contains(path))
         .collect();
+    plan.runtime_alias_live = runtime_alias_live;
     Ok(plan)
+}
+
+/// Keep resolver-approved runtime alias targets linked and fully addressable, while preserving
+/// their lazy evaluation: module selection only creates namespaces and evaluates the graph entry.
+pub(super) fn include_runtime_aliases_in_demand(
+    graph: &ModuleGraph,
+    demand: &mut kiln_module_graph::LiveDemand,
+    paths: &BTreeSet<PathBuf>,
+) {
+    for path in paths {
+        let Some(node) = graph.module(path) else {
+            continue;
+        };
+        demand.live.insert(path.clone());
+        demand.slots.insert(
+            path.clone(),
+            node.program
+                .exports
+                .iter()
+                .map(|export| export.local_slot)
+                .collect(),
+        );
+        demand
+            .live_imports
+            .extend((0..node.program.imports.len()).map(|index| (path.clone(), index)));
+    }
 }
 
 pub(super) fn validate_native_builtins_in_paths(
@@ -1718,6 +1776,25 @@ pub(super) fn graph_topology_digest(
             bytes.push(0);
         }
     }
+    // Runtime-generated ESM imports are not represented by static module edges. Their alias
+    // table is emitted in the shared graph wrapper, so include the complete resolver-approved
+    // alias-to-linked-module mapping in its cache identity. Omitting this metadata can reuse a
+    // wrapper compiled before the alias existed, even though all module bodies are unchanged.
+    for alias in graph.runtime_package_aliases() {
+        bytes.extend_from_slice(b"runtime-package-alias:");
+        bytes.extend_from_slice(alias.package_root.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.target.to_string_lossy().as_bytes());
+        bytes.push(0);
+        let index = modules
+            .iter()
+            .position(|(node, _)| node.path == alias.target)
+            .unwrap_or(usize::MAX);
+        bytes.extend_from_slice(index.to_string().as_bytes());
+        bytes.push(0);
+    }
     for ((importer, specifier), message) in graph.dynamic_failures() {
         bytes.extend_from_slice(b"dynamic-failure:");
         bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
@@ -1796,6 +1873,21 @@ pub(super) fn graph_shared_topology_digest(
             bytes.extend_from_slice(export.exported.as_bytes());
             bytes.push(0);
         }
+    }
+    // Runtime-generated ESM imports are not represented by static module edges. Their alias
+    // table is emitted in the shared graph wrapper, so include the resolver-approved mapping
+    // in the wrapper's cache identity.
+    for alias in graph.runtime_package_aliases() {
+        bytes.extend_from_slice(b"runtime-package-alias:");
+        bytes.extend_from_slice(alias.package_root.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.target.to_string_lossy().as_bytes());
+        bytes.push(0);
+        let index = indices.get(&alias.target).copied().unwrap_or(usize::MAX);
+        bytes.extend_from_slice(index.to_string().as_bytes());
+        bytes.push(0);
     }
     for ((importer, specifier), message) in graph.dynamic_failures() {
         bytes.extend_from_slice(b"dynamic-failure:");
@@ -2601,6 +2693,14 @@ pub(super) fn write_launcher_dynamic_import(
     output.push_str(
         &r#"
 typedef struct kiln_graph_context kiln_graph_context;
+extern int kiln_node_fs_read_file_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern int kiln_node_fs_realpath_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern void kiln_node_fs_free_bytes(uint8_t *, uint64_t);
+extern int kiln_c99_dynamic_eval_module(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
+extern int kiln_c99_dynamic_module_text(kiln_value, uint8_t **, size_t *);
+static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
+                                        kiln_value *namespace_value, kiln_value *thrown,
+                                        int depth);
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index);
 static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
 static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index);
@@ -2837,8 +2937,18 @@ import_attributes_valid:
     write_actor_module_not_linked(output, modules);
     output.push_str(
         r#"    {
+        kiln_value runtime_namespace = kiln_c99_undefined();
+        kiln_value runtime_failure = kiln_c99_undefined();
+        int runtime_status = kiln_graph_runtime_load_file(
+            graph, specifier, &runtime_namespace, &runtime_failure, depth);
+        if (runtime_status == KILN_C99_OK)
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE,
+                                          kiln_c99_undefined(), &runtime_namespace, 1, depth, thrown);
+        if (runtime_status == KILN_C99_THROWN)
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT,
+                                          kiln_c99_undefined(), &runtime_failure, 1, depth, thrown);
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_new_type_error(&err, "no module loader is installed");
+        (void)kiln_c99_new_type_error(&err, "runtime module loading failed");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
 }
@@ -3197,7 +3307,7 @@ pub(super) fn render_graph_roots(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) {
     output.push_str(
-        "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (graph == NULL) return 0;\n",
+        "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (graph == NULL || graph->realm == NULL) return 0;\n",
     );
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
@@ -3230,6 +3340,7 @@ pub(super) fn render_graph_roots(
         output.push_str("    if (visit(visit_context, &kiln_opentui_namespace, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &kiln_node_ffi_namespace, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
     }
     output.push_str("    { kiln_graph_unit_store *store; for (store = graph->instance->unit_stores; store != NULL; store = store->next) { size_t slot; for (slot = 0; slot < store->unit->val_count; ++slot) if (visit(visit_context, &store->values[slot], KILN_GC_VISIT_COMPACT) != 0) return KILN_C99_HOST_ERROR; } }\n");
+    output.push_str("    { kiln_graph_runtime_module *module; for (module = graph->realm->runtime_modules; module != NULL; module = module->next) if (visit(visit_context, &module->namespace_value, KILN_GC_VISIT_VALUE) != 0 || visit(visit_context, &module->failure, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR; }\n");
     let builtin_skip = modules
         .iter()
         .enumerate()
@@ -3246,7 +3357,7 @@ pub(super) fn render_graph_roots(
     writeln!(output, "    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if ({builtin_skip}) continue;\n        if (visit(visit_context, &graph->instance->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
     output.push_str("static int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) { kiln_graph_context *graph = (kiln_graph_context *)context; if (graph == NULL) return 0; if (!graph->is_builtin_graph && graph->realm != NULL && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active) return 0; return kiln_graph_gc_visit_roots(context, visit, visit_context); }\n");
     // Collection and ownership inspection enumerate precisely the same root slots.
-    output.push_str("\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase);\nstatic void kiln_graph_release_module_instance(void *context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_graph_context **link;\n    if (graph == NULL) return;\n    if (graph->realm != NULL) {\n        link = &graph->realm->instances;\n        while (*link != NULL && *link != graph) link = &(*link)->next_instance;\n        if (*link == graph) *link = graph->next_instance;\n        if (graph->realm->current_graph == graph) graph->realm->current_graph = graph->realm->instances;\n    }\n    if (graph->instance != NULL && graph->instance->roots_registered)\n        (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n    kiln_graph_free_unit_stores(graph->instance);\n    free(graph->instance);\n    free(graph);\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL ||\n        graph->realm == NULL || graph->host.module_owner == NULL ||\n        (!graph->is_builtin_graph && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active)) return;\n    owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner };\n    (void)kiln_realm_gc_mark_value(heap, &owner_root);\n}\n");
+    output.push_str("\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase);\nstatic void kiln_graph_release_module_instance(void *context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_graph_context **link;\n    if (graph == NULL) return;\n    if (graph->realm != NULL) {\n        link = &graph->realm->instances;\n        while (*link != NULL && *link != graph) link = &(*link)->next_instance;\n        if (*link == graph) *link = graph->next_instance;\n        if (graph->realm->current_graph == graph) graph->realm->current_graph = graph->realm->instances;\n    }\n    if (graph->instance != NULL && graph->instance->roots_registered)\n        (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n    kiln_graph_free_unit_stores(graph->instance);\n    if (graph->realm != NULL && graph->realm->instances == NULL) {\n        kiln_graph_runtime_module *module = graph->realm->runtime_modules;\n        while (module != NULL) {\n            kiln_graph_runtime_module *next = module->next;\n            free(module->path);\n            free(module);\n            module = next;\n        }\n        graph->realm->runtime_modules = NULL;\n    }\n    free(graph->instance);\n    free(graph);\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL ||\n        graph->realm == NULL || graph->host.module_owner == NULL ||\n        (!graph->is_builtin_graph && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active)) return;\n    owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner };\n    (void)kiln_realm_gc_mark_value(heap, &owner_root);\n}\n");
 }
 
 #[cfg(test)]
@@ -3677,6 +3788,7 @@ extern int kiln_c99_node_incoming_message_prototype(kiln_value *result);
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 #define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
+#define KILN_C99_HOST_RUNTIME_MODULE_IMPORT UINT16_C(0x7FF2)
 #define KILN_C99_HINT_STRING 1
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
@@ -3938,9 +4050,10 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     let context = format!(
         "typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
+         typedef struct kiln_graph_runtime_module {{ char *path; uint64_t generation; kiln_value namespace_value; kiln_value failure; int state; struct kiln_graph_runtime_module *next; }} kiln_graph_runtime_module;\n\
          typedef struct kiln_graph_unit_store {{ const kiln_c99_unit *unit; kiln_val *values; struct kiln_graph_unit_store *next; }} kiln_graph_unit_store;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
-         typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
+         typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    kiln_graph_runtime_module *runtime_modules;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
          typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
          struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    int is_builtin_graph;\n}};\n{linkage_names}",
         modules.len(),
@@ -4208,7 +4321,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         ),
     );
     output.push_str(
-        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\nstatic int kiln_graph_runtime_resolve(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);\n",
+        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\nstatic int kiln_graph_runtime_resolve(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);\nstatic int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);\n",
     );
     output.push_str("static int kiln_graph_runtime_require(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_require_context *context = (kiln_graph_require_context *)opaque;\n    kiln_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
@@ -4406,9 +4519,177 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     {
         writeln!(output, "    {{ const uint8_t *bytes = NULL; uint64_t length = 0; if (kiln_realm_argv_at(0, &bytes, &length) == KILN_C99_OK && kiln_c99_filename_matches(arguments[0], (const char *)bytes, (size_t)length)) {{ graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->instance->require_contexts[{base_index}], kiln_graph_gc_visit_registered_roots, graph); }} }}").unwrap();
     }
-    output.push_str(
-        "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_registered_roots, graph);\n}\n\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    int status;\n    if (graph == NULL || graph->instance == NULL) return KILN_C99_HOST_ERROR;\n    graph->instance->active_calls++;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) status = kiln_graph_create_require(graph, argc, arguments, result);\n    else if (operation == KILN_C99_HOST_MODULE_LOADER) status = kiln_graph_module_loader(graph, argc, arguments, result);\n    else status = kiln_cli_host_call(&graph->realm->cli, operation, argc, arguments, result);\n    graph->instance->active_calls--;\n    return status;\n}\n",
-    );
+    output.push_str("    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_registered_roots, graph);\n}\n\nstatic int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    if (graph == NULL || graph->instance == NULL || argc != 2 || arguments == NULL || result == NULL || arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    let mut linked_module_indices = std::collections::HashMap::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        linked_module_indices.insert(node.path.clone(), index);
+        if let Ok(canonical) = std::fs::canonicalize(&node.path) {
+            linked_module_indices.insert(canonical, index);
+        }
+    }
+    for alias in graph.runtime_package_aliases() {
+        let Some(index) = linked_module_indices.get(&alias.target).copied() else {
+            continue;
+        };
+        let package_root = alias.package_root.to_string_lossy();
+        let root = native_c_string(&package_root);
+        let specifier = native_c_string(&alias.specifier);
+        let ambiguous = graph
+            .runtime_package_aliases()
+            .iter()
+            .filter(|candidate| candidate.specifier == alias.specifier)
+            .count()
+            > 1;
+        let root_guard = format!(
+            "(arguments[1].len >= (uint64_t){} && memcmp(arguments[1].ptr, {root}, (size_t){}) == 0 && (arguments[1].len == (uint64_t){} || arguments[1].ptr[{}] == '/' || arguments[1].ptr[{}] == '\\\\'))",
+            package_root.len(),
+            package_root.len(),
+            package_root.len(),
+            package_root.len(),
+            package_root.len()
+        );
+        let root_guard = if ambiguous {
+            root_guard
+        } else {
+            "1".to_owned()
+        };
+        writeln!(output, "    if ({root_guard} && kiln_c99_string_equals_ascii(arguments[0], {specifier}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){index}); if (status != KILN_C99_OK) {{ *result = *kiln_graph_module_result(graph, (size_t){index}); return status; }} *result = graph->instance->namespaces[{index}]; return KILN_C99_OK; }}",
+            alias.specifier.len()).unwrap();
+    }
+    output.push_str(r#"    (void)kiln_c99_new_type_error(result, "runtime module import is outside the linked package graph");
+    return KILN_C99_THROWN;
+}
+
+static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
+                                        kiln_value *namespace_value, kiln_value *thrown,
+                                        int depth) {
+    uint8_t *url = NULL;
+    size_t url_len = 0;
+    char *path = NULL;
+    size_t path_len = 0;
+    kiln_value path_value = kiln_c99_undefined();
+    kiln_value canonical = kiln_c99_undefined();
+    kiln_value source = kiln_c99_undefined();
+    uint8_t *canonical_bytes = NULL;
+    uint8_t *source_bytes = NULL;
+    uint64_t canonical_len = 0, source_len = 0;
+    int32_t fs_error = 0;
+    int status;
+    if (graph == NULL || graph->instance == NULL || namespace_value == NULL ||
+        specifier.tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_dynamic_module_text(specifier, &url, &url_len);
+    if (status != KILN_C99_OK) return status;
+    if (url_len < 8 || memcmp(url, "file://", 7) != 0 || url[7] != '/') {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown,
+            "runtime native modules require an absolute file URL");
+        return KILN_C99_THROWN;
+    }
+    path = (char *)malloc(url_len + 1);
+    if (path == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (size_t index = 7; index < url_len; ++index) {
+        if (url[index] == '%') {
+            if (index + 2 >= url_len) { status = KILN_C99_INVALID_ARGUMENT; goto done; }
+            unsigned char hi = url[index + 1], lo = url[index + 2];
+            int high = hi >= '0' && hi <= '9' ? hi - '0' :
+                       hi >= 'A' && hi <= 'F' ? hi - 'A' + 10 :
+                       hi >= 'a' && hi <= 'f' ? hi - 'a' + 10 : -1;
+            int low = lo >= '0' && lo <= '9' ? lo - '0' :
+                      lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 :
+                      lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
+            if (high < 0 || low < 0 || (high == 0 && low == 0)) {
+                status = KILN_C99_INVALID_ARGUMENT; goto done;
+            }
+            path[path_len++] = (char)((high << 4) | low);
+            index += 2;
+        } else {
+            if (url[index] == '?' || url[index] == '#') {
+                status = KILN_C99_INVALID_ARGUMENT; goto done;
+            }
+            path[path_len++] = (char)url[index];
+        }
+    }
+    path[path_len] = '\0';
+    if (kiln_node_fs_realpath_sync((const uint8_t *)path, path_len, &canonical_bytes,
+                                   &canonical_len, &fs_error) != 0 || fs_error != 0) {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown, "cannot resolve runtime module path");
+        status = KILN_C99_THROWN;
+        goto done;
+    }
+    for (kiln_graph_runtime_module *module = graph->realm->runtime_modules;
+         module != NULL; module = module->next) {
+        if (module->generation == graph->instance->instance_id &&
+            strlen(module->path) == canonical_len &&
+            memcmp(module->path, canonical_bytes, canonical_len) == 0) {
+            kiln_node_fs_free_bytes(canonical_bytes, canonical_len);
+            canonical_bytes = NULL;
+            if (module->state == 3) {
+                if (thrown != NULL) *thrown = module->failure;
+                status = KILN_C99_THROWN;
+            } else {
+                *namespace_value = module->namespace_value;
+                status = module->state == 2 ? KILN_C99_OK : KILN_C99_THROWN;
+            if (status == KILN_C99_THROWN && thrown != NULL)
+                (void)kiln_c99_new_type_error(thrown, "cyclic runtime module evaluation");
+            }
+            goto done;
+        }
+    }
+    kiln_graph_runtime_module *module = (kiln_graph_runtime_module *)calloc(1, sizeof *module);
+    if (module == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    module->path = (char *)malloc((size_t)canonical_len + 1);
+    if (module->path == NULL) { free(module); status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    memcpy(module->path, canonical_bytes, canonical_len);
+    module->path[canonical_len] = '\0';
+    path_value = kiln_c99_copy_text(module->path, (size_t)canonical_len);
+    canonical = path_value;
+    if (canonical.tag != KILN_VALUE_STRING) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    module->namespace_value = kiln_c99_undefined();
+    module->failure = kiln_c99_undefined();
+    module->state = 1;
+    module->generation = graph->instance->instance_id;
+    module->next = graph->realm->runtime_modules;
+    graph->realm->runtime_modules = module;
+    fs_error = 0;
+    if (kiln_node_fs_read_file_sync((const uint8_t *)module->path,
+            (uint64_t)canonical_len, &source_bytes, &source_len, &fs_error) != 0 ||
+        fs_error != 0) {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown, "cannot read runtime module source");
+        status = KILN_C99_THROWN;
+    } else {
+        source = kiln_c99_copy_text((const char *)source_bytes, (size_t)source_len);
+        status = source.tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_dynamic_eval_module(&graph->host, source, canonical,
+                                               &module->namespace_value, depth, thrown);
+    if (status == KILN_C99_OK) {
+        module->state = 2;
+        *namespace_value = module->namespace_value;
+    } else {
+        module->state = 3;
+        if (thrown != NULL) module->failure = *thrown;
+    }
+done:
+    if (canonical_bytes != NULL) kiln_node_fs_free_bytes(canonical_bytes, canonical_len);
+    if (source_bytes != NULL) kiln_node_fs_free_bytes(source_bytes, source_len);
+    free(path);
+    return status;
+}
+
+static int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);
+static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {
+    kiln_graph_context *graph = (kiln_graph_context *)context;
+    int status;
+    if (graph == NULL || graph->instance == NULL) return KILN_C99_HOST_ERROR;
+    graph->instance->active_calls++;
+    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) status = kiln_graph_create_require(graph, argc, arguments, result);
+    else if (operation == KILN_C99_HOST_MODULE_LOADER) status = kiln_graph_module_loader(graph, argc, arguments, result);
+    else if (operation == KILN_C99_HOST_RUNTIME_MODULE_IMPORT) status = kiln_graph_runtime_module_import(graph, argc, arguments, result);
+    else status = kiln_cli_host_call(&graph->realm->cli, operation, argc, arguments, result);
+    graph->instance->active_calls--;
+    return status;
+}
+"#);
     // The module a worker names by its path (`new Worker(path)`, realms issue 06), or -1: every
     // module of the program a realm can run as its entry. Matched by its project-relative path at
     // the end of the one asked for -- the longest that matches -- so the launcher names no

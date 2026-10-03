@@ -951,19 +951,20 @@ fn sync_project_sources_with_override(
     // closure below, and whatever the daemon says it is missing.
     let walked = sources::digest_all(root, &walk.files, source_override)?;
     let mut texts: Vec<(String, String)> = Vec::new();
-    let (resolution_entries, node_formats, declared_includes) = if let Some((entry, _)) =
-        source_override
-    {
-        // Starting from an empty snapshot makes this read the entry and its closure and nothing
-        // else; every module it reaches is absent from `texts` and so is read on the same terms
-        // the entry always was.
-        let (resolutions, formats, includes) =
-            sources::include_reachable_dependencies_with_includes(root, entry, &mut texts, node)?;
-        notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
-        (resolutions, formats, includes)
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
-    };
+    let (resolution_entries, node_formats, declared_includes, runtime_package_aliases) =
+        if let Some((entry, _)) = source_override {
+            // Starting from an empty snapshot makes this read the entry and its closure and nothing
+            // else; every module it reaches is absent from `texts` and so is read on the same terms
+            // the entry always was.
+            let (resolutions, formats, includes, runtime_aliases) =
+                sources::include_reachable_dependencies_with_aliases(
+                    root, entry, &mut texts, node,
+                )?;
+            notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
+            (resolutions, formats, includes, runtime_aliases)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
     // The caller's snapshot is authoritative for its own path. The closure above reads the entry
     // from disk when the walk did not volunteer it, so a save landing between the two would
     // otherwise advertise bytes the caller never saw -- which is the one thing the override
@@ -1017,11 +1018,12 @@ fn sync_project_sources_with_override(
     // Re-run the complete begin/stage/commit sequence once using the same already-read texts;
     // never re-walk the filesystem or mix snapshots.
     for attempt in 0..=1 {
-        let resolutions = ResolutionMap::with_node_formats_and_includes(
+        let resolutions = ResolutionMap::with_runtime_aliases(
             resolution_root.clone(),
             resolution_entries.clone(),
             node_formats.clone(),
             declared_includes.clone(),
+            runtime_package_aliases.clone(),
         )
         .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
         let plan = backend.begin_sync(files.clone(), resolutions)?;

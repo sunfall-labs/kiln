@@ -3016,6 +3016,74 @@ fn native_namespace_import_of_commonjs_resolves_property_values() {
 }
 
 #[test]
+fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and_cache_identity() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module");
+    fs::create_dir_all(root.path.join("node_modules/pkg/src")).expect("create linked package");
+    fs::write(
+        root.path.join("node_modules/pkg/package.json"),
+        r#"{"name":"pkg","type":"module","exports":{"./*":"./src/*.js"}}"#,
+    )
+    .expect("write package exports");
+    fs::write(
+        root.path.join("node_modules/pkg/src/runtime.js"),
+        "export const value = 42;\n",
+    )
+    .expect("write linked runtime module");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             import {{ value }} from 'pkg/runtime';\n\
+             const path = '{}';\n\
+             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; function helper() {{ return value; }} export let count = 0; export function answer() {{ return helper(); }} export function bump() {{ count++; return count; }}\");\n\
+             const url = 'file://' + path;\n\
+             const first = await import(url);\n\
+             const second = await import(url);\n\
+             console.log(value, first.answer(), first === second, first.bump(), first.count);\n\
+             writeFileSync(path + '.bad', 'export = ;');\n\
+             try {{ await import('file://' + path + '.bad'); }}\n\
+             catch (error) {{ console.log(error.name); }}\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("runtime module graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds and runs");
+    assert_eq!(
+        report.stdout,
+        b"42 42 true 1 1\nSyntaxError\n",
+        "stderr={}, exit={:?}",
+        String::from_utf8_lossy(&report.stderr),
+        report.exit_code
+    );
+}
+
+#[test]
 fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

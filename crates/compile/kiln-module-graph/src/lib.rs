@@ -208,6 +208,19 @@ pub struct ModuleGraph {
     dynamic_dependencies: Arc<HashMap<PathBuf, Vec<Dependency>>>,
     dynamic_failures: Arc<BTreeMap<(PathBuf, String), String>>,
     runtime_failures: Arc<BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>>,
+    /// Resolver-verified public package specifiers for targets already compiled into this graph.
+    /// These let runtime-created modules import a linked target without pretending to be one of
+    /// the source modules whose static edges were available during graph construction.
+    runtime_package_aliases: Arc<Vec<RuntimePackageAlias>>,
+}
+
+/// A package-visible spelling for a linked module, scoped to the package that owns the runtime
+/// importer. This is resolution data only; the target still has to be present in this graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimePackageAlias {
+    pub package_root: PathBuf,
+    pub specifier: String,
+    pub target: PathBuf,
 }
 
 /// Link-time identity of one visible export.
@@ -570,6 +583,7 @@ impl ModuleGraph {
             dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
             dynamic_failures: Arc::clone(&self.dynamic_failures),
             runtime_failures: Arc::clone(&self.runtime_failures),
+            runtime_package_aliases: Arc::clone(&self.runtime_package_aliases),
         })
     }
 
@@ -1099,6 +1113,20 @@ impl ModuleGraph {
             declared_includes.insert(path.clone());
         }
         builder.visit_with_includes(entry_path.clone(), includes)?;
+        let runtime_package_aliases = builder
+            .resolver
+            .runtime_package_aliases_for_targets(
+                &builder.modules.keys().cloned().collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|(package_root, specifier, target)| RuntimePackageAlias {
+                package_root,
+                specifier,
+                target,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
         validate_links(&builder.modules, &builder.order, &export_resolutions)?;
         Ok(Self {
@@ -1112,6 +1140,7 @@ impl ModuleGraph {
             dynamic_dependencies: Arc::new(builder.dynamic_dependencies),
             dynamic_failures: Arc::new(builder.dynamic_failures.into_iter().collect()),
             runtime_failures: Arc::new(builder.runtime_failures),
+            runtime_package_aliases: Arc::new(runtime_package_aliases),
         })
     }
 
@@ -1137,6 +1166,11 @@ impl ModuleGraph {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// Package aliases verified by the resolver for modules already present in this graph.
+    pub fn runtime_package_aliases(&self) -> &[RuntimePackageAlias] {
+        &self.runtime_package_aliases
     }
 
     pub fn declared_includes(&self) -> &BTreeSet<PathBuf> {
@@ -1305,6 +1339,7 @@ impl ModuleGraph {
             dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
             dynamic_failures: Arc::clone(&self.dynamic_failures),
             runtime_failures: Arc::clone(&self.runtime_failures),
+            runtime_package_aliases: Arc::clone(&self.runtime_package_aliases),
         })
     }
 
@@ -1591,6 +1626,12 @@ impl ModuleGraph {
             .filter(|(owner, _)| demand.live.contains(*owner))
             .map(|(owner, failures)| (owner.clone(), failures.clone()))
             .collect();
+        let runtime_package_aliases = self
+            .runtime_package_aliases
+            .iter()
+            .filter(|alias| demand.live.contains(&alias.target))
+            .cloned()
+            .collect();
         Ok((
             Self {
                 entry: self.entry.clone(),
@@ -1609,6 +1650,7 @@ impl ModuleGraph {
                 dynamic_dependencies: Arc::new(dynamic_dependencies),
                 dynamic_failures: Arc::new(dynamic_failures),
                 runtime_failures: Arc::new(runtime_failures),
+                runtime_package_aliases: Arc::new(runtime_package_aliases),
             },
             LiveDemand {
                 live: demand.live.clone(),

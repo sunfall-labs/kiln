@@ -696,6 +696,18 @@ pub(crate) fn build_graph_from_snapshot(
             )
         })
         .collect::<Vec<_>>();
+    let runtime_package_aliases = snapshot
+        .resolutions
+        .iter()
+        .flat_map(|map| &map.runtime_package_aliases)
+        .map(|alias| {
+            (
+                PathBuf::from(&alias.package_root),
+                alias.specifier.clone(),
+                PathBuf::from(&alias.target),
+            )
+        })
+        .collect::<Vec<_>>();
     let resolver = if snapshot.node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
             &snapshot.project_root,
@@ -713,7 +725,8 @@ pub(crate) fn build_graph_from_snapshot(
         importer: PathBuf::new(),
         specifier: String::new(),
         error,
-    })?;
+    })?
+    .with_runtime_package_aliases(runtime_package_aliases);
     ModuleGraph::build_with_typed_policy_includes(
         &snapshot.entry,
         resolver,
@@ -1279,6 +1292,17 @@ fn build_graph<E: QueryEngine>(
             )
         })
         .collect::<Vec<_>>();
+    let runtime_package_aliases = resolutions
+        .into_iter()
+        .flat_map(|map| &map.runtime_package_aliases)
+        .map(|alias| {
+            (
+                PathBuf::from(&alias.package_root),
+                alias.specifier.clone(),
+                PathBuf::from(&alias.target),
+            )
+        })
+        .collect::<Vec<_>>();
     let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
         module_payload(engine, module_path, project_root, source_kind)
     };
@@ -1299,7 +1323,8 @@ fn build_graph<E: QueryEngine>(
         importer: PathBuf::new(),
         specifier: String::new(),
         error,
-    })?;
+    })?
+    .with_runtime_package_aliases(runtime_package_aliases);
     ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
 }
 

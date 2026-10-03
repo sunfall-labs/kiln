@@ -14,11 +14,11 @@ use std::sync::OnceLock;
 use crate::error::{Error, Result};
 use kiln_module_resolver::{
     NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
-    ResolutionKind, ResolutionPolicy, is_asset_extension,
+    NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, is_asset_extension,
 };
 use kiln_proto::{
-    DeclaredInclude, NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest,
-    source_digest,
+    DeclaredInclude, NodeModuleFormat, NodeSourceFormat, PackageResolution,
+    RuntimePackageAlias as WireRuntimePackageAlias, SourceDigest, source_digest,
 };
 
 /// The root package's explicit closed-world module declaration (ADR 0067 §2). A relative
@@ -423,11 +423,27 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     Vec<NodeSourceFormat>,
     Vec<DeclaredInclude>,
 )> {
+    let (resolutions, formats, includes, _) =
+        include_reachable_dependencies_with_aliases(root, entry, texts, node)?;
+    Ok((resolutions, formats, includes))
+}
+
+pub(crate) fn include_reachable_dependencies_with_aliases(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+    Vec<WireRuntimePackageAlias>,
+)> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut indexes = texts
@@ -739,6 +755,26 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     }
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
+    let targets = texts
+        .iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect::<Vec<_>>();
+    // Runtime-created modules resolve from a package entry point rather than from one of the
+    // graph modules. Build the same resolver policy used by the runtime so its verified reverse
+    // export map accompanies the synchronized source snapshot.
+    let runtime_resolver = NodeRuntimeResolver::new(root)
+        .map_err(|error| Error::BadInput(format!("cannot resolve runtime aliases: {error}")))?;
+    let runtime_package_aliases = runtime_resolver
+        .runtime_package_aliases_for_targets(&targets)
+        .into_iter()
+        .map(
+            |(package_root, specifier, target)| WireRuntimePackageAlias {
+                package_root: package_root.to_string_lossy().into_owned(),
+                specifier,
+                target: target.to_string_lossy().into_owned(),
+            },
+        )
+        .collect();
     Ok((
         resolutions.into_values().collect(),
         node_formats
@@ -749,6 +785,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             })
             .collect(),
         declared_includes,
+        runtime_package_aliases,
     ))
 }
 
@@ -1148,6 +1185,62 @@ mod tests {
             formats
                 .iter()
                 .any(|format| format.path == includes[0].target)
+        );
+    }
+
+    #[test]
+    fn runtime_alias_snapshot_contains_only_discovered_export_targets() {
+        let tree = Tree::new("runtime-alias-snapshot");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"name":"effect","type":"module","exports":{"./*":"./src/*.ts","./hidden/*":null}}"#,
+        )
+        .expect("write project manifest");
+        std::fs::write(
+            tree.0.join("main.ts"),
+            "import { value } from './src/schema/SchemaCompiler/runtime.ts'; console.log(value);",
+        )
+        .expect("write entry");
+        std::fs::create_dir_all(tree.0.join("src/schema/SchemaCompiler"))
+            .expect("create reachable source directory");
+        std::fs::write(
+            tree.0.join("src/schema/SchemaCompiler/runtime.ts"),
+            "export const value = 1;",
+        )
+        .expect("write reachable export");
+        std::fs::write(
+            tree.0.join("src/schema/unused.ts"),
+            "export const unused = 2;",
+        )
+        .expect("write undiscovered export");
+
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = Vec::new();
+        let (_, _, _, aliases) = include_reachable_dependencies_with_aliases(
+            &root,
+            root.join("main.ts").to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("collect runtime aliases");
+        let entry_target = root.join("src/schema/SchemaCompiler/runtime.ts");
+        let unused_target = root.join("src/schema/unused.ts");
+        assert!(
+            aliases.iter().any(|alias| {
+                alias.specifier == "effect/schema/SchemaCompiler/runtime"
+                    && alias.target == entry_target.to_string_lossy()
+            }),
+            "aliases were {aliases:?}"
+        );
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| { texts.iter().any(|(path, _)| path == &alias.target) })
+        );
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| alias.target != unused_target.to_string_lossy())
         );
     }
 
@@ -2256,7 +2349,6 @@ mod tests {
                         )
                     })
                     .collect::<Vec<_>>();
-
                 let resolver = kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
                     root,
                     entries,

@@ -875,6 +875,69 @@ fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
 }
 
 #[test]
+fn runtime_alias_targets_remain_linked_without_eager_evaluation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-alias-liveness");
+    let entry = root.path.join("main.ts");
+    fs::write(
+        root.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write side-effect metadata");
+    fs::write(
+        root.path.join("tsconfig.json"),
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"runtime/*":["src/*.ts"]}}}"#,
+    )
+    .expect("write project path alias");
+    fs::create_dir_all(root.path.join("src")).expect("create source directory");
+    fs::write(
+        root.path.join("src/compiler.ts"),
+        "import { runtime } from './runtime.ts'; export const generated = () => \"import { runtime } from 'runtime/runtime';\";",
+    )
+    .expect("write runtime-generated source");
+    let target = root.path.join("src/runtime.ts");
+    fs::write(&target, "export const runtime = 42;").expect("write runtime target");
+    fs::write(
+        &entry,
+        "import { generated } from './src/compiler.ts'; console.log(generated());",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    assert!(graph.runtime_package_aliases().iter().any(|alias| {
+        alias.specifier == "runtime/runtime" && alias.target == fs::canonicalize(&target).unwrap()
+    }));
+    let plan = native_graph_plan(&graph).expect("plan graph");
+    let canonical_target = fs::canonicalize(target).unwrap();
+    assert!(
+        !plan.excluded.contains(&canonical_target),
+        "resolver-approved runtime aliases need their target linked"
+    );
+    assert!(plan.runtime_alias_live.contains(&canonical_target));
+    let mut demand = kiln_liveness::executable_demand(
+        &graph,
+        &selection_options_with_exclusions(&NativeProfile::Dev, &plan.excluded),
+    )
+    .expect("select static entry");
+    assert!(!demand.live.contains(&canonical_target));
+    include_runtime_aliases_in_demand(&graph, &mut demand, &plan.runtime_alias_live);
+    assert!(demand.live.contains(&canonical_target));
+    assert_eq!(demand.slots[&canonical_target].len(), 1);
+    let (reduced, _) = graph.reduce_to_live(&demand).unwrap();
+    assert!(
+        reduced.runtime_package_aliases().iter().any(|alias| {
+            alias.specifier == "runtime/runtime" && alias.target == canonical_target
+        })
+    );
+}
+
+#[test]
 fn native_runtime_failures_keep_distinct_captured_bases() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

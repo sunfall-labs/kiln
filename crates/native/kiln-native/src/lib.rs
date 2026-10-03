@@ -2030,11 +2030,12 @@ impl NativeBuilder {
         // Shared libraries embed for unknown hosts: development selection
         // keeps both arms of the production dispatcher and every live edge,
         // while dead modules are pruned like any other executable.
-        let demand = kiln_liveness::executable_demand(
+        let mut demand = kiln_liveness::executable_demand(
             graph,
             &selection_options_with_exclusions(&NativeProfile::Dev, &native_plan.excluded),
         )
         .map_err(NativeError::Graph)?;
+        include_runtime_aliases_in_demand(graph, &mut demand, &native_plan.runtime_alias_live);
         let (reduced, demand) = reduced_graph(graph, &demand)?;
         let (reduced, demand) = if matches!(
             options.profile,
@@ -2717,7 +2718,8 @@ impl NativeBuilder {
         // One shaken graph feeds emission: reduce to the live subset first,
         // so the emitter and launcher below only ever see live modules and
         // live edges. With everything live this is the identity transform.
-        let demand = selected.demand();
+        let mut demand = selected.demand();
+        include_runtime_aliases_in_demand(graph, &mut demand, &native_plan.runtime_alias_live);
         debug_module_demands("selected", graph, &demand);
         let (reduced, demand) = reduced_graph(graph, &demand)?;
         debug_module_demands("reduced", &reduced, &demand);

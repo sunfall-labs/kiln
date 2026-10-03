@@ -1842,6 +1842,50 @@ fn package_policy_links_a_named_package_import() {
 }
 
 #[test]
+fn graph_retains_resolver_verified_package_aliases_for_linked_runtime_imports() {
+    let project = TempProject::new();
+    let package = project.root.join("node_modules/pkg");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"pkg","exports":{".":"./index.js","./*":"./src/*.js","./private/*":null}}"#,
+    )
+    .expect("write package manifest");
+    fs::create_dir_all(package.join("src")).expect("create package source directory");
+    let target = project.write(
+        "node_modules/pkg/src/runtime.js",
+        "export const value = 42;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { value } from 'pkg/runtime'; console.log(value);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build package graph");
+    let target = fs::canonicalize(target).expect("canonical target");
+    assert!(
+        graph
+            .runtime_package_aliases()
+            .contains(&RuntimePackageAlias {
+                package_root: fs::canonicalize(package).expect("canonical package root"),
+                specifier: "pkg/runtime".to_owned(),
+                target,
+            })
+    );
+    assert!(
+        graph
+            .runtime_package_aliases()
+            .iter()
+            .all(|alias| !alias.specifier.starts_with("pkg/private/"))
+    );
+}
+
+#[test]
 fn node_builtin_static_imports_are_typed_virtual_modules() {
     let project = TempProject::new();
     let entry = project.write(

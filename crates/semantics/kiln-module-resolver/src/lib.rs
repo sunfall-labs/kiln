@@ -763,6 +763,30 @@ pub trait ResolutionPolicy {
     ) -> Result<Option<NodeModuleFormat>, ResolveError> {
         Ok(None)
     }
+
+    /// Package specifiers that resolve to an already compiled target when imported from a
+    /// runtime-created module in the target's package scope. A runtime module is not itself a
+    /// graph node, so its import text cannot contribute a normal graph dependency edge. The
+    /// native linker embeds these verified aliases and still requires the target to be linked.
+    fn runtime_package_aliases(&self, _target: &Path) -> Vec<(PathBuf, String)> {
+        Vec::new()
+    }
+
+    /// Batch form used by graph construction so package manifests and export patterns are
+    /// traversed once per graph rather than once for every linked module.
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        targets
+            .iter()
+            .flat_map(|target| {
+                self.runtime_package_aliases(target)
+                    .into_iter()
+                    .map(move |(root, specifier)| (root, specifier, target.clone()))
+            })
+            .collect()
+    }
 }
 
 impl ResolutionPolicy for ModuleResolver {
@@ -976,6 +1000,228 @@ impl NodePackageResolver {
             self.project_root(),
         )
     }
+
+    /// Return public package-export spellings which resolve to `target` from the package that
+    /// owns it. Runtime-created ESM has no build-time dependency edge, but native execution can
+    /// still link an import when its target is already in the closed graph. Every candidate is
+    /// passed through the same Oxc resolver used by ordinary imports, so this reverse index does
+    /// not implement a second package-resolution policy.
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        let target_set = targets
+            .iter()
+            .filter_map(|target| fs::canonicalize(target).ok())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut packages = std::collections::BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+        for target in target_set {
+            if let Some(manifest) = nearest_package_json(&target) {
+                packages.entry(manifest).or_default().push(target);
+            }
+        }
+        let mut aliases = std::collections::BTreeSet::new();
+        for (manifest_path, package_targets) in packages {
+            let Some(package_root) = manifest_path.parent() else {
+                continue;
+            };
+            let Ok(bytes) = fs::read(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(package_name) = manifest.get("name").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(exports) = manifest.get("exports") else {
+                continue;
+            };
+            for (subpath, target_template) in package_export_entries(exports) {
+                for target in &package_targets {
+                    let Some(capture) =
+                        export_pattern_capture(package_root, target, &target_template)
+                    else {
+                        continue;
+                    };
+                    let Some(package_subpath) = subpath
+                        .replace('*', &capture)
+                        .strip_prefix('.')
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let specifier = format!("{package_name}{package_subpath}");
+                    let resolved =
+                        self.resolve_for_request(&specifier, target, NodeRequestKind::Import);
+                    if resolved.is_ok_and(|resolved| resolved.path == *target) {
+                        aliases.insert((package_root.to_path_buf(), specifier, target.clone()));
+                    }
+                }
+            }
+        }
+        // TypeScript projects can expose linked source through `paths` even when a package
+        // deliberately exports only its public barrel. Runtime-generated modules (for example
+        // compiler output) still use those project aliases. Enumerate only aliases whose path
+        // template names one of the linked targets, then ask the ordinary Oxc resolver to
+        // confirm the candidate from the project root before publishing it.
+        if let Some(config_path) = ["tsconfig.json", "jsconfig.json"]
+            .into_iter()
+            .map(|name| self.project_root().join(name))
+            .find(|path| path.is_file())
+        {
+            if let Ok(bytes) = fs::read(&config_path) {
+                if let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    let options = config.get("compilerOptions");
+                    let base_url = options
+                        .and_then(|options| options.get("baseUrl"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|base| {
+                            config_path
+                                .parent()
+                                .unwrap_or(self.project_root())
+                                .join(base)
+                        })
+                        .unwrap_or_else(|| {
+                            config_path
+                                .parent()
+                                .unwrap_or(self.project_root())
+                                .to_path_buf()
+                        });
+                    let base_url = fs::canonicalize(&base_url).unwrap_or(base_url);
+                    if let Some(paths) = options
+                        .and_then(|options| options.get("paths"))
+                        .and_then(serde_json::Value::as_object)
+                    {
+                        for (pattern, templates) in paths {
+                            let Some(templates) = templates.as_array() else {
+                                continue;
+                            };
+                            for template in templates.iter().filter_map(serde_json::Value::as_str) {
+                                for target in targets
+                                    .iter()
+                                    .filter_map(|target| fs::canonicalize(target).ok())
+                                {
+                                    let Some(capture) =
+                                        tsconfig_path_capture(&base_url, &target, template)
+                                    else {
+                                        continue;
+                                    };
+                                    let specifier = pattern.replace('*', &capture);
+                                    if self
+                                        .resolve_for_request(
+                                            &specifier,
+                                            &target,
+                                            NodeRequestKind::Import,
+                                        )
+                                        .is_ok_and(|resolved| resolved.path == target)
+                                    {
+                                        let package_root = nearest_package_json(&target)
+                                            .and_then(|manifest| {
+                                                manifest.parent().map(Path::to_path_buf)
+                                            })
+                                            .unwrap_or_else(|| self.project_root().to_path_buf());
+                                        aliases.insert((package_root, specifier, target));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        aliases.into_iter().collect()
+    }
+}
+
+fn tsconfig_path_capture(base_url: &Path, target: &Path, template: &str) -> Option<String> {
+    let mut parts = template.split('*');
+    let prefix = parts.next()?;
+    let suffix = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return None;
+    }
+    let template_path = base_url.join(prefix);
+    let target_text = target.to_string_lossy();
+    let prefix_text = template_path.to_string_lossy();
+    let suffix_path = if suffix.is_empty() {
+        String::new()
+    } else {
+        suffix.to_owned()
+    };
+    let capture = target_text
+        .strip_prefix(prefix_text.as_ref())?
+        .strip_suffix(&suffix_path)?;
+    Some(capture.to_owned())
+}
+
+/// Flatten the source targets of package export entries while retaining their public subpaths.
+/// Conditional maps and fallback arrays are collected as candidates; the actual resolver below
+/// selects the active condition and rejects candidates that do not name the target.
+fn package_export_entries(exports: &serde_json::Value) -> Vec<(String, String)> {
+    fn targets(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(target) => output.push(target.clone()),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    targets(value, output);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    targets(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    if let serde_json::Value::Object(entries) = exports {
+        if entries.keys().any(|key| key.starts_with('.')) {
+            for (subpath, value) in entries {
+                if !subpath.starts_with('.') {
+                    continue;
+                }
+                let mut values = Vec::new();
+                targets(value, &mut values);
+                output.extend(values.into_iter().map(|target| (subpath.clone(), target)));
+            }
+        } else {
+            let mut values = Vec::new();
+            targets(exports, &mut values);
+            output.extend(values.into_iter().map(|target| (".".to_owned(), target)));
+        }
+    } else {
+        let mut values = Vec::new();
+        targets(exports, &mut values);
+        output.extend(values.into_iter().map(|target| (".".to_owned(), target)));
+    }
+    output
+}
+
+/// Match one package export target template to the canonical target path and return its wildcard
+/// capture (empty for an exact target). Invalid traversal and multi-wildcard patterns are
+/// deliberately omitted; the ordinary resolver remains the authority for admitted candidates.
+fn export_pattern_capture(package_root: &Path, target: &Path, template: &str) -> Option<String> {
+    let relative = target.strip_prefix(package_root).ok()?.to_str()?;
+    let template = template.strip_prefix("./")?;
+    if !template.contains('*') {
+        return (relative == template).then(String::new);
+    }
+    let mut parts = template.split('*');
+    let prefix = parts.next()?;
+    let suffix = parts.next().unwrap_or("");
+    if parts.next().is_some() || !relative.starts_with(prefix) || !relative.ends_with(suffix) {
+        return None;
+    }
+    let capture_end = relative.len().checked_sub(suffix.len())?;
+    let capture = relative.get(prefix.len()..capture_end)?;
+    if capture.contains('*') || capture.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    Some(capture.to_owned())
 }
 
 fn nearest_package_json(path: &Path) -> Option<PathBuf> {
@@ -1172,6 +1418,21 @@ impl ResolutionPolicy for NodeRuntimeResolver {
             Ok(Some(node_module_format_for_path(&module.path)?))
         }
     }
+
+    fn runtime_package_aliases(&self, target: &Path) -> Vec<(PathBuf, String)> {
+        self.packages
+            .runtime_package_aliases_for_targets(&[target.to_path_buf()])
+            .into_iter()
+            .map(|(root, specifier, _)| (root, specifier))
+            .collect()
+    }
+
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        self.packages.runtime_package_aliases_for_targets(targets)
+    }
 }
 
 fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveError> {
@@ -1228,6 +1489,7 @@ pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
     packages: HashMap<(PathBuf, String, NodeRequestKind), PathBuf>,
     formats: HashMap<PathBuf, NodeModuleFormat>,
+    runtime_package_aliases: Vec<(PathBuf, String, PathBuf)>,
     node_builtins: bool,
 }
 
@@ -1296,8 +1558,22 @@ impl PinnedPackageResolver {
                 })
                 .collect(),
             formats: formats.into_iter().collect(),
+            runtime_package_aliases: Vec::new(),
             node_builtins: false,
         })
+    }
+
+    /// Attach aliases approved by the synchronizing client. They remain limited to targets
+    /// already present in the synchronized source graph.
+    pub fn with_runtime_package_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = (PathBuf, String, PathBuf)>,
+    ) -> Self {
+        let mut aliases = aliases.into_iter().collect::<Vec<_>>();
+        aliases.sort();
+        aliases.dedup();
+        self.runtime_package_aliases = aliases;
+        self
     }
 
     /// Construct a pinned resolver with the explicit Node compatibility builtin surface enabled.
@@ -1464,6 +1740,18 @@ impl ResolutionPolicy for PinnedPackageResolver {
                 None => Ok(None),
             }
         }
+    }
+
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        let targets = targets.iter().collect::<std::collections::HashSet<_>>();
+        self.runtime_package_aliases
+            .iter()
+            .filter(|(_, _, target)| targets.contains(target))
+            .cloned()
+            .collect()
     }
 }
 
@@ -1940,6 +2228,50 @@ mod tests {
             .resolve("@scope/name", &importer)
             .expect("resolve scoped package root");
         assert_eq!(resolved.path, fs::canonicalize(scoped_entry).unwrap());
+    }
+
+    #[test]
+    fn derives_runtime_aliases_from_public_package_exports() {
+        let project = TempProject::new();
+        let target = project.write(
+            "src/schema/SchemaCompiler/runtime.ts",
+            "export const value = 1;",
+        );
+        project.write(
+            "package.json",
+            r#"{"name":"effect","type":"module","exports":{"./*":"./src/*.ts","./hidden/*":null}}"#,
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let aliases = resolver.runtime_package_aliases(&target);
+        assert!(aliases.contains(&(
+            project.root.clone(),
+            "effect/schema/SchemaCompiler/runtime".to_owned()
+        )));
+        assert!(
+            !aliases
+                .iter()
+                .any(|(_, specifier)| specifier.starts_with("effect/hidden/"))
+        );
+    }
+
+    #[test]
+    fn derives_runtime_aliases_from_resolver_verified_tsconfig_paths() {
+        let project = TempProject::new();
+        let target = project.write("src/schema/runtime.ts", "export const value = 1;");
+        project.write(
+            "tsconfig.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"effect/*":["src/*.ts"]}}}"#,
+        );
+        project.write(
+            "package.json",
+            r#"{"name":"effect","exports":{"./schema":"./src/schema/index.ts"}}"#,
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let aliases = resolver.runtime_package_aliases(&target);
+        assert!(
+            aliases.contains(&(project.root.clone(), "effect/schema/runtime".to_owned())),
+            "aliases: {aliases:?}"
+        );
     }
 
     #[test]

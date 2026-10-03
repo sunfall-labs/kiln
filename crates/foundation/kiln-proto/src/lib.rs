@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 40;
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -164,6 +164,14 @@ pub struct DeclaredInclude {
     pub target: String,
 }
 
+/// A package specifier approved for runtime-created ESM to reach a source already in the graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePackageAlias {
+    pub package_root: String,
+    pub specifier: String,
+    pub target: String,
+}
+
 /// The package-resolution snapshot belonging to one [`Request::Sync`].
 ///
 /// Entries are canonicalized by `(importer, specifier, condition)`. Construct maps through [`Self::new`],
@@ -178,19 +186,50 @@ pub struct ResolutionMap {
     pub node_formats: Vec<NodeSourceFormat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_includes: Vec<DeclaredInclude>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_package_aliases: Vec<RuntimePackageAlias>,
 }
 
 /// A malformed package-resolution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolutionMapError {
-    EmptyField { field: &'static str, index: usize },
-    IncompleteManifest { index: usize },
-    NodeFormatsNotSorted { previous: String, current: String },
-    DuplicateNodeFormat { path: String },
-    DeclaredIncludesNotSorted { previous: String, current: String },
-    DuplicateDeclaredInclude { specifier: String },
-    EntriesNotSorted { previous: String, current: String },
-    DuplicateEntry { importer: String, specifier: String },
+    EmptyField {
+        field: &'static str,
+        index: usize,
+    },
+    IncompleteManifest {
+        index: usize,
+    },
+    NodeFormatsNotSorted {
+        previous: String,
+        current: String,
+    },
+    DuplicateNodeFormat {
+        path: String,
+    },
+    DeclaredIncludesNotSorted {
+        previous: String,
+        current: String,
+    },
+    DuplicateDeclaredInclude {
+        specifier: String,
+    },
+    RuntimeAliasesNotSorted {
+        previous: String,
+        current: String,
+    },
+    DuplicateRuntimePackageAlias {
+        package_root: String,
+        specifier: String,
+    },
+    EntriesNotSorted {
+        previous: String,
+        current: String,
+    },
+    DuplicateEntry {
+        importer: String,
+        specifier: String,
+    },
 }
 
 impl fmt::Display for ResolutionMapError {
@@ -217,6 +256,17 @@ impl fmt::Display for ResolutionMapError {
             Self::DuplicateDeclaredInclude { specifier } => {
                 write!(formatter, "duplicate declared include for {specifier:?}")
             }
+            Self::RuntimeAliasesNotSorted { previous, current } => write!(
+                formatter,
+                "runtime package aliases are not sorted: {previous:?} appears before {current:?}"
+            ),
+            Self::DuplicateRuntimePackageAlias {
+                package_root,
+                specifier,
+            } => write!(
+                formatter,
+                "duplicate runtime package alias for {specifier:?} in {package_root:?}"
+            ),
             Self::EntriesNotSorted { previous, current } => write!(
                 formatter,
                 "resolution entries are not sorted: {previous:?} appears before {current:?}"
@@ -242,6 +292,8 @@ struct ResolutionMapWire {
     node_formats: Vec<NodeSourceFormat>,
     #[serde(default)]
     declared_includes: Vec<DeclaredInclude>,
+    #[serde(default)]
+    runtime_package_aliases: Vec<RuntimePackageAlias>,
 }
 
 impl<'de> Deserialize<'de> for ResolutionMap {
@@ -255,6 +307,7 @@ impl<'de> Deserialize<'de> for ResolutionMap {
             wire.entries,
             wire.node_formats,
             wire.declared_includes,
+            wire.runtime_package_aliases,
         )
         .map_err(de::Error::custom)
     }
@@ -272,6 +325,7 @@ impl ResolutionMap {
             entries,
             node_formats: Vec::new(),
             declared_includes: Vec::new(),
+            runtime_package_aliases: Vec::new(),
         };
         map.validate()?;
         Ok(map)
@@ -290,6 +344,7 @@ impl ResolutionMap {
             entries,
             node_formats,
             declared_includes: Vec::new(),
+            runtime_package_aliases: Vec::new(),
         };
         map.validate()?;
         Ok(map)
@@ -298,18 +353,43 @@ impl ResolutionMap {
     /// Include declared lazy roots in the canonical snapshot and its cache identity.
     pub fn with_node_formats_and_includes(
         project_root: impl Into<String>,
+        entries: Vec<PackageResolution>,
+        node_formats: Vec<NodeSourceFormat>,
+        declared_includes: Vec<DeclaredInclude>,
+    ) -> Result<Self, ResolutionMapError> {
+        Self::with_runtime_aliases(
+            project_root,
+            entries,
+            node_formats,
+            declared_includes,
+            Vec::new(),
+        )
+    }
+
+    /// Include aliases verified by the client resolver for already synchronized targets.
+    pub fn with_runtime_aliases(
+        project_root: impl Into<String>,
         mut entries: Vec<PackageResolution>,
         mut node_formats: Vec<NodeSourceFormat>,
         mut declared_includes: Vec<DeclaredInclude>,
+        mut runtime_package_aliases: Vec<RuntimePackageAlias>,
     ) -> Result<Self, ResolutionMapError> {
         entries.sort_by(Self::compare_entries);
         node_formats.sort_by(|left, right| left.path.cmp(&right.path));
         declared_includes.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        runtime_package_aliases.sort_by(|left, right| {
+            (&left.package_root, &left.specifier, &left.target).cmp(&(
+                &right.package_root,
+                &right.specifier,
+                &right.target,
+            ))
+        });
         let map = Self {
             project_root: project_root.into(),
             entries,
             node_formats,
             declared_includes,
+            runtime_package_aliases,
         };
         map.validate()?;
         Ok(map)
@@ -421,6 +501,49 @@ impl ResolutionMap {
                 }
             }
         }
+        for (index, alias) in self.runtime_package_aliases.iter().enumerate() {
+            for (field, value) in [
+                ("runtime_package_aliases.package_root", &alias.package_root),
+                ("runtime_package_aliases.specifier", &alias.specifier),
+                ("runtime_package_aliases.target", &alias.target),
+            ] {
+                if value.is_empty() {
+                    return Err(ResolutionMapError::EmptyField { field, index });
+                }
+            }
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| self.runtime_package_aliases.get(previous))
+            {
+                match (
+                    &previous.package_root,
+                    &previous.specifier,
+                    &previous.target,
+                )
+                    .cmp(&(&alias.package_root, &alias.specifier, &alias.target))
+                {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => {
+                        return Err(ResolutionMapError::DuplicateRuntimePackageAlias {
+                            package_root: alias.package_root.clone(),
+                            specifier: alias.specifier.clone(),
+                        });
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return Err(ResolutionMapError::RuntimeAliasesNotSorted {
+                            previous: format!(
+                                "{}:{}:{}",
+                                previous.package_root, previous.specifier, previous.target
+                            ),
+                            current: format!(
+                                "{}:{}:{}",
+                                alias.package_root, alias.specifier, alias.target
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -432,7 +555,7 @@ impl ResolutionMap {
     pub fn identity(&self) -> Digest {
         debug_assert!(self.validate().is_ok());
         let mut bytes = Vec::new();
-        frame(&mut bytes, b"kiln-resolution-map\0v5");
+        frame(&mut bytes, b"kiln-resolution-map\0v6");
         frame(&mut bytes, self.project_root.as_bytes());
         frame_u64(&mut bytes, self.entries.len() as u64);
         for entry in &self.entries {
@@ -472,6 +595,12 @@ impl ResolutionMap {
             frame(&mut bytes, include.specifier.as_bytes());
             frame(&mut bytes, include.target.as_bytes());
         }
+        frame_u64(&mut bytes, self.runtime_package_aliases.len() as u64);
+        for alias in &self.runtime_package_aliases {
+            frame(&mut bytes, alias.package_root.as_bytes());
+            frame(&mut bytes, alias.specifier.as_bytes());
+            frame(&mut bytes, alias.target.as_bytes());
+        }
         Digest::hash(&bytes)
     }
 
@@ -480,12 +609,14 @@ impl ResolutionMap {
         entries: Vec<PackageResolution>,
         node_formats: Vec<NodeSourceFormat>,
         declared_includes: Vec<DeclaredInclude>,
+        runtime_package_aliases: Vec<RuntimePackageAlias>,
     ) -> Result<Self, ResolutionMapError> {
         let map = Self {
             project_root,
             entries,
             node_formats,
             declared_includes,
+            runtime_package_aliases,
         };
         map.validate()?;
         Ok(map)
@@ -1131,7 +1262,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 40);
+        assert_eq!(PROTOCOL_VERSION, 41);
 
         let requests = [
             (
@@ -1581,6 +1712,67 @@ mod tests {
             duplicate,
             Err(ResolutionMapError::DuplicateDeclaredInclude { .. })
         ));
+    }
+
+    #[test]
+    fn runtime_aliases_are_canonical_and_part_of_resolution_identity() {
+        let alias = |specifier: &str, target: &str| RuntimePackageAlias {
+            package_root: "/project/node_modules/effect".into(),
+            specifier: specifier.into(),
+            target: target.into(),
+        };
+        let first = ResolutionMap::with_runtime_aliases(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                alias(
+                    "effect/schema/runtime",
+                    "/project/node_modules/effect/runtime.ts",
+                ),
+                alias("effect/schema/core", "/project/node_modules/effect/core.ts"),
+            ],
+        )
+        .expect("valid aliases");
+        let reordered = ResolutionMap::with_runtime_aliases(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                alias("effect/schema/core", "/project/node_modules/effect/core.ts"),
+                alias(
+                    "effect/schema/runtime",
+                    "/project/node_modules/effect/runtime.ts",
+                ),
+            ],
+        )
+        .expect("alias order is canonical");
+        assert_eq!(
+            first.runtime_package_aliases,
+            reordered.runtime_package_aliases
+        );
+        assert_eq!(first.identity(), reordered.identity());
+        assert_ne!(first.identity(), empty_resolution_map().identity());
+
+        let retargeted = ResolutionMap::with_runtime_aliases(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![alias(
+                "effect/schema/runtime",
+                "/project/node_modules/effect/other.ts",
+            )],
+        )
+        .expect("changed target is valid");
+        assert_ne!(first.identity(), retargeted.identity());
+
+        let decoded: ResolutionMap =
+            serde_json::from_value(serde_json::to_value(&first).expect("serialize aliases"))
+                .expect("round-trip aliases");
+        assert_eq!(decoded, first);
     }
 
     #[test]
