@@ -2275,35 +2275,111 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
-    /// What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id`: the
-    /// bootstrap's handle object (`kiln-builtins/src/timers.ts`, `kind` 0 a timeout, 1 an
-    /// interval, 2 an immediate), or the bare identity in a realm that has none.
+    /// What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id` (`kind`
+    /// 0 a timeout, 1 an interval, 2 an immediate): an object the engine allocates here, with the
+    /// prototype the bootstrap published (`kiln-builtins/src/timers.ts`) and the identity in a
+    /// reserved slot, or the bare identity in a realm that published none. No script runs to make
+    /// one, which is what keeps arming a timer cheap; the prototype's methods ask the engine
+    /// about the slot through `__kilnTimerRef` (`timer_op`).
     pub(crate) fn timer_handle(
         &mut self,
         id: f64,
         kind: f64,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        // The factory is `timerHandle` on the realm's engine-private object, kept in an internal
-        // slot of the global object: not a property a program can find.
-        let global = self.global_object_in(self.current_realm);
-        let private = match &global {
-            Value::Object(global) => global.borrow().get_own(crate::ENGINE_PRIVATE_SLOT).cloned(),
+        let slot = self.current_realm.0 as usize;
+        let cached = self.timer_prototypes.get(slot).cloned().flatten();
+        let (timeout, immediate) = match cached {
+            Some(prototypes) => prototypes,
+            None => {
+                // The prototypes are on the realm's engine-private object, kept in an internal
+                // slot of the global object: not a property a program can find. A realm that
+                // has not published them yet is asked again next time.
+                let global = self.global_object_in(self.current_realm);
+                let private = match &global {
+                    Value::Object(global) => {
+                        global.borrow().get_own(crate::ENGINE_PRIVATE_SLOT).cloned()
+                    }
+                    _ => None,
+                };
+                let Some(private) = private else {
+                    return Ok(Value::Number(id));
+                };
+                let timeout = self.read_property(&private, "timeoutPrototype", instruction)?;
+                let immediate = self.read_property(&private, "immediatePrototype", instruction)?;
+                if !matches!(timeout, Value::Object(_)) || !matches!(immediate, Value::Object(_)) {
+                    return Ok(Value::Number(id));
+                }
+                if self.timer_prototypes.len() <= slot {
+                    self.timer_prototypes.resize(slot + 1, None);
+                }
+                self.timer_prototypes[slot] = Some((timeout.clone(), immediate.clone()));
+                (timeout, immediate)
+            }
+        };
+        let prototype = if kind == 2.0 { immediate } else { timeout };
+        let mut data = ObjectData::default();
+        data.set_prototype(prototype);
+        data.node_object = Some(NodeObject::TimerHandle {
+            id: id as u64,
+            unreferenced: false,
+        });
+        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }
+
+    /// The identity a timer handle holds, when `value` is one this engine made.
+    pub(crate) fn timer_handle_id(value: Option<&Value>) -> Option<f64> {
+        match value {
+            Some(Value::Object(handle)) => match &handle.borrow().node_object {
+                Some(NodeObject::TimerHandle { id, .. }) => Some(*id as f64),
+                _ => None,
+            },
             _ => None,
-        };
-        let factory = match private {
-            Some(private) => self.read_property(&private, "timerHandle", instruction)?,
-            None => Value::Undefined,
-        };
-        if !is_callable(&factory) {
-            return Ok(Value::Number(id));
         }
-        self.call_value(
-            &factory,
-            Value::Undefined,
-            vec![Value::Number(id), Value::Number(kind)],
-            instruction,
-        )
+    }
+
+    /// What a timer handle's methods ask of the engine (`__kilnTimerRef(handle, op)`): `op` 0 its
+    /// identity, 1 whether it is referenced, 2 and 3 to reference or unreference it, 4 to restart
+    /// it from now. The referenced flag the program sees lives on the handle, so it survives the
+    /// timer's end as node's does; the one the loop reads lives in the realm's timer queue.
+    pub(crate) fn timer_op(&mut self, handle: Option<&Value>, op: f64) -> Value {
+        let Some(Value::Object(handle)) = handle else {
+            return if op == 0.0 {
+                Value::Undefined
+            } else {
+                Value::Boolean(true)
+            };
+        };
+        let (id, unreferenced) = match &handle.borrow().node_object {
+            Some(NodeObject::TimerHandle { id, unreferenced }) => (*id, *unreferenced),
+            _ => {
+                return if op == 0.0 {
+                    Value::Undefined
+                } else {
+                    Value::Boolean(true)
+                };
+            }
+        };
+        let timer = TimerId::new(id);
+        match op as u8 {
+            0 => Value::Number(id as f64),
+            2 | 3 => {
+                let unref = op == 3.0;
+                if unref != unreferenced {
+                    handle.borrow_mut().node_object = Some(NodeObject::TimerHandle {
+                        id,
+                        unreferenced: unref,
+                    });
+                    self.with_realm_mut(|realm| realm.set_timer_referenced(timer, !unref));
+                }
+                Value::Boolean(!unref)
+            }
+            4 => {
+                self.with_realm_mut(|realm| realm.refresh_timer(timer));
+                Value::Undefined
+            }
+            _ => Value::Boolean(!unreferenced),
+        }
     }
 
     /// A platform exception, as node raises one: an `Error` named `name` whose prototype is the

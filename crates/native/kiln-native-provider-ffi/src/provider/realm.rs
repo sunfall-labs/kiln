@@ -5498,6 +5498,23 @@ pub extern "C" fn kiln_realm_set_timer_ref(id: u64, referenced: i32) -> i32 {
     })
 }
 
+/// Restarts a timeout or interval on the active Realm as `Timeout.prototype.refresh()` does: the
+/// same identity, callback, arguments, referenced state and delay, measured from the Realm's
+/// current (virtual) time. A timer that already ran or was cleared is left alone.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_refresh_timer(id: u64) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        queue.refresh_timer(TimerId::new(id));
+        0
+    })
+}
+
 /// Drives every queued microtask and timer on `handle` to deterministic quiescence.
 ///
 /// # Safety
@@ -7110,6 +7127,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_set_timer_ref, realm_set_timer_ref) => {
             const _: extern "C" fn(u64, i32) -> i32 = kiln_realm_set_timer_ref;
+        };
+        (realm, kiln_realm_refresh_timer, realm_clear_timer) => {
+            const _: extern "C" fn(u64) -> i32 = kiln_realm_refresh_timer;
         };
         (realm, kiln_realm_drive, realm_drive) => {
             const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;

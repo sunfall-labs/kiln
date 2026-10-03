@@ -1488,22 +1488,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.timer_handle(id.get() as f64, kind, instruction)
             }
             Native::TimerRefRaw => {
-                let id = arguments.first().map_or(f64::NAN, Value::as_number);
-                if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
-                    let referenced = arguments.get(1).is_some_and(Value::is_truthy);
-                    self.with_realm_mut(|realm| {
-                        realm.set_timer_referenced(TimerId::new(id as u64), referenced)
-                    });
-                }
-                Ok(Value::Undefined)
+                let op = arguments.get(1).map_or(f64::NAN, Value::as_number);
+                Ok(self.timer_op(arguments.first(), op))
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
                 // A timer object clears by its identity, which is how `toPrimitive` reads it.
-                let id = match arguments.first() {
-                    Some(handle @ Value::Object(_)) => self
+                let id = match (Self::timer_handle_id(arguments.first()), arguments.first()) {
+                    // A handle this engine made holds its identity where it can be read directly.
+                    (Some(id), _) => id,
+                    (None, Some(handle @ Value::Object(_))) => self
                         .as_number_argument(Some(handle), instruction)
                         .unwrap_or(f64::NAN),
-                    other => other.map_or(f64::NAN, Value::as_number),
+                    (None, other) => other.map_or(f64::NAN, Value::as_number),
                 };
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
                     self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));

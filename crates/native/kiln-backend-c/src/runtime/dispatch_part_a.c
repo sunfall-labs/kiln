@@ -3051,19 +3051,24 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return kiln_c99_timer_handle(host, id, code, result, depth, thrown);
         }
         case KILN_C99_METHOD_TIMER_REF_RAW: {
-            double id = 0.0 / 0.0;
-            if (argc > 0 && args[0].tag == KILN_VALUE_NUMBER) id = kiln_c99_as_number(args[0]);
-            *result = kiln_c99_undefined();
-            if (isfinite(id) && id >= 1.0 && floor(id) == id && id <= 9007199254740991.0)
-                return kiln_realm_set_timer_ref((uint64_t)id,
-                                                argc > 1 && kiln_c99_truthy(args[1]));
-            return KILN_C99_OK;
+            double op = argc > 1 && args[1].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[1])
+                                                                     : 0.0 / 0.0;
+            return kiln_c99_timer_op(host, result, argc > 0 ? args[0] : kiln_c99_undefined(), op,
+                                     depth, thrown);
         }
         case KILN_C99_METHOD_CLEAR_TIMEOUT:
         case KILN_C99_METHOD_CLEAR_INTERVAL:
         case KILN_C99_METHOD_CLEAR_IMMEDIATE: {
             double id = 0.0 / 0.0;
+            int held = 0;
+            /* A handle this engine made holds its identity where it can be read directly. */
             if (argc > 0) {
+                status = kiln_c99_timer_handle_id(host, args[0], &id, &held, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            if (argc > 0 && !held) {
                 status = kiln_c99_to_number_checked(host, args[0], &id, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;

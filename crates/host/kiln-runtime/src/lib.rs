@@ -81,7 +81,7 @@ pub use worker_pool::{
     WorkerRealmHandle,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -5202,6 +5202,12 @@ pub struct Realm<M = WorkId, T = WorkId> {
     /// The active timers that do not keep the loop alive (`timer.unref()`). Always a subset of
     /// `active_timers`: every place that retires an identity retires it here too.
     unreferenced_timers: HashSet<TimerId, SequenceBuild>,
+    /// Timers restarted by `refresh_timer` whose queue entry still sits at its old deadline: the
+    /// new base (the realm's time when it was refreshed) and the sequence it was refreshed at.
+    /// The entry is moved when it reaches the front (`discard_cancelled_timers`), as node's timer
+    /// lists do, so a refresh is a map write and never a search of the queue. Empty unless a
+    /// program refreshes, and a subset of `active_timers` like the set above.
+    refreshed_timers: HashMap<TimerId, (Duration, u64), SequenceBuild>,
     /// Whether a process warning has been written, after which node leaves off its
     /// `--trace-warnings` hint.
     warned: bool,
@@ -5266,6 +5272,7 @@ impl<M, T> Realm<M, T> {
             cancelled_timers: HashSet::default(),
             active_timers: HashSet::default(),
             unreferenced_timers: HashSet::default(),
+            refreshed_timers: HashMap::default(),
             _not_send: PhantomData,
         }
     }
@@ -5456,6 +5463,7 @@ impl<M, T> Realm<M, T> {
                 id,
                 work,
                 interval,
+                delay,
             },
         );
         id
@@ -5465,6 +5473,7 @@ impl<M, T> Realm<M, T> {
     pub fn clear_timeout(&mut self, id: TimerId) -> bool {
         if self.active_timers.remove(&id) {
             self.unreferenced_timers.remove(&id);
+            self.refreshed_timers.remove(&id);
             self.cancelled_timers.insert(id);
             true
         } else {
@@ -5486,6 +5495,25 @@ impl<M, T> Realm<M, T> {
         } else {
             self.unreferenced_timers.insert(id);
         }
+        true
+    }
+
+    /// Restarts an active timeout or interval as `Timeout.prototype.refresh()` does: the same
+    /// identity, callback and arguments, referenced state and delay, measured from the realm's
+    /// current virtual time. An interval restarts its current period. A timer that already
+    /// finished or was cleared is not re-armed. `id` must name a timeout or an interval: an
+    /// immediate or an I/O callback has no delay to restart, and the caller (`Timeout`, never
+    /// `Immediate`) is what keeps them apart. Returns whether `id` was restarted.
+    ///
+    /// The queue entry is not searched for: the new base is recorded, and the entry moves when it
+    /// reaches the front of the queue, which it does no later than its new deadline.
+    pub fn refresh_timer(&mut self, id: TimerId) -> bool {
+        if !self.active_timers.contains(&id) {
+            return false;
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.refreshed_timers.insert(id, (self.now, sequence));
         true
     }
 
@@ -5574,17 +5602,28 @@ impl<M, T> Realm<M, T> {
         };
     }
 
+    /// Brings the front of the queue up to date: drops cancelled entries, and moves a refreshed
+    /// timer's entry, found at its old deadline, to the deadline its refresh gave it. Both are
+    /// settled here, before anything reads the front, so the virtual clock never advances to a
+    /// deadline the timer no longer has.
     fn discard_cancelled_timers(&mut self) {
-        if self.cancelled_timers.is_empty() {
+        if self.cancelled_timers.is_empty() && self.refreshed_timers.is_empty() {
             return;
         }
-        while self
-            .timers
-            .peek_key()
-            .is_some_and(|(_, _, id)| self.cancelled_timers.contains(&TimerId(id)))
-        {
-            let timer = self.timers.pop().expect("peeked timer exists");
-            self.cancelled_timers.remove(&timer.id);
+        while let Some((_, _, id)) = self.timers.peek_key() {
+            let id = TimerId(id);
+            if self.cancelled_timers.contains(&id) {
+                let timer = self.timers.pop().expect("peeked timer exists");
+                self.cancelled_timers.remove(&timer.id);
+            } else if let Some((base, sequence)) = self.refreshed_timers.remove(&id) {
+                let mut timer = self.timers.pop().expect("peeked timer exists");
+                let delay = timer.interval.unwrap_or(timer.delay);
+                timer.deadline = base.saturating_add(delay);
+                timer.sequence = sequence;
+                self.timers.push(delay, timer);
+            } else {
+                break;
+            }
         }
     }
 
@@ -5617,6 +5656,7 @@ impl<M, T> Realm<M, T> {
         }
         self.active_timers.remove(&id);
         self.unreferenced_timers.remove(&id);
+        self.refreshed_timers.remove(&id);
         Some(WorkItem::Timer { id, work })
     }
 
@@ -5647,6 +5687,7 @@ impl<M, T> Realm<M, T> {
                     id,
                     work: rearmed,
                     interval: Some(interval),
+                    delay: interval,
                 },
             );
         } else {

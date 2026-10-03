@@ -2483,6 +2483,62 @@ fn interval_rearms_before_callback_and_can_be_cleared() {
     assert!(!realm.has_pending_work());
 }
 
+/// `Timeout.prototype.refresh()`: the same timer restarted with its delay from the realm's
+/// current virtual time, still the same identity and still unreferenced if it was; a finished or
+/// cleared timer is not re-armed.
+#[test]
+fn refreshed_timers_restart_from_now() {
+    let mut realm: Realm = Realm::new();
+    let first = realm.set_timeout(Duration::from_millis(10), WorkId::new(1));
+    let slow = realm.set_timeout(Duration::from_millis(20), WorkId::new(2));
+    realm.set_timer_referenced(slow, false);
+    let next = |realm: &mut Realm| match realm.run_next_timer() {
+        Some(WorkItem::Timer { id, work }) => (id, work, realm.now()),
+        _ => panic!("a timer was due"),
+    };
+    assert_eq!(
+        next(&mut realm),
+        (first, WorkId::new(1), Duration::from_millis(10))
+    );
+    // Refreshed at 10 ms it is due at 30, behind a timer armed for 25.
+    assert!(realm.refresh_timer(slow));
+    let between = realm.set_timeout(Duration::from_millis(15), WorkId::new(3));
+    assert_eq!(
+        next(&mut realm),
+        (between, WorkId::new(3), Duration::from_millis(25))
+    );
+    assert!(!realm.has_referenced_timers());
+    assert_eq!(
+        next(&mut realm),
+        (slow, WorkId::new(2), Duration::from_millis(30))
+    );
+    // Finished: nothing to restart, and nothing is re-armed.
+    assert!(!realm.refresh_timer(slow));
+    assert!(!realm.has_pending_work());
+
+    // Cleared: the same.
+    let doomed = realm.set_timeout(Duration::from_millis(5), WorkId::new(4));
+    assert!(realm.refresh_timer(doomed));
+    assert!(realm.clear_timeout(doomed));
+    assert!(!realm.refresh_timer(doomed));
+    assert!(realm.next_timer_deadline().is_none());
+
+    // An interval restarts its current period, and keeps ticking at its period after.
+    let start = realm.now();
+    let tick = realm.set_interval(Duration::from_millis(10), WorkId::new(5));
+    assert_eq!(next(&mut realm).2, start + Duration::from_millis(10));
+    let before = realm.now();
+    realm.set_timeout(Duration::from_millis(4), WorkId::new(6));
+    assert_eq!(next(&mut realm).1, WorkId::new(6));
+    assert!(realm.refresh_timer(tick));
+    assert_eq!(
+        next(&mut realm),
+        (tick, WorkId::new(5), before + Duration::from_millis(4 + 10))
+    );
+    assert_eq!(next(&mut realm).2, before + Duration::from_millis(4 + 20));
+    assert!(realm.clear_timeout(tick));
+}
+
 /// An unreferenced timer never keeps the loop open and never moves the virtual clock by
 /// itself, but runs in its turn while a referenced one keeps the loop going.
 #[test]

@@ -249,29 +249,87 @@ static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *
     return status;
 }
 
-/* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id`: the handle
- * object the bootstrap's `__kilnTimerHandle` makes (`kiln-builtins/src/timers.ts`; `kind` 0 a
- * timeout, 1 an interval, 2 an immediate), or the bare identity where it is not installed. The
- * object and its `ref`/`unref` are TypeScript; this only asks for one. The factory is
- * `timerHandle` on the realm's engine-private object (`kiln_c99_private_object`), never a
- * property a program can find. */
+/* What `setTimeout`, `setInterval` and `setImmediate` hand back for the timer `id` (`code` says
+ * which): an object allocated here, with the prototype the bootstrap published on the realm's
+ * engine-private object (`kiln-builtins/src/timers.ts`) and the identity in a reserved slot, or
+ * the bare identity where no prototype was published. No script runs to make one, which is what
+ * keeps arming a timer cheap. Its methods ask the engine about the slot through
+ * `__kilnTimerRef` (`kiln_c99_timer_op`); the private object is never a property a program can
+ * find (`kiln_c99_private_object`). */
 static int kiln_c99_private_object(kiln_value *out);
 static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
                                  int depth, kiln_value *thrown) {
     kiln_value private_object = kiln_c99_undefined();
-    kiln_value factory = kiln_c99_undefined();
-    kiln_value factory_args[2];
+    kiln_value prototype = kiln_c99_undefined();
     int status = kiln_c99_private_object(&private_object);
     *result = kiln_c99_number((double)id);
     if (status == KILN_C99_OK)
-        status = kiln_c99_get(host, private_object, "timerHandle", 11, &factory, depth, thrown);
-    if (status != KILN_C99_OK || !kiln_c99_is_callable(factory)) return status;
-    factory_args[0] = kiln_c99_number((double)id);
-    factory_args[1] = kiln_c99_number(code == KILN_C99_METHOD_SET_INTERVAL    ? 1.0
-                                      : code == KILN_C99_METHOD_SET_IMMEDIATE ? 2.0
-                                                                               : 0.0);
-    return kiln_c99_call(host, result, factory, kiln_c99_undefined(), factory_args, 2, depth,
-                         thrown);
+        status = code == KILN_C99_METHOD_SET_IMMEDIATE
+                     ? kiln_c99_get(host, private_object, "immediatePrototype", 18, &prototype,
+                                    depth, thrown)
+                     : kiln_c99_get(host, private_object, "timeoutPrototype", 16, &prototype,
+                                    depth, thrown);
+    if (status != KILN_C99_OK || prototype.tag != KILN_VALUE_OBJECT) return status;
+    status = kiln_c99_new_object(result);
+    if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*result, prototype);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *result, "@@kiln:timer:id", 15, kiln_c99_number((double)id), 0,
+                              NULL);
+    return status;
+}
+
+/* The identity a timer handle holds, when `handle` is one this engine made. */
+static int kiln_c99_timer_handle_id(kiln_host *host, kiln_value handle, double *id, int *found,
+                                    int depth, kiln_value *thrown) {
+    kiln_value slot = kiln_c99_undefined();
+    int status = KILN_C99_OK;
+    *found = 0;
+    if (handle.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+    status = kiln_c99_get(host, handle, "@@kiln:timer:id", 15, &slot, depth, thrown);
+    if (status == KILN_C99_OK && slot.tag == KILN_VALUE_NUMBER) {
+        *id = kiln_c99_as_number(slot);
+        *found = 1;
+    }
+    return status;
+}
+
+/* What a timer handle's methods ask of the engine, `__kilnTimerRef(handle, op)`: `op` 0 its
+ * identity, 1 whether it is referenced, 2 and 3 to reference or unreference it, 4 to restart it
+ * from now. The referenced flag the program sees lives on the handle, so it survives the timer's
+ * end as node's does; the one the loop reads lives in the realm's timer queue. */
+static int kiln_c99_timer_op(kiln_host *host, kiln_value *result, kiln_value handle, double op,
+                             int depth, kiln_value *thrown) {
+    kiln_value slot = kiln_c99_undefined();
+    double id = 0.0;
+    int found = 0;
+    int unreferenced;
+    int status = kiln_c99_timer_handle_id(host, handle, &id, &found, depth, thrown);
+    *result = kiln_c99_undefined();
+    if (status != KILN_C99_OK) return status;
+    if (!found) {
+        if (op != 0.0) *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_get(host, handle, "@@kiln:timer:unref", 18, &slot, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    unreferenced = slot.tag == KILN_VALUE_BOOLEAN && kiln_c99_truthy(slot);
+    if (op == 0.0) {
+        *result = kiln_c99_number(id);
+    } else if (op == 2.0 || op == 3.0) {
+        int unref = op == 3.0;
+        if (unref != unreferenced) {
+            status = kiln_c99_put(NULL, handle, "@@kiln:timer:unref", 18, kiln_c99_boolean(unref),
+                                  0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_realm_set_timer_ref((uint64_t)id, !unref);
+        }
+        *result = kiln_c99_boolean(!unref);
+    } else if (op == 4.0) {
+        status = kiln_realm_refresh_timer((uint64_t)id);
+    } else {
+        *result = kiln_c99_boolean(!unreferenced);
+    }
+    return status;
 }
 
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,

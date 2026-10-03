@@ -1499,6 +1499,7 @@ int kiln_realm_set_immediate(kiln_realm_work_fn run, kiln_realm_drop_fn drop, vo
 int kiln_realm_queue_io(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);
 int kiln_realm_clear_timer(uint64_t id);
 int kiln_realm_set_timer_ref(uint64_t id, int referenced);
+int kiln_realm_refresh_timer(uint64_t id);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown, uint32_t *kind, uint64_t *delay_ns);
 int kiln_realm_destroy(uint64_t realm);
@@ -2777,7 +2778,10 @@ static int kiln_c99_text_decoder_flags(kiln_host *host, kiln_value options, int 
 static int kiln_c99_new_text_decoder(kiln_host *host, kiln_value *out, const kiln_value *args,
 static int kiln_c99_text_decoder_decode(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_dom_exception(kiln_host *host, kiln_value *out, const char *message,
+static int kiln_c99_private_object(kiln_value *out);
 static int kiln_c99_timer_handle(kiln_host *host, uint64_t id, uint64_t code, kiln_value *result,
+static int kiln_c99_timer_handle_id(kiln_host *host, kiln_value handle, double *id, int *found,
+static int kiln_c99_timer_op(kiln_host *host, kiln_value *result, kiln_value handle, double op,
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length) {
 static int kiln_c99_buffer_encoding_is(const char *name, size_t length, const char *wanted) {

@@ -281,6 +281,14 @@ pub(super) enum NodeObject {
     StringDecoder(Rc<RefCell<StringDecoderState>>),
     AsyncLocalStorage(Rc<AsyncStorage>),
     Zlib(Rc<zlib::ZlibState>),
+    /// A `Timeout` or `Immediate` the engine allocated (`Vm::timer_handle`): the timer's identity,
+    /// and whether the program has unreferenced it, which `hasRef` reports after the timer is
+    /// gone. A slot rather than properties, so arming a timer costs one allocation and no key
+    /// lookups, and a program cannot see it.
+    TimerHandle {
+        id: u64,
+        unreferenced: bool,
+    },
 }
 
 impl Default for ObjectData {

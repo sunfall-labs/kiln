@@ -892,6 +892,10 @@ int kiln_realm_clear_timer(uint64_t id) {
     (void)id;
     return KILN_C99_OK;
 }
+int kiln_realm_refresh_timer(uint64_t id) {
+    (void)id;
+    return KILN_C99_OK;
+}
 int kiln_realm_set_timer_ref(uint64_t id, int referenced) {
     (void)id;
     (void)referenced;

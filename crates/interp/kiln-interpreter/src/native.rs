@@ -786,9 +786,11 @@ pub enum Native {
     /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
     /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
     QueueIoRaw,
-    /// `__kilnTimerRef(id, referenced)`: whether the timer, interval or immediate `id` keeps the
-    /// loop alive (`timer.ref()` / `timer.unref()`), a flag the realm's timer queue owns
-    /// (`kiln_runtime::Realm::set_timer_referenced`). Captured and deleted by
+    /// `__kilnTimerRef(handle, op)`: what the methods of a timer handle ask of the engine, which
+    /// made the handle and holds its identity (`op` 0 the identity, 1 `hasRef`, 2 `ref`, 3
+    /// `unref`, 4 `refresh`). Whether a timer keeps the loop alive is a flag the realm's timer
+    /// queue owns (`kiln_runtime::Realm::set_timer_referenced`), and a refresh restarts the
+    /// queue's own entry (`refresh_timer`). Captured and deleted by
     /// `kiln-builtins/src/timers.ts`.
     TimerRefRaw,
     /// `__kilnWorkerOp(op, ...)`: the runtime's cross-realm ports and workers

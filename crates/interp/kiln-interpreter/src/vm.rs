@@ -210,6 +210,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// to find it again. What it does *not* do is back variable lookup: writing
     /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
     pub(super) global_objects: Vec<Option<Value>>,
+    /// The `Timeout` and `Immediate` prototypes a realm's bootstrap published, by realm: what
+    /// `timer_handle` gives each handle it allocates, found once rather than by a scan of the
+    /// global object's properties on every timer.
+    pub(super) timer_prototypes: Vec<Option<(Value, Value)>>,
     /// Successful RegExp capture strings, indexed by realm. Failed matches leave this snapshot
     /// alone, as Annex B requires.
     pub(super) regexp_legacy_captures: Vec<[StringUnits; 9]>,
