@@ -43,7 +43,7 @@ use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SymbolId;
-use oxc_semantic::{IsGlobalReference, SemanticBuilder};
+use oxc_semantic::{IsGlobalReference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_str::Ident;
 use oxc_syntax::module_record::{
@@ -2599,6 +2599,15 @@ fn lower_parsed_in_context(
         diagnostics.extend(early);
     }
     let inline_eval_calls = global_literal_eval_call_spans(parsed);
+    // Enum member identifiers are references in an Oxc-owned enum scope. Build that scope only
+    // for sources that may contain enums; ordinary JavaScript and TypeScript avoid this extra
+    // semantic pass.
+    let enum_semantic = source.contains("enum").then(|| {
+        SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic
+    });
     let mut lowerer = Lowerer {
         text: source,
         path,
@@ -2606,6 +2615,10 @@ fn lower_parsed_in_context(
         source_units: source_units.map(|(units, _)| units),
         source_map: source_units.map(|(_, map)| map),
         inline_eval_calls,
+        enum_scoping: enum_semantic.as_ref().map(|semantic| semantic.scoping()),
+        active_enum_members: None,
+        active_enum_name: None,
+        enum_merge: false,
     };
     let body = lowerer.statements(&parsed.program.body);
     let source_origin =
@@ -3369,7 +3382,7 @@ fn skipped_trivia(text: &str) -> usize {
     }
 }
 
-struct Lowerer<'a> {
+struct Lowerer<'a, 's> {
     /// The source being lowered, so a span can be *read* and not merely recorded.
     ///
     /// Only one thing needs this, and it needs it for a reason no span arithmetic can supply: a
@@ -3385,12 +3398,20 @@ struct Lowerer<'a> {
     /// Call spans whose callee is Oxc-proven to be the unresolved global `eval` and whose sole
     /// argument is a string literal. The inner source is narrowed further before HIR inlining.
     inline_eval_calls: HashSet<(u32, u32)>,
+    /// Oxc's enum evaluator supplies constant values for resolved enum member references.
+    enum_scoping: Option<&'s Scoping>,
+    /// Resolved references to the enum currently being lowered. Symbol identity preserves
+    /// shadowing when a computed initializer contains a nested binding with the same name.
+    active_enum_members: Option<HashMap<SymbolId, String>>,
+    active_enum_name: Option<String>,
+    /// Whether this enum declaration merges with one earlier in the same statement list.
+    enum_merge: bool,
     /// Exact input units and parser-transport byte boundaries for dynamic compilation.
     source_units: Option<&'a [u16]>,
     source_map: Option<&'a [usize]>,
 }
 
-impl Lowerer<'_> {
+impl Lowerer<'_, '_> {
     fn inline_eval_expression(&mut self, source: &str) -> Option<HirExpression> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::default().with_script(true))
@@ -3414,6 +3435,10 @@ impl Lowerer<'_> {
             path: self.path,
             native_import_meta: None,
             inline_eval_calls: HashSet::new(),
+            enum_scoping: self.enum_scoping,
+            active_enum_members: None,
+            active_enum_name: None,
+            enum_merge: false,
             // This separately parsed scalar eval literal has its own source coordinates.
             source_units: None,
             source_map: None,
@@ -3463,11 +3488,25 @@ impl Lowerer<'_> {
     /// three evals of a four-megabyte source held a gigabyte that nothing pointed at.
     fn statements(&mut self, source: &[Statement<'_>]) -> Vec<HirStatement> {
         let mut lowered = Vec::with_capacity(source.len());
-        lowered.extend(
-            source
-                .iter()
-                .filter_map(|statement| self.statement(statement)),
-        );
+        let mut enum_names = HashSet::new();
+        for statement in source {
+            let name = match statement {
+                Statement::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
+                Statement::ExportDeclaration(declaration) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &declaration.declaration {
+                        Some(declaration.id.name.as_str())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            self.enum_merge = name.is_some_and(|name| !enum_names.insert(name.to_owned()));
+            if let Some(statement) = self.statement(statement) {
+                lowered.push(statement);
+            }
+            self.enum_merge = false;
+        }
         lowered
     }
 
@@ -3904,9 +3943,6 @@ impl Lowerer<'_> {
         declaration: &TSEnumDeclaration<'_>,
         statement_span: HirSpan,
     ) -> Result<Vec<HirStatement>, String> {
-        if declaration.r#const {
-            return Err("const enum (inlining is not implemented)".to_owned());
-        }
         let name = declaration.id.name.to_string();
         let span = statement_span;
         let string = |value: &str| HirExpression {
@@ -3927,16 +3963,51 @@ impl Lowerer<'_> {
             span,
         };
         let mut statements = Vec::with_capacity(1 + declaration.body.members.len() * 2);
+        let mut member_symbols = HashMap::new();
+        if let (Some(scoping), Some(scope_id)) =
+            (self.enum_scoping, declaration.body.scope_id.get())
+        {
+            for member in &declaration.body.members {
+                if let TSEnumMemberName::Identifier(id) = &member.id
+                    && let Some(symbol) = scoping.get_binding(scope_id, id.name)
+                {
+                    member_symbols.insert(symbol, id.name.to_string());
+                }
+            }
+        }
         statements.push(HirStatement {
             kind: HirStatementKind::Variable {
                 kind: HirVariableKind::Var,
                 declarations: vec![HirVariableDeclarator {
                     pattern: kiln_hir::Pattern::Identifier(name.clone()),
-                    initializer: Some(HirExpression {
-                        kind: HirExpressionKind::Object {
-                            members: Vec::new(),
-                        },
-                        span,
+                    initializer: Some(if self.enum_merge {
+                        HirExpression {
+                            kind: HirExpressionKind::Logical {
+                                operator: HirLogicalOperator::Or,
+                                left: Box::new(identifier(&name)),
+                                right: Box::new(HirExpression {
+                                    kind: HirExpressionKind::Assignment {
+                                        operator: HirAssignmentOperator::Assign,
+                                        target: name.clone(),
+                                        value: Box::new(HirExpression {
+                                            kind: HirExpressionKind::Object {
+                                                members: Vec::new(),
+                                            },
+                                            span,
+                                        }),
+                                    },
+                                    span,
+                                }),
+                            },
+                            span,
+                        }
+                    } else {
+                        HirExpression {
+                            kind: HirExpressionKind::Object {
+                                members: Vec::new(),
+                            },
+                            span,
+                        }
                     }),
                     span,
                 }],
@@ -3954,20 +4025,34 @@ impl Lowerer<'_> {
                     return Err("computed template enum member name".to_owned());
                 }
             };
-            let (value, auto_incrementable, needs_runtime_reverse_map) =
+            let constant = self.enum_scoping.and_then(|scoping| {
+                let scope_id = declaration.body.scope_id.get()?;
+                let TSEnumMemberName::Identifier(id) = &member.id else {
+                    return None;
+                };
+                let symbol = scoping.get_binding(scope_id, id.name)?;
+                scoping.get_enum_member_value(symbol).cloned()
+            });
+            let is_string_constant =
+                matches!(
+                    constant,
+                    Some(oxc_syntax::constant_value::ConstantValue::String(_))
+                ) || matches!(member.initializer, Some(Expression::StringLiteral(_)));
+            let (value, auto_incrementable, needs_reverse_map) =
                 if let Some(initializer) = &member.initializer {
-                    let numeric = matches!(initializer, Expression::NumericLiteral(_));
-                    // An enum initializer that refers to a previous member needs enum-local name
-                    // resolution. Until that rewrite is available, refuse it instead of resolving
-                    // the identifier in the surrounding JavaScript scope by accident.
-                    if let Expression::Identifier(id) = initializer
-                        && previous
-                            .as_ref()
-                            .is_some_and(|(member, _)| member == id.name.as_str())
-                    {
-                        return Err("enum member reference initializer".to_owned());
-                    }
-                    (self.expression(initializer), numeric, true)
+                    let old_members = self.active_enum_members.replace(member_symbols.clone());
+                    let old_name = self.active_enum_name.replace(name.clone());
+                    let value = self.expression(initializer);
+                    self.active_enum_members = old_members;
+                    self.active_enum_name = old_name;
+                    (
+                        value,
+                        matches!(
+                            constant,
+                            Some(oxc_syntax::constant_value::ConstantValue::Number(_))
+                        ) || matches!(initializer, Expression::NumericLiteral(_)),
+                        !is_string_constant,
+                    )
                 } else if let Some((previous_name, true)) = &previous {
                     (
                         HirExpression {
@@ -4010,22 +4095,8 @@ impl Lowerer<'_> {
                 }),
                 span,
             });
-            if needs_runtime_reverse_map {
+            if needs_reverse_map {
                 let assigned_value = member_read(&member_name);
-                let is_number = HirExpression {
-                    kind: HirExpressionKind::Binary {
-                        operator: HirBinaryOperator::StrictEqual,
-                        left: Box::new(HirExpression {
-                            kind: HirExpressionKind::Unary {
-                                operator: HirUnaryOperator::TypeOf,
-                                argument: Box::new(assigned_value.clone()),
-                            },
-                            span,
-                        }),
-                        right: Box::new(string("number")),
-                    },
-                    span,
-                };
                 let reverse = HirExpression {
                     kind: HirExpressionKind::ComputedAssignment {
                         operator: HirAssignmentOperator::Assign,
@@ -4036,17 +4107,7 @@ impl Lowerer<'_> {
                     span,
                 };
                 statements.push(HirStatement {
-                    kind: HirStatementKind::Expression(HirExpression {
-                        kind: HirExpressionKind::Conditional {
-                            test: Box::new(is_number),
-                            consequent: Box::new(reverse),
-                            alternate: Box::new(HirExpression {
-                                kind: HirExpressionKind::Literal(HirLiteral::Undefined),
-                                span,
-                            }),
-                        },
-                        span,
-                    }),
+                    kind: HirStatementKind::Expression(reverse),
                     span,
                 });
             }
@@ -4121,7 +4182,51 @@ impl Lowerer<'_> {
                 oxc_string_units(literal.value.as_str(), literal.lone_surrogates),
             )),
             Expression::Identifier(identifier) => {
-                HirExpressionKind::Identifier(identifier.name.to_string())
+                let enum_value = self.enum_scoping.and_then(|scoping| {
+                    let reference = identifier.reference_id.get()?;
+                    let symbol = scoping.get_reference(reference).symbol_id()?;
+                    self.active_enum_members
+                        .as_ref()
+                        .and_then(|members| members.get(&symbol))
+                        .map(|member_name| {
+                            (
+                                member_name.clone(),
+                                scoping.get_enum_member_value(symbol).cloned(),
+                            )
+                        })
+                });
+                if let Some((member_name, value)) = enum_value {
+                    if let Some(value) = value {
+                        match value {
+                            oxc_syntax::constant_value::ConstantValue::Number(value) => {
+                                HirExpressionKind::Literal(HirLiteral::Number(value.to_bits()))
+                            }
+                            oxc_syntax::constant_value::ConstantValue::String(value) => {
+                                HirExpressionKind::Literal(HirLiteral::String(StringUnits::from(
+                                    value.as_str(),
+                                )))
+                            }
+                        }
+                    } else if let Some(enum_name) = &self.active_enum_name {
+                        HirExpressionKind::ComputedMember {
+                            object: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier(enum_name.clone()),
+                                span: expression_span,
+                            }),
+                            property: Box::new(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    StringUnits::from(member_name.as_str()),
+                                )),
+                                span: expression_span,
+                            }),
+                            optional: false,
+                        }
+                    } else {
+                        HirExpressionKind::Identifier(identifier.name.to_string())
+                    }
+                } else {
+                    HirExpressionKind::Identifier(identifier.name.to_string())
+                }
             }
             Expression::ParenthesizedExpression(expression) => {
                 return self.expression(&expression.expression);
@@ -7564,7 +7669,7 @@ mod tests {
                 module.body[0]
             );
         };
-        assert_eq!(statements.len(), 7); // binding, three values and their numeric reverse maps
+        assert_eq!(statements.len(), 6); // binding, two numeric reverse maps, one string value
         assert!(matches!(
             &statements[0].kind,
             HirStatementKind::Variable { kind: HirVariableKind::Var, declarations }
@@ -7579,7 +7684,7 @@ mod tests {
         assert!(matches!(
             &statements[2].kind,
             HirStatementKind::Expression(HirExpression {
-                kind: HirExpressionKind::Conditional { .. },
+                kind: HirExpressionKind::ComputedAssignment { .. },
                 ..
             })
         ));
@@ -7591,10 +7696,7 @@ mod tests {
         ));
 
         let constant = parse("enum.ts", "const enum Flags { Read, Write }");
-        assert!(matches!(
-            &constant.body[0].kind,
-            HirStatementKind::Unsupported { feature } if feature == "const enum (inlining is not implemented)"
-        ));
+        assert!(matches!(&constant.body[0].kind, HirStatementKind::Block(_)));
     }
 
     /// The parameters of the single function a module declares.
