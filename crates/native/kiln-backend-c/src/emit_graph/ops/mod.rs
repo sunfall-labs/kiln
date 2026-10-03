@@ -236,6 +236,7 @@ pub(super) fn emit_graph_op(
     boxed: Option<&HashSet<ValueId>>,
     await_resolve_arg: Option<ValueId>,
     used: &HashSet<ValueId>,
+    argument_length_values: &HashSet<ValueId>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -590,6 +591,15 @@ pub(super) fn emit_graph_op(
             // A sunk literal's spread or define: the fast clone's graph alone carries it as a
             // scalar object (`FunctionGraph::spread_sinks`).
             emit_sunk_bridge(output, vid, instruction, operands, &ctx);
+        }
+        GraphOp::Bridge {
+            instruction: Instruction::LoadArguments,
+            ..
+        } if argument_length_values.contains(&vid) => {
+            // The matching GetProperty reads argc directly. Keep a defined, unobservable slot
+            // for diagnostics and any conservative emitter bookkeeping, without allocating the
+            // arguments exotic object.
+            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
         }
         GraphOp::Bridge {
             instruction: Instruction::HostCall { op, argc },
@@ -1640,6 +1650,12 @@ pub(super) fn emit_graph_op(
         }
         // Property and element access call the value-shaped helpers directly: the same
         // functions the stack-shaped entry points wrap, without the one-element arrays.
+        GraphOp::GetProperty { object, name, .. }
+            if argument_length_values.contains(object)
+                && matches!(program.constants.get(*name as usize), Some(kiln_ir::Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length")) =>
+        {
+            writeln!(output, "    v{v} = kiln_c99_val_from_double((double)argc);").unwrap();
+        }
         GraphOp::GetProperty { object, name, .. } => {
             properties::emit_get_property(output, vid, object, name, &ctx)
         }

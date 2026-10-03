@@ -19,6 +19,106 @@ use std::fmt::Write;
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
 
+/// Return arguments-object loads whose only observed use is an own `length` read.
+/// The arguments object exposes a writable length and can be aliased, so this is safe only
+/// when every live load in the function has that exact use and no nested arrow closes over it.
+/// Those reads can then use the call frame's argc directly without allocating the exotic object.
+fn arguments_length_only_values(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+) -> HashSet<ValueId> {
+    if proto.arrow || proto.generator || proto.asynchronous || proto.async_generator {
+        return HashSet::new();
+    }
+    if proto
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
+    {
+        return HashSet::new();
+    }
+    fn arrow_tree_uses_arguments(index: u32, program: &Program) -> bool {
+        let Some(proto) = program.functions.get(index as usize) else {
+            return false;
+        };
+        if proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Instruction::LoadArguments | Instruction::DirectEval(_)))
+        {
+            return true;
+        }
+        proto.code.iter().any(|instruction| {
+            let Instruction::MakeFunction(child) = instruction else {
+                return false;
+            };
+            program
+                .functions
+                .get(*child as usize)
+                .is_some_and(|child_proto| {
+                    child_proto.arrow && arrow_tree_uses_arguments(*child, program)
+                })
+        })
+    }
+    for instruction in &proto.code {
+        let Instruction::MakeFunction(child) = instruction else {
+            continue;
+        };
+        if program
+            .functions
+            .get(*child as usize)
+            .is_some_and(|child_proto| {
+                child_proto.arrow && arrow_tree_uses_arguments(*child, program)
+            })
+        {
+            return HashSet::new();
+        }
+    }
+
+    let mut loads = HashSet::new();
+    let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
+    for block in &graph.blocks {
+        for (value, operation) in &block.operations {
+            if matches!(
+                operation,
+                GraphOp::Bridge {
+                    instruction: Instruction::LoadArguments,
+                    pushes: 1,
+                    ..
+                }
+            ) {
+                loads.insert(*value);
+            }
+            for input in operation.operands() {
+                uses.entry(input).or_default().push(operation);
+            }
+        }
+    }
+    if loads.is_empty() {
+        return loads;
+    }
+
+    let mut optimized = HashSet::new();
+    for value in loads.iter().copied() {
+        let Some(value_uses) = uses.get(&value) else {
+            continue;
+        };
+        if value_uses.len() != 1 {
+            return HashSet::new();
+        }
+        let GraphOp::GetProperty { object, name, .. } = value_uses[0] else {
+            return HashSet::new();
+        };
+        let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length"));
+        if *object != value || !is_length {
+            return HashSet::new();
+        }
+        optimized.insert(value);
+    }
+    optimized
+}
+
 /// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
 /// their context needs from the rendered body, including tail bridges and suspension setup,
 /// instead of duplicating those emitters' requirements in an opcode classification.
@@ -1106,6 +1206,7 @@ fn emit_block_sequence(
     type_profile_record: bool,
     this_sites: &std::collections::HashMap<ValueId, usize>,
     spec: &Speculation,
+    argument_length_values: &HashSet<ValueId>,
 ) {
     // A proven number nothing reads boxed is never boxed: its box statement is dropped from
     // the operation's text, and its twin is all that lives. In a versioned body the generic
@@ -1456,6 +1557,7 @@ fn emit_block_sequence(
                 boxed.as_ref(),
                 await_resolve_arg,
                 &used,
+                &argument_length_values,
             );
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
@@ -2819,6 +2921,7 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
+    let argument_length_values = arguments_length_only_values(graph, proto, program);
     let use_counts = graph_value_use_counts(graph);
     // A read of `length` bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
@@ -3044,6 +3147,7 @@ fn emit_blocks(
                 sinks: spec_sinks.clone(),
                 exits: true,
             },
+            &argument_length_values,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -3081,6 +3185,7 @@ fn emit_blocks(
                 sinks: spec_sinks.clone(),
                 exits: false,
             },
+            &argument_length_values,
         );
     } else {
         let boxed = if plan.generic_only && baseline_numbers.is_empty() {
@@ -3148,6 +3253,7 @@ fn emit_blocks(
             type_profile_record,
             &this_sites,
             &Speculation::default(),
+            &argument_length_values,
         );
     }
 
