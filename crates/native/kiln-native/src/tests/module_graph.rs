@@ -208,7 +208,12 @@ export function check(weak) {
         "stressed module reset failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"true 2\n");
+    assert_eq!(
+        output.stdout,
+        b"true 2\n",
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -3291,6 +3296,80 @@ fn native_runtime_module_reset_keeps_old_namespace_closure_and_collects_safely()
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"false 1 2 1 2\n");
+}
+
+#[test]
+fn native_runtime_module_reset_releases_old_cache_generation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module cache collection: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-cache-collection");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package manifest");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+             loader('registerRunner', import.meta.url);\n\
+             async function probe() {{\n\
+             const path = '{}';\n\
+             const source = generation => 'export const value = ' + generation + '; export function check(weak) {{ setTimeout(() => {{ globalThis.gcJunk = Array.from({{length: 2000}}, (_, i) => ({{i}})); globalThis.gcJunk = null; setTimeout(() => console.log(weak.deref() === undefined, value), 0); }}, 0); }}';\n\
+             writeFileSync(path, source(1));\n\
+             const url = 'file://' + path;\n\
+             let old = await import(url);\n\
+             loader('reset');\n\
+             writeFileSync(path, source(2));\n\
+             const current = await import(url);\n\
+             const weak = new WeakRef(old);\n\
+             old = null;\n\
+             current.check(weak);\n\
+             }}\n\
+             await probe();\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module cache collection with GC stress");
+    assert!(
+        output.status.success(),
+        "runtime module cache collection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"true 2\n",
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
