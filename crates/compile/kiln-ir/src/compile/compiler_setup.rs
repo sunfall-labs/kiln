@@ -81,6 +81,7 @@ impl super::Compiler {
             // The module body has no parameters and no `arguments`; the flag is a function's.
             mapped_arguments: false,
             with_scopes: Vec::new(),
+            eval_lexical_names: HashSet::new(),
             private_scopes: Vec::new(),
             private_scope_modules: Vec::new(),
             private_module_id: module.module_id.to_string(),

@@ -236,6 +236,35 @@ impl super::Compiler {
         bindings
     }
 
+    /// The object records around a direct eval are dynamic environments, not lexical bindings.
+    /// Capture their hidden object cells in outer-to-inner order so eval recompilation can seed
+    /// the same `with` lookup chain instead of resolving those names globally.
+    pub(super) fn eval_site_with_objects(&mut self, span: Span) -> Vec<EvalBinding> {
+        let names: Vec<String> = self
+            .with_scopes
+            .iter()
+            .map(|with| with.name.clone())
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let access = match self.resolve_or_capture(&name) {
+                    Resolution::Local(local) if local.celled => EvalAccess::Cell(local.slot),
+                    Resolution::Upvalue(index) => EvalAccess::Upvalue(index),
+                    _ => {
+                        self.error(Some(span), "a direct `eval` cannot reach an active `with`");
+                        return None;
+                    }
+                };
+                Some(EvalBinding {
+                    name,
+                    access,
+                    declaration: EvalDeclaration::Const,
+                })
+            })
+            .collect()
+    }
+
     /// Names visible to the function being compiled, and how each is reached.
     pub(super) fn resolve(&self, name: &str) -> Resolution {
         if let Some(local) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {

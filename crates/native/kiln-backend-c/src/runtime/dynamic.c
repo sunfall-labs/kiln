@@ -809,6 +809,8 @@ typedef struct {
     unsigned char control_parens[128];
     size_t paren_depth;
     size_t paren_overflow;
+    /* Direct eval parses a Script goal, where `return` is forbidden outside nested functions. */
+    int script_goal;
     int closed_control_paren;
     int regex_literal_error;
     int numeric_literal_error;
@@ -2093,6 +2095,8 @@ static int kiln_dyn_validate_parameter_separators(const char *source, size_t len
                                                   int depth, kiln_value *thrown);
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
                                    int depth, kiln_value *thrown);
+static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
+                                          int depth, kiln_value *thrown);
 
 static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
                                              kiln_value left, kiln_value right) {
@@ -3215,8 +3219,8 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                     status = kiln_dyn_string_to_source(call_args[0], &eval_source,
                                                        &eval_length);
                     if (status == KILN_C99_OK)
-                        status = kiln_dyn_preflight_body(host, (const char *)eval_source,
-                            eval_length, depth + 1, thrown);
+                        status = kiln_dyn_preflight_direct_eval(host,
+                            (const char *)eval_source, eval_length, depth + 1, thrown);
                     if (status == KILN_C99_OK) {
                         kiln_dyn_scope eval_scope;
                         kiln_dyn_scope_init(&eval_scope, scope);
@@ -3231,6 +3235,7 @@ static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
                             eval_lex.strict = eval_scope.strict;
                             eval_lex.dynamic_function_body = 1;
                             eval_lex.statement_completion = 1;
+                            eval_lex.script_goal = 1;
                             kiln_dyn_lexer_next(&eval_lex);
                             int returned = 0;
                             res = kiln_c99_undefined();
@@ -6161,6 +6166,9 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_RETURN) {
+        if (lex->script_goal)
+            return kiln_dyn_throw_parse_error(lex, thrown,
+                                              "Illegal return statement in direct eval");
         kiln_dyn_lexer_next(lex);
         if (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
             int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, result, thrown);
@@ -7123,6 +7131,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
         block.parse_only = lex->parse_only;
         block.strict = block_scope.strict;
         block.statement_completion = lex->statement_completion;
+        block.script_goal = lex->script_goal;
         block.break_label = lex->break_label;
         block.break_label_len = lex->break_label_len;
         block.active_labels = lex->active_labels;
@@ -7179,6 +7188,35 @@ static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t l
         status = kiln_dyn_eval_stmt(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
                                     depth, &completion, &returned, thrown);
         if (returned && lex.parse_only) returned = 0;
+    }
+    if (status == KILN_C99_OK && lex.curr.kind != KILN_DYN_EOF)
+        status = kiln_dyn_throw_unexpected_token(&lex, thrown);
+    kiln_dyn_token_free(&lex.curr);
+    kiln_dyn_scope_destroy(&scope);
+    return status;
+}
+
+/* Eval source uses the Script goal even though the dynamic evaluator also serves function
+ * bodies. Carry that grammar bit through blocks, while nested function preflight starts a fresh
+ * body lexer with the default function goal. */
+static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
+                                          int depth, kiln_value *thrown) {
+    kiln_dyn_scope scope;
+    kiln_dyn_lexer lex;
+    kiln_value completion = kiln_c99_undefined();
+    int returned = 0;
+    int status = KILN_C99_OK;
+    kiln_dyn_scope_init(&scope, NULL);
+    memset(&lex, 0, sizeof lex);
+    lex.src = source;
+    lex.len = length;
+    lex.parse_only = 1;
+    lex.script_goal = 1;
+    kiln_dyn_lexer_next(&lex);
+    while (lex.curr.kind != KILN_DYN_EOF && status == KILN_C99_OK) {
+        returned = 0;
+        status = kiln_dyn_eval_stmt(host, &lex, &scope, kiln_c99_undefined(), NULL, 0,
+                                    depth, &completion, &returned, thrown);
     }
     if (status == KILN_C99_OK && lex.curr.kind != KILN_DYN_EOF)
         status = kiln_dyn_throw_unexpected_token(&lex, thrown);

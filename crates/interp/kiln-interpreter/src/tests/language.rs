@@ -79,6 +79,7 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
                     access: EvalAccess::Cell(0),
                     declaration: kiln_ir::EvalDeclaration::Var,
                 }],
+                with_objects: Vec::new(),
                 strict: false,
                 global_var_scope: false,
                 argc: Some(1),

@@ -1018,6 +1018,9 @@ impl super::Compiler {
         if name == "this" || name.starts_with('%') || name.starts_with('*') {
             return Vec::new();
         }
+        if self.eval_program && self.eval_lexical_names.contains(name) {
+            return Vec::new();
+        }
         let bound = self
             .scopes
             .iter()

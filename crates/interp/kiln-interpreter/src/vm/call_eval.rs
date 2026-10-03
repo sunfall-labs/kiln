@@ -226,10 +226,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .map(|site| {
                 site.bindings
                     .iter()
+                    .chain(site.with_objects.iter())
                     .map(|binding| kiln_ir::EvalOuter {
                         name: binding.name.clone(),
                         declaration: binding.declaration,
                     })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let with_objects: Vec<String> = site
+            .map(|site| {
+                site.with_objects
+                    .iter()
+                    .map(|binding| binding.name.clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -250,6 +259,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             source_units,
             module_id: &eval_module_id,
             outer: &outer,
+            with_objects: &with_objects,
             strict,
             global_var_scope,
             script,
@@ -297,6 +307,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .mark(&cell, kind, initializer_program);
                 }
                 locals[slot] = Value::Cell(cell);
+            }
+            for (offset, binding) in site.with_objects.iter().enumerate() {
+                let cell = match binding.access {
+                    EvalAccess::Cell(slot) => self.cell(slot as usize)?,
+                    EvalAccess::Upvalue(index) => self.upvalue(index)?,
+                };
+                locals[site.bindings.len() + offset] = Value::Cell(cell);
             }
         }
 

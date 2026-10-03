@@ -46,17 +46,19 @@ export function runInContext(code: string, contextifiedObject: any, _options?: a
 
 export function runInNewContext(code: string, contextObject?: any, _options?: any): any {
   const scope = contextObject && typeof contextObject === "object" ? contextObject : {};
-  const keys = Object.keys(scope);
-  const values = keys.map((k) => scope[k]);
-  if (kilnPrivate.gcExposed === true && typeof kilnPrivate.gcRequest === "function" &&
-      !keys.includes("gc")) {
-    keys.push("gc");
-    values.push(kilnPrivate.gcRequest);
+  const hasSyntheticGc = kilnPrivate.gcExposed === true &&
+    typeof kilnPrivate.gcRequest === "function" && !("gc" in scope);
+  // A with-environment gives direct eval an object environment: reads fall through to the
+  // realm, while writes to existing context properties update the caller's context object.
+  // Keep the optional gc binding in the outer function environment so the context object stays
+  // untouched and an own context property still takes precedence.
+  const body = `with (environment) { return eval(${JSON.stringify(code)}); }`;
+  if (hasSyntheticGc) {
+    const evaluate = new Function("environment", "gc", body);
+    return evaluate(scope, kilnPrivate.gcRequest);
   }
-  if (keys.length === 0) return (0, eval)(code);
-  // Direct eval keeps the context parameters in scope and preserves script completion values.
-  const evaluate = new Function(...keys, `return eval(${JSON.stringify(code)})`);
-  return evaluate(...values);
+  const evaluate = new Function("environment", body);
+  return evaluate(scope);
 }
 
 export function createScript(code: string, options?: any): Script {

@@ -1995,6 +1995,7 @@ impl super::Compiler {
             && self.names_nothing("eval")
         {
             let mut bindings = self.eval_site_bindings(span);
+            let with_objects = self.eval_site_with_objects(span);
             // The home object travels as an ordinary binding. `eval_site_bindings` skips every
             // name beginning with `%` -- none of them can be written by the eval'd source -- so
             // this is added afterwards rather than found there, and only where the language
@@ -2062,6 +2063,7 @@ impl super::Compiler {
                 module_id: self.private_module_id.clone(),
                 source_offset: span.start,
                 bindings,
+                with_objects,
                 strict: self.strict,
                 argc,
                 global_var_scope: self.global_var_scope && !self.compiling_function(),

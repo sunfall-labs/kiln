@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 13;
+pub const BYTECODE_VERSION: u16 = 14;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1083,6 +1083,9 @@ pub struct EvalSite {
     /// The names in scope where the call is written, innermost binding first so a shadowed outer
     /// name never wins.
     pub bindings: Vec<EvalBinding>,
+    /// Active object environment records from enclosing `with` statements, outermost first.
+    /// Unlike ordinary bindings these resolve names dynamically through property lookup.
+    pub with_objects: Vec<EvalBinding>,
     /// Whether the calling code is strict, which decides whether the eval'd source gets its own
     /// scope for `var` declarations or shares the caller's bindings.
     pub strict: bool,

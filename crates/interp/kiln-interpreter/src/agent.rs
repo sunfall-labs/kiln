@@ -923,6 +923,7 @@ fn run_agent_realm(
         source_units: exact_units,
         module_id: "<agent-eval>",
         outer: &[],
+        with_objects: &[],
         strict: false,
         global_var_scope: true,
         script: true,

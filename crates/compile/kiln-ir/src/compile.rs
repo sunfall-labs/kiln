@@ -97,6 +97,8 @@ pub struct EvalOptions {
     /// The calling frame's visible bindings, innermost first. Empty for an indirect eval, which
     /// sees global scope and nothing else.
     pub outer: Vec<EvalOuter>,
+    /// Names among `outer` whose cells hold active `with` object environments, outermost first.
+    pub with_objects: Vec<String>,
     /// Strict either because the caller is, or because the eval'd source says so itself.
     pub strict: bool,
     /// Whether the variable environment this eval's declarations belong to is the global one.
@@ -159,6 +161,23 @@ pub fn compile_eval_with_strictness(
     // eval that is the caller's module, holding entirely unrelated slots. Boxing every top-level
     // binding means every such read is a capture instead, and `LoadGlobal` is never emitted.
     compiler.cell_everything = true;
+    for statement in &module.body {
+        match &statement.kind {
+            StatementKind::Variable { kind, declarations } if *kind != VariableKind::Var => {
+                for declaration in declarations {
+                    let mut names = Vec::new();
+                    analysis::pattern_names_in_order(&declaration.pattern, &mut names);
+                    compiler.eval_lexical_names.extend(names);
+                }
+            }
+            StatementKind::Class(class) => {
+                if let Some(name) = &class.name {
+                    compiler.eval_lexical_names.insert(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
     // Strict eval code gets a variable environment of its own, so nothing it declares can
     // collide with an environment it is nested in and the whole rule is silent there.
     if !compiler.strict {
@@ -191,6 +210,15 @@ pub fn compile_eval_with_strictness(
                 eval_declaration: Some(outer.declaration),
             },
         );
+    }
+    for name in &options.with_objects {
+        compiler.with_scopes.push(WithScope {
+            name: name.clone(),
+            functions: 0,
+            // Eval source declarations occupy scope zero too; the compiler separately marks
+            // its own lexical names so they shadow these enclosing object environments.
+            scopes: 1,
+        });
     }
     // The enclosing classes' private names, so `eval("this.#m")` resolves `#m` to the element
     // the class actually declared rather than to a key of its own. The identities come with them
@@ -880,6 +908,8 @@ struct Compiler {
     /// it, and only code lexically inside a `with` pays for that: the resolution everywhere else
     /// is the static one it has always been.
     with_scopes: Vec<WithScope>,
+    /// Eval program top-level lexical names, which shadow inherited object environments.
+    eval_lexical_names: HashSet<String>,
     /// `finally` blocks enclosing the code being compiled, innermost last. A non-local exit has
     /// to run each of them on its way out, so it needs their bodies rather than their addresses.
     finalizers: Vec<Cleanup>,

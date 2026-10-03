@@ -88,6 +88,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
         &module,
         &EvalOptions {
             outer: request.outer.to_vec(),
+            with_objects: request.with_objects.to_vec(),
             strict: request.strict,
             global_var_scope: request.global_var_scope,
             script: request.script,

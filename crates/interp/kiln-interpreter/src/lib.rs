@@ -1538,6 +1538,8 @@ pub struct EvalSource<'a> {
     /// Stable module/call-site identity for private scopes created by this dynamic compilation.
     pub module_id: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],
+    /// Names among `outer` that hold the caller's active `with` object records.
+    pub with_objects: &'a [String],
     pub strict: bool,
     /// Whether this eval's `var` and function declarations belong to the global environment
     /// record, and so become properties of the global object rather than slots of its own frame.
