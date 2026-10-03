@@ -2226,74 +2226,8 @@ pub fn build_function_graph(
 }
 
 pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<BlockId>> {
-    let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-    if graph.blocks.is_empty() {
-        return dominators;
-    }
-    let mut reachable = HashSet::new();
-    let mut worklist = vec![graph.entry_block];
-    reachable.insert(graph.entry_block);
-    while let Some(bid) = worklist.pop() {
-        if let Some(block) = graph.block(bid) {
-            for &succ in &block.successors {
-                if reachable.insert(succ) {
-                    worklist.push(succ);
-                }
-            }
-        }
-    }
-
-    let all_reachable: HashSet<BlockId> = reachable.clone();
-
-    let mut entry_dom = HashSet::new();
-    entry_dom.insert(graph.entry_block);
-    dominators.insert(graph.entry_block, entry_dom);
-
-    for block in &graph.blocks {
-        if block.id != graph.entry_block {
-            if reachable.contains(&block.id) {
-                dominators.insert(block.id, all_reachable.clone());
-            } else {
-                let mut self_dom = HashSet::new();
-                self_dom.insert(block.id);
-                dominators.insert(block.id, self_dom);
-            }
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in &graph.blocks {
-            if !reachable.contains(&block.id) || block.id == graph.entry_block {
-                continue;
-            }
-            let mut new_dom: Option<HashSet<BlockId>> = None;
-            for &pred in &block.predecessors {
-                if !reachable.contains(&pred) {
-                    continue;
-                }
-                if let Some(pred_dom) = dominators.get(&pred) {
-                    match &mut new_dom {
-                        Some(current) => {
-                            *current = current.intersection(pred_dom).copied().collect();
-                        }
-                        None => {
-                            new_dom = Some(pred_dom.clone());
-                        }
-                    }
-                }
-            }
-            let mut new_dom = new_dom.unwrap_or_default();
-            new_dom.insert(block.id);
-
-            if dominators.get(&block.id) != Some(&new_dom) {
-                dominators.insert(block.id, new_dom);
-                changed = true;
-            }
-        }
-    }
-    dominators
+    let ids: Vec<BlockId> = graph.blocks.iter().map(|block| block.id).collect();
+    crate::dominators::compute(graph, false).into_hash_map(&ids)
 }
 
 /// Find all natural loops in `graph` given precomputed `dominators`.

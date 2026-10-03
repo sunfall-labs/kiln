@@ -2,6 +2,7 @@
 
 pub mod closed_world;
 pub mod demanded;
+mod dominators;
 pub mod graph;
 pub mod summary;
 pub mod validation;
