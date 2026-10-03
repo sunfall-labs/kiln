@@ -16,18 +16,22 @@ fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
         r#"
 const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
 loader("registerRunner", import.meta.url);
+const originalV8 = await import("node:v8");
 let releaseOld;
 globalThis.__moduleInstanceGate = new Promise(resolve => { releaseOld = resolve; });
-const oldPromise = import("./target.mjs");
+let oldPromise = import("./target.mjs");
 await Promise.resolve();
 loader("reset");
 const current = await import("./target.mjs");
+const currentV8 = await import("node:v8");
 releaseOld();
-const old = await oldPromise;
+let old = await oldPromise;
 console.log(old.value, current.value, old === current, old.retained(),
             old.urlConstructor === current.urlConstructor,
             old.processObject === current.processObject,
-            old.v8Object === current.v8Object);
+            old.v8Object === current.v8Object,
+            originalV8.default === currentV8.default,
+            originalV8 === currentV8);
 "#,
     )
     .expect("write entry");
@@ -57,7 +61,7 @@ export function retained() { return generation; }
     )
     .expect("module-instance graph compiles");
     let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
-        .run_graph(
+        .build_graph(
             &graph,
             &NativeBuildOptions {
                 output: root.path.join("program"),
@@ -68,8 +72,17 @@ export function retained() { return generation; }
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("module-instance graph builds and runs");
-    assert_eq!(report.stdout, b"1 2 false 1 true true true\n");
+        .expect("module-instance graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run module reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"1 2 false 1 true true true true true\n");
 }
 
 #[test]

@@ -3183,10 +3183,13 @@ pub(super) fn render_graph_roots(
     );
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
-        let source_module = matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs);
-        if source_module {
-            output.push_str("    if (!graph->is_builtin_graph) {\n");
-        }
+        let node_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(
+            output,
+            "    if (graph->is_builtin_graph == {}) {{",
+            usize::from(node_builtin)
+        )
+        .unwrap();
         if export_count != 0 {
             writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_exports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
             if modules[index].1.instantiation.is_some() {
@@ -3196,13 +3199,11 @@ pub(super) fn render_graph_roots(
         if !node.program.imports.is_empty() {
             writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_imports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", node.program.imports.len()).unwrap();
         }
-        if source_module {
-            output.push_str("    }\n");
-        }
+        output.push_str("    }\n");
     }
     for (index, (node, _)) in modules.iter().enumerate() {
-        let source_module = matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs);
-        writeln!(output, "    if ({}visit(visit_context, &kiln_namespaces[{index}], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", if source_module { "!graph->is_builtin_graph && " } else { "" }).unwrap();
+        let node_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(output, "    if (graph->is_builtin_graph == {} && visit(visit_context, &kiln_namespaces[{index}], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", usize::from(node_builtin)).unwrap();
     }
     if modules
         .iter()
@@ -3225,6 +3226,7 @@ pub(super) fn render_graph_roots(
         format!("graph->is_builtin_graph && ({})", builtin_skip.join(" && "))
     };
     writeln!(output, "    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if ({builtin_skip}) continue;\n        if (visit(visit_context, &graph->instance->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
+    output.push_str("static int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) { kiln_graph_context *graph = (kiln_graph_context *)context; if (graph == NULL) return 0; if (!graph->is_builtin_graph && graph->realm != NULL && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active) return 0; return kiln_graph_gc_visit_roots(context, visit, visit_context); }\n");
     // Collection and ownership inspection enumerate precisely the same root slots.
     output.push_str("\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase);\nstatic void kiln_graph_release_module_instance(void *context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_graph_context **link;\n    if (graph == NULL) return;\n    if (graph->realm != NULL) {\n        link = &graph->realm->instances;\n        while (*link != NULL && *link != graph) link = &(*link)->next_instance;\n        if (*link == graph) *link = graph->next_instance;\n        if (graph->realm->current_graph == graph) graph->realm->current_graph = graph->realm->instances;\n    }\n    if (graph->instance != NULL && graph->instance->roots_registered)\n        (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n    kiln_graph_free_unit_stores(graph->instance);\n    free(graph->instance);\n    free(graph);\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL ||\n        graph->realm == NULL || graph->host.module_owner == NULL ||\n        (!graph->is_builtin_graph && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active)) return;\n    owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner };\n    (void)kiln_realm_gc_mark_value(heap, &owner_root);\n}\n");
 }
@@ -4601,7 +4603,7 @@ static int kiln_graph_enter_inner(void *opaque) {
         r#"
     if (!graph->instance->roots_registered) {
         status = kiln_realm_gc_register_roots_with_visitor(kiln_graph_gc_roots,
-                         kiln_graph_gc_visit_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+                         kiln_graph_gc_visit_registered_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->instance->roots_registered = 1;
         graph->host.module_owner = kiln_c99_external_owner_create(
@@ -5245,13 +5247,14 @@ static int kiln_graph_enter_inner(void *opaque) {
     output.push_str("    int status;\n");
     output.push_str("    if (graph == NULL || index >= (size_t)");
     output.push_str(&modules.len().to_string());
-    output.push_str(
-        ") return KILN_C99_CONTROL_ERROR;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n",
-    );
+    output.push_str(") return KILN_C99_CONTROL_ERROR;\n");
     for index in 0..modules.len() {
         if matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_)) {
             writeln!(output, "    if (!graph->is_builtin_graph && index == (size_t){index}) {{ if (graph->realm->builtin_graph == NULL) return KILN_C99_CONTROL_ERROR; status = kiln_graph_ensure_module(graph->realm->builtin_graph, index); if (status == KILN_C99_OK) kiln_graph_alias_builtins(graph); return status; }}").unwrap();
         }
+    }
+    output.push_str("    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n");
+    for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
         let dependencies = if modules[index].0.source == ModuleSource::CommonJs {
             &[][..]
@@ -5308,6 +5311,8 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
             fresh->realm->current_graph = selected;
             return status;
         }
+        status = kiln_graph_ensure_module(fresh, target);
+        if (status != KILN_C99_OK) return status;
         graph->realm->reset_requested = 0;
         selected = fresh;
     } else {
