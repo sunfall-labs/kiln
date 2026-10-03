@@ -888,10 +888,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "@@toStringTag")) {
-            *out = kiln_c99_copy_text("RegExp", 6);
-            return KILN_C99_OK;
-        }
         /* Each flag is a boolean named after itself, read off the flag *string* rather than from
          * a field per flag -- so a flag the backend does nothing else with still reads back. */
         for (index = 0; index + 1 < sizeof known; ++index) {
@@ -2355,10 +2351,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     *out = kiln_c99_copy_text("(?:)", 4);
                     return KILN_C99_OK;
                 }
-                if (kiln_c99_same_name_key(key, "@@toStringTag")) {
-                    *out = kiln_c99_copy_text("RegExp", 6);
-                    return KILN_C99_OK;
-                }
             }
             if ((target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE && (
                     kiln_c99_same_name_key(key, "global") ||
@@ -2369,12 +2361,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_same_name_key(key, "unicode") ||
                     kiln_c99_same_name_key(key, "unicodeSets") ||
                     kiln_c99_same_name_key(key, "sticky") ||
+                    kiln_c99_same_name_key(key, "@@toStringTag") ||
                     kiln_c99_same_name_key(key, "name"))) ||
                 (target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE &&
                     kiln_c99_same_name_key(key, "name")) ||
                 (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
                     kiln_c99_same_name_key(key, "name"))) {
-                KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
+                KILN_C99_ABSENT("not a member of this prototype: unnamed prototype or absent RegExp tag", out);
             }
             if (target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,

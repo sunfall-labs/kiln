@@ -784,6 +784,23 @@
             kiln_text built = {NULL, 0, 0};
             kiln_value custom = kiln_c99_undefined();
             const char *tag;
+            int proxy_is_array = 0;
+            if (receiver.tag == KILN_VALUE_PROXY) {
+                // IsArray precedes the observable @@toStringTag Get and rejects any revoked
+                // proxy in the target chain. Other target brands do not cross a proxy.
+                kiln_value current = receiver;
+                while (current.tag == KILN_VALUE_PROXY) {
+                    kiln_proxy *proxy = kiln_c99_proxy_of(current);
+                    if (proxy->revoked)
+                        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                            "Cannot perform operation on a proxy that has been revoked");
+                    current = proxy->target;
+                }
+                proxy_is_array = current.tag == KILN_VALUE_ARRAY ||
+                    (current.tag == KILN_VALUE_SHARED && kiln_c99_shared_is_array(current)) ||
+                    (current.tag == KILN_VALUE_BUILTIN &&
+                     current.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+            }
             /* `Symbol.toStringTag` overrides the built-in answer, which is the whole reason the
              * symbol exists: it is how a class says what a library's type test should call it.
              * Read through the ordinary chain walk, so an accessor on a prototype runs -- the
@@ -794,9 +811,18 @@
              * Primitive tags still come from their kind without a property conversion. */
             if (receiver.tag == KILN_VALUE_OBJECT || receiver.tag == KILN_VALUE_SHARED ||
                 receiver.tag == KILN_VALUE_FUNCTION || receiver.tag == KILN_VALUE_METHOD ||
-                receiver.tag == KILN_VALUE_BOUND || receiver.tag == KILN_VALUE_BUILTIN) {
-                int status = kiln_c99_probe_symbol(host, receiver, "@@toStringTag", 13, &custom, depth,
-                                          thrown);
+                receiver.tag == KILN_VALUE_BOUND || receiver.tag == KILN_VALUE_BUILTIN ||
+                receiver.tag == KILN_VALUE_PROXY) {
+                int status;
+                if (receiver.tag == KILN_VALUE_PROXY) {
+                    kiln_value symbol;
+                    if (!kiln_c99_symbol_of_key_view(&kiln_c99_symbol_key_to_string_tag, &symbol))
+                        return KILN_C99_INVALID_ARGUMENT;
+                    status = kiln_c99_get_computed(host, receiver, symbol, &custom, depth, thrown);
+                } else {
+                    status = kiln_c99_probe_symbol(host, receiver, "@@toStringTag", 13,
+                                                   &custom, depth, thrown);
+                }
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -814,6 +840,9 @@
                 return KILN_C99_OK;
             }
             switch (receiver.tag) {
+            case KILN_VALUE_PROXY:
+                tag = proxy_is_array ? "Array" : kiln_c99_is_callable(receiver) ? "Function" : "Object";
+                break;
             case KILN_VALUE_UNDEFINED: tag = "Undefined"; break;
             case KILN_VALUE_NULL: tag = "Null"; break;
             case KILN_VALUE_BOOLEAN: tag = "Boolean"; break;

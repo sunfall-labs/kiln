@@ -203,6 +203,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // and without it every value whose tag lives on a prototype, from a `Map` to `Math`,
             // reports the bare `[object Object]` that the tag exists to replace.
             Native::ObjectToStringTag if is_reflect_target(receiver) => {
+                // IsArray runs before the observable tag getter, and a revoked proxy at any
+                // depth throws before its outer proxy can invoke a get trap.
+                let mut target = receiver;
+                while let Value::Proxy(proxy) = target {
+                    if proxy.revoked.get() {
+                        return Err(ExecutionError::RevokedProxy);
+                    }
+                    target = &proxy.target;
+                }
+                let proxy_tag = if matches!(receiver, Value::Proxy(_)) {
+                    Some(
+                        if matches!(
+                            target,
+                            Value::Array(_)
+                                | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+                        ) || matches!(target, Value::Shared(facade) if facade.is_array())
+                        {
+                            "Array"
+                        } else if is_callable(receiver) {
+                            "Function"
+                        } else {
+                            "Object"
+                        },
+                    )
+                } else {
+                    None
+                };
                 let tag = self.read_property(
                     receiver,
                     WellKnown::ToStringTag.property_key(),
@@ -213,6 +240,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     units.extend(tag.units());
                     units.extend(StringUnits::from("]").units());
                     return Ok(Value::String(StringUnits::from_units(&units)));
+                }
+                if let Some(tag) = proxy_tag {
+                    return Ok(Value::String(format!("[object {tag}]").into()));
                 }
             }
             // `ToString(text)` may run the program's own `toString`, so the validation cannot
