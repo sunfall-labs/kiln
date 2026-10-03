@@ -1166,7 +1166,11 @@ fn runtime_prelude_size() {
     // predicates, the exotic store, `in`, `delete`, spread and the prototype read, and 140 net
     // lines over the previous ceiling for the record's run, drop, op and re-arm functions; no
     // runtime section is duplicated and no built-in is added. 80,060 measured; ~140 headroom.
-    const CEILING_LINES: usize = 80_200;
+    // Indirect eval now uses the existing evaluator and validates syntax through
+    // its parse-only grammar walk. Reviewed: 324 net runtime source lines account
+    // for the 329 emitted lines (80,060 -> 80,389); sections remain emitted once.
+    // The ABI snapshot adds three private preflight helpers and a parser label.
+    const CEILING_LINES: usize = 80_550;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

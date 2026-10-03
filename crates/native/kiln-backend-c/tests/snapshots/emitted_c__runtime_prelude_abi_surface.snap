@@ -4130,6 +4130,9 @@ static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln
 static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_t *byte_len) {
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_preflight_indirect_eval(kiln_host *host, const char *source, size_t length,
+static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
+static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_new_environment(kiln_value *out) {
 static int kiln_dyn_captured_record_push(kiln_value records, int with_record,
@@ -4145,6 +4148,7 @@ static int kiln_dyn_append_source_units(kiln_value *source, kiln_value part) {
 static int kiln_dyn_function_constructor_source(kiln_value parameters, kiln_value body,
 static int kiln_dyn_body_has_use_strict(const char *body, size_t length) {
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+object_property_value_ready:;
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int prefix);
 static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
@@ -4179,8 +4183,8 @@ static int kiln_c99_dynamic_eval_expression_impl(kiln_host *host, kiln_value sou
 direct_eval_unsupported:
 direct_eval_done:
 int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
-static int kiln_dyn_preflight_indirect_eval(const char *source, size_t length,
-syntax_error:
+static int kiln_dyn_preflight_indirect_eval(kiln_host *host, const char *source, size_t length,
+parse_only_done:
 int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
 static int kiln_dyn_capture_block(kiln_dyn_lexer *lex, const char **body, size_t *body_len) {
 static const char *kiln_dyn_expression_syntax_end(const char *source, size_t start,
@@ -4205,6 +4209,7 @@ static int kiln_dyn_prepare_block_scope(kiln_host *host, kiln_dyn_scope *parent,
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 typedef struct {
 typedef struct {
+static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
 static int kiln_dyn_collect_lexicals(const char *source, size_t source_len,
 oom:
