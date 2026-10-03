@@ -8870,6 +8870,12 @@ static void kiln_c99_gc_weak_ephemerons(kiln_gc_heap *heap) {
         }
         kiln_c99_gc_drain(heap);
     } while (!heap->mark_failed && heap->marked_blocks != before);
+}
+
+/* Prune only after all strong roots and weak-resource holdings reach the same fixed point.
+ * A FinalizationRegistry holding can keep a WeakMap key alive even when no ordinary root does. */
+static void kiln_c99_gc_weak_ephemerons_prune(kiln_gc_heap *heap) {
+    kiln_collection *collection;
     if (heap->mark_failed) return;
     for (collection = heap->weak_collections; collection != NULL;
          collection = collection->weak_next) {
@@ -9246,14 +9252,16 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             kiln_c99_gc_weak_ephemerons(heap);
             if (!heap->mark_failed) kiln_c99_gc_weak_resources_mark(heap);
             kiln_c99_gc_drain(heap);
-            if (!heap->mark_failed) kiln_c99_gc_weak_resources_process(heap);
-            kiln_c99_gc_drain(heap);
         } while (!heap->mark_failed && heap->marked_blocks != marked_before);
+        // Weak decisions must wait for registry holdings and ephemerons to finish marking.
+        if (!heap->mark_failed) kiln_c99_gc_weak_resources_process(heap);
+        kiln_c99_gc_drain(heap);
         if (!heap->mark_failed) {
             kiln_c99_gc_prune_unique_symbols(heap);
             kiln_c99_gc_weak_resources_sweep(heap);
             kiln_c99_gc_drain(heap);
             if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons(heap);
+            if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons_prune(heap);
         }
     }
 

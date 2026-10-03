@@ -219,7 +219,7 @@ fn weak_collections_mark_values_to_a_fixed_point_and_clear_dead_keys() {
 int main(void) {
     kiln_gc_heap heap;
     kiln_gc_heap other;
-    kiln_value map, first_key, second_key, bridge, final_value;
+    kiln_value map, first_key, second_key, bridge, final_value, registry, target;
     kiln_collection *collection;
     kiln_gc_block *final_block;
     kiln_c99_gc_heap_init(&heap);
@@ -244,19 +244,35 @@ int main(void) {
                                                  (void *)(uintptr_t)first_key.bits));
     if (kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)first_key.bits)->mark != heap.epoch)
         return 12;
+    if (kiln_c99_new_object(&registry) != KILN_C99_OK ||
+        kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_finalization_registry_create(registry,
+            kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK)) != KILN_C99_OK ||
+        kiln_c99_finalization_registry_register(registry, target, first_key,
+            kiln_c99_undefined()) != KILN_C99_OK) return 15;
+    kiln_c99_nursery_turn_chunk(&heap);
     kiln_c99_gc_begin(&heap);
     kiln_c99_gc_mark_value(&heap, &map);
-    kiln_c99_gc_mark_value(&heap, &first_key);
+    kiln_c99_gc_mark_value(&heap, &registry);
+    kiln_c99_gc_drain(&heap);
+    /* The first ephemeron scan precedes registry holdings. It must not destroy their
+     * still-unmarked keys; the subsequent strong-mark pass makes the chain reachable. */
+    kiln_c99_gc_weak_ephemerons(&heap);
+    if (collection->live != 2) return 16;
+    kiln_c99_gc_weak_resources_mark(&heap);
     kiln_c99_gc_drain(&heap);
     kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
     if (final_block->mark != heap.epoch || collection->live != 2) return 6;
     kiln_c99_gc_begin(&heap);
     kiln_c99_gc_mark_value(&heap, &map);
     kiln_c99_gc_drain(&heap);
     kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
     if (collection->live != 0 || !collection->entries[0].dead ||
         !collection->entries[1].dead || collection->entries[0].key.tag != KILN_VALUE_UNDEFINED)
         return 7;
+    kiln_c99_gc_weak_resources_sweep(&heap);
     kiln_c99_gc_release_cell(collection);
     if (heap.weak_collections != NULL) return 8;
     kiln_c99_gc_heap_init(&other);
