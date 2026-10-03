@@ -430,14 +430,25 @@ pub(super) fn is_async_generator(state: &Rc<GeneratorData>) -> bool {
 /// wanted instead -- a namespace object, a star expansion -- goes through this.
 pub fn read_through_cell(value: &Value) -> Value {
     let mut current = value.clone();
-    let mut visited = Vec::new();
+    // Brent's cycle detector keeps the ordinary one-cell import read allocation-free. A
+    // pathological alias cycle retains its TDZ answer rather than spinning forever.
+    let mut checkpoint = None;
+    let mut window = 1usize;
+    let mut distance = 0usize;
     while let Value::Cell(cell) = current {
         let address = Rc::as_ptr(&cell);
-        if visited.contains(&address) {
+        if checkpoint == Some(address) {
             return Value::Native(Native::Uninitialized, RealmId::PRIMARY);
         }
-        visited.push(address);
+        if checkpoint.is_none() {
+            checkpoint = Some(address);
+        } else if distance == window {
+            checkpoint = Some(address);
+            window = window.saturating_mul(2);
+            distance = 0;
+        }
         current = cell.borrow().clone();
+        distance = distance.saturating_add(1);
     }
     current
 }
