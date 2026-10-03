@@ -411,7 +411,15 @@ print(f"bundle build pool completed in {build_elapsed:.2f}s", flush=True)
 if wait_for_release:
     print(f"waiting for gate release marker: {wait_for_release}", flush=True)
     barrier_started = time.perf_counter()
-    deadline = barrier_started + 15 * 60
+    # A cold native test build can legitimately outlast the normal barrier
+    # allowance. Keep the default bounded and let the gate caller name its cap.
+    try:
+        release_timeout = int(os.environ.get("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS", "900"))
+    except ValueError:
+        sys.exit("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS must be a positive integer")
+    if release_timeout <= 0:
+        sys.exit("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS must be a positive integer")
+    deadline = barrier_started + release_timeout
     while not os.path.exists(wait_for_release):
         if time.perf_counter() >= deadline:
             sys.exit("timed out waiting for gate release marker")
