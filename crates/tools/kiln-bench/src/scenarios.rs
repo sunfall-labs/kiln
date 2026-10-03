@@ -314,6 +314,7 @@ impl WarmDaemonFixture {
                 stream_output: false,
                 project_root,
                 node: false,
+                wall_clock: false,
                 // The benchmark measures the daemon's answer for a fixed program, which is the
                 // same program every iteration -- a budget could only turn a measurement into a
                 // refusal.
