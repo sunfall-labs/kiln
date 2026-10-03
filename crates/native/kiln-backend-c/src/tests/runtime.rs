@@ -1593,6 +1593,39 @@ int main(void) {{
     if (status != KILN_C99_OK || call_res.tag != KILN_VALUE_NUMBER ||
         kiln_c99_as_number(call_res) != 42.0) return 15;
 
+    // 5. Object-pattern lexical bindings enter their TDZ before the initializer runs.
+    kiln_value globals;
+    status = kiln_c99_global_object(&globals);
+    if (status != KILN_C99_OK) return 16;
+    status = kiln_c99_put(NULL, globals, "x", 1, kiln_c99_number(99.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 17;
+    const char tdz_body[] = "const {{x}}=x; return x;";
+    kiln_value tdz_args[1] = {{ kiln_c99_copy_text(tdz_body, sizeof tdz_body - 1) }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, tdz_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 18;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 19;
+
+    // 6. Even an empty object pattern performs RequireObjectCoercible.
+    const char null_body[] = "const {{}}=null; return 1;";
+    kiln_value null_args[1] = {{ kiln_c99_copy_text(null_body, sizeof null_body - 1) }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, null_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 20;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 21;
+
+    // 7. Duplicate bound names fail before the initializer can run.
+    const char duplicate_body[] = "const {{x,y:x}}=({{}}); return x;";
+    kiln_value duplicate_args[1] = {{ kiln_c99_copy_text(duplicate_body, sizeof duplicate_body - 1) }};
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_dynamic_new_function(NULL, &result, duplicate_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 22;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 23;
+
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
 }}

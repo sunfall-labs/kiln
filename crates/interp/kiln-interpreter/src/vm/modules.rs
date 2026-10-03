@@ -57,7 +57,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// truthful answer: the binding is not there.
     pub(crate) fn module_slot_value(&self, slot: u32) -> Value {
         match self.locals.get(slot as usize) {
-            Some(Value::Cell(cell)) => cell.borrow().clone(),
+            Some(Value::Cell(cell)) => read_through_cell(&Value::Cell(Rc::clone(cell))),
             Some(other) => other.clone(),
             None => Value::Native(Native::Uninitialized, RealmId::PRIMARY),
         }

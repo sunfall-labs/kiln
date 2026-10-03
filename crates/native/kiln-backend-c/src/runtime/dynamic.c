@@ -179,6 +179,14 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
     scope->annex_b_declaration_capacity = 0;
 }
 
+static int kiln_dyn_scope_has_own(kiln_dyn_scope *scope, const char *name, size_t name_len) {
+    for (size_t i = 0; i < scope->count; ++i) {
+        if (scope->bindings[i].name_len == name_len &&
+            memcmp(scope->bindings[i].name, name, name_len) == 0) return 1;
+    }
+    return 0;
+}
+
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
     size_t i;
     for (i = 0; i < scope->count; ++i) {
@@ -628,6 +636,10 @@ static int kiln_dyn_scope_get(kiln_host *host, kiln_dyn_scope *scope, const char
                     *out = kiln_val_to_boundary(*kiln_c99_cell_of(curr->bindings[i].value));
                 } else {
                     *out = curr->bindings[i].value;
+                    if (out->tag == KILN_VALUE_UNINITIALIZED)
+                        return kiln_c99_throw_error(
+                            thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                            "Cannot access binding before initialization");
                 }
                 *found = 1;
                 return KILN_C99_OK;
@@ -2180,11 +2192,57 @@ static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
         goto done;
     }
     kiln_dyn_lexer_next(lex);
+    kiln_dyn_scope *decl_scope = is_var && scope->var_target != NULL
+                                     ? scope->var_target : scope;
+    for (size_t index = 0; index < count; ++index) {
+        for (size_t prior = 0; prior < index; ++prior) {
+            if (bindings[index].name_len == bindings[prior].name_len &&
+                memcmp(bindings[index].name, bindings[prior].name,
+                       bindings[index].name_len) == 0) {
+                status = kiln_dyn_throw_parse_error(lex, thrown,
+                                                    "Duplicate binding name in object pattern");
+                goto done;
+            }
+        }
+    }
+    if (!lex->parse_only) {
+        for (size_t index = 0; index < count; ++index) {
+            if (is_var) {
+                if (!kiln_dyn_scope_has_own(decl_scope, bindings[index].name,
+                                            bindings[index].name_len) &&
+                    !kiln_dyn_scope_set(decl_scope, bindings[index].name,
+                                        bindings[index].name_len, kiln_c99_undefined())) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    goto done;
+                }
+            } else {
+                if (kiln_dyn_scope_has_own(decl_scope, bindings[index].name,
+                                           bindings[index].name_len)) {
+                    status = kiln_dyn_throw_parse_error(lex, thrown,
+                                                        "Duplicate lexical declaration");
+                    goto done;
+                }
+                if (!kiln_dyn_scope_set(decl_scope, bindings[index].name,
+                                        bindings[index].name_len,
+                                        kiln_c99_uninitialized())) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    goto done;
+                }
+                (void)kiln_dyn_scope_mark_restriction(
+                    decl_scope, bindings[index].name, bindings[index].name_len,
+                    is_const ? KILN_DYN_BINDING_READ_ONLY : KILN_DYN_BINDING_LEXICAL);
+            }
+        }
+    }
     status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth,
                                 &initial, thrown);
     if (status != KILN_C99_OK || lex->parse_only) goto done;
-    kiln_dyn_scope *decl_scope = is_var && scope->var_target != NULL
-                                     ? scope->var_target : scope;
+    kiln_c99_gc_keep_alive(&initial);
+    if (initial.tag == KILN_VALUE_NULL || initial.tag == KILN_VALUE_UNDEFINED) {
+        status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                      "Cannot destructure null or undefined");
+        goto done;
+    }
     for (size_t index = 0; index < count; ++index) {
         kiln_value value = kiln_c99_undefined();
         status = kiln_c99_get(host, initial, bindings[index].property,
@@ -2195,14 +2253,6 @@ static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
             status = KILN_C99_OUT_OF_MEMORY;
             goto done;
         }
-        if (is_const)
-            (void)kiln_dyn_scope_mark_restriction(decl_scope, bindings[index].name,
-                                                  bindings[index].name_len,
-                                                  KILN_DYN_BINDING_READ_ONLY);
-        else if (!is_var)
-            (void)kiln_dyn_scope_mark_restriction(decl_scope, bindings[index].name,
-                                                  bindings[index].name_len,
-                                                  KILN_DYN_BINDING_LEXICAL);
     }
 done:
     free(bindings);

@@ -429,10 +429,11 @@ pub(super) fn is_async_generator(state: &Rc<GeneratorData>) -> bool {
 /// An export is a cell so that a named import is a live view of it. Everywhere a *value* is
 /// wanted instead -- a namespace object, a star expansion -- goes through this.
 pub fn read_through_cell(value: &Value) -> Value {
-    match value {
-        Value::Cell(cell) => cell.borrow().clone(),
-        other => other.clone(),
+    let mut current = value.clone();
+    while let Value::Cell(cell) = current {
+        current = cell.borrow().clone();
     }
+    current
 }
 
 /// The own properties of a namespace object, in the order it holds them.

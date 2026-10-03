@@ -167,7 +167,10 @@ impl ModuleMap {
             let record = self.record(realm, key);
             match record.bindings.get(&name) {
                 Some(value) => {
-                    *cell.borrow_mut() = read_through_cell(&Value::Cell(Rc::clone(value)))
+                    /* Keep an import linked to the canonical export cell. Copying the current
+                     * value breaks live-binding updates (including an authorized test spy) for
+                     * modules that linked across a cycle before the exporter published. */
+                    *cell.borrow_mut() = Value::Cell(Rc::clone(value));
                 }
                 None => waiting.push((name, cell)),
             }
@@ -338,5 +341,45 @@ mod tests {
         assert_eq!(object.borrow().get_own_attributes("run"), attributes);
         assert!(!object.borrow().is_extensible());
         assert!(object.borrow().is_module_namespace());
+    }
+
+    #[test]
+    fn import_linked_before_publish_keeps_the_export_cell_through_a_cycle() {
+        let realm = RealmId::PRIMARY;
+        let mut modules = ModuleMap::default();
+        modules.begin(realm, "/a.mjs");
+        modules.begin(realm, "/b.mjs");
+
+        // Both sides link the other's export before either finishes, as in an ESM cycle.
+        let a_imports_b = modules.binding(realm, "/b.mjs", "run").unwrap();
+        let b_imports_a = modules.binding(realm, "/a.mjs", "run").unwrap();
+        let a_canonical = Rc::new(RefCell::new(Value::Number(1.0)));
+        let b_canonical = Rc::new(RefCell::new(Value::Number(3.0)));
+        modules.publish(
+            realm,
+            "/a.mjs",
+            HashMap::from([("run".to_owned(), Value::Cell(Rc::clone(&a_canonical)))]),
+        );
+        assert_eq!(read_through_cell(&b_imports_a), Value::Number(1.0));
+        modules.publish(
+            realm,
+            "/b.mjs",
+            HashMap::from([("run".to_owned(), Value::Cell(Rc::clone(&b_canonical)))]),
+        );
+        assert_eq!(read_through_cell(&a_imports_b), Value::Number(3.0));
+        modules.add_runner_candidate(realm, "/test.mjs");
+        modules.begin(realm, "/test.mjs");
+        modules.publish(realm, "/test.mjs", HashMap::new());
+        assert!(modules.register_runner(realm, "/test.mjs"));
+        modules.begin(realm, "/spy.mjs");
+        modules.publish(realm, "/spy.mjs", HashMap::new());
+        assert!(modules.register_spy_adapter(realm, "/spy.mjs"));
+
+        let namespace = modules.namespace(realm, "/a.mjs");
+        assert!(modules.spy_export(realm, &namespace, "run", Value::Number(2.0), "/spy.mjs"));
+        assert_eq!(read_through_cell(&b_imports_a), Value::Number(2.0));
+        let b_namespace = modules.namespace(realm, "/b.mjs");
+        assert!(modules.spy_export(realm, &b_namespace, "run", Value::Number(4.0), "/spy.mjs"));
+        assert_eq!(read_through_cell(&a_imports_b), Value::Number(4.0));
     }
 }
