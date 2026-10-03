@@ -381,6 +381,15 @@ impl Facts<'_> {
     /// Whether Oxc might judge `expression` itself free of effects when it is not.
     fn needs_guard(&self, expression: &Expression<'_>) -> bool {
         match expression {
+            // Oxc's minifier treats recognized globals such as `Date` and `Math` as constant
+            // values. In this runtime, source names resolve through the mutable global object:
+            // even a discarded identifier read can call an accessor or throw after deletion.
+            // Keep only names that the compiler itself resolves as builtins, and only when the
+            // reference remains unresolved in this scope; ordinary locals retain normal DCE.
+            Expression::Identifier(identifier) => {
+                self.is_unresolved(identifier)
+                    && kiln_ir::Builtin::from_name(identifier.name.as_str()).is_some()
+            }
             Expression::BinaryExpression(binary) => {
                 let coerces_both =
                     || !self.is_primitive(&binary.left) || !self.is_primitive(&binary.right);

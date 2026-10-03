@@ -6350,6 +6350,33 @@ mod tests {
     }
 
     #[test]
+    fn native_dce_preserves_discarded_mutable_builtin_global_reads() {
+        let module = parse_dce_native(
+            "discarded-builtin-global.ts",
+            r#"
+                export function readGlobal() { Date; }
+                export function shadowed(Date: unknown) { Date; }
+            "#,
+            &BTreeSet::from(["readGlobal".to_owned(), "shadowed".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Identifier(\"Date\")"),
+            "the unresolved builtin read can invoke a getter or throw after deletion: {hir}"
+        );
+        let shadowed = hir.split("name: Some(\"shadowed\")").nth(1).unwrap();
+        assert!(
+            shadowed.contains("body: []"),
+            "the shadowed local read remains eligible for native DCE: {hir}"
+        );
+        // The local parameter isn't a global-object lookup, so ordinary DCE may still remove it.
+        let functions = hir.matches("Function").count();
+        assert!(functions >= 2, "both exports remain in the HIR: {hir}");
+    }
+
+    #[test]
     fn ordinary_isolate_calls_do_not_claim_graph_ownership() {
         // Neither the spelling of a callee nor a local alias proves that a JS object graph
         // can leave its realm. In particular, a user function and an arbitrary object's

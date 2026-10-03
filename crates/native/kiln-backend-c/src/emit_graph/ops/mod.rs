@@ -514,6 +514,16 @@ pub(super) fn emit_graph_op(
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
             }
         }
+        GraphOp::LoadGlobalBuiltin(builtin) => {
+            let check = status_check(diagnostic_site, pc, label, unwind);
+            let name = crate::string::c_string(builtin.name());
+            writeln!(
+                output,
+                "    {{ kiln_value value; int status = kiln_c99_global_builtin(host, &value, {name}, {}, 0, thrown); {check} v{v} = kiln_val_from_boundary(value); }}",
+                builtin.name().len()
+            )
+            .unwrap();
+        }
         GraphOp::LoadBuiltin(builtin) => match builtin_load(*builtin) {
             // A built-in object or method is a constant in the box, not a boundary value to
             // build and convert on every mention: `Math` inside a hot method was doing both.

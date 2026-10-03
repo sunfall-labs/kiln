@@ -938,6 +938,24 @@ int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
     return kiln_c99_object_prototype_binding(host, out, &view, found, depth, thrown);
 }
 
+/* A source-level builtin name is an ordinary global-object reference. Keeping this read in the
+ * runtime makes generated code observe replacement, accessors and deletion through the same
+ * binding path used by the interpreter. Intrinsic identity is loaded through kiln_c99_builtin
+ * separately and never comes through here. */
+int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name, size_t length,
+                            int depth, kiln_value *thrown) {
+    int found = 0;
+    int status;
+    char message[256];
+    if (name == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_global_binding(host, out, name, length, &found, depth, thrown);
+    if (status != KILN_C99_OK || found) return status;
+    if (length > sizeof message - sizeof " is not defined") return KILN_C99_OUT_OF_MEMORY;
+    memcpy(message, name, length);
+    memcpy(message + length, " is not defined", sizeof " is not defined");
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, message);
+}
+
 /* The headed form: global names compare as units, so a non-ASCII binding resolves the
  * way the interpreter resolves it rather than missing every name the ASCII-only
  * comparison cannot spell. */

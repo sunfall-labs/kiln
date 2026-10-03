@@ -82,6 +82,9 @@ pub enum GraphOp {
     },
     /// A name the compiler resolved to something the runtime supplies.
     LoadBuiltin(kiln_ir::Builtin),
+    /// A source-level global builtin binding. Unlike `LoadBuiltin`, the global property is
+    /// mutable and may be an accessor, so this read must remain in execution order.
+    LoadGlobalBuiltin(kiln_ir::Builtin),
     /// The value supplied by a generator caller when a suspension resumes. It has no compile-time
     /// value or type; the C emitter restores it from `frame->sent` at the synthetic resume edge.
     ResumeValue,
@@ -230,6 +233,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::LoadGlobalBuiltin(_)
             | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
@@ -284,6 +288,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::LoadGlobalBuiltin(_)
             | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
@@ -370,6 +375,14 @@ impl GraphOp {
             Self::CheckTdz { .. } => Effects::MAY_THROW,
 
             Self::LoadCell(_) | Self::LoadUpvalue(_) => Effects::READS_HEAP | Effects::MAY_THROW,
+
+            Self::LoadGlobalBuiltin(_) => {
+                Effects::READS_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::WRITES_HEAP
+            }
 
             Self::LoadGlobal(_) => Effects::READS_HEAP,
 
@@ -1878,7 +1891,7 @@ pub fn build_function_graph(
                 }
                 Instruction::LoadBuiltin(builtin) => {
                     let res = graph.alloc_value();
-                    operations.push((res, GraphOp::LoadBuiltin(*builtin)));
+                    operations.push((res, GraphOp::LoadGlobalBuiltin(*builtin)));
                     frame.stack.push(res);
                 }
                 Instruction::LoadIntrinsicBuiltin(builtin) => {
@@ -3613,6 +3626,12 @@ mod dead_phi_tests {
                         value: ValueId(2),
                     },
                 ),
+                // A source global read remains observable even when its value is discarded:
+                // an accessor can run and an absent binding must throw.
+                (
+                    ValueId(4),
+                    GraphOp::LoadGlobalBuiltin(kiln_ir::Builtin::Date),
+                ),
             ],
             terminator: Terminator::Return(Some(ValueId(2))),
             predecessors: vec![],
@@ -3629,6 +3648,7 @@ mod dead_phi_tests {
         // Values 2 (live return) and 3 (side-effecting CheckTdz) must be preserved
         assert!(remaining_ops.contains(&ValueId(2)));
         assert!(remaining_ops.contains(&ValueId(3)));
+        assert!(remaining_ops.contains(&ValueId(4)));
         crate::verifier::verify_function_graph(&graph).unwrap();
     }
 

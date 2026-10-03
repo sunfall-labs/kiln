@@ -48,6 +48,7 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::LoadUpvalue(_)
             | GraphOp::StoreUpvalue { .. }
             | GraphOp::LoadBuiltin(_)
+            | GraphOp::LoadGlobalBuiltin(_)
             | GraphOp::ResumeValue
             | GraphOp::CaughtValue
             | GraphOp::Bridge { .. }

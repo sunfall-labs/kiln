@@ -1038,6 +1038,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // replacements and user descriptors must be observed just like any other
                     // global property; LoadIntrinsicBuiltin below keeps the engine identity.
                     let global = self.global_object();
+                    let key = PropertyKeyRef::Utf8(builtin.name());
+                    if !has_property_key(&self.intrinsics, &global, key) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{} is not defined", builtin.name()),
+                            current,
+                        )?;
+                        continue;
+                    }
                     let read = self.read_property(&global, builtin.name(), current);
                     let Some(value) = self.catchable(read, current)? else {
                         continue;

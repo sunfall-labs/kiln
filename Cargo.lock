@@ -2279,6 +2279,7 @@ version = "0.1.0"
 dependencies = [
  "kiln-hir",
  "kiln-host-abi",
+ "kiln-ir",
  "num-bigint 0.4.8",
  "oxc_allocator",
  "oxc_ast",
