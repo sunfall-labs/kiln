@@ -207,7 +207,7 @@ static int kiln_c99_text_decoder_state_decode_provider(kiln_value *out, void *st
     return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
 }
 
-static void *kiln_c99_text_decoder_state(kiln_value receiver) {
+void *kiln_c99_text_decoder_state(kiln_value receiver) {
     kiln_object *object;
     kiln_gc_external_owner *owner;
     kiln_c99_text_decoder_owner_context *context;
@@ -215,7 +215,9 @@ static void *kiln_c99_text_decoder_state(kiln_value receiver) {
     object = kiln_c99_object_of(receiver);
     if (object == NULL || object->external_owner == NULL) return NULL;
     owner = (kiln_gc_external_owner *)object->external_owner;
-    if (kiln_c99_gc_payload_kind(owner) != KILN_GC_EXTERNAL_OWNER || owner->context == NULL)
+    if (kiln_c99_gc_payload_kind(owner) != KILN_GC_EXTERNAL_OWNER || owner->context == NULL ||
+        owner->release_context != kiln_c99_text_decoder_release ||
+        owner->visit_roots != kiln_c99_text_decoder_visit)
         return NULL;
     context = (kiln_c99_text_decoder_owner_context *)owner->context;
     return context->brand == &kiln_c99_text_decoder_owner_brand ? context->decoder : NULL;

@@ -2923,8 +2923,8 @@ pub unsafe extern "C" fn kiln_text_decoder_state_decode(
             return INVALID_ARGUMENT;
         };
         if out.is_null() || capacity_usize < required {
-            // This is a safe upper bound, rather than an exact decoded length: we have not fed
-            // `bytes` to the state yet, so retrying with this capacity is transactional.
+            // A safe upper bound is returned without feeding `bytes`, making a larger-buffer
+            // retry transactional even when the decoder has pending bytes from earlier chunks.
             unsafe { *out_len = required as u64 };
             return INVALID_ARGUMENT;
         }

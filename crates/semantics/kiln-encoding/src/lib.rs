@@ -233,6 +233,10 @@ mod tests {
     #[test]
     fn streaming_fatal_flush_rejects_then_resets_for_next_sequence() {
         let mut decoder = StreamingDecoder::new("utf-8", true, false).unwrap();
+        // Both Node 26 and Bun 1.4 discard streaming state after a fatal input error,
+        // including when the failing call requested `stream: true`.
+        assert_eq!(decoder.decode(&[0xff], true), Err(Error::InvalidData));
+        assert_eq!(decoder.decode(b"A", true).unwrap(), "A");
         assert_eq!(
             decoder.decode(&[0xff, 0xfe], false),
             Err(Error::InvalidData)

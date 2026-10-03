@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn text_decoder_rejects_other_external_owner_context_before_reading_it() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int tiny_visit(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    (void)context; (void)visit; (void)visit_context; return 0;
+}
+static void tiny_release(void *context) { (void)context; }
+extern void *kiln_c99_text_decoder_state(kiln_value receiver);
+int main(void) {
+    unsigned char tiny_context = 0;
+    void *owner = kiln_c99_external_owner_create(&tiny_context, tiny_visit, tiny_release);
+    kiln_value object = kiln_c99_undefined();
+    if (owner == NULL || kiln_c99_new_object(&object) != KILN_C99_OK) return 1;
+    if (kiln_c99_object_set_external_owner(object, owner) != KILN_C99_OK) return 2;
+    if (kiln_c99_text_decoder_state(object) != NULL) return 3;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "text-decoder-wrong-owner");
+    assert!(
+        run.status.success(),
+        "wrong external owner was not safely rejected ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     let module = ModuleProgram {
         program: Program {
