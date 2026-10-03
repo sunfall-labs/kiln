@@ -716,6 +716,7 @@ typedef enum {
     KILN_DYN_KW_THIS,
     KILN_DYN_KW_ARGUMENTS,
     KILN_DYN_KW_TYPEOF,
+    KILN_DYN_KW_VOID,
     KILN_DYN_KW_DELETE,
     KILN_DYN_KW_FUNCTION,
     KILN_DYN_KW_NEW,
@@ -1744,6 +1745,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
                             lex->prev_kind == KILN_DYN_KW_CASE ||
                             lex->prev_kind == KILN_DYN_KW_IN ||
                             lex->prev_kind == KILN_DYN_KW_INSTANCEOF ||
+                            lex->prev_kind == KILN_DYN_KW_VOID ||
                             lex->prev_kind == KILN_DYN_KW_DELETE ||
                             lex->prev_kind == KILN_DYN_KW_TYPEOF);
         if (can_be_regex) {
@@ -1863,6 +1865,7 @@ static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
         KILN_CHECK_KW("this", KILN_DYN_KW_THIS);
         KILN_CHECK_KW("arguments", KILN_DYN_KW_ARGUMENTS);
         KILN_CHECK_KW("typeof", KILN_DYN_KW_TYPEOF);
+        KILN_CHECK_KW("void", KILN_DYN_KW_VOID);
         KILN_CHECK_KW("delete", KILN_DYN_KW_DELETE);
         KILN_CHECK_KW("function", KILN_DYN_KW_FUNCTION);
         KILN_CHECK_KW("new", KILN_DYN_KW_NEW);
@@ -2125,6 +2128,20 @@ typedef struct kiln_dyn_object_binding {
     size_t name_len;
 } kiln_dyn_object_binding;
 
+static int kiln_dyn_scope_has_uninitialized_own(kiln_dyn_scope *scope,
+                                                 const char *name, size_t name_len) {
+    for (size_t index = 0; index < scope->count; ++index) {
+        kiln_dyn_binding *binding = &scope->bindings[index];
+        if (binding->name_len != name_len || memcmp(binding->name, name, name_len) != 0)
+            continue;
+        if (binding->value.tag == KILN_VALUE_CELL)
+            return kiln_val_to_boundary(*kiln_c99_cell_of(binding->value)).tag ==
+                   KILN_VALUE_UNINITIALIZED;
+        return binding->value.tag == KILN_VALUE_UNINITIALIZED;
+    }
+    return 0;
+}
+
 /* The dynamic Function evaluator accepts the object-binding form emitted by schema codegen.
  * Each key is read with ordinary Get (including inherited accessors), and the local bindings
  * retain the same lexical restriction as a simple const/let declaration. */
@@ -2218,15 +2235,17 @@ static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
                     goto done;
                 }
             } else {
+                int predeclared = kiln_dyn_scope_has_uninitialized_own(
+                    decl_scope, bindings[index].name, bindings[index].name_len);
                 if (kiln_dyn_scope_has_own(decl_scope, bindings[index].name,
-                                           bindings[index].name_len)) {
+                                           bindings[index].name_len) && !predeclared) {
                     status = kiln_dyn_throw_parse_error(lex, thrown,
                                                         "Duplicate lexical declaration");
                     goto done;
                 }
-                if (!kiln_dyn_scope_set(decl_scope, bindings[index].name,
-                                        bindings[index].name_len,
-                                        kiln_c99_uninitialized())) {
+                if (!predeclared && !kiln_dyn_scope_set(decl_scope, bindings[index].name,
+                                                        bindings[index].name_len,
+                                                        kiln_c99_uninitialized())) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     goto done;
                 }
@@ -3619,6 +3638,12 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
     return KILN_C99_OK;
 }
 
+/* Unary `void` produces undefined by language definition; this helper keeps that value distinct
+ * from a receiver read whose undefined result would require an absence proof. */
+static kiln_value kiln_dyn_void_result(void) {
+    return kiln_c99_undefined();
+}
+
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *out, kiln_value *thrown) {
@@ -3697,6 +3722,16 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
         kiln_dyn_lexer_next(lex);
         return kiln_dyn_eval_delete_operand(host, lex, scope, receiver, args, argc,
                                             depth, out, thrown);
+    }
+    if (lex->curr.kind == KILN_DYN_KW_VOID) {
+        kiln_dyn_lexer_next(lex);
+        kiln_value operand;
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc,
+                                         depth, &operand, thrown);
+        if (status != KILN_C99_OK) return status;
+        (void)operand;
+        *out = kiln_dyn_void_result();
+        return KILN_C99_OK;
     }
     if (lex->curr.kind == KILN_DYN_KW_TYPEOF) {
         kiln_dyn_lexer_next(lex);
@@ -7421,30 +7456,78 @@ static int kiln_dyn_collect_lexicals(const char *source, size_t source_len,
             kiln_dyn_lexer look = scan;
             kiln_dyn_lexer_next(&look);
             for (;;) {
-                if (look.curr.kind != KILN_DYN_IDENT) break;
-                if (*out_count == capacity) {
-                    size_t next_capacity = capacity == 0 ? 8 : capacity * 2;
-                    if (next_capacity <= capacity ||
-                        next_capacity > SIZE_MAX / sizeof **out) {
-                        kiln_dyn_token_free(&look.curr);
-                        goto oom;
+                if (look.curr.kind == KILN_DYN_IDENT) {
+                    if (*out_count == capacity) {
+                        size_t next_capacity = capacity == 0 ? 8 : capacity * 2;
+                        if (next_capacity <= capacity ||
+                            next_capacity > SIZE_MAX / sizeof **out) {
+                            kiln_dyn_token_free(&look.curr);
+                            goto oom;
+                        }
+                        kiln_dyn_lexical_declaration *next = realloc(
+                            *out, next_capacity * sizeof *next);
+                        if (next == NULL) {
+                            kiln_dyn_token_free(&look.curr);
+                            goto oom;
+                        }
+                        *out = next;
+                        capacity = next_capacity;
                     }
-                    kiln_dyn_lexical_declaration *next = realloc(
-                        *out, next_capacity * sizeof *next);
-                    if (next == NULL) {
-                        kiln_dyn_token_free(&look.curr);
-                        goto oom;
+                    (*out)[(*out_count)++] = (kiln_dyn_lexical_declaration){
+                        .name = look.curr.start,
+                        .name_len = look.curr.len,
+                        .scope_id = scope_count == 0 ? SIZE_MAX : scope_starts[scope_count - 1],
+                        .is_const = kind == KILN_DYN_KW_CONST,
+                    };
+                    kiln_dyn_lexer_next(&look);
+                } else if (look.curr.kind == KILN_DYN_LBRACE) {
+                    /* Function declarations are closed over the function environment before
+                     * body statements run. Collect the aliases of the object binding form that
+                     * the dynamic evaluator supports so those closures see the TDZ cells too. */
+                    kiln_dyn_lexer_next(&look);
+                    while (look.curr.kind != KILN_DYN_RBRACE &&
+                           look.curr.kind != KILN_DYN_EOF) {
+                        if (look.curr.kind != KILN_DYN_IDENT) break;
+                        const char *binding_name = look.curr.start;
+                        size_t binding_len = look.curr.len;
+                        kiln_dyn_lexer_next(&look);
+                        if (look.curr.kind == KILN_DYN_COLON) {
+                            kiln_dyn_lexer_next(&look);
+                            if (look.curr.kind != KILN_DYN_IDENT) break;
+                            binding_name = look.curr.start;
+                            binding_len = look.curr.len;
+                            kiln_dyn_lexer_next(&look);
+                        }
+                        if (*out_count == capacity) {
+                            size_t next_capacity = capacity == 0 ? 8 : capacity * 2;
+                            if (next_capacity <= capacity ||
+                                next_capacity > SIZE_MAX / sizeof **out) {
+                                kiln_dyn_token_free(&look.curr);
+                                goto oom;
+                            }
+                            kiln_dyn_lexical_declaration *next = realloc(
+                                *out, next_capacity * sizeof *next);
+                            if (next == NULL) {
+                                kiln_dyn_token_free(&look.curr);
+                                goto oom;
+                            }
+                            *out = next;
+                            capacity = next_capacity;
+                        }
+                        (*out)[(*out_count)++] = (kiln_dyn_lexical_declaration){
+                            .name = binding_name,
+                            .name_len = binding_len,
+                            .scope_id = scope_count == 0 ? SIZE_MAX : scope_starts[scope_count - 1],
+                            .is_const = kind == KILN_DYN_KW_CONST,
+                        };
+                        if (look.curr.kind != KILN_DYN_COMMA) break;
+                        kiln_dyn_lexer_next(&look);
                     }
-                    *out = next;
-                    capacity = next_capacity;
+                    if (look.curr.kind != KILN_DYN_RBRACE) break;
+                    kiln_dyn_lexer_next(&look);
+                } else {
+                    break;
                 }
-                (*out)[(*out_count)++] = (kiln_dyn_lexical_declaration){
-                    .name = look.curr.start,
-                    .name_len = look.curr.len,
-                    .scope_id = scope_count == 0 ? SIZE_MAX : scope_starts[scope_count - 1],
-                    .is_const = kind == KILN_DYN_KW_CONST,
-                };
-                kiln_dyn_lexer_next(&look);
                 if (look.curr.kind == KILN_DYN_ASSIGN) {
                     kiln_dyn_lexer_next(&look);
                     int init_parens = 0, init_brackets = 0, init_braces = 0;
