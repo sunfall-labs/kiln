@@ -6322,6 +6322,28 @@ mod tests {
     }
 
     #[test]
+    fn native_dce_preserves_strict_delete_of_a_primitive_property() {
+        let module = parse_dce_native(
+            "strict-delete.ts",
+            r#"
+                export function remove() {
+                    try { return delete ("text" as any).length; }
+                    catch (error) { return error.constructor.name; }
+                }
+            "#,
+            &BTreeSet::from(["remove".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(hir.contains("Delete"), "delete must survive DCE: {hir}");
+        assert!(
+            hir.contains("kind: Literal(String"),
+            "DCE must preserve the string receiver instead of folding its `length`: {hir}"
+        );
+    }
+
+    #[test]
     fn ordinary_isolate_calls_do_not_claim_graph_ownership() {
         // Neither the spelling of a callee nor a local alias proves that a JS object graph
         // can leave its realm. In particular, a user function and an arbitrary object's

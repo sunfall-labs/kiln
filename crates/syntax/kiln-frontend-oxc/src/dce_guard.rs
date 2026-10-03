@@ -399,6 +399,10 @@ impl Facts<'_> {
                 }
             }
             Expression::UnaryExpression(unary) => {
+                // DCE has historically folded deletes of constant primitive properties to
+                // `true`. Guarding the whole unary expression still lets Oxc fold the member
+                // reference inside the call argument. Delete's receiver/key are guarded
+                // separately by `Collect`, preserving the Reference that delete operates on.
                 matches!(
                     unary.operator,
                     UnaryOperator::UnaryPlus
@@ -510,6 +514,24 @@ struct Collect<'s> {
 
 impl<'a> Visit<'a> for Collect<'_> {
     fn visit_expression(&mut self, it: &Expression<'a>) {
+        if let Expression::UnaryExpression(unary) = it
+            && unary.operator == UnaryOperator::Delete
+        {
+            match unary.argument.without_parentheses() {
+                Expression::StaticMemberExpression(member) => {
+                    self.targets.insert(member.object.address());
+                }
+                Expression::ComputedMemberExpression(member) => {
+                    self.targets.insert(member.object.address());
+                    if !self.facts.is_primitive(&member.expression)
+                        && !self.facts.is_well_known_symbol(&member.expression)
+                    {
+                        self.targets.insert(member.expression.address());
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.facts.needs_guard(it) {
             self.targets.insert(it.address());
         }
