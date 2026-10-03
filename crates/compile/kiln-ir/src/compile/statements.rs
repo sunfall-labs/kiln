@@ -182,7 +182,8 @@ impl super::Compiler {
     pub(super) fn require_object_coercible(&mut self) {
         self.code.push(Instruction::Dup);
         let coercible = self.emit_jump(Instruction::JumpIfNotNullish(0));
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "Cannot destructure 'null' or 'undefined'".to_owned().into(),
         ));
@@ -580,7 +581,8 @@ impl super::Compiler {
         let object = self.emit_jump(Instruction::JumpIfNotNullish(0));
 
         self.patch_jump(refused);
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -1647,7 +1649,8 @@ impl super::Compiler {
     /// shadow that name and the error a language rule raises is not the shadowing program's to
     /// choose.
     pub(super) fn emit_type_error(&mut self, message: &str) {
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -2271,7 +2274,8 @@ impl super::Compiler {
         let yielded_this = self.emit_jump(Instruction::Jump(0));
 
         self.patch_jump(refused);
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "a derived constructor may only return an object or undefined"
                 .to_owned()
@@ -2299,7 +2303,8 @@ impl super::Compiler {
         self.push_constant(Constant::String("prototype".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let usable = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "a static class element may not be named `prototype`"
                 .to_owned()
@@ -2333,7 +2338,8 @@ impl super::Compiler {
 
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     pub(super) fn emit_iterator_result_type_error(&mut self) {
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "iterator result is not an object".to_owned().into(),
         ));

@@ -395,7 +395,9 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Performance
             | kiln_ir::Builtin::StructuredClone,
         ) => Ok(()),
-        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Eval) => Ok(()),
+        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Eval | kiln_ir::Builtin::TypeError) => {
+            Ok(())
+        }
         Instruction::LoadIntrinsicBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the intrinsic `{builtin:?}` builtin in the native backend"),
         }),

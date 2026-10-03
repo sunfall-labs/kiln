@@ -1199,7 +1199,7 @@ impl super::Compiler {
                 self.constant_index(Constant::String("Assignment to constant variable.".into()));
             vec![
                 Instruction::Pop,
-                Instruction::LoadBuiltin(Builtin::TypeError),
+                Instruction::LoadIntrinsicBuiltin(Builtin::TypeError),
                 Instruction::Const(message),
                 Instruction::New { argc: 1 },
                 Instruction::Throw,

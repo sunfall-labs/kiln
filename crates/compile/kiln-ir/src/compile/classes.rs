@@ -541,7 +541,8 @@ impl super::Compiler {
             self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
             valid.push(self.emit_jump(Instruction::JumpIfTruthy(0)));
         }
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "class heritage does not have a valid prototype property"
                 .to_owned()
@@ -1142,7 +1143,8 @@ impl super::Compiler {
         if class.is_some() {
             self.code.push(Instruction::LoadNewTarget);
             let constructed = self.emit_jump(Instruction::JumpIfNotNullish(0));
-            self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+            self.code
+                .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
             self.push_constant(Constant::String(
                 match &function.name {
                     Some(name) if !name.is_empty() => {

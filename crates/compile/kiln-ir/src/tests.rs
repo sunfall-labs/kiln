@@ -1871,7 +1871,7 @@ fn linkage_compilation_defers_import_assignment_failure_until_execution() {
         linked
             .program
             .code
-            .contains(&Instruction::LoadBuiltin(Builtin::TypeError))
+            .contains(&Instruction::LoadIntrinsicBuiltin(Builtin::TypeError))
     );
     assert!(linked.program.code.contains(&Instruction::Throw));
     assert!(!linked.program.code.contains(&Instruction::StoreCell(0)));

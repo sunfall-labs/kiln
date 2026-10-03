@@ -1,6 +1,19 @@
 const originalDate = Date
 const originalMath = Math
 const originalSetTimeout = setTimeout
+const originalTypeError = TypeError
+
+globalThis.TypeError = function ReplacementTypeError() {}
+let internalTypeErrorStayedIntrinsic = false
+try {
+  ;({} = null)
+} catch (error) {
+  internalTypeErrorStayedIntrinsic = error instanceof originalTypeError
+}
+if (!internalTypeErrorStayedIntrinsic) {
+  throw new Error("compiler-generated TypeError was redirected through the mutable global")
+}
+globalThis.TypeError = originalTypeError
 
 const fakeTimeout = () => "replacement timer"
 globalThis.setTimeout = fakeTimeout
