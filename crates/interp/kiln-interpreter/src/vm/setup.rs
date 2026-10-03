@@ -71,6 +71,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_serial: 0,
             realm: Realm::new(),
             clock_capability: capabilities.clock,
+            host_clock_origin_ms: None,
             timezone,
             default_locale,
             source_compiler: execution.source_compiler(),
@@ -137,14 +138,18 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// monotonic clock, matching the native wall-clock realm without changing virtual executions.
     pub(super) fn advance_host_scheduler_clock(
         &mut self,
-        runtime: &RealmRuntime,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        if self.clock_capability != ClockCapability::Host {
+        let Some(origin) = self
+            .host_clock_origin_ms
+            .as_ref()
+            .and_then(|origin| origin.get())
+        else {
             return Ok(());
-        }
+        };
         let now_ms = host_clock_milliseconds(self.host, instruction)?;
-        self.with_realm_mut(|realm| runtime.advance_host_clock(realm, now_ms));
+        let elapsed = kiln_runtime::duration_from_milliseconds((now_ms - origin).max(0.0));
+        self.with_realm_mut(|realm| realm.advance_to(elapsed));
         Ok(())
     }
 

@@ -287,6 +287,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         } else {
                             ATOMICS_UNBOUNDED_WAIT_MS
                         });
+                        self.advance_host_scheduler_clock(instruction)?;
                         self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
                     }
                 }

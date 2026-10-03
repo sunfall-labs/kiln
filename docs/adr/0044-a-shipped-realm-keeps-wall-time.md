@@ -61,10 +61,11 @@ arm an hour-long timer without waiting an hour.
 - The virtual realm is untouched: `now` moves only when a timer runs, Tokio time is paused on the
   first drive turn, and `Date.now()` starts at the epoch.
 - The interpreter's explicit host-clock execution uses the same split. `Date.now()` reads
-  `HostOp::ClockNow`, and each Node event-loop turn advances its run-relative monotonic scheduler
-  clock from that host reading before selecting timers. The origin belongs to the shared runtime,
-  so short-lived VMs for modules do not reset scheduler time. Ordinary interpreter execution keeps
-  the virtual clock, so a busy deterministic run never observes machine speed.
+  `HostOp::ClockNow`; timer arms and each Node event-loop turn advance its run-relative monotonic
+  scheduler clock from that host reading. The origin belongs to the shared runtime, so short-lived
+  VMs for modules do not reset scheduler time, and a timeout scheduled after synchronous work
+  starts its delay at the arm point. Ordinary interpreter execution keeps the virtual clock, so a
+  busy deterministic run never observes machine speed.
 
 ## Consequences
 

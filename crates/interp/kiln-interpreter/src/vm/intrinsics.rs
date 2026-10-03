@@ -716,6 +716,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
                 // It never keeps the program alive, as in node, where its timer is unreferenced.
+                self.advance_host_scheduler_clock(instruction)?;
                 self.with_realm_mut(|realm| {
                     let (delay, _) = realm.node_timer_delay(Some(milliseconds.max(0.0)));
                     let id = realm.set_timeout(delay, timer);
@@ -1518,6 +1519,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Some(handle) => Timer::Handle(Rc::clone(handle)),
                     None => Timer::plain(callback, carried, context),
                 };
+                // Timeout and interval deadlines are relative to the host clock at the arm
+                // point, including after synchronous JavaScript. Immediates and queued I/O do
+                // not have timer deadlines.
+                if !matches!(native, Native::SetImmediate | Native::QueueIoRaw) {
+                    self.advance_host_scheduler_clock(instruction)?;
+                }
                 let id = self.with_realm_mut(|realm| match native {
                     Native::SetInterval => realm.set_interval(delay, timer),
                     Native::SetImmediate => realm.set_immediate(timer),
@@ -1538,6 +1545,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::TimerRefRaw => {
                 let op = arguments.get(1).map_or(f64::NAN, Value::as_number);
+                if op == 4.0 {
+                    self.advance_host_scheduler_clock(instruction)?;
+                }
                 Ok(self.timer_op(arguments, op))
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {

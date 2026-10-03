@@ -263,6 +263,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) realm: Realm<Scheduled, Timer>,
     /// Policy for civil time and for advancing timer deadlines during event-loop turns.
     pub(super) clock_capability: ClockCapability,
+    /// Shared realm origin used to refresh timer deadlines while synchronous code is running.
+    pub(super) host_clock_origin_ms: Option<Rc<std::cell::Cell<Option<f64>>>>,
     /// Canonical environmental strings resolved once when the realm is entered.
     ///
     /// Host-backed policy crosses HostOps here, never from an individual builtin. This makes the

@@ -117,6 +117,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     runtime: &mut RealmRuntime,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
+    initialize_host_clock(runtime, host)?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -127,6 +128,8 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
     // The HTTP runtime is available for global fetch (a WHATWG web standard, not a Node API).
     // The realm's HTTP transport (Hyper via Tokio) exists in both modes; only the Node.js
     // API surface (require, process, etc.) remains gated behind the node adapter.
@@ -218,6 +221,8 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     let execution = runtime.enter(|| {
@@ -892,6 +897,8 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
     vm.self_bindings = self_bindings;
     vm.module_path = module_path.map(Rc::from);
     vm.self_namespaces = self_namespaces;

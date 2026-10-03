@@ -449,6 +449,71 @@ fn node_host_clock_waits_for_the_timer_deadline() {
     assert!(started.elapsed() >= std::time::Duration::from_millis(50));
 }
 
+#[test]
+fn node_timer_armed_after_synchronous_work_uses_the_arm_time() {
+    struct SlowClockHost {
+        started: std::time::Instant,
+        clock_calls: usize,
+        output: Vec<String>,
+    }
+    impl HostOps for SlowClockHost {
+        fn call(
+            &mut self,
+            operation: HostOp,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            match operation {
+                HostOp::ClockNow => {
+                    self.clock_calls += 1;
+                    if self.clock_calls == 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(80));
+                    }
+                    let elapsed = self.started.elapsed().as_secs_f64();
+                    Ok(HostValue::number(1_725_000_000_000.0 + elapsed * 1000.0))
+                }
+                HostOp::WriteStdout => {
+                    self.output
+                        .extend(arguments.iter().map(HostValue::to_console_string));
+                    Ok(HostValue::Undefined)
+                }
+                _ => Ok(HostValue::Undefined),
+            }
+        }
+    }
+
+    let mut program = timer_program(&[("after-work", 30.0)]);
+    let now_name = program.constants.len() as u32;
+    program
+        .constants
+        .push(Constant::String("now".to_owned().into()));
+    program.code.splice(
+        0..0,
+        [
+            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::CallMethod {
+                name: now_name,
+                argc: 0,
+            },
+            Instruction::Pop,
+        ],
+    );
+    let mut host = SlowClockHost {
+        started: std::time::Instant::now(),
+        clock_calls: 0,
+        output: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    execute_node(
+        Rc::new(program),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("Node timer completes after synchronous work");
+    assert_eq!(host.output, ["after-work"]);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+}
+
 /// `({ mark: "receiver", step: function* () { yield this.mark; } }).step().next().value`,
 /// compiled by hand, printed.
 fn generator_receiver_program() -> Program {

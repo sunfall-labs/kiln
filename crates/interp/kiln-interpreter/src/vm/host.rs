@@ -6155,7 +6155,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         until_module: bool,
     ) -> Result<(), ExecutionError> {
         loop {
-            self.advance_host_scheduler_clock(runtime, self.instruction)?;
+            self.advance_host_scheduler_clock(self.instruction)?;
             self.drain_microtasks(runtime)?;
             self.checkpoint_runtime_http(runtime)?;
             // An entry-module rejection must reach its caller even if an actor, server or

@@ -1206,7 +1206,7 @@ pub struct RealmState<H> {
     host: H,
     capabilities: RealmCapabilities,
     /// Epoch sample shared by every VM that participates in this realm's scheduler.
-    host_clock_origin_ms: Option<f64>,
+    host_clock_origin_ms: Rc<std::cell::Cell<Option<f64>>>,
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
     #[cfg(feature = "http")]
@@ -1591,7 +1591,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         Self {
             host,
             capabilities,
-            host_clock_origin_ms: None,
+            host_clock_origin_ms: Rc::new(std::cell::Cell::new(None)),
             http_agent: HttpAgent::default(),
             #[cfg(feature = "http")]
             http_server: HttpServerEngine::default(),
@@ -2002,15 +2002,21 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// Subsequent module VMs share this origin instead of resetting scheduler time.
     pub fn initialize_host_clock_origin(&mut self, epoch_ms: f64) {
         if self.capabilities.clock == ClockCapability::Host
-            && self.host_clock_origin_ms.is_none()
+            && self.host_clock_origin_ms.get().is_none()
             && epoch_ms.is_finite()
         {
-            self.host_clock_origin_ms = Some(epoch_ms);
+            self.host_clock_origin_ms.set(Some(epoch_ms));
         }
     }
 
     pub fn has_host_clock_origin(&self) -> bool {
-        self.host_clock_origin_ms.is_some()
+        self.host_clock_origin_ms.get().is_some()
+    }
+
+    /// A shared handle for interpreter timer-arm checkpoints; the runtime remains the owner of
+    /// the single origin even when several short-lived module VMs schedule work.
+    pub fn host_clock_anchor(&self) -> Rc<std::cell::Cell<Option<f64>>> {
+        Rc::clone(&self.host_clock_origin_ms)
     }
 
     /// Advance an interpreter scheduler from the shared realm's original host epoch.
@@ -2018,7 +2024,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         if self.capabilities.clock != ClockCapability::Host || !epoch_ms.is_finite() {
             return;
         }
-        if let Some(origin_ms) = self.host_clock_origin_ms {
+        if let Some(origin_ms) = self.host_clock_origin_ms.get() {
             realm.advance_to(duration_from_milliseconds((epoch_ms - origin_ms).max(0.0)));
         }
     }
