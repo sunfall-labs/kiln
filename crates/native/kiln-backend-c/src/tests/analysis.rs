@@ -1260,6 +1260,7 @@ fn closed_world_namespace_traces_local_alias_across_generator_suspension() {
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(
