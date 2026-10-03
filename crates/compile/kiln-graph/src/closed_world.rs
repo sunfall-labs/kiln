@@ -1,11 +1,10 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::graph;
 use kiln_ir::{
     Constant, FunctionProto, Instruction, ModuleProgram, Program, RemovableDeclaration, Upvalue,
 };
 
-use crate::graph::{FunctionGraph, GraphOp, Terminator, build_function_graph};
+use crate::graph::{FunctionGraph, GraphOp, Terminator, ValueId, build_function_graph};
 
 fn graph_for(proto: &FunctionProto, program: &Program) -> Option<FunctionGraph> {
     let graph = build_function_graph(proto, program).ok()?;
@@ -464,6 +463,35 @@ pub fn retained_module_instructions<'a>(
 /// evaluated between loading a namespace and calling its method. Aliases used only to carry the
 /// same value across TDZ checks, locals, or control-flow joins remain inspectable. Any other use
 /// is deliberately the conservative answer.
+fn namespace_alias_reaches(
+    value: ValueId,
+    defs: &HashMap<ValueId, &GraphOp>,
+    roots: &HashSet<ValueId>,
+    local_aliases: &HashSet<u32>,
+) -> bool {
+    let mut pending = vec![value];
+    let mut seen = HashSet::new();
+    while let Some(value) = pending.pop() {
+        if roots.contains(&value) {
+            return true;
+        }
+        if !seen.insert(value) {
+            continue;
+        }
+        match defs.get(&value) {
+            Some(GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. }) => {
+                pending.push(*value);
+            }
+            Some(GraphOp::Phi { inputs }) => {
+                pending.extend(inputs.iter().map(|(_, input)| *input));
+            }
+            Some(GraphOp::LoadLocal(slot)) if local_aliases.contains(slot) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn closed_world_namespace_members(
     program: &Program,
     slot: u32,
@@ -533,7 +561,25 @@ pub fn closed_world_namespace_members(
         if roots.is_empty() {
             continue;
         }
-        let is_namespace = |value| roots.contains(&graph::resolve_root_alias(value, &defs));
+        // A namespace value can cross a suspension through a local or a resume phi. Unlike
+        // `resolve_root_alias`, this deliberately follows every phi input: a mixed value is still
+        // a possible namespace, and including its statically named member only widens the result.
+        let mut namespace_locals = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (_, op) in graph.blocks.iter().flat_map(|block| &block.operations) {
+                let GraphOp::StoreLocal { slot, value } = op else {
+                    continue;
+                };
+                if namespace_alias_reaches(*value, &defs, &roots, &namespace_locals) {
+                    changed |= namespace_locals.insert(*slot);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let is_namespace = |value| namespace_alias_reaches(value, &defs, &roots, &namespace_locals);
         for block in &graph.blocks {
             for (_, op) in &block.operations {
                 let namespace_operands = op

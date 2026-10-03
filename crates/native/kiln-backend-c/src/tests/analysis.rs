@@ -1218,6 +1218,57 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
 }
 
 #[test]
+fn closed_world_namespace_traces_local_alias_across_generator_suspension() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        source_origin: None,
+        constants: vec![Constant::String("member".into()), Constant::Number(1)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(1),
+            Instruction::Return,
+        ],
+        local_count: 2,
+        functions: vec![FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count: 1,
+            code: vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            arrow: false,
+            generator: true,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            mapped_arguments: false,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            type_annotations: None,
+        }],
+        template_sites: Vec::new(),
+    };
+
+    assert_eq!(
+        closed_world_namespace_members(&program, 0, false),
+        Some(["member".to_owned()].into_iter().collect())
+    );
+}
+
+#[test]
 fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
     let program = Program {
         source: "".into(),
