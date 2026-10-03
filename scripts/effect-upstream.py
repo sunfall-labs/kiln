@@ -202,6 +202,8 @@ def main():
             versions[engine] = subprocess.check_output(cmd, text=True).strip()
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
+                  'kiln_binary_sha256': digest(kiln) if any(e != 'bun' for e in engines) else None,
+                  'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
                   'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout, 'runtime_jobs': args.runtime_jobs,
                   'harness_sha256': {p.name: digest(p) for p in HARNESS.iterdir() if p.is_file()},
@@ -227,7 +229,8 @@ def main():
                 write_json(directory / (engine + '.json'), envelope)
             reference = row['engines'].get('bun')
             for engine, envelope in row['engines'].items():
-                envelope['matches_reference_inventory'] = (envelope['inventory'] == reference['inventory']) if reference else None
+                envelope['matches_reference_inventory'] = ([c['id'] for c in envelope['inventory']] == [c['id'] for c in reference['inventory']]) if reference and envelope['inventory'] is not None and reference['inventory'] is not None else None
+                envelope['matches_reference_modes'] = (envelope['inventory'] == reference['inventory']) if reference else None
                 envelope['matches_reference_outcomes'] = ([{k: c[k] for k in ('id', 'outcome')} for c in envelope['cases']] == [{k: c[k] for k in ('id', 'outcome')} for c in reference['cases']]) if reference else None
             return row
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:

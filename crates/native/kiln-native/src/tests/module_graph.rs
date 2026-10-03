@@ -1764,7 +1764,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
         logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
             .expect("logical CommonJS path");
     assert!(launcher.contains("    kiln_value imports_0[5];"));
-    assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
+    assert!(launcher.contains("#define kiln_imports_0 (graph->instance->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
         "kiln_commonjs_require_{commonjs_index}, kiln_commonjs_resolve_{commonjs_index}, graph, kiln_graph_gc_visit_roots, graph)"
