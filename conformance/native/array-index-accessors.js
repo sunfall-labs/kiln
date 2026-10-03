@@ -74,4 +74,34 @@ const popped = popTarget.pop()
 if (popped !== 42 || popTarget.length !== 0 || 0 in popTarget || popEvents.join(",") !== "get") {
   throw new Error(`pop accessor behavior: ${popped}/${popEvents}/${popTarget.length}/${0 in popTarget}`)
 }
+const sortEvents = []
+const sortable = ["b", "a"]
+let first = "b"
+Object.defineProperty(sortable, "0", {
+  configurable: true,
+  enumerable: true,
+  get() {
+    sortEvents.push("get")
+    return first
+  },
+  set(value) {
+    sortEvents.push(`set:${value}`)
+    first = value
+  },
+})
+sortable.sort()
+const sorted = sortable.join(",")
+const sortTrace = sortEvents.join(",")
+if (sorted !== "a,b" || sortTrace !== "get,set:a,get") {
+  throw new Error(`sort bypassed indexed [[Get]]/[[Set]]: ${sorted}/${sortTrace}`)
+}
+sortEvents.length = 0
+first = "b"
+sortable[1] = "a"
+sortable.reverse()
+const reversed = sortable.join(",")
+const reverseEvents = sortEvents.join(",")
+if (reversed !== "a,b" || reverseEvents !== "get,set:a,get") {
+  throw new Error(`reverse bypassed indexed [[Get]]/[[Set]]: ${reversed}/${reverseEvents}`)
+}
 console.log("array indexed accessors ok")

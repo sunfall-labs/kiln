@@ -3358,6 +3358,60 @@
                 thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                 "The comparison function must be either a function or undefined");
         }
+        if (array->has_index_descriptors) {
+            kiln_value values;
+            size_t original_length = array->count;
+            size_t undefined_count = 0;
+            status = kiln_c99_new_array_with_capacity(&values, original_length, 0);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < original_length; ++index) {
+                int present = 0;
+                kiln_value value;
+                status = kiln_c99_array_has_index(host, receiver, index, &present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!present) continue;
+                status = kiln_c99_array_get_index(host, receiver, index, &value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (value.tag == KILN_VALUE_UNDEFINED) {
+                    undefined_count += 1;
+                } else {
+                    status = kiln_c99_array_push(values, value);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+            live = kiln_c99_array_of(values)->count;
+            if (live > 1) {
+                kiln_c99_sort_context ctx;
+                ctx.host = host;
+                ctx.comparator = comparator;
+                ctx.depth = depth;
+                ctx.thrown = thrown;
+                status = kiln_c99_timsort_val(&ctx, kiln_c99_array_of(values)->elements, live);
+                if (status != KILN_C99_OK) return status;
+            }
+            for (index = 0; index < live + undefined_count; ++index) {
+                kiln_value value = index < live
+                    ? kiln_val_to_boundary(kiln_c99_array_of(values)->elements[index])
+                    : kiln_c99_undefined();
+                char key[32];
+                size_t key_length = kiln_c99_double_to_js((double)index, key);
+                status = kiln_c99_put(host, receiver, key, key_length, value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            for (index = live + undefined_count; index < original_length; ++index) {
+                int deleted = 0;
+                status = kiln_c99_delete_computed(host, receiver,
+                                                  kiln_c99_number((double)index), &deleted, depth,
+                                                  thrown);
+                if (status != KILN_C99_OK) return status;
+                if (!deleted) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot delete array element");
+                }
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        }
         for (index = 0; index < array->count; ++index) {
             if (array->elements[index] != KILN_VAL_HOLE &&
                 array->elements[index] != KILN_VAL_UNDEFINED) {
@@ -3384,6 +3438,56 @@
     }
     case KILN_C99_METHOD_ARRAY_REVERSE: {
         size_t half;
+        if (array->has_index_descriptors) {
+            for (half = 0; half * 2 + 1 < array->count; ++half) {
+                size_t low = half;
+                size_t high = array->count - half - 1;
+                int low_present = 0;
+                int high_present = 0;
+                kiln_value low_value = kiln_c99_undefined();
+                kiln_value high_value = kiln_c99_undefined();
+                status = kiln_c99_array_has_index(host, receiver, low, &low_present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (low_present) {
+                    status = kiln_c99_array_get_index(host, receiver, low, &low_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+                status = kiln_c99_array_has_index(host, receiver, high, &high_present, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (high_present) {
+                    status = kiln_c99_array_get_index(host, receiver, high, &high_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+                if (high_present) {
+                    char key[32];
+                    size_t key_length = kiln_c99_double_to_js((double)low, key);
+                    status = kiln_c99_put(host, receiver, key, key_length, high_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else {
+                    int deleted = 0;
+                    status = kiln_c99_delete_computed(host, receiver, kiln_c99_number((double)low),
+                                                      &deleted, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!deleted) return kiln_c99_throw_error(
+                        thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Cannot delete array element");
+                }
+                if (low_present) {
+                    char key[32];
+                    size_t key_length = kiln_c99_double_to_js((double)high, key);
+                    status = kiln_c99_put(host, receiver, key, key_length, low_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else {
+                    int deleted = 0;
+                    status = kiln_c99_delete_computed(host, receiver, kiln_c99_number((double)high),
+                                                      &deleted, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!deleted) return kiln_c99_throw_error(
+                        thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Cannot delete array element");
+                }
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        }
         for (half = 0; half * 2 + 1 < array->count; ++half) {
             kiln_val swap = array->elements[half];
             kiln_c99_heap_store_val(array, &array->elements[half], array->elements[array->count - 1 - half]);
