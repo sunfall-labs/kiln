@@ -5524,11 +5524,13 @@ fn native_runner_spy_overlay_mutates_live_export_without_mutating_namespace() {
     fs::write(
         root.path.join("main.mjs"),
         r#"
-import { run } from "./consumer.mjs";
+import { run, constRun, functionRun } from "./consumer.mjs";
 const nativeModules = process.__kilnNativeModules;
 const namespace = await import("./target.mjs");
 const before = Object.getOwnPropertyDescriptor(namespace, "run");
 const original = namespace.run;
+const originalConst = namespace.constRun;
+const originalFunction = namespace.functionRun;
 const replacement = () => "mock";
 const registrationDenied = nativeModules.__kilnHostModuleLoader("registerSpyAdapter", import.meta.url) === false;
 const unauthorized = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url) === false;
@@ -5541,9 +5543,17 @@ catch { ordinaryMutation = true; }
 const installed = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url);
 const mocked = namespace.run === replacement && run() === "mock";
 nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", original, import.meta.url);
+const constReplacement = () => "const-mock";
+const functionReplacement = () => "function-mock";
+const constIntercepted = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "constRun", constReplacement, import.meta.url)
+  && constRun() === "const-mock";
+const functionIntercepted = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "functionRun", functionReplacement, import.meta.url)
+  && functionRun() === "function-mock";
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "constRun", originalConst, import.meta.url);
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "functionRun", originalFunction, import.meta.url);
 const after = Object.getOwnPropertyDescriptor(namespace, "run");
 console.log(registrationDenied, unauthorized, wrongReferrer, installed, ordinaryMutation, mocked,
-  run() === "real", after.configurable === before.configurable,
+  run() === "real", constIntercepted, functionIntercepted, after.configurable === before.configurable,
   after.enumerable === before.enumerable, after.get === before.get,
   after.set === before.set, after.value === before.value);
 "#,
@@ -5551,12 +5561,12 @@ console.log(registrationDenied, unauthorized, wrongReferrer, installed, ordinary
     .expect("write entry");
     fs::write(
         root.path.join("target.mjs"),
-        "export let run = () => 'real';\n",
+        "export let run = () => 'real'; export const constRun = () => 'const'; export function functionRun() { return 'function'; }\n",
     )
     .expect("write target");
     fs::write(
         root.path.join("consumer.mjs"),
-        "import { run } from './target.mjs'; export { run };\n",
+        "import { run, constRun, functionRun } from './target.mjs'; export { run, constRun, functionRun };\n",
     )
     .expect("write consumer");
     let entry = root.path.join("main.mjs");
@@ -5586,7 +5596,7 @@ console.log(registrationDenied, unauthorized, wrongReferrer, installed, ordinary
     );
     assert_eq!(
         report.stdout,
-        b"true true true true true true true true true true true true\n"
+        b"true true true true true true true true true true true true true true\n"
     );
 }
 
