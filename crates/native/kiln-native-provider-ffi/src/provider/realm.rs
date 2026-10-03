@@ -2901,10 +2901,13 @@ pub unsafe extern "C" fn kiln_text_decoder_state_decode(
     out_len: *mut u64,
 ) -> i32 {
     ffi(|| {
-        if state.is_null() {
+        if state.is_null() || out_len.is_null() {
             return INVALID_ARGUMENT;
         }
         let Ok(bytes_len) = usize::try_from(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(capacity_usize) = usize::try_from(capacity) else {
             return INVALID_ARGUMENT;
         };
         let bytes = if bytes.is_null() {
@@ -2916,6 +2919,15 @@ pub unsafe extern "C" fn kiln_text_decoder_state_decode(
             unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
         };
         let decoder = unsafe { &mut *state.cast::<kiln_encoding::StreamingDecoder>() };
+        let Some(required) = decoder.max_output_buffer_length(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        if out.is_null() || capacity_usize < required {
+            // This is a safe upper bound, rather than an exact decoded length: we have not fed
+            // `bytes` to the state yet, so retrying with this capacity is transactional.
+            unsafe { *out_len = required as u64 };
+            return INVALID_ARGUMENT;
+        }
         match decoder.decode(bytes, stream != 0) {
             Ok(text) => unsafe { spill(text.as_bytes(), out, capacity, out_len) },
             Err(error) => {

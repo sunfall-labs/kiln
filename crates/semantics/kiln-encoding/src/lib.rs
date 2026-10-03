@@ -13,6 +13,8 @@ pub const DEFAULT_LABEL: &str = "utf-8";
 pub const FLAG_FATAL: u32 = 1;
 /// `TextDecoderOptions.ignoreBOM`, as the flag word the provider ABI carries.
 pub const FLAG_IGNORE_BOM: u32 = 2;
+/// Shared TypeError text for malformed input, also used to preflight native output buffers.
+pub const INVALID_DATA_MESSAGE: &str = "The encoded data was not valid for encoding";
 
 /// Why a `TextDecoder` operation failed. The variant picks the JavaScript error class.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +91,25 @@ impl StreamingDecoder {
         result
     }
 
+    /// A safe output-buffer bound for one input segment in the current decoder state.
+    ///
+    /// The native provider uses this before mutating the decoder so a caller can retry with a
+    /// larger buffer without submitting the same bytes twice. The fatal error message is
+    /// included because malformed input is written into that same output buffer.
+    pub fn max_output_buffer_length(&self, input_bytes: usize) -> Option<usize> {
+        let output = if self.fatal {
+            self.decoder
+                .max_utf8_buffer_length_without_replacement(input_bytes)?
+        } else {
+            self.decoder.max_utf8_buffer_length(input_bytes)?
+        };
+        Some(if self.fatal {
+            output.max(INVALID_DATA_MESSAGE.len())
+        } else {
+            output
+        })
+    }
+
     fn fresh_decoder(encoding: &'static Encoding, ignore_bom: bool) -> RsDecoder {
         if ignore_bom {
             encoding.new_decoder_without_bom_handling()
@@ -112,7 +133,7 @@ impl Error {
             Self::InvalidLabel(label) => {
                 format!("The encoding label provided ('{label}') is invalid")
             }
-            Self::InvalidData => "The encoded data was not valid for encoding".to_owned(),
+            Self::InvalidData => INVALID_DATA_MESSAGE.to_owned(),
         }
     }
 }

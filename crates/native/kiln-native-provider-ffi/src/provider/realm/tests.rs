@@ -33,8 +33,40 @@ fn text_decoder_state_preserves_chunks_bom_and_resets_after_flush_error() {
         },
         0
     );
+    let first_bom_byte = [0xEF];
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                first_bom_byte.as_ptr(),
+                first_bom_byte.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                0,
+                &mut out_len,
+            )
+        },
+        INVALID_ARGUMENT
+    );
+    let retry_capacity = out_len;
+    assert!(retry_capacity > 0 && retry_capacity <= out.len() as u64);
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                first_bom_byte.as_ptr(),
+                first_bom_byte.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                retry_capacity,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(out_len, 0);
+
     for (bytes, stream, expected) in [
-        (&[0xEF][..], 1, ""),
         (&[0xBB, 0xBF, 0xF0, 0x9F][..], 1, ""),
         (&[0x98, 0x80][..], 0, "😀"),
         (&[0xEF, 0xBB, 0xBF, b'B'][..], 0, "B"),
