@@ -3108,7 +3108,7 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
     /* Current-nursery owners are young, so they cannot create an old-to-young edge. With no
      * candidate groups there is no other ledger to update; trust the allocator's active range
      * metadata and skip both slab and nursery membership lookups on this common path. */
-    if (heap->candidate_ledger_groups == 0 && heap->nursery.base != NULL &&
+    if (heap->candidate_ledger_groups == 0 && heap->nursery.active && heap->nursery.base != NULL &&
         heap->nursery.bump != NULL && (uintptr_t)owner_payload >= (uintptr_t)heap->nursery.base &&
         (uintptr_t)owner_payload < (uintptr_t)heap->nursery.bump)
         return;
@@ -3488,7 +3488,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uint
     /* The current nursery range is already authoritative: `base` and `bump` are maintained
      * by the allocator, and the bitmap validates the containing block. Avoid hashing the
      * slab table for the overwhelmingly common young-object lookup. */
-    if (heap->nursery.base != NULL && heap->nursery.bump != NULL &&
+    if (heap->nursery.active && heap->nursery.base != NULL && heap->nursery.bump != NULL &&
         address >= (uintptr_t)heap->nursery.base && address < (uintptr_t)heap->nursery.bump)
         return kiln_c99_gc_bitmap_block(heap->nursery.bitmap, heap->nursery.bitmap_words,
                                         heap->nursery.base, address);
@@ -8057,6 +8057,13 @@ static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
                 heap->minor_audit_first_owner_kind =
                     owner != NULL ? owner->kind & KILN_GC_KIND_MASK : KILN_GC_NONE;
                 heap->minor_audit_first_target_kind = target->kind & KILN_GC_KIND_MASK;
+                fprintf(stderr,
+                        "kiln gc minor audit edge: owner=%p kind=%u flags=%u target=%p kind=%u flags=%u active=%d range=[%p,%p)\n",
+                        heap->minor_audit_owner, (unsigned)(owner != NULL ? owner->kind & KILN_GC_KIND_MASK : 0),
+                        (unsigned)(owner != NULL ? owner->kind & ~KILN_GC_KIND_MASK : 0), payload,
+                        (unsigned)(target->kind & KILN_GC_KIND_MASK),
+                        (unsigned)(target->kind & ~KILN_GC_KIND_MASK), heap->nursery.active,
+                        (void *)heap->nursery.base, (void *)heap->nursery.bump);
             }
             if (heap->minor_audit_misses != SIZE_MAX) ++heap->minor_audit_misses;
             if (heap->minor_audit_total_misses != UINT64_MAX)
