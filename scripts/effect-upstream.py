@@ -244,7 +244,7 @@ def main():
     parser.add_argument('--workspace', type=Path, default=Path.home() / '.cache/kiln' / ('effect-direct-' + PIN['commit'][:12]))
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--engine', action='append', choices=['bun', 'interpreter', 'native'])
-    parser.add_argument('--path', action='append', help='test stem or directory prefix (repeatable)')
+    parser.add_argument('--path', action='append', default=[], help='test stem or directory prefix (repeatable)')
     parser.add_argument('--kiln', type=Path, default=REPO / 'target/release/kiln')
     parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
     parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
