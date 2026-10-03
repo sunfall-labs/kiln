@@ -1194,7 +1194,11 @@ fn runtime_prelude_size() {
     // unary void, AggregateError prototype repair, the private server-listening query and
     // retained process capability, plus shared timer arities bring the prelude to 81,652 lines.
     // These extend existing evaluation/ownership kernels; no runtime section is duplicated.
-    const CEILING_LINES: usize = 82_000;
+    // Reviewed 2026-10-03: array index descriptor overlays and the existing array
+    // algorithms' descriptor-aware paths add 492 lines; unconditional TDZ checks
+    // add three. The 82,147-line prelude has no repeated runtime section. These
+    // repair property/evaluation kernels rather than introduce public built-ins.
+    const CEILING_LINES: usize = 82_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

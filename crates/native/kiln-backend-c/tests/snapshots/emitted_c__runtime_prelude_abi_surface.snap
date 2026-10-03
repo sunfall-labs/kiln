@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 821
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -2847,6 +2848,8 @@ static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
 static int kiln_c99_buffer_legacy(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_new_array(kiln_value *out) {
+int kiln_c99_array_get_index(kiln_host *host, kiln_value value, size_t index,
+int kiln_c99_array_has_index(kiln_host *host, kiln_value value, size_t index,
 static uint64_t kiln_c99_array_candidate_id(const kiln_array *array) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 #define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
