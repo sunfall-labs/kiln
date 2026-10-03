@@ -9553,7 +9553,20 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             /* Keep `survived` as the last full collection's baseline. Advancing it by minor
              * promotions would move the major threshold with the heap and could postpone full
              * collection forever. `since_collection` already retains promoted bytes after the
-             * minor's dead-young accounting. */
+             * minor's dead-young accounting.
+             *
+             * The open nursery chunk was settled above, so all ordinary nursery survivors have
+             * aged together and no remembered old-to-young edges remain. Candidate chunks may
+             * deliberately retain their exact layout; in that case keep the set until a later
+             * collection can promote them. A failed mark/audit also keeps the set intact. */
+            if (!heap->mark_failed && !heap->minor_audit_failed &&
+                heap->nursery.full == NULL &&
+                (!heap->nursery.active || heap->nursery.bump == heap->nursery.base)) {
+                size_t index;
+                for (index = 0; index < heap->remembered_owners.capacity; ++index)
+                    heap->remembered_owners.table[index] = NULL;
+                heap->remembered_owners.count = 0;
+            }
             heap->collections += 1;
         } else if (tenured_due || (heap->nursery.promoted != NULL)) {
             size_t index;

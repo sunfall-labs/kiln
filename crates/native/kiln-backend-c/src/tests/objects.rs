@@ -6416,22 +6416,25 @@ static int minor_gc_entry(void *context) {
         kiln_c99_gc_lookup_interior(heap, (uintptr_t)first.ptr) == NULL)
         return 6;
     if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead.ptr) != NULL) return 7;
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 18;
 
-    /* The remembered owner remains registered across a minor cycle because it can publish
-     * another young pointer later. Values use an interior string-data pointer, so this also
-     * checks that the barrier resolves non-payload references to their owning allocation. */
+    /* All ordinary nursery survivors were promoted together, so no old-to-young edge remains
+     * after the minor. A later publication re-registers the owner; this also checks that the
+     * barrier resolves an interior string-data pointer to its owning allocation. */
     second = kiln_c99_copy_text("remembered-second", 17);
     dead_again = kiln_c99_copy_text("dead-again", 10);
     if (second.tag != KILN_VALUE_STRING || dead_again.tag != KILN_VALUE_STRING) return 8;
     second_block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)second.ptr);
     if (second_block == NULL || kiln_c99_gc_is_young(heap, second_block) == 0) return 9;
     kiln_c99_heap_store_val((const void *)owner, &owner->value, kiln_val_from_boundary(second));
+    if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 19;
     heap->minor_requested = 1;
     kiln_c99_gc_collect(heap, 0);
     heap->minor_requested = 0;
     if (heap->minor_audit_failed ||
         kiln_c99_gc_lookup_interior(heap, (uintptr_t)second.ptr) == NULL) return 10;
     if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead_again.ptr) != NULL) return 11;
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 20;
 
     /* The audit must still catch a missing barrier if another old owner has already marked the
      * same young target. Allocate cells in audit order: the first cell uses the barrier, the
