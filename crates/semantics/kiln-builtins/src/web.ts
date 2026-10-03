@@ -395,12 +395,23 @@ class DOMException extends Error {
   }
 }
 
+function formDataValue(value: any, filename?: string): string | File {
+  if (!(value instanceof Blob)) {
+    if (filename !== undefined) throw new TypeError("FormData filename requires a Blob");
+    return String(value);
+  }
+  if (value instanceof File && filename === undefined) return value;
+  return new File([value], filename === undefined ? "blob" : String(filename), {
+    type: value.type, lastModified: value instanceof File ? value.lastModified : undefined,
+  });
+}
+
 class FormData {
   private _entries: [string, string | Blob][] = [];
 
   append(name: string, value: any, _filename?: string): void {
     const k = String(name);
-    const val = value instanceof Blob ? value : String(value);
+    const val = formDataValue(value, _filename);
     this._entries.push([k, val]);
   }
 
@@ -436,7 +447,7 @@ class FormData {
 
   set(name: string, value: any, _filename?: string): void {
     const k = String(name);
-    const val = value instanceof Blob ? value : String(value);
+    const val = formDataValue(value, _filename);
     let found = false;
     const newEntries: [string, string | Blob][] = [];
     for (let i = 0; i < this._entries.length; i++) {
@@ -510,6 +521,141 @@ function bodyContentType(body: any): string | null {
     return "application/x-www-form-urlencoded;charset=UTF-8";
   }
   return null;
+}
+
+// HTML multipart encoding retains entry order and raw file bytes; only textual fields
+// normalize line endings. The boundary belongs to this extraction, not to the FormData.
+function formLineEndings(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, "\r\n");
+}
+function formQuoted(value: string): string {
+  return formLineEndings(value).replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/"/g, "%22");
+}
+const formBoundaryRandom = Math.random;
+function encodeFormData(form: FormData): { bytes: Uint8Array; type: string } {
+  let boundary = "----kilnFormBoundary";
+  for (let i = 0; i < 4; i++) boundary += formBoundaryRandom().toString(36).slice(2);
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  function add(bytes: Uint8Array): void { parts.push(bytes); length += bytes.byteLength; }
+  for (const [name, value] of form) {
+    let head = `--${boundary}\r\nContent-Disposition: form-data; name="${formQuoted(name)}"`;
+    if (value instanceof Blob) {
+      const filename = value instanceof File ? value.name : "blob";
+      head += `; filename="${formQuoted(filename)}"\r\nContent-Type: ${value.type || "application/octet-stream"}`;
+    }
+    add(getSharedEncoder().encode(head + "\r\n\r\n"));
+    add(value instanceof Blob ? value._data : getSharedEncoder().encode(formLineEndings(value)));
+    add(getSharedEncoder().encode("\r\n"));
+  }
+  add(getSharedEncoder().encode(`--${boundary}--\r\n`));
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (let i = 0; i < parts.length; i++) { bytes.set(parts[i], offset); offset += parts[i].byteLength; }
+  return { bytes, type: `multipart/form-data; boundary=${boundary}` };
+}
+
+// MIME parameters allow quoted strings with escaped characters and semicolons.
+function mimeParameter(value: string, wanted: string): string | null {
+  let i = value.indexOf(";");
+  while (i >= 0 && i < value.length) {
+    i++;
+    while (value[i] === " " || value[i] === "\t") i++;
+    const start = i;
+    while (i < value.length && value[i] !== "=" && value[i] !== ";") i++;
+    const name = value.slice(start, i).trim().toLowerCase();
+    if (value[i] !== "=") continue;
+    i++;
+    while (value[i] === " " || value[i] === "\t") i++;
+    let parameter = "";
+    if (value[i] === '"') {
+      i++;
+      let closed = false;
+      while (i < value.length) {
+        const c = value[i++];
+        if (c === '"') { closed = true; break; }
+        if (c === "\\" && i < value.length) parameter += value[i++];
+        else parameter += c;
+      }
+      if (!closed) return null;
+      while (i < value.length && value[i] !== ";") i++;
+    } else {
+      const begin = i;
+      while (i < value.length && value[i] !== ";") i++;
+      parameter = value.slice(begin, i).trim();
+    }
+    if (name === wanted) return parameter;
+    if (i === value.length) break;
+  }
+  return null;
+}
+function findBodyBytes(bytes: Uint8Array, needle: Uint8Array, start: number): number {
+  for (let i = start; i <= bytes.byteLength - needle.byteLength; i++) {
+    if (bytes[i] !== needle[0]) continue;
+    let j = 1;
+    while (j < needle.byteLength && bytes[i + j] === needle[j]) j++;
+    if (j === needle.byteLength) return i;
+  }
+  return -1;
+}
+async function bodyFormData(self: any, contentType: string | null): Promise<FormData> {
+  const bytes = await bodyBytes(self);
+  const form = new FormData();
+  const type = contentType === null ? "" : contentType.split(";", 1)[0].trim().toLowerCase();
+  if (type === "application/x-www-form-urlencoded") {
+    const params = new URLSearchParams(getSharedDecoder().decode(bytes));
+    for (const [name, value] of params) form.append(name, value);
+    return form;
+  }
+  if (type !== "multipart/form-data") throw new TypeError("Body has no supported form content type");
+  const boundary = mimeParameter(contentType!, "boundary");
+  if (boundary === null || boundary === "" || boundary.indexOf("\r") >= 0 || boundary.indexOf("\n") >= 0) {
+    throw new TypeError("Multipart body has no valid boundary");
+  }
+  const encoder = getSharedEncoder();
+  const marker = encoder.encode(`--${boundary}`);
+  const delimiter = encoder.encode(`\r\n--${boundary}`);
+  const headerEnd = encoder.encode("\r\n\r\n");
+  let cursor = findBodyBytes(bytes, marker, 0);
+  if (cursor < 0) throw new TypeError("Invalid multipart body");
+  cursor += marker.byteLength;
+  while (true) {
+    if (bytes[cursor] === 45 && bytes[cursor + 1] === 45) return form;
+    if (bytes[cursor] !== 13 || bytes[cursor + 1] !== 10) throw new TypeError("Invalid multipart boundary");
+    const headerStart = cursor + 2;
+    const end = findBodyBytes(bytes, headerEnd, headerStart);
+    if (end < 0) throw new TypeError("Invalid multipart headers");
+    const headers = getSharedDecoder().decode(bytes.subarray(headerStart, end)).split("\r\n");
+    let disposition: string | null = null;
+    let partType = "";
+    for (let i = 0; i < headers.length; i++) {
+      const colon = headers[i].indexOf(":");
+      if (colon <= 0) throw new TypeError("Invalid multipart header");
+      const name = headers[i].slice(0, colon).trim().toLowerCase();
+      const value = headers[i].slice(colon + 1).trim();
+      if (name === "content-disposition") disposition = value;
+      else if (name === "content-type") partType = value;
+    }
+    if (disposition === null || disposition.split(";", 1)[0].trim().toLowerCase() !== "form-data") {
+      throw new TypeError("Invalid multipart disposition");
+    }
+    const name = mimeParameter(disposition, "name");
+    if (name === null) throw new TypeError("Multipart field has no name");
+    const begin = end + 4;
+    let next = findBodyBytes(bytes, delimiter, begin);
+    while (next >= 0) {
+      const suffix = next + delimiter.byteLength;
+      if ((bytes[suffix] === 45 && bytes[suffix + 1] === 45) ||
+          (bytes[suffix] === 13 && bytes[suffix + 1] === 10)) break;
+      next = findBodyBytes(bytes, delimiter, next + 1);
+    }
+    if (next < 0) throw new TypeError("Unterminated multipart body");
+    const part = bytes.subarray(begin, next);
+    const filename = mimeParameter(disposition, "filename");
+    if (filename === null) form.append(name, getSharedDecoder().decode(part));
+    else form.append(name, new File([part], filename, { type: partType || "text/plain" }));
+    cursor = next + delimiter.byteLength;
+  }
 }
 
 // A body as Request and Response keep it: a string (kept as text until something needs bytes),
@@ -838,6 +984,10 @@ class Response {
       if (typeof body === "string") {
         stored = body;
         list = list === "" ? TEXT_PLAIN_FIELD : headerListWithContentType(list, TEXT_PLAIN_UTF8);
+      } else if (body instanceof FormData) {
+        const encoded = encodeFormData(body);
+        stored = encoded.bytes;
+        list = headerListWithContentType(list, encoded.type);
       } else if (body !== undefined && body !== null) {
         stored = bodyValue(body);
         list = headerListWithContentType(list, bodyContentType(body));
@@ -922,6 +1072,10 @@ class Response {
     const bytes = await bodyBytes(this);
     const type = headerListGet(responseHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
+  }
+
+  async formData(): Promise<FormData> {
+    return bodyFormData(this, headerListGet(responseHeaderList(this), CONTENT_TYPE_NEEDLE));
   }
 
   clone(): Response {
@@ -1086,7 +1240,14 @@ class Request {
       bodySource = initBody;
       contentType = bodyContentType(bodySource);
     }
-    const body = bodySource === undefined || bodySource === null ? null : bodyValue(bodySource);
+    let body: StoredBody;
+    if (bodySource instanceof FormData) {
+      const encoded = encodeFormData(bodySource);
+      body = encoded.bytes;
+      contentType = encoded.type;
+    } else {
+      body = bodySource === undefined || bodySource === null ? null : bodyValue(bodySource);
+    }
     if (body !== null && (method === "GET" || method === "HEAD")) {
       throw new TypeError("Request constructor: Request with GET/HEAD method cannot have body.");
     }
@@ -1164,6 +1325,10 @@ class Request {
     const bytes = await bodyBytes(this);
     const type = headerListGet(requestHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
+  }
+
+  async formData(): Promise<FormData> {
+    return bodyFormData(this, headerListGet(requestHeaderList(this), CONTENT_TYPE_NEEDLE));
   }
 
   clone(): Request {
