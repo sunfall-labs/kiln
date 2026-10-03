@@ -5015,6 +5015,23 @@ impl Lowerer<'_, '_> {
                     value: Box::new(value),
                 }
             }
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(member.object, Expression::Super(_)) =>
+            {
+                HirExpressionKind::SuperComputedAssignment {
+                    operator,
+                    property: Box::new(self.expression(&member.expression)),
+                    value: Box::new(value),
+                }
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                HirExpressionKind::ComputedAssignment {
+                    operator,
+                    object: Box::new(self.expression(&member.object)),
+                    property: Box::new(self.expression(&member.expression)),
+                    value: Box::new(value),
+                }
+            }
             AssignmentTarget::StaticMemberExpression(member)
                 if !member.optional && matches!(member.object, Expression::Super(_)) =>
             {
@@ -7370,6 +7387,26 @@ mod tests {
             HirExpressionKind::Assignment { target, value, .. }
                 if target == "count" && matches!(value.kind, HirExpressionKind::Call { .. })
         ));
+    }
+
+    #[test]
+    fn ordinary_computed_assignment_keeps_its_reference() {
+        let module = parse("module.js", "receiver()[key()] += value();");
+        let HirStatementKind::Expression(assignment) = &module.body[0].kind else {
+            panic!("expected assignment");
+        };
+        let HirExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } = &assignment.kind
+        else {
+            panic!("expected computed assignment, got {:?}", assignment.kind);
+        };
+        assert!(matches!(object.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(property.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(value.kind, HirExpressionKind::Call { .. }));
     }
 
     #[test]
