@@ -6495,6 +6495,47 @@ int main(void) {
 }
 
 #[test]
+fn executable_minor_gc_skips_barrier_lookup_for_active_young_owners() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int active_young_barrier_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_gc_cell *owner;
+    kiln_value child;
+    kiln_gc_block *owner_block;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->candidate_ledger_groups = 0;
+    owner = (kiln_gc_cell *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *owner);
+    child = kiln_c99_copy_text("active-young-child", 18);
+    if (owner == NULL || child.tag != KILN_VALUE_STRING) return 2;
+    owner_block = ((kiln_gc_block *)owner) - 1;
+    if (!kiln_c99_gc_is_young(heap, owner_block) || heap->nursery.base == NULL ||
+        (uintptr_t)owner < (uintptr_t)heap->nursery.base ||
+        (uintptr_t)owner >= (uintptr_t)heap->nursery.bump) return 3;
+    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)child.ptr) == NULL) return 5;
+    owner->value = KILN_VAL_UNDEFINED;
+    kiln_c99_heap_store_val(owner, &owner->value, kiln_val_from_boundary(child));
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, owner_block + 1)) return 4;
+    return 0;
+}
+int main(void) {
+    return active_young_barrier_entry(NULL);
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-active-young-owner-barrier-test");
+    assert!(
+        run.status.success(),
+        "active young owner barrier fast path failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_minor_gc_promotes_open_chunk_edges_before_the_next_cycle() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

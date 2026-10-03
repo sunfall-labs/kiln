@@ -3105,6 +3105,13 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
     if (heap == NULL || target_payload == NULL || kiln_c99_no_write_depth != 0) return;
     /* The same central store seam feeds the GC remembered set. This work is limited to
      * old-to-young edges; normal stores to process constants and tenured values stop here. */
+    /* Current-nursery owners are young, so they cannot create an old-to-young edge. With no
+     * candidate groups there is no other ledger to update; trust the allocator's active range
+     * metadata and skip both slab and nursery membership lookups on this common path. */
+    if (heap->candidate_ledger_groups == 0 && heap->nursery.base != NULL &&
+        heap->nursery.bump != NULL && (uintptr_t)owner_payload >= (uintptr_t)heap->nursery.base &&
+        (uintptr_t)owner_payload < (uintptr_t)heap->nursery.bump)
+        return;
     owner = kiln_c99_gc_lookup(heap, owner_payload);
     if (owner != NULL && !kiln_c99_gc_is_young(heap, owner)) {
         target = kiln_c99_gc_lookup(heap, target_payload);
@@ -3478,6 +3485,13 @@ static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uint
     void *slab_base;
     const kiln_nursery_chunk *chunk;
     if (address < sizeof(kiln_gc_block)) return NULL;
+    /* The current nursery range is already authoritative: `base` and `bump` are maintained
+     * by the allocator, and the bitmap validates the containing block. Avoid hashing the
+     * slab table for the overwhelmingly common young-object lookup. */
+    if (heap->nursery.base != NULL && heap->nursery.bump != NULL &&
+        address >= (uintptr_t)heap->nursery.base && address < (uintptr_t)heap->nursery.bump)
+        return kiln_c99_gc_bitmap_block(heap->nursery.bitmap, heap->nursery.bitmap_words,
+                                        heap->nursery.base, address);
     slab_base = (void *)(address & ~(uintptr_t)(KILN_GC_SLAB_SIZE - 1));
     if (kiln_c99_gc_ptrset_contains(&heap->slab_table, slab_base)) {
         const kiln_gc_slab *slab = (const kiln_gc_slab *)slab_base;
