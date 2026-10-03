@@ -127,7 +127,31 @@ def entry_for(workspace, source, name):
         features.append('timers')
     if 'toMatchInlineSnapshot' in text:
         features.append('snapshot')
-    imports = ''.join('import ' + json.dumps(str((directory if f == 'node-support' else workspace) / (f + '.mjs'))) + ';\n' for f in features)
+    if re.search(r'\b(?:vi|vitest)\s*\.\s*(?:resetModules|importActual)', text):
+        # Module reset is an explicit test-loader policy, scoped to the original
+        # test referrer. Literal lazy roots retain each importActual target in the
+        # native graph; they are never called just to register the capability.
+        targets = RUNTIME_TARGETS['importActual'].get(name, [])
+        registry = ',\n'.join(
+            json.dumps(specifier) + ':{url:' + json.dumps((test.parent / specifier).resolve().as_uri())
+            + ',load:()=>import(' + json.dumps(str((test.parent / specifier).resolve())) + ')}'
+            for specifier in targets)
+        for specifier in targets:
+            if not (test.parent / specifier).resolve().is_file():
+                raise RuntimeError(f'{name}: importActual target {specifier} is missing')
+        (directory / 'reload-support.mjs').write_text(
+            'import {installVi} from ' + json.dumps(str(workspace / 'harness.mjs')) + ';\n'
+            + 'const referrer=' + json.dumps(test.as_uri()) + ';\n'
+            + 'const targets={' + registry + '};\n'
+            + 'const loader=process?.__kilnNativeModules?.__kilnHostModuleLoader;\n'
+            + 'if(typeof loader==="function"){\n'
+            + 'loader("registerRunner",referrer);\n'
+            + 'installVi({resetModules(){loader("reset");},importActual(specifier){\n'
+            + 'if(!Object.hasOwn(targets,specifier))throw new Error("HARNESS_UNSUPPORTED: undeclared importActual target "+specifier);\n'
+            + 'return Promise.resolve(loader("importActual",specifier,referrer,targets[specifier].url));\n'
+            + '}});\n}\n')
+        features.append('reload-support')
+    imports = ''.join('import ' + json.dumps(str((directory if f in ('node-support', 'reload-support') else workspace) / (f + '.mjs'))) + ';\n' for f in features)
     entry = directory / 'entry.ts'
     entry.write_text(imports + 'import ' + json.dumps(str(source / 'vitest.setup.ts')) + ';\n'
                      + 'import ' + json.dumps(str(test)) + ';\n'
@@ -244,6 +268,7 @@ def main():
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
                   'clock_policy': {e: 'wall' for e in engines},
                   'kiln_binary_sha256': digest(kiln) if any(e != 'bun' for e in engines) else None,
+                  'runner_sha256': digest(Path(__file__).resolve()),
                   'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
                   'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout, 'runtime_jobs': args.runtime_jobs,
@@ -282,7 +307,12 @@ def main():
                     envelope['build'] = build
                     envelope['binary_sha256'] = digest(binary)
                 envelope.update(records(log))
-                envelope['complete'] &= not envelope['timed_out']
+                summary = envelope['summary']
+                expected_exit = (1 if summary['failed'] else 0) if summary else None
+                envelope['matches_expected_exit'] = envelope['exit_code'] == expected_exit
+                # A crash after the summary is an incomplete execution, even when
+                # every recorded case passed. Failed assertions normally exit 1.
+                envelope['complete'] &= not envelope['timed_out'] and envelope['matches_expected_exit']
                 row['engines'][engine] = envelope
                 write_json(directory / (engine + '.json'), envelope)
             reference = row['engines'].get('bun')
