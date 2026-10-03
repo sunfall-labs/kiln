@@ -1,6 +1,5 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 820
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -4169,6 +4168,7 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
 static int kiln_dyn_preflight_indirect_eval(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_validate_parameter_separators(const char *source, size_t length,
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
+static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
 static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4249,6 +4249,7 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
 typedef struct {
 typedef struct {
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
+static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
 static int kiln_dyn_collect_lexicals(const char *source, size_t source_len,
 oom:
