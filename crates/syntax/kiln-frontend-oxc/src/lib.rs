@@ -5383,6 +5383,12 @@ impl Lowerer<'_, '_> {
         for element in &class.body.body {
             let method = match element {
                 ClassElement::PropertyDefinition(property) => {
+                    // `declare` fields describe a type only and must not become own properties
+                    // at construction time. Besides changing reflection, materializing one as
+                    // `undefined` breaks checks such as Object.hasOwn on optional issue fields.
+                    if property.declare {
+                        continue;
+                    }
                     let key = self
                         .member_key(&property.key, property.computed)
                         .ok_or("class field name")?;
