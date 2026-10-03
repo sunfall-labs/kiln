@@ -4799,6 +4799,10 @@ int kiln_c99_dynamic_eval_expression(kiln_host *host, kiln_value source,
                                      const unsigned char *read_only_flags,
                                      size_t binding_count, int strict_context,
                                      kiln_value *out, int depth, kiln_value *thrown) {
+    if (source.tag == KILN_VALUE_STRING) {
+        int policy_status = kiln_dyn_require_string_codegen(thrown);
+        if (policy_status != KILN_C99_OK) return policy_status;
+    }
     return kiln_c99_dynamic_eval_expression_impl(host, source, names, name_lengths, values,
                                                   read_only_flags, binding_count,
                                                   strict_context, out, depth, thrown, 0);

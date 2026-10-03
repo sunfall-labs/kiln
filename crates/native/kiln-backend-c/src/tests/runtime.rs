@@ -1694,7 +1694,7 @@ int main(void) {{
         !kiln_test_units_contain(message, "Code generation from strings is disabled")) return 20;
 
     thrown = kiln_c99_undefined();
-    source = kiln_c99_copy_text("eval('(')", 9);
+    source = kiln_c99_copy_text("1+1", 3);
     if (kiln_c99_dynamic_eval_expression(NULL, source, NULL, NULL, NULL, NULL, 0, 0,
                                          &out, 0, &thrown) != KILN_C99_THROWN) return 6;
     kind = kiln_c99_undefined();
