@@ -28,6 +28,18 @@ the official Node run. `bun-reference.json` records the case IDs, pin, adapter
 digests and full report digest. These are correctness counts, not performance
 measurements. Runtime-specific skip modes are preserved and compared explicitly.
 
+`Formatter > format > function` remains a genuine direct-source failure. Its assertion expects
+tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The
+test source contains ten-space indentation and no semicolon; Node 26.8.1 with
+`--experimental-strip-types` preserves that source text, while Bun 1.4.2 reformats it to two
+spaces plus a semicolon. Kiln's direct TypeScript path also preserves the source text. The
+official Node/Vitest case passes because Vite transforms the source before execution, so that
+runner does not establish the direct-source `Function.prototype.toString()` expectation. Do not
+change source fidelity or rewrite this assertion to make this case appear compatible; it needs
+an upstream/runtime contract decision. The pinned Bun failure remains recorded in
+`bun-reference.json`, and the native failure remains in
+`native-diagnostic-reference.json`.
+
 The latest complete selection on native compiler `8cb04e4f` recorded 10,785 passes,
 142 failures and 45 skips. Two files stopped early: 47 registered cases were not
 recorded, so this is an incomplete diagnostic run, not a complete native score.
