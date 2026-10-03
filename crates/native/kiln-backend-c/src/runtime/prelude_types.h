@@ -842,7 +842,7 @@ extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn 
                                               void *context);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
                                       void *visit_context);
-typedef void (*kiln_gc_release_instance_fn)(void *context);
+typedef void (*kiln_gc_release_external_context_fn)(void *context);
 extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
                                          void *context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
@@ -878,7 +878,7 @@ typedef struct kiln_closure {
     kiln_body_fn body;
     /* Generated module closures stay bound to their graph instance across later resets. */
     kiln_host *module_host;
-    void *module_owner;
+    void *external_owner;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
@@ -1266,7 +1266,7 @@ typedef struct kiln_object {
      * data properties report writable=true. This is deliberately separate from `frozen`: a
      * namespace is not an ordinary frozen object, and reflection must preserve that distinction. */
     int module_namespace;
-    void *module_owner;
+    void *external_owner;
     /* The `arguments` object of a call. An internal slot rather than a `Symbol.toStringTag`
      * property, because the tag is not a property: neither `getOwnPropertyNames` nor
      * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
@@ -2306,28 +2306,28 @@ typedef enum kiln_gc_kind {
     KILN_GC_NODE_PROCESS_COMPLETION,
     KILN_GC_NEXT_TICK,
     KILN_GC_TIMER,
-    /* Realm-local owner for external ESM instance state. Never cloned into shared heaps. */
-    KILN_GC_MODULE_OWNER,
+    /* GC owner for external native state. Never cloned into shared heaps. */
+    KILN_GC_EXTERNAL_OWNER,
     KILN_GC_KIND_COUNT
 } kiln_gc_kind;
 
-typedef struct kiln_gc_module_owner {
+typedef struct kiln_gc_external_owner {
     void *context;
     kiln_gc_visit_roots_fn visit_roots;
-    kiln_gc_release_instance_fn release_instance;
-} kiln_gc_module_owner;
+    kiln_gc_release_external_context_fn release_context;
+} kiln_gc_external_owner;
 
 typedef struct kiln_gc_cell {
     /* First member preserves existing generated `kiln_val *` cell access. */
     kiln_val value;
-    void *module_owner;
+    void *external_owner;
 } kiln_gc_cell;
 
-extern void *kiln_c99_module_owner_create(void *context,
+extern void *kiln_c99_external_owner_create(void *context,
                                           kiln_gc_visit_roots_fn visit_roots,
-                                          kiln_gc_release_instance_fn release_instance);
-extern int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner);
-extern void kiln_c99_closure_set_module_owner(kiln_closure *closure, void *owner);
+                                          kiln_gc_release_external_context_fn release_context);
+extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
+extern void kiln_c99_closure_set_external_owner(kiln_closure *closure, void *owner);
 extern int kiln_c99_val_make_cell_owned(kiln_val *slot, void *owner);
 
 /* The kind of a heap payload, read from the block header in front of it. The header is exactly

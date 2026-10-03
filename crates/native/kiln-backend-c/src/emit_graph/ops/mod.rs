@@ -1534,7 +1534,7 @@ pub(super) fn emit_graph_op(
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host); kiln_c99_closure_set_module_owner(kiln_c99_closure_of(built), host != NULL ? host->module_owner : NULL);{publish} v{v} = kiln_val_from_boundary(built); }}"
+                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host); kiln_c99_closure_set_external_owner(kiln_c99_closure_of(built), host != NULL ? host->module_owner : NULL);{publish} v{v} = kiln_val_from_boundary(built); }}"
                 )
                 .unwrap();
             }

@@ -3104,7 +3104,7 @@ pub(super) fn write_graph_namespace_build(
         )
         .unwrap();
         if !shared {
-            writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_module_namespace_set_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+            writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_object_set_external_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
         }
         return;
     }
@@ -3158,7 +3158,7 @@ pub(super) fn write_graph_namespace_build(
     )
     .unwrap();
     if !shared {
-        writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_module_namespace_set_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+        writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_object_set_external_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
     }
 }
 
@@ -3562,9 +3562,9 @@ typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit, void *visit_context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
              kiln_gc_visit_roots_fn visit_roots, void *context, uint32_t flags);
-extern void *kiln_c99_module_owner_create(void *context,
+extern void *kiln_c99_external_owner_create(void *context,
              kiln_gc_visit_roots_fn visit_roots, void (*release_instance)(void *context));
-extern int kiln_c99_module_namespace_set_owner(kiln_value namespace_value, void *owner);
+extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
 #define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
@@ -4499,7 +4499,7 @@ static int kiln_graph_enter_inner(void *opaque) {
                          kiln_graph_gc_visit_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->instance->roots_registered = 1;
-        graph->host.module_owner = kiln_c99_module_owner_create(
+        graph->host.module_owner = kiln_c99_external_owner_create(
             graph, kiln_graph_gc_visit_roots, NULL);
         if (graph->host.module_owner == NULL) return KILN_C99_OUT_OF_MEMORY;
         /* A realm hosted beside others writes its standard streams where its host said. */
