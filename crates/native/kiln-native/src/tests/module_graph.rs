@@ -86,6 +86,84 @@ export function retained() { return generation; }
 }
 
 #[test]
+fn native_module_reset_collects_superseded_generation_while_current_stays_alive() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native module-generation GC integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-module-instance-collection");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+async function probe() {
+  loader("reset");
+  let old = await import("./target.mjs");
+  loader("reset");
+  const current = await import("./target.mjs");
+  const weak = new WeakRef(old);
+  old = null;
+  current.check(weak);
+}
+await probe();
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        r#"
+const generation = (globalThis.__collectibleGeneration ?? 0) + 1;
+globalThis.__collectibleGeneration = generation;
+export const value = generation;
+export function check(weak) {
+  setTimeout(() => {
+    globalThis.__gcJunk = Array.from({length: 2000}, (_, i) => ({i}));
+    globalThis.__gcJunk = null;
+    setTimeout(() => console.log(weak.deref() === undefined, generation), 0);
+  }, 0);
+}
+"#,
+    )
+    .expect("write target");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("module-generation graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("module-generation graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"true 2\n");
+}
+
+#[test]
 fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
