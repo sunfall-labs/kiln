@@ -512,6 +512,25 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
         }
     }
+    // Source coordinates affect emitted frame metadata even though they do not alter bytecode.
+    // Keep this as a trailing, tagged component so older persisted prefixes remain stable.
+    if !program.debug_call_sites.is_empty() {
+        byte(&mut hash, 0x66);
+        word(&mut hash, program.debug_call_sites.len() as u64);
+        for site in &program.debug_call_sites {
+            match site.function_span {
+                Some(span) => {
+                    byte(&mut hash, 1);
+                    word(&mut hash, u64::from(span.start));
+                    word(&mut hash, u64::from(span.end));
+                }
+                None => byte(&mut hash, 0),
+            }
+            word(&mut hash, u64::from(site.instruction));
+            word(&mut hash, u64::from(site.line));
+            word(&mut hash, u64::from(site.column));
+        }
+    }
     hash
 }
 

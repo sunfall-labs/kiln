@@ -810,6 +810,61 @@ fn program_hash_covers_lossless_source_origin() {
 }
 
 #[test]
+fn program_hash_covers_debug_call_site_coordinates() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_site = |site: kiln_ir::DebugCallSite| {
+        let mut program = base.clone();
+        program.debug_call_sites = vec![site];
+        program
+    };
+    let base_site = kiln_ir::DebugCallSite {
+        function_span: None,
+        instruction: 0,
+        line: 3,
+        column: 7,
+    };
+    let variants = [
+        kiln_ir::DebugCallSite {
+            line: 4,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            column: 8,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            instruction: 1,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            function_span: Some(kiln_ir::Span { start: 0, end: 0 }),
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            line: 3,
+            ..base_site
+        },
+    ];
+    let baseline = hash_program(&with_site(base_site));
+    for variant in variants.into_iter().take(4) {
+        assert_ne!(
+            baseline,
+            hash_program(&with_site(variant)),
+            "each debug call-site field affects emitted frame metadata"
+        );
+    }
+    let mut reordered = base.clone();
+    reordered.debug_call_sites = vec![base_site, variants[0]];
+    let mut reversed = reordered.clone();
+    reversed.debug_call_sites.reverse();
+    assert_ne!(
+        hash_program(&reordered),
+        hash_program(&reversed),
+        "ordered call-site tables must retain their instruction mapping"
+    );
+}
+
+#[test]
 fn emitted_closure_names_use_lossless_effective_function_metadata() {
     let mut high = function(vec![Instruction::Return]);
     high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
