@@ -388,7 +388,8 @@ impl Facts<'_> {
             // reference remains unresolved in this scope; ordinary locals retain normal DCE.
             Expression::Identifier(identifier) => {
                 self.is_unresolved(identifier)
-                    && kiln_ir::Builtin::from_name(identifier.name.as_str()).is_some()
+                    && kiln_builtin_surface::GlobalBuiltin::from_name(identifier.name.as_str())
+                        .is_some()
             }
             Expression::BinaryExpression(binary) => {
                 let coerces_both =
