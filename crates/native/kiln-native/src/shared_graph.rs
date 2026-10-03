@@ -154,7 +154,13 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
 static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     {arena} arena = {{ NULL, 0, 0 }};
     {proxy} proxy = {{ host, &arena, KILN_C99_OK }};
-    kiln_host proxy_host = {{ {stem}_proxy_call, &proxy, NULL }};
+    kiln_host proxy_host = {{0}};
+    proxy_host.call = {stem}_proxy_call;
+    proxy_host.context = &proxy;
+    proxy_host.module_context = host != NULL ? host->module_context : NULL;
+    proxy_host.module_owner = host != NULL ? host->module_owner : NULL;
+    proxy_host.module_unit_values = host != NULL ? host->module_unit_values : NULL;
+    proxy_host.module_instance_id = host != NULL ? host->module_instance_id : 0;
     kiln_value value = {{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     kiln_result_v2 *owned = NULL;
     kiln_string *copy = NULL;

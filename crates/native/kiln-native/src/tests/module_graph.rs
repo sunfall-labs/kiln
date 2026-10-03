@@ -14,22 +14,33 @@ fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
     fs::write(
         root.path.join("main.mjs"),
         r#"
-import * as old from "./target.mjs";
 const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
 loader("registerRunner", import.meta.url);
-const retained = old.retained;
+let releaseOld;
+globalThis.__moduleInstanceGate = new Promise(resolve => { releaseOld = resolve; });
+const oldPromise = import("./target.mjs");
+await Promise.resolve();
 loader("reset");
 const current = await import("./target.mjs");
-console.log(old.value, current.value, old === current, retained());
+releaseOld();
+const old = await oldPromise;
+console.log(old.value, current.value, old === current, old.retained(),
+            old.urlConstructor === current.urlConstructor,
+            old.processObject === current.processObject);
 "#,
     )
     .expect("write entry");
     fs::write(
         root.path.join("target.mjs"),
         r#"
+import { URL } from "node:url";
+import process from "node:process";
 const generation = (globalThis.__moduleInstanceGeneration ?? 0) + 1;
 globalThis.__moduleInstanceGeneration = generation;
+if (generation === 1) await globalThis.__moduleInstanceGate;
 export const value = generation;
+export const urlConstructor = URL;
+export const processObject = process;
 export function retained() { return generation; }
 "#,
     )
@@ -55,7 +66,7 @@ export function retained() { return generation; }
             },
         )
         .expect("module-instance graph builds and runs");
-    assert_eq!(report.stdout, b"1 2 false 1\n");
+    assert_eq!(report.stdout, b"1 2 false 1 true true\n");
 }
 
 #[test]

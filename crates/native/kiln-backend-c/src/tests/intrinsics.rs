@@ -113,6 +113,76 @@ int main(void) {
 }
 
 #[test]
+fn external_owner_module_cycles_release_old_generation_while_current_stays_rooted() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+typedef struct {
+    kiln_value namespace;
+    kiln_val unit_slot;
+    int releases;
+} module_generation_state;
+static int module_generation_visit(void *context, kiln_gc_visit_root_fn visit,
+                                   void *visit_context) {
+    module_generation_state *state = (module_generation_state *)context;
+    if (visit(visit_context, &state->namespace, KILN_GC_VISIT_VALUE) != 0) return 1;
+    return visit(visit_context, &state->unit_slot, KILN_GC_VISIT_COMPACT);
+}
+static void module_generation_release(void *context) {
+    module_generation_state *state = (module_generation_state *)context;
+    state->releases += 1;
+}
+int main(void) {
+    kiln_gc_heap heap;
+    module_generation_state old_state = {0}, current_state = {0};
+    kiln_value old_namespace = kiln_c99_undefined();
+    kiln_value current_namespace = kiln_c99_undefined();
+    void *old_owner, *current_owner;
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation++;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_object(&old_namespace) != KILN_C99_OK ||
+        kiln_c99_new_object(&current_namespace) != KILN_C99_OK) return 1;
+    old_state.namespace = old_namespace;
+    old_state.unit_slot = kiln_val_from_boundary(old_namespace);
+    current_state.namespace = current_namespace;
+    current_state.unit_slot = kiln_val_from_boundary(current_namespace);
+    old_owner = kiln_c99_external_owner_create(&old_state, module_generation_visit,
+                                               module_generation_release);
+    current_owner = kiln_c99_external_owner_create(&current_state, module_generation_visit,
+                                                   module_generation_release);
+    if (old_owner == NULL || current_owner == NULL) return 2;
+    if (kiln_c99_object_set_external_owner(old_namespace, old_owner) != KILN_C99_OK ||
+        kiln_c99_object_set_external_owner(current_namespace, current_owner) != KILN_C99_OK)
+        return 3;
+    /* The unit-state slot and namespace close a cycle through their generation owner. Only the
+     * current namespace is a root, so the old owner's release callback must unlink its graph. */
+    kiln_test_gc_root = current_namespace;
+    old_namespace = kiln_c99_undefined();
+    current_namespace = kiln_c99_undefined();
+    heap.enabled = 1;
+    kiln_c99_gc_collect(&heap, 1);
+    if (old_state.releases != 1 || current_state.releases != 0) return 4;
+    kiln_test_gc_root = kiln_c99_undefined();
+    kiln_c99_gc_collect(&heap, 1);
+    if (old_state.releases != 1 || current_state.releases != 1) return 6;
+    heap.enabled = 0;
+    kiln_test_heap = NULL;
+    kiln_test_realm_active = 0;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "module-generation-owner-cycle");
+    assert!(
+        run.status.success(),
+        "module generation owner cycles failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn native_shared_facade_cache_is_weak_and_releases_its_lease() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

@@ -197,7 +197,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 7;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 8;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -568,7 +568,7 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #define KILN_NATIVE_RUNTIME_VERSION 14
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 7
+#define KILN_HOST_ABI_VERSION 8
 #define KILN_MODULE_API_VERSION 2
 #define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
 
@@ -613,11 +613,19 @@ enum kiln_value_tag {
  * propagated as KILN_C99_HOST_ERROR. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
+/* Private module-context slots are part of kiln_host's layout because generated C executables
+ * and embedding hosts pass the same struct. Embedding hosts leave these callbacks null. */
+typedef uint64_t kiln_val;
+typedef struct kiln_c99_unit kiln_c99_unit;
+typedef kiln_val *(*kiln_host_unit_values_fn)(void *module_context,
+                                              const kiln_c99_unit *unit);
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
     void *module_context;
     void *module_owner;
+    kiln_host_unit_values_fn module_unit_values;
+    uint64_t module_instance_id;
 } kiln_host;
 
 /* An invocation-scoped owned result.  The v2 run function initializes *result to NULL before
@@ -1587,6 +1595,8 @@ mod tests {
         assert!(embedding_header().contains("uint32_t len;"));
         assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
         assert!(embedding_header().contains("typedef struct kiln_host"));
+        assert!(embedding_header().contains("kiln_host_unit_values_fn module_unit_values;"));
+        assert!(embedding_header().contains("uint64_t module_instance_id;"));
         assert!(embedding_header().contains("typedef struct kiln_result_v2 kiln_result_v2;"));
         assert!(embedding_header().contains("typedef struct kiln_module_api_v2"));
         assert!(
@@ -1723,7 +1733,11 @@ int main(void) {
 #include "kiln_module.h"
 
 int main(void) {
-    kiln_host host = {0, 0, 0};
+#ifdef __cplusplus
+    kiln_host host = {};
+#else
+    kiln_host host = {0};
+#endif
     kiln_value result;
     result.tag = 0;
     result.flags = 0;
