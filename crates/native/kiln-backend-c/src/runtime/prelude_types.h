@@ -695,6 +695,9 @@ extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidat
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 #define KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE UINT32_C(16)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_GETTER UINT32_C(17)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_SETTER UINT32_C(18)
+#define KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN UINT32_C(19)
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 /* The collector's seam with the runtime archive (ADR 0041). The prelude owns the heap and the
  * tracer; the archive owns the turn boundary and the roots it holds. */

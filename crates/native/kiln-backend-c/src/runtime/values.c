@@ -89,10 +89,6 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
 int kiln_c99_capture_error_frames(kiln_value *result, size_t limit) {
     kiln_value frames;
     size_t count = 0;
-    if (limit == 0) {
-        *result = kiln_c99_undefined();
-        return KILN_C99_OK;
-    }
     int status = kiln_c99_new_array(&frames);
     if (status != KILN_C99_OK) return status;
     for (kiln_js_frame *frame = kiln_c99_js_frame_top; frame != NULL;
@@ -118,11 +114,51 @@ int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
     int skipping = constructor.tag != KILN_VALUE_UNDEFINED;
     int skipping_facade = 1;
     int status;
+    /* Registration is an internal use of this already-owned intrinsic. The opaque token is
+     * created in errors.ts's closure and retained only by the call; it cannot be guessed from JS. */
+    if (target.tag == KILN_VALUE_BUILTIN && target.bits == KILN_C99_BUILTIN_ERROR &&
+        argc >= 5 && args[3].tag == KILN_VALUE_OBJECT && args[4].tag == KILN_VALUE_OBJECT &&
+        args[1].tag == KILN_VALUE_FUNCTION && args[2].tag == KILN_VALUE_FUNCTION) {
+        void *getter_slot = NULL;
+        void *setter_slot = NULL;
+        void *brand_token_slot = NULL;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot);
+        if (status != KILN_C99_OK) return status;
+        if (getter_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot);
+        if (status != KILN_C99_OK) return status;
+        if (setter_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN,
+                                       &brand_token_slot);
+        if (status != KILN_C99_OK) return status;
+        if (brand_token_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        if (((kiln_value *)getter_slot)->tag == KILN_VALUE_UNDEFINED) {
+            *(kiln_value *)getter_slot = args[1];
+            *(kiln_value *)setter_slot = args[2];
+            *(kiln_value *)brand_token_slot = args[4];
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (argc > 2 && args[2].tag == KILN_VALUE_OBJECT) {
+        void *brand_token_slot = NULL;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN,
+                                       &brand_token_slot);
+        if (status != KILN_C99_OK) return status;
+        *result = kiln_c99_boolean(
+            brand_token_slot != NULL &&
+            args[2].tag == KILN_VALUE_OBJECT &&
+            ((kiln_value *)brand_token_slot)->tag == KILN_VALUE_OBJECT &&
+            args[2].ptr == ((kiln_value *)brand_token_slot)->ptr &&
+            target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand);
+        return KILN_C99_OK;
+    }
     /* errors.ts uses the already-captured primitive in this internal mode when the public lazy
      * stack getter is first read. Reserved frame metadata never becomes a reflectable property. */
-    if (argc > 2 && args[2].tag == KILN_VALUE_BOOLEAN && args[2].bits != 0 &&
-        target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand) {
-        *result = kiln_c99_object_of(target)->error_stack_frames;
+    if (argc > 2 && args[2].tag == KILN_VALUE_BOOLEAN && args[2].bits != 0) {
+        *result = target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand
+                      ? kiln_c99_object_of(target)->error_stack_frames
+                      : kiln_c99_undefined();
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||

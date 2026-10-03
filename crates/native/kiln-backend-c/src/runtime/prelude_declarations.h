@@ -107,7 +107,7 @@ extern int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *resul
                                               kiln_value *thrown);
 extern int kiln_c99_capture_error_frames(kiln_value *result, size_t limit);
 extern int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
-                                      size_t frame_limit);
+                                      size_t frame_limit, int capture_enabled);
 extern int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method);
 extern const uint16_t kiln_c99_method_codes[];

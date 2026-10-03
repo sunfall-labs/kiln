@@ -2028,7 +2028,7 @@ builtin_backlog! {
     ("RegExp", "escape",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Error", "isError",
-     "not implemented"),
+     "answered by shared errors.ts through the Error brand slot; no row"),
     ("BigInt", "asIntN",
      "answered by the shared numeric_bigint.ts bootstrap using the BigInt value kernel; no row"),
     ("BigInt", "asUintN",

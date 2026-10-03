@@ -42,6 +42,24 @@ static uint64_t kiln_c99_error_kind(kiln_value value) {
     return 0;
 }
 
+static int kiln_c99_error_stack_accessors(kiln_value *getter, kiln_value *setter) {
+    void *getter_slot = NULL;
+    void *setter_slot = NULL;
+    if (getter == NULL || setter == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot) !=
+            KILN_C99_OK ||
+        kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot) !=
+            KILN_C99_OK ||
+        getter_slot == NULL || setter_slot == NULL) {
+        *getter = kiln_c99_undefined();
+        *setter = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    *getter = *(kiln_value *)getter_slot;
+    *setter = *(kiln_value *)setter_slot;
+    return KILN_C99_OK;
+}
+
 /* `Error.prototype.toString`: "name: message", and the one text form an object has that is not
  * "[object Object]".
  *
@@ -95,11 +113,11 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
  * beside the `toString` and `constructor` that already work that way. `message` has the same
  * shape: own only when one was passed, and "" from the kind otherwise. */
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
-    return kiln_c99_new_error_limited(out, kind, message, 10);
+    return kiln_c99_new_error_limited(out, kind, message, 10, 1);
 }
 
 int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
-                                size_t frame_limit) {
+                                size_t frame_limit, int capture_enabled) {
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
     kiln_value frames;
@@ -113,6 +131,18 @@ int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value messag
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* The accessor pair is shared TypeScript policy registered once by errors.ts, held in
+     * realm-rooted slots, and copied onto each instance. Error.prototype remains untouched. */
+    {
+        kiln_value getter;
+        kiln_value setter;
+        status = kiln_c99_error_stack_accessors(&getter, &setter);
+        if (status == KILN_C99_OK && getter.tag == KILN_VALUE_FUNCTION &&
+            setter.tag == KILN_VALUE_FUNCTION) {
+            status = kiln_c99_define_accessor(error, "stack", 5, getter, setter, 0);
+        }
+        if (status != KILN_C99_OK) return status;
+    }
     /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
      * does afterwards can add or remove it. */
     kiln_c99_object_of(error)->error_brand = 1;
@@ -120,7 +150,8 @@ int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value messag
         kind == KILN_C99_BUILTIN_AGGREGATE_ERROR
             ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
             : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
-    status = kiln_c99_capture_error_frames(&frames, frame_limit);
+    status = capture_enabled ? kiln_c99_capture_error_frames(&frames, frame_limit)
+                             : (frames = kiln_c99_undefined(), KILN_C99_OK);
     if (status == KILN_C99_OK)
         kiln_c99_object_of(error)->error_stack_frames = frames;
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {

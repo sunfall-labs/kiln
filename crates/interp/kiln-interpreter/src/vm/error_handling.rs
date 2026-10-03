@@ -1,6 +1,27 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn error_stack_frame_limit(&self) -> Option<usize> {
+        let constructor = Value::Native(Native::Error(ErrorKind::Error), self.current_realm);
+        let identity = intrinsic_key(&constructor)?;
+        let entries = self.intrinsics.entries.borrow();
+        let value = entries
+            .iter()
+            .find(|(key, _)| *key == identity)
+            .and_then(|(_, data)| data.get_own("stackTraceLimit"))?;
+        let Value::Number(limit) = value else {
+            return None;
+        };
+        if limit.is_nan() || *limit <= 0.0 {
+            return Some(0);
+        }
+        Some(if limit.is_infinite() || *limit >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            limit.floor() as usize
+        })
+    }
+
     /// Resume a generator, recovering what it threw rather than unwinding past this point.
     pub(super) fn resume_catching(
         &mut self,
@@ -139,15 +160,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-        if matches!(arguments.get(2), Some(Value::Boolean(true)))
-            && let Value::Object(object) = &target
-            && object.borrow().error_brand
+        if matches!(&target, Value::Native(Native::Error(ErrorKind::Error), _))
+            && arguments.len() >= 5
+            && matches!(arguments.get(3), Some(Value::Object(_)))
+            && matches!(arguments.get(4), Some(Value::Object(_)))
         {
-            return Ok(object
-                .borrow()
-                .error_stack_frames
-                .clone()
-                .unwrap_or(Value::Undefined));
+            if self.error_stack_getter.is_none() {
+                self.error_stack_getter = arguments.get(1).cloned();
+                self.error_stack_setter = arguments.get(2).cloned();
+                self.error_stack_brand_token = arguments.get(4).cloned();
+            }
+            return Ok(Value::Undefined);
+        }
+        if let Some(token) = &self.error_stack_brand_token
+            && arguments
+                .get(2)
+                .is_some_and(|candidate| strict_equal(candidate, token))
+        {
+            return Ok(Value::Boolean(matches!(
+                &target,
+                Value::Object(object) if object.borrow().error_brand
+            )));
+        }
+        if matches!(arguments.get(2), Some(Value::Boolean(true))) {
+            return Ok(match &target {
+                Value::Object(object) if object.borrow().error_brand => object
+                    .borrow()
+                    .error_stack_frames
+                    .clone()
+                    .unwrap_or(Value::Undefined),
+                _ => Value::Undefined,
+            });
         }
         if !is_object_type(&target) {
             return Err(ExecutionError::TypeErrorMessage {
@@ -261,6 +304,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Object(object) = &error {
             let mut object = object.borrow_mut();
             object.set_prototype(prototype);
+            if let Some(getter) = self.error_stack_getter.clone() {
+                object.properties.insert(
+                    0,
+                    Slot {
+                        key: "stack".into(),
+                        symbol: false,
+                        internal: false,
+                        property: Property::Accessor {
+                            get: Some(getter),
+                            set: self.error_stack_setter.clone(),
+                        },
+                        attributes: Attributes {
+                            writable: false,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    },
+                );
+            }
             // Recorded where the error was *made*, not where it was reported: a rejection
             // surfaces after the stack that produced it is gone, and that is exactly the case
             // where a trace is worth having.
@@ -273,21 +335,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .collect(),
                 )),
             );
-            object.error_stack_frames = Some(Value::Array(ArrayData::new(
-                self.trace()
-                    .into_iter()
-                    .map(|function_name| {
-                        ordinary_object([
-                            ("fileName".to_owned(), Value::String("<kiln>".into())),
-                            (
-                                "functionName".to_owned(),
-                                Value::String(function_name.into()),
-                            ),
-                            ("instruction".to_owned(), Value::Number(0.0)),
-                        ])
-                    })
-                    .collect(),
-            )));
+            let stack_frames = self.error_stack_frame_limit().map(|limit| {
+                let mut trace = self.trace();
+                trace.truncate(limit);
+                Value::Array(ArrayData::new(
+                    trace
+                        .into_iter()
+                        .map(|function_name| {
+                            ordinary_object([
+                                ("fileName".to_owned(), Value::String("<kiln>".into())),
+                                (
+                                    "functionName".to_owned(),
+                                    Value::String(function_name.into()),
+                                ),
+                                ("instruction".to_owned(), Value::Number(0.0)),
+                            ])
+                        })
+                        .collect(),
+                ))
+            });
+            object.error_stack_frames = stack_frames;
         }
         error
     }

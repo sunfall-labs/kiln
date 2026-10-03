@@ -128,12 +128,21 @@
         configurable: true,
       });
     };
-    Object.defineProperty(ErrorCtor.prototype, "stack", {
-      get: stackGetter,
-      set: stackSetter,
-      configurable: true,
-      enumerable: false,
-    });
+    // Register these shared TypeScript accessors with each engine's private realm slot. The
+    // constructor copies the pair to each Error instance so the observable own-property shape
+    // matches Error's [[ErrorData]] behavior without adding `stack` to Error.prototype.
+    const stackRegistrationToken = {};
+    const errorBrandToken = {};
+    captureFrameSnapshots(
+      ErrorCtor,
+      stackGetter,
+      stackSetter,
+      stackRegistrationToken,
+      errorBrandToken,
+    );
+    defineHidden(ErrorCtor, "isError", (value: unknown): boolean =>
+      captureFrameSnapshots(value, undefined, errorBrandToken) === true
+    );
   }
 
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).

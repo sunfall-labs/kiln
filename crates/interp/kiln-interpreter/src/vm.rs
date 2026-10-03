@@ -221,6 +221,11 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) regexp_legacy_captures: Vec<[StringUnits; 9]>,
     /// How many built-ins are currently between the running code and the interpreter loop.
     pub(super) native_depth: usize,
+    /// Shared TypeScript stack facade callbacks installed once per VM realm. Each Error instance
+    /// gets its own lazy accessor pair from this registry, keeping Error.prototype unmodified.
+    pub(super) error_stack_getter: Option<Value>,
+    pub(super) error_stack_setter: Option<Value>,
+    pub(super) error_stack_brand_token: Option<Value>,
     /// `process`, built on first use and shared from then on.
     ///
     /// Bundles read `process.env.NODE_ENV` unguarded -- it is the standard way a library ships

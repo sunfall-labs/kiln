@@ -83,18 +83,15 @@ fn error_is_error_inherits_through_native_error_constructors() {
     ));
 }
 
-/// An error with no message gets a bare header, not one with a trailing colon -- and no own
-/// `message` at all, because an absent message is the prototype's empty one.
+/// The low-level constructor preserves an absent message; the public lazy stack formatter is
+/// installed by the shared TypeScript Error builtin, outside this constructor unit fixture.
 #[test]
-fn an_empty_message_produces_a_bare_stack_header() {
+fn an_empty_message_stays_absent_before_stack_formatter_registration() {
     for arguments in [Vec::new(), vec![Value::Undefined]] {
         let Value::Object(data) = build_error(ErrorKind::Error, &arguments) else {
             panic!("construct_error returns an object");
         };
-        assert_eq!(
-            data.borrow().get("stack"),
-            Some(Value::String("Error".to_owned().into()))
-        );
+        assert_eq!(data.borrow().get_own("stack"), None);
         assert_eq!(data.borrow().get_own("message"), None);
     }
 }
