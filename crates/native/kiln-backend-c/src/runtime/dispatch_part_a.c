@@ -2485,10 +2485,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (code == KILN_C99_METHOD_FUNCTION_CALL || code == KILN_C99_METHOD_FUNCTION_APPLY ||
             code == KILN_C99_METHOD_FUNCTION_BIND ||
             code == KILN_C99_METHOD_FUNCTION_TO_STRING ||
-            code == KILN_C99_METHOD_OBJECT_TO_STRING) {
+            code == KILN_C99_METHOD_OBJECT_TO_STRING ||
+            code == KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE) {
             /* These operations touch no mutable receiver storage. Calls reach the apply trap;
              * Function toString follows the callable target, while Object toString performs
-             * its own IsArray and observable @@toStringTag Get below. */
+             * its own IsArray and observable @@toStringTag Get below. Enumerability
+             * uses the proxy's own-property descriptor trap below. */
         } else if (code == KILN_C99_METHOD_HAS_OWN_PROPERTY) {
             /* `Object.prototype.hasOwnProperty.call(p, k)` asks `[[GetOwnProperty]]`, which is a
              * trap -- so it must not read a store the proxy does not have. */

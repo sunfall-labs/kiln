@@ -2146,8 +2146,18 @@
         case KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE: {
             /* Own *and* enumerable, which is the pair `Object.keys` reports and `hasOwnProperty`
              * only half of. */
-            kiln_value name = kiln_c99_property_key(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value key = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value name;
             kiln_property property;
+            status = KILN_C99_OK;
+            if (kiln_c99_is_reference(key)) {
+                status = kiln_c99_to_primitive(host, key, 1, &key, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            name = kiln_c99_property_key(key);
+            if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                    "Cannot convert undefined or null to object");
             *result = kiln_c99_boolean(0);
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY && name.tag == KILN_VALUE_STRING) {
                 int found;
@@ -2155,15 +2165,50 @@
                 kiln_c99_typed_own_key(receiver, (const kiln_string *)name.ptr, &found,
                                        &enumerable);
                 *result = kiln_c99_boolean(found && enumerable);
-                return KILN_C99_OK;
+                if (found) return KILN_C99_OK;
             }
-            if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
-                return KILN_C99_OK;
+            if (name.tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                kiln_array *array = kiln_c99_array_of(receiver);
+                if (array->properties.tag == KILN_VALUE_OBJECT &&
+                    kiln_c99_property_read_own_value(array->properties,
+                        (const kiln_string *)name.ptr, NULL, &property)) {
+                    *result = kiln_c99_boolean(kiln_c99_property_is_enumerable(&property));
+                } else {
+                    double index = kiln_c99_key_index_key((const kiln_string *)name.ptr);
+                    *result = kiln_c99_boolean(index >= 0 && index < (double)array->count &&
+                        array->elements[(size_t)index] != KILN_VAL_HOLE);
+                }
+            } else if (receiver.tag == KILN_VALUE_OBJECT) {
+                if (kiln_c99_property_read_own_value(receiver, (const kiln_string *)name.ptr,
+                                                     NULL, &property))
+                    *result = kiln_c99_boolean(kiln_c99_property_is_enumerable(&property));
+            } else {
+                kiln_value subject = receiver, descriptor;
+                int found;
+                status = kiln_c99_object_constructor(&subject, &receiver, 1);
+                if (status == KILN_C99_OK && subject.tag == KILN_VALUE_PROXY)
+                    status = kiln_c99_proxy_describe(host, subject,
+                        key.tag == KILN_VALUE_SYMBOL ? key : name,
+                        &descriptor, &found, depth, thrown);
+                else if (status == KILN_C99_OK)
+                    status = kiln_c99_describe_property_key(host, subject,
+                        (const kiln_string *)name.ptr, kiln_c99_property_ikey(key),
+                        &descriptor, &found, depth, thrown);
+                if (status == KILN_C99_OK && found) {
+                    kiln_value flag;
+                    if (!kiln_c99_is_reference(descriptor))
+                        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                            "getOwnPropertyDescriptor trap must return an object or undefined");
+                    status = kiln_c99_get(host, descriptor, "enumerable", 10, &flag,
+                        depth, thrown);
+                    if (status == KILN_C99_OK) *result = kiln_c99_boolean(kiln_c99_truthy(flag));
+                }
+                kiln_c99_gc_keep_alive(&subject);
             }
-            if (kiln_c99_property_read_own_value(receiver, (const kiln_string *)name.ptr,
-                                                 NULL, &property))
-                *result = kiln_c99_boolean(kiln_c99_property_is_enumerable(&property));
-            return KILN_C99_OK;
+            kiln_c99_gc_keep_alive(&key);
+            kiln_c99_gc_keep_alive(&name);
+            return status;
         }
         case KILN_C99_METHOD_IS_PROTOTYPE_OF: {
             /* Walks the chain rather than comparing one link, which is what makes it different

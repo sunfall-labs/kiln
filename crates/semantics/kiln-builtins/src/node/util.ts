@@ -228,6 +228,17 @@ export function isDeepStrictEqual(actual: any, expected: any): boolean {
     }
     leftSeen.push(left);
     rightSeen.push(right);
+    try {
+      return equalObject(left, right);
+    } finally {
+      // Only ancestors constrain cycle matching. A shared child and two equal
+      // independent children compare equally once their earlier branch ends.
+      leftSeen.pop();
+      rightSeen.pop();
+    }
+  }
+
+  function equalObject(left: any, right: any): boolean {
 
     if (left instanceof Date || right instanceof Date) {
       if (!(left instanceof Date) || !(right instanceof Date) || !Object.is(left.getTime(), right.getTime())) return false;

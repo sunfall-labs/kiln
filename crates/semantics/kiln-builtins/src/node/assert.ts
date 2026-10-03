@@ -1,5 +1,7 @@
 // kiln-builtins: node:assert implementation (Phase 5.2, ADR 0005)
 
+import { isDeepStrictEqual } from "node:util";
+
 export class AssertionError extends Error {
   actual: any;
   expected: any;
@@ -135,6 +137,9 @@ function compareObjectProperties(
 }
 
 function deepEqualGraph(a: any, b: any, strict: boolean): boolean {
+  // Strict assertions and util share one graph comparator, including enumerable
+  // symbol identity and the internal state of built-in objects.
+  if (strict) return isDeepStrictEqual(a, b);
   return isDeepEqual(a, b, strict, {
     left: new WeakMap<object, object>(),
     right: new WeakMap<object, object>(),
