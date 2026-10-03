@@ -13,6 +13,9 @@ The default comparison is Bun versus kiln native. Both consume the original TS a
 the same adapter, including upstream setup and a shared `createRequire` shim for files that use it, without bundling.
 The native lane builds a `native-dev` executable and runs it with the shipped
 wall-clock policy, matching Bun. Build and execution evidence are separate.
+Bun preloads its own `bun:test` mock operations so namespace spies follow its
+[documented ESM mocking behavior](https://bun.com/docs/test/mocks).
+The shared adapter and assertion libraries remain the same.
 The optional interpreter lane uses Node host-clock capability. Its timer scheduler
 is being brought into agreement with that capability; continuously runnable work
 currently exposes incomplete timer coverage. Dependencies are
