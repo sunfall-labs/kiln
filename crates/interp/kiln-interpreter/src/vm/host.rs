@@ -4467,7 +4467,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 }
                 let mut state = state.borrow_mut();
                 state.status = status as u16;
-                if let Some(Value::Object(headers)) = arguments.get(1) {
+                // Node permits either `writeHead(status, headers)` or
+                // `writeHead(status, statusMessage, headers)`. Platform adapters use the latter
+                // form to preserve status text; skipping argument two silently drops headers
+                // such as `Location`, which makes the response impossible to follow.
+                let headers_argument = match arguments.get(1) {
+                    Some(Value::Object(_)) => arguments.get(1),
+                    _ => arguments.get(2),
+                };
+                if let Some(Value::Object(headers)) = headers_argument {
                     let headers = headers.borrow();
                     for property in headers
                         .properties

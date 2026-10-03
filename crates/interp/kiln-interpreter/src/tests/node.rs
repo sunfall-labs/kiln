@@ -694,6 +694,62 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
 }
 
 #[test]
+fn node_response_write_head_reads_headers_after_optional_status_text() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let state = Rc::new(RefCell::new(HttpResponseState {
+        stream: kiln_host_abi::ResourceId::new(1),
+        request_id: Some(7),
+        status: 200,
+        headers: Vec::new(),
+        streaming: false,
+        ended: false,
+        object: None,
+    }));
+    let response = Value::Object(Rc::new(RefCell::new(ObjectData {
+        node_object: Some(NodeObject::HttpResponse(Rc::clone(&state))),
+        ..ObjectData::default()
+    })));
+    let headers = ordinary_object([(
+        "location".into(),
+        Value::String("/?value=a%23b#fragment".to_owned().into()),
+    )]);
+
+    vm.dispatch_node_response(
+        Native::NodeResponseWriteHead,
+        &response,
+        &[Value::Number(302.0), Value::Undefined, headers],
+        0,
+    )
+    .expect("three-argument writeHead is accepted");
+
+    assert_eq!(state.borrow().status, 302);
+    assert!(
+        state
+            .borrow()
+            .headers
+            .iter()
+            .any(|(name, value)| name == "location" && value == "/?value=a%23b#fragment")
+    );
+}
+
+#[test]
 fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
     let program = Program {
         source: "".into(),
