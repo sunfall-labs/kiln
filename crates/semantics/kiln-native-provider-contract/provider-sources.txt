@@ -103,6 +103,9 @@ crates/native/kiln-native-provider-ffi/src/provider/temporal.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/workers.rs
 crates/native/kiln-native-provider-ffi/src/provider/webcrypto.rs
+crates/native/kiln-native-provider-ffi/src/provider/compression.rs
+crates/semantics/kiln-compression/Cargo.toml
+crates/semantics/kiln-compression/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/gui.rs
 crates/host/kiln-host-gui/Cargo.toml
 crates/host/kiln-host-gui/src/appkit.rs

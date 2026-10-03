@@ -533,3 +533,125 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     }
     return KILN_C99_OK;
 }
+
+/* CompressionStream owns one incremental flate2 codec. The opaque state is attached to the
+ * public compressor object through the collector's external-owner slot, so a stream's codec dies
+ * with the stream and remains alive during a collection whenever the JS object is reachable. */
+typedef struct {
+    const void *brand;
+    void *codec;
+} kiln_c99_compression_owner_context;
+
+static const char kiln_c99_compression_owner_brand;
+
+static int kiln_c99_compression_visit(void *context, kiln_gc_visit_root_fn visit,
+                                      void *visit_context) {
+    (void)context;
+    (void)visit;
+    (void)visit_context;
+    return 0;
+}
+
+static void kiln_c99_compression_release(void *context) {
+    kiln_c99_compression_owner_context *owner = (kiln_c99_compression_owner_context *)context;
+    if (owner == NULL) return;
+    kiln_compression_state_free(owner->codec);
+    free(owner);
+}
+
+static void *kiln_c99_compression_codec(kiln_value receiver) {
+    kiln_object *object;
+    kiln_gc_external_owner *external;
+    kiln_c99_compression_owner_context *context;
+    if (receiver.tag != KILN_VALUE_OBJECT || (object = kiln_c99_object_of(receiver)) == NULL ||
+        object->external_owner == NULL) return NULL;
+    external = (kiln_gc_external_owner *)object->external_owner;
+    if (kiln_c99_gc_payload_kind(external) != KILN_GC_EXTERNAL_OWNER ||
+        external->release_context != kiln_c99_compression_release ||
+        external->visit_roots != kiln_c99_compression_visit) return NULL;
+    context = (kiln_c99_compression_owner_context *)external->context;
+    return context->brand == &kiln_c99_compression_owner_brand ? context->codec : NULL;
+}
+
+static int kiln_c99_compression_bytes(kiln_value value, const uint8_t **bytes,
+                                      size_t *length, kiln_value *thrown) {
+    kiln_typed_array *view;
+    if (value.tag != KILN_VALUE_TYPED_ARRAY)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "CompressionStream chunks must be Uint8Array values");
+    view = kiln_c99_typed_array_of(value);
+    if (view == NULL || view->kind != KILN_TYPED_UINT8 || view->buffer == NULL ||
+        view->buffer->detached)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "CompressionStream chunks must be live Uint8Array values");
+    *length = view->length;
+    *bytes = view->length == 0 ? NULL : view->buffer->bytes + view->byte_offset;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_compression_primitive(kiln_value *out, const kiln_value *args, size_t argc,
+                                   kiln_value *thrown) {
+    double operation, format, direction;
+    void *codec;
+    if (out == NULL || args == NULL || argc < 2 || args[1].tag != KILN_VALUE_NUMBER)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Invalid CompressionStream operation");
+    operation = kiln_c99_as_number(args[1]);
+    if (operation == 0) {
+        kiln_c99_compression_owner_context *context;
+        void *owner;
+        int status;
+        if (args[0].tag != KILN_VALUE_OBJECT || argc < 4 || args[2].tag != KILN_VALUE_NUMBER ||
+            args[3].tag != KILN_VALUE_NUMBER)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Invalid CompressionStream constructor");
+        format = kiln_c99_as_number(args[2]);
+        direction = kiln_c99_as_number(args[3]);
+        if (format < 1 || format > 3 || floor(format) != format || direction < 1 || direction > 2 ||
+            floor(direction) != direction)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Unsupported compression format");
+        codec = kiln_compression_state_create((uint32_t)format, (uint32_t)direction);
+        if (codec == NULL) return KILN_C99_OUT_OF_MEMORY;
+        context = (kiln_c99_compression_owner_context *)malloc(sizeof *context);
+        if (context == NULL) { kiln_compression_state_free(codec); return KILN_C99_OUT_OF_MEMORY; }
+        context->brand = &kiln_c99_compression_owner_brand;
+        context->codec = codec;
+        owner = kiln_c99_external_owner_create(context, kiln_c99_compression_visit,
+                                               kiln_c99_compression_release);
+        if (owner == NULL) { kiln_c99_compression_release(context); return KILN_C99_OUT_OF_MEMORY; }
+        status = kiln_c99_object_set_external_owner(args[0], owner);
+        if (status != KILN_C99_OK) { kiln_c99_external_owner_detach(owner); return status; }
+        *out = (kiln_value){.tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0};
+        return KILN_C99_OK;
+    }
+    if (operation != 1 || argc < 4 || args[3].tag != KILN_VALUE_BOOLEAN)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Invalid CompressionStream operation");
+    codec = kiln_c99_compression_codec(args[0]);
+    if (codec == NULL)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Invalid CompressionStream receiver");
+    {
+        const uint8_t *input;
+        size_t input_length, output_length = 0;
+        uint8_t *output = NULL;
+        kiln_typed_array *view;
+        int status = kiln_c99_compression_bytes(args[2], &input, &input_length, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_compression_state_push(codec, input, input_length,
+                                             args[3].bits ? 1u : 0u, &output,
+                                             &output_length);
+        if (status != 0) return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                     "Invalid compressed data");
+        status = kiln_c99_webcrypto_output_array(out, output_length);
+        if (status == KILN_C99_OK) {
+            view = kiln_c99_typed_array_of(*out);
+            if (view == NULL || view->buffer == NULL) status = KILN_C99_OUT_OF_MEMORY;
+            else if (output_length != 0) memcpy(view->buffer->bytes + view->byte_offset, output,
+                                                output_length);
+        }
+        kiln_compression_output_free(output, output_length);
+        return status;
+    }
+}

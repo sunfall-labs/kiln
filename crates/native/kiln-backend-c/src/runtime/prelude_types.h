@@ -3765,6 +3765,13 @@ int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
                            const uint8_t *additional_data, size_t additional_data_length,
                            size_t output_length, uint8_t *output, size_t output_capacity,
                            size_t *required);
+void *kiln_compression_state_create(uint32_t format, uint32_t direction);
+void kiln_compression_state_free(void *state);
+int kiln_compression_state_push(void *state, const uint8_t *input, size_t input_length,
+                                uint32_t finish, uint8_t **output, size_t *output_length);
+void kiln_compression_output_free(uint8_t *output, size_t length);
+int kiln_c99_compression_primitive(kiln_value *out, const kiln_value *args, size_t argc,
+                                   kiln_value *thrown);
 int kiln_c99_webcrypto_output_array(kiln_value *out, size_t length);
 int kiln_c99_webcrypto_primitive(kiln_value *out, const kiln_value *args, size_t argc,
                                  kiln_value *thrown);

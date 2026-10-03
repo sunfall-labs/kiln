@@ -1161,14 +1161,44 @@ pub(crate) fn linked_source(module_source: &str, wrapper: &str) -> String {
     format!(
         "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
              #define _POSIX_C_SOURCE 200809L\n\
-             #endif\n{}\n{}\n{}\n{}\n{}",
+             #endif\n{}\n{}\n{}\n{}\n{}\n{}",
         kiln_native_provider_contract::number::runtime_source(),
         module_source,
         REGEXP_FIXTURE,
         REALM_FIXTURE,
+        SEMANTIC_PROVIDER_FIXTURE,
         wrapper
     )
 }
+
+/// Link-only symbols for executable backend fixtures, which do not link the packaged Rust
+/// semantic provider. Production compression and WebCrypto always resolve to their real archive.
+const SEMANTIC_PROVIDER_FIXTURE: &str = r#"
+int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
+                           const uint8_t *data, size_t data_length,
+                           const uint8_t *iv, size_t iv_length,
+                           const uint8_t *additional_data, size_t additional_data_length,
+                           size_t output_length, uint8_t *output, size_t output_capacity,
+                           size_t *required) {
+    (void)op; (void)key; (void)key_length; (void)data; (void)data_length;
+    (void)iv; (void)iv_length; (void)additional_data; (void)additional_data_length;
+    (void)output_length; (void)output; (void)output_capacity;
+    if (required != NULL) *required = 0;
+    return -6;
+}
+void *kiln_compression_state_create(uint32_t format, uint32_t direction) {
+    (void)format; (void)direction; return NULL;
+}
+void kiln_compression_state_free(void *state) { (void)state; }
+int kiln_compression_state_push(void *state, const uint8_t *input, size_t input_length,
+                                uint32_t finish, uint8_t **output, size_t *output_length) {
+    (void)state; (void)input; (void)input_length; (void)finish; (void)output; (void)output_length;
+    return -1;
+}
+void kiln_compression_output_free(uint8_t *output, size_t length) {
+    (void)output; (void)length;
+}
+"#;
 
 fn function(code: Vec<Instruction>) -> FunctionProto {
     FunctionProto {

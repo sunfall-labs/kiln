@@ -37,6 +37,12 @@ delete (globalThis as any).__kilnPortWait;
 
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
+  const compressionPrimitive = G.__kilnCompressionPrimitive;
+  delete G.__kilnCompressionPrimitive;
+  const compressionStreamSlots = new WeakMap<object, any>();
+  const weakSet = WeakMap.prototype.set;
+  const weakGet = WeakMap.prototype.get;
+  const apply = Reflect.apply;
 
   // The host primitive owns cancellation transport. Public controller identity, WebIDL
   // descriptors and brand checks belong to this ordinary class in both engines.
@@ -2335,6 +2341,70 @@ delete (globalThis as any).__kilnPortWait;
     get [Symbol.toStringTag](): string { return "TransformStream"; }
   }
 
+  // The byte transform algorithms are shared Rust codecs. Queueing, validation, writer
+  // backpressure, and error propagation stay in this TransformStream implementation.
+  class CompressionStream {
+    constructor(format: string) {
+      const normalized = compressionFormat(format, "CompressionStream");
+      compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 1);
+      const transform = new TransformStream({
+        transform: (chunk: any, controller: TransformStreamDefaultController) => {
+          if (!(chunk instanceof Uint8Array)) throw new TypeError("CompressionStream chunks must be Uint8Array values");
+          const result = compressionPrimitive(this, 1, chunk, false) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+        flush: (controller: TransformStreamDefaultController) => {
+          const result = compressionPrimitive(this, 1, new Uint8Array(0), true) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+      });
+      apply(weakSet, compressionStreamSlots, [this, { readable: transform.readable, writable: transform.writable }]);
+      hideSlots(this);
+    }
+    get readable(): ReadableStream { return compressionStreamSlot(this).readable; }
+    get writable(): WritableStream { return compressionStreamSlot(this).writable; }
+    get [Symbol.toStringTag](): string { return "CompressionStream"; }
+  }
+
+  class DecompressionStream {
+    constructor(format: string) {
+      const normalized = compressionFormat(format, "DecompressionStream");
+      compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 2);
+      const transform = new TransformStream({
+        transform: (chunk: any, controller: TransformStreamDefaultController) => {
+          if (!(chunk instanceof Uint8Array)) throw new TypeError("DecompressionStream chunks must be Uint8Array values");
+          const result = compressionPrimitive(this, 1, chunk, false) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+        flush: (controller: TransformStreamDefaultController) => {
+          const result = compressionPrimitive(this, 1, new Uint8Array(0), true) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+      });
+      apply(weakSet, compressionStreamSlots, [this, { readable: transform.readable, writable: transform.writable }]);
+      hideSlots(this);
+    }
+    get readable(): ReadableStream { return compressionStreamSlot(this).readable; }
+    get writable(): WritableStream { return compressionStreamSlot(this).writable; }
+    get [Symbol.toStringTag](): string { return "DecompressionStream"; }
+  }
+
+  function compressionFormat(input: any, constructorName: string): string {
+    let format: string;
+    if (typeof input === "symbol")
+      throw new TypeError(`Failed to construct '${constructorName}': 1st argument is a Symbol and cannot be converted to a string.`);
+    format = `${input}`;
+    if (format !== "gzip" && format !== "deflate" && format !== "deflate-raw")
+      throw new TypeError(`Failed to construct '${constructorName}': 1st argument '${format}' is not a valid enum value of type CompressionFormat.`);
+    return format;
+  }
+
+  function compressionStreamSlot(receiver: any): any {
+    const slot = apply(weakGet, compressionStreamSlots, [receiver]);
+    if (slot === undefined) throw new TypeError("Illegal invocation");
+    return slot;
+  }
+
   // ---- Install -------------------------------------------------------------------------------
 
   const classes: [string, any][] = [
@@ -2355,6 +2425,8 @@ delete (globalThis as any).__kilnPortWait;
     ["WritableStreamDefaultWriter", WritableStreamDefaultWriter],
     ["TransformStream", TransformStream],
     ["TransformStreamDefaultController", TransformStreamDefaultController],
+    ["CompressionStream", CompressionStream],
+    ["DecompressionStream", DecompressionStream],
   ];
   // An index loop without destructuring: `for (const [name, value] of classes)` made an iterator,
   // its results and one more iterator per pair in every realm's bootstrap (realms issue 08).
@@ -2370,5 +2442,9 @@ delete (globalThis as any).__kilnPortWait;
       classDescriptor.value = value;
       Object.defineProperty(G, name, classDescriptor);
     }
+  }
+  for (const Ctor of [CompressionStream, DecompressionStream]) {
+    Object.defineProperty(Ctor.prototype, "readable", { enumerable: true });
+    Object.defineProperty(Ctor.prototype, "writable", { enumerable: true });
   }
 })();

@@ -245,6 +245,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeCryptoKeyExport => Some("__kilnCryptoKeyExport"),
         Native::NodeCryptoKeyFree => Some("__kilnCryptoKeyFree"),
         Native::WebCryptoPrimitive => Some("__kilnWebCryptoPrimitive"),
+        Native::WebCompressionPrimitive => Some("__kilnCompressionPrimitive"),
         Native::NodeHashUpdate => Some("update"),
         Native::NodeHashDigest => Some("digest"),
         _ => None,
@@ -495,6 +496,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeCryptoKeyExport => node_crypto_key_export(arguments),
             Native::NodeCryptoKeyFree => node_crypto_key_free(arguments),
             Native::WebCryptoPrimitive => webcrypto_primitive(arguments),
+            Native::WebCompressionPrimitive => crate::compression::primitive(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();

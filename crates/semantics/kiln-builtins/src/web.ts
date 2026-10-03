@@ -337,6 +337,20 @@ class Blob {
     return new Uint8Array(this._data);
   }
 
+  stream(): ReadableStream<Uint8Array> {
+    const data = this._data;
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= data.length) { controller.close(); return; }
+        const end = Math.min(offset + 65536, data.length);
+        controller.enqueue(data.slice(offset, end));
+        offset = end;
+        if (offset >= data.length) controller.close();
+      },
+    });
+  }
+
   slice(start?: number, end?: number, contentType?: string): Blob {
     const s = start === undefined ? 0 : start < 0 ? Math.max(this.size + start, 0) : Math.min(start, this.size);
     const e = end === undefined ? this.size : end < 0 ? Math.max(this.size + end, 0) : Math.min(end, this.size);
