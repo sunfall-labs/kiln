@@ -438,11 +438,14 @@ fn node_host_clock_waits_for_the_timer_deadline() {
         output: Vec::new(),
     };
     let started = std::time::Instant::now();
-    execute_node(
-        Rc::new(timer_program(&[("fired", 70.0)])),
+    let program = Rc::new(timer_program(&[("fired", 70.0)]));
+    execute_node_with_clock_and_strictness(
+        Rc::clone(&program),
+        Rc::new(kiln_ir::Strictness::sloppy(&program)),
         &mut host,
         ExecutionLimits::default(),
         ExecutionCapabilities::default(),
+        kiln_runtime::ClockCapability::Host,
     )
     .expect("Node timer completes");
     assert_eq!(host.output, ["fired"]);
@@ -503,11 +506,14 @@ fn node_timer_armed_after_synchronous_work_uses_the_arm_time() {
         output: Vec::new(),
     };
     let started = std::time::Instant::now();
-    execute_node(
-        Rc::new(program),
+    let program = Rc::new(program);
+    execute_node_with_clock_and_strictness(
+        Rc::clone(&program),
+        Rc::new(kiln_ir::Strictness::sloppy(&program)),
         &mut host,
         ExecutionLimits::default(),
         ExecutionCapabilities::default(),
+        kiln_runtime::ClockCapability::Host,
     )
     .expect("Node timer completes after synchronous work");
     assert_eq!(host.output, ["after-work"]);
