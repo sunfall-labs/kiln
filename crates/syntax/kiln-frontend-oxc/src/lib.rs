@@ -2263,11 +2263,29 @@ fn parse_source_in_context_with_units(
         parsed.diagnostics.extend(ret.diagnostics);
     }
 
+    let has_unshadowed_eval = if !parsed.panicked && parsed.diagnostics.is_empty() {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        let scoping = semantic.scoping();
+        semantic.nodes().iter().any(|node| {
+            let AstKind::CallExpression(call) = node.kind() else {
+                return false;
+            };
+            matches!(&call.callee, Expression::Identifier(identifier)
+                if identifier.name == "eval" && identifier.is_global_reference(scoping))
+        })
+    } else {
+        false
+    };
+
     if let Some(demanded_exports) = demanded_exports
         && !parsed.panicked
         && parsed.diagnostics.is_empty()
         && early_errors_with_source_units(&parsed, source_units).is_empty()
         && !has_unexported_top_level_class_heritage(&parsed.program)
+        && !has_unshadowed_eval
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
         dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
@@ -6374,6 +6392,28 @@ mod tests {
         // The local parameter isn't a global-object lookup, so ordinary DCE may still remove it.
         let functions = hir.matches("Function").count();
         assert!(functions >= 2, "both exports remain in the HIR: {hir}");
+    }
+
+    #[test]
+    fn native_dce_preserves_bindings_visible_to_direct_eval() {
+        let module = parse_dce_native(
+            "direct-eval-capture.mjs",
+            r#"
+                function factory(source) {
+                    let captured = "scope";
+                    return eval(source)();
+                }
+                console.log(factory("(function () { return captured; })"));
+            "#,
+            &BTreeSet::new(),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Identifier(\"captured\")"),
+            "DCE must retain lexical bindings a dynamic direct eval can read: {hir}"
+        );
     }
 
     #[test]
