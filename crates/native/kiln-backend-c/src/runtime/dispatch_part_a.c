@@ -3214,13 +3214,28 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * `encodeURI` keeps the ones that structure a URI, because it is encoding a whole
              * one; `encodeURIComponent` encodes those too, because a component containing a `/`
              * must not look like a path separator. */
-            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value subject;
             kiln_text built = {NULL, 0, 0};
             uint8_t *encoded = NULL;
             size_t encoded_len = 0;
             size_t at;
-            if (subject.tag != KILN_VALUE_STRING) {
-                return KILN_C99_OUT_OF_MEMORY;
+            status = kiln_c99_to_text_argument(host,
+                argc > 0 ? args[0] : kiln_c99_undefined(), &subject, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            /* URI encoding rejects lone UTF-16 surrogates instead of replacing them during
+             * the byte conversion. Latin-1 and validated UTF-8 need no pairing scan. */
+            const kiln_string *source = (const kiln_string *)subject.ptr;
+            if (source->flags & KILN_STRING_UTF16) {
+                for (at = 0; at < source->unit_len; ++at) {
+                    uint32_t unit = kiln_string_unit_at(source, at);
+                    if (unit < 0xD800 || unit > 0xDFFF) continue;
+                    if (unit <= 0xDBFF && at + 1 < source->unit_len) {
+                        uint32_t low = kiln_string_unit_at(source, at + 1);
+                        if (low >= 0xDC00 && low <= 0xDFFF) { ++at; continue; }
+                    }
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR,
+                                                "URI malformed");
+                }
             }
             if (kiln_c99_string_to_utf8_lossy(subject, &encoded, &encoded_len) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
