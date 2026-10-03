@@ -938,10 +938,25 @@ impl GraphExecutor<'_> {
     /// the origin exports it under, or the namespace of a module.
     fn plan_resolution(&self, resolution: &ResolvedExport) -> Option<ModuleBinding> {
         match resolution {
-            ResolvedExport::Local { module, local_slot } => Some(ModuleBinding::Export {
-                module: module_key(module),
-                name: self.exported_name(module, *local_slot)?,
-            }),
+            ResolvedExport::Local { module, local_slot } => {
+                let name = if *local_slot == 0
+                    && self
+                        .module(module)
+                        .is_some_and(|node| node.source == ModuleSource::CommonJs)
+                {
+                    // CommonJS's ESM default is virtual slot zero: the loader publishes
+                    // `module.exports` under "default", but there is no HIR export row for
+                    // `exported_name` to find. Dynamic import plans still bind by the published
+                    // module-map key, so carry the same bridge used by the static graph linker.
+                    "default".to_owned()
+                } else {
+                    self.exported_name(module, *local_slot)?
+                };
+                Some(ModuleBinding::Export {
+                    module: module_key(module),
+                    name,
+                })
+            }
             ResolvedExport::Namespace { module } => Some(ModuleBinding::Namespace {
                 module: module_key(module),
             }),

@@ -89,6 +89,9 @@ struct Output {
 
 impl HostOps for Output {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
+        if operation == HostOp::ClockNow {
+            return Ok(HostValue::number(0.0));
+        }
         if operation == HostOp::WriteStdout {
             self.lines.push(
                 arguments
@@ -275,6 +278,22 @@ fn import_and_require_of_commonjs_share_module_exports() {
          console.log(d.default === r, d.a, globalThis.cRuns);",
         &["true 1 1"],
     );
+}
+
+#[test]
+fn dynamic_esm_default_import_of_commonjs_uses_the_published_default() {
+    let project = Project::new();
+    project.write("value.cjs", "module.exports = (value) => value + 1;");
+    project.write(
+        "wrapper.mjs",
+        "import value from './value.cjs'; export default value;",
+    );
+    let (lines, outcome) = project.run(
+        "const wrapper = await import('./wrapper.mjs');\n\
+         console.log(wrapper.default(41));",
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(lines, ["42"]);
 }
 
 #[test]
