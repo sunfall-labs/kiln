@@ -7,15 +7,32 @@
   const unboxPrimitive = G.__kilnJsonUnbox;
   const rawCreate = G.__kilnJsonRawCreate;
   const isRaw = G.__kilnJsonIsRaw;
+  const TypeErrorCtor = TypeError;
+  const SyntaxErrorCtor = SyntaxError;
   delete G.__kilnJsonSerialize;
   delete G.__kilnJsonParse;
   delete G.__kilnJsonUnbox;
   delete G.__kilnJsonRawCreate;
   delete G.__kilnJsonIsRaw;
-  if (typeof rawCreate === "function" && typeof isRaw === "function") {
+  if (typeof rawCreate === "function" && typeof isRaw === "function" &&
+      typeof parse === "function") {
     Object.defineProperties(G.JSON, {
       rawJSON: {
-        value: function rawJSON(text: any): object { return rawCreate(text); },
+        value: function rawJSON(text: any): object {
+          if (typeof text === "symbol")
+            throw new TypeErrorCtor("Cannot convert a Symbol value to a string");
+          const source = `${text}`;
+          const first = source[0];
+          const last = source[source.length - 1];
+          const isWhitespace = (unit: string): boolean =>
+            unit === " " || unit === "\t" || unit === "\n" || unit === "\r";
+          if (source.length === 0 || isWhitespace(first) || isWhitespace(last))
+            throw new SyntaxErrorCtor("Invalid value for JSON.rawJSON");
+          const parsed = parse(source);
+          if (parsed !== null && typeof parsed === "object")
+            throw new SyntaxErrorCtor("Invalid value for JSON.rawJSON");
+          return rawCreate(source);
+        },
         writable: true, enumerable: false, configurable: true,
       },
       isRawJSON: {

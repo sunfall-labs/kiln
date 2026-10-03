@@ -1565,6 +1565,8 @@ kiln_value kiln_c99_json_text_value(kiln_text *text) {
     kiln_string *string;
     uint16_t *units;
     size_t output = 0;
+    if (text->len == 0 || memchr(text->bytes, 0xFF, text->len) == NULL)
+        return kiln_c99_text_value(text);
     while (offset < text->len) {
         unsigned char byte = (unsigned char)text->bytes[offset];
         if (byte == 0xFF) {
@@ -1628,44 +1630,22 @@ int kiln_c99_json_is_raw(uint16_t argc, const kiln_value *args, kiln_value *resu
 
 int kiln_c99_json_raw_create(kiln_host *host, uint16_t argc, const kiln_value *args,
                              kiln_value *result, int depth, kiln_value *thrown) {
-    kiln_value primitive = kiln_c99_undefined();
     kiln_value source_value;
-    kiln_value invalid;
-    kiln_val parsed = KILN_VAL_UNDEFINED;
     const kiln_string *source;
     kiln_object *object;
     const kiln_string *key;
     int status;
-    size_t index;
-    if (argc == 0 || args == NULL) primitive = kiln_c99_undefined();
-    else {
-        status = kiln_c99_to_primitive(host, args[0], 1 /* string */, &primitive, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-    }
-    if (primitive.tag == KILN_VALUE_SYMBOL)
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Cannot convert a Symbol value to a string");
-    source_value = kiln_c99_text(primitive);
+    (void)host;
+    (void)depth;
+    (void)thrown;
+    if (argc == 0 || args == NULL || args[0].tag != KILN_VALUE_STRING)
+        return KILN_C99_INVALID_ARGUMENT;
+    source_value = args[0];
     source = source_value.tag == KILN_VALUE_STRING ? (const kiln_string *)source_value.ptr : NULL;
-    if (source == NULL || source->unit_len == 0)
-        goto invalid_json;
-    /* JSON.rawJSON preserves the exact source. Surrounding JSON whitespace therefore makes a
-     * valid JSON document invalid as a raw value. */
-    for (index = 0; index < source->unit_len; ++index) {
-        uint32_t unit = kiln_string_unit_at(source, index);
-        if (index == 0 || index + 1 == source->unit_len) {
-            if (unit == ' ' || (unit >= '\t' && unit <= '\r')) goto invalid_json;
-        }
-    }
-    status = kiln_c99_json_document(source, &parsed);
-    if (status == KILN_C99_CONTROL_ERROR) goto invalid_json;
-    if (status != KILN_C99_OK) return status;
-    invalid = kiln_val_to_boundary(parsed);
-    if (invalid.tag != KILN_VALUE_NULL && invalid.tag != KILN_VALUE_BOOLEAN &&
-        invalid.tag != KILN_VALUE_NUMBER && invalid.tag != KILN_VALUE_STRING)
-        goto invalid_json;
+    if (source == NULL) return KILN_C99_INVALID_ARGUMENT;
     status = kiln_c99_new_object(result);
     if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&source_value);
     object = kiln_c99_object_of(*result);
     if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
     key = kiln_c99_intern_key(&(kiln_string){.unit_len = 7, .flags = KILN_STRING_LATIN1,
@@ -1678,13 +1658,10 @@ int kiln_c99_json_raw_create(kiln_host *host, uint16_t argc, const kiln_value *a
         KILN_C99_REFUSE_INTERNAL("the empty shaped object used by JSON.rawJSON");
     }
     if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&source_value);
     object->raw_json_brand = 1;
     kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_null());
     object->frozen = 1;
     object->not_extensible = 1;
     return KILN_C99_OK;
-
-invalid_json:
-    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                "Invalid value for JSON.rawJSON");
 }

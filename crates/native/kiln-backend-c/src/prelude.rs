@@ -2330,7 +2330,7 @@ pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
     InternalRefusal {
         function: "kiln_c99_json_raw_create",
         sites: 1,
-        converted_by: "the private JSON.rawJSON primitive, which propagates the carrier-construction status",
+        converted_by: "the JSON.rawJSON TypeScript facade, which only passes validated strings to carrier construction",
     },
 ];
 

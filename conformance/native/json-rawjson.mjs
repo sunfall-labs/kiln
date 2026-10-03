@@ -8,6 +8,11 @@ console.log(carrier.value, carrier.writable, carrier.enumerable, carrier.configu
 console.log(Object.getPrototypeOf(huge) === null, Object.isFrozen(huge));
 console.log(JSON.isRawJSON({ rawJSON: "123" }));
 console.log(JSON.isRawJSON(new Proxy(huge, {})));
+console.log(JSON.stringify(JSON.rawJSON({ toString() { return "1e+21"; } })));
+for (const value of [Symbol("raw"), { [Symbol.toPrimitive]() { return Symbol("raw"); } }]) {
+  try { JSON.rawJSON(value); console.log("accepted symbol"); }
+  catch (error) { console.log(error.name); }
+}
 for (const source of ["", " ", "1 ", "{}", "[]", "01", "undefined"]) {
   try {
     JSON.rawJSON(source);
