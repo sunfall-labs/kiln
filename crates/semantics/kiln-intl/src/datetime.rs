@@ -619,7 +619,9 @@ impl DateTimeFormat {
         let shaped = self.shaped(shape)?;
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
         if !needs_numeric_width_adjustment(&shaped.options) {
-            return Ok(shaped.formatter.format(&at.0).to_string());
+            return Ok(normalize_datetime_spaces(
+                shaped.formatter.format(&at.0).to_string(),
+            ));
         }
         use writeable::Writeable;
         let mut sink = PartCollector::default();
@@ -675,7 +677,9 @@ impl DateTimeFormat {
         let shaped = self.shaped(shape)?;
         let (first, second) = self.shaped_range_ends(shape, &shaped, start, end)?;
         if !needs_numeric_width_adjustment(&shaped.options) {
-            return Ok(shaped.ranges.format(&first.0, &second.0).to_string());
+            return Ok(normalize_datetime_spaces(
+                shaped.ranges.format(&first.0, &second.0).to_string(),
+            ));
         }
         use writeable::Writeable;
         let mut sink = PartCollector::default();
@@ -713,7 +717,9 @@ impl DateTimeFormat {
     pub fn format(&self, epoch_milliseconds: f64) -> Result<String, Error> {
         if !needs_numeric_width_adjustment(&self.options) {
             let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
-            return Ok(self.formatter.format(&at.0).to_string());
+            return Ok(normalize_datetime_spaces(
+                self.formatter.format(&at.0).to_string(),
+            ));
         }
         self.format_to_parts(epoch_milliseconds)
             .map(|parts| join_parts(parts.into_iter().map(|(_, text)| text)))
@@ -762,7 +768,9 @@ impl DateTimeFormat {
     pub fn format_range(&self, start: f64, end: f64) -> Result<String, Error> {
         if !needs_numeric_width_adjustment(&self.options) {
             let (from, to) = self.range_ends(start, end)?;
-            return Ok(self.ranges.format(&from.0, &to.0).to_string());
+            return Ok(normalize_datetime_spaces(
+                self.ranges.format(&from.0, &to.0).to_string(),
+            ));
         }
         self.format_range_to_parts(start, end)
             .map(|parts| join_parts(parts.into_iter().map(|(_, _, text)| text)))
@@ -1472,6 +1480,13 @@ impl PartCollector {
     }
 
     fn push(&mut self, text: &str) {
+        let normalized;
+        let text = if text.contains('\u{202f}') {
+            normalized = text.replace('\u{202f}', " ");
+            normalized.as_str()
+        } else {
+            text
+        };
         if text.is_empty() {
             return;
         }
@@ -1480,6 +1495,17 @@ impl PartCollector {
             Some((last, buffer)) if *last == name => buffer.push_str(text),
             _ => self.parts.push((name, text.to_owned())),
         }
+    }
+}
+
+// Match Node/V8's ICU compatibility policy for DateTimeFormat only: ICU 72 changed
+// AM/PM spacing to U+202F. Preserve CLDR range separator spacing, as Node 26 does.
+// https://chromium.googlesource.com/v8/v8/+/b9c9b3154770309f1464a441d99921913a643a5d/src/objects/js-date-time-format.cc
+fn normalize_datetime_spaces(text: String) -> String {
+    if text.contains('\u{202f}') {
+        text.replace('\u{202f}', " ")
+    } else {
+        text
     }
 }
 
@@ -1626,6 +1652,44 @@ mod tests {
             time_style: time.map(str::to_owned),
             time_zone: utc(),
             ..Options::default()
+        }
+    }
+
+    #[test]
+    fn datetime_spaces_match_node_in_strings_parts_and_ranges() {
+        assert_eq!(
+            normalize_datetime_spaces("a\u{202f}b\u{2009}c".into()),
+            "a b\u{2009}c"
+        );
+        for locale in ["en-US", "zh-CN"] {
+            let formatter =
+                DateTimeFormat::new(&[locale.to_owned()], styled(None, Some("long"))).unwrap();
+            let at = 1_704_067_200_000.0;
+            let text = formatter.format(at).unwrap();
+            assert!(!text.contains('\u{202f}'));
+            assert_eq!(
+                text,
+                join_parts(
+                    formatter
+                        .format_to_parts(at)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, text)| text)
+                )
+            );
+            let end = at + 3_600_000.0;
+            let range = formatter.format_range(at, end).unwrap();
+            assert!(!range.contains('\u{202f}'));
+            assert_eq!(
+                range,
+                join_parts(
+                    formatter
+                        .format_range_to_parts(at, end)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, _, text)| text)
+                )
+            );
         }
     }
 
