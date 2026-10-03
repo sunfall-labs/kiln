@@ -2358,7 +2358,14 @@ pub(crate) fn native_run_graph(
         let options = kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
+            // A directly-run native Node program has the same host-backed clock policy as a
+            // node-enabled launcher built for later execution. Keep plain native scripts on
+            // the deterministic clock.
+            realm: if node {
+                kiln_native::NativeRealmPolicy::host_clock()
+            } else {
+                kiln_native::NativeRealmPolicy::default()
+            },
             march_native: false,
             static_link,
             pgo_generate,

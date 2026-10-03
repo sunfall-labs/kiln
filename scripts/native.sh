@@ -142,10 +142,13 @@ run_probe() {
 	local name
 	name="$(basename -- "$probe")"
 	local adapter=""
+	local -a clock_policy=()
 	# `.mjs` too: an application-shaped ES module imports `node:` builtins, and only the adapter
-	# resolves those. Two such probes sat here unrun from 2026-09-19 until the glob below grew.
+	# resolves those. Node programs need their host-backed clock policy for timer and worker
+	# scheduling; deterministic virtual time remains the default for non-Node probes.
 	if [[ $name == *.cjs || $name == *.mjs ]]; then
 		adapter="--node"
+		clock_policy=(--clock wall)
 	fi
 	name="${name%.*}"
 
@@ -164,7 +167,7 @@ run_probe() {
 	local interpreted interpreted_status=0
 	interpreted="$(run_invocation "$interpreted_marker" \
 		env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
-		${adapter:+"$adapter"} run "$probe" 2>&1)" || interpreted_status=$?
+		${adapter:+"$adapter"} "${clock_policy[@]}" run "$probe" 2>&1)" || interpreted_status=$?
 	if [[ -f "$interpreted_marker.interrupted" ]]; then
 		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.interrupted"
 		return 0
