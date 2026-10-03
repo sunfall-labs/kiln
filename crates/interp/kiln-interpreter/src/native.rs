@@ -779,6 +779,8 @@ pub enum Native {
     /// `__kilnDataViewState(view)`: 0 for a non-view, 1 for a mutable view, 2 for an immutable
     /// view. A side-effect-free internal-slot read, checked before any argument coercion.
     DataViewStateRaw,
+    /// Side-effect-free ECMAScript IsConstructor predicate for shared built-ins.
+    IsConstructorRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,

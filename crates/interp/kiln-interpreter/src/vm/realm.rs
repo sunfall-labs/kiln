@@ -902,6 +902,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Native::TypedArrayOutOfBoundsRaw,
             ),
             ("__kilnDataViewState", Native::DataViewStateRaw),
+            ("__kilnIsConstructor", Native::IsConstructorRaw),
             ("__kilnCollectionSize", Native::CollectionSizeRaw),
             // A same-type element copy and the default-order sort (`typedarray.ts`, every realm).
             ("__kilnTypedArrayCopy", Native::TypedArrayCopyRaw),

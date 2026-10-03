@@ -2059,6 +2059,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         }
                     }
                 }
+                if (kiln_c99_same_name_key(key, "from") ||
+                    kiln_c99_same_name_key(key, "of") ||
+                    kiln_c99_same_name_key(key, "@@species")) {
+                    /* An implicit default parent has no constructor store to traverse. Its
+                     * shared bootstrap methods still shadow the intrinsic fallback below. */
+                    int found = 0;
+                    int status = kiln_c99_prototype_store_read_with_receiver(
+                        host, KILN_C99_BUILTIN_TYPED_ARRAY, target, key, ikey,
+                        out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                }
                 if (kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;

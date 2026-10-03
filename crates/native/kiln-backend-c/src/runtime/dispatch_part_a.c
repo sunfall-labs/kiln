@@ -2004,6 +2004,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_typed_array_copy_raw(result, args, argc);
     if (code == KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW)
         return kiln_c99_typed_array_sort_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_IS_CONSTRUCTOR_RAW) {
+        *result = kiln_c99_boolean(argc > 0 && kiln_c99_is_constructor(args[0]));
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_DATA_VIEW_STATE_RAW) {
         /* Native ArrayBuffers cannot yet be immutable. State 2 is reserved for that
          * representation; 0 is a non-view and 1 a mutable view, regardless of detachment. */

@@ -1,3 +1,8 @@
+// IsConstructor inspects engine callable metadata without invoking a constructor or reading
+// observable properties. The static algorithm below has the same owner in both engines.
+const __kilnIsConstructor: (value: any) => boolean = (globalThis as any).__kilnIsConstructor;
+delete (globalThis as any).__kilnIsConstructor;
+
 // kiln-builtins: `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 //
 // Shared by both interpreter and native execution.
@@ -124,7 +129,37 @@ delete (globalThis as any).__kilnDataViewState;
       configurable: true,
     });
     Object.defineProperty(sharedConstructor, "from", {
-      value: Uint8Array.from,
+      value: {
+        from(this: any, source: any): any {
+          const C = this;
+          if (!__kilnIsConstructor(C)) throw new TypeError("TypedArray.from requires a constructor");
+          const mapper = arguments[1];
+          const mapping = mapper !== undefined;
+          if (mapping && typeof mapper !== "function") throw new TypeError("TypedArray.from mapper must be callable");
+          const thisArg = arguments[2];
+          if (source === null || source === undefined) throw new TypeError("TypedArray.from source is null or undefined");
+          const iteratorMethod = source[Symbol.iterator];
+          let values: any;
+          let length: number;
+          if (iteratorMethod !== undefined && iteratorMethod !== null) {
+            if (typeof iteratorMethod !== "function") throw new TypeError("TypedArray.from iterator must be callable");
+            // Gather before constructing or mapping; Array.from receives the already-read
+            // iterator method through a wrapper, so a getter on source is observed once.
+            values = Array.from({ [Symbol.iterator]() { return apply(iteratorMethod, source, []); } });
+            length = values.length;
+          } else {
+            values = Object(source);
+            length = toLength(values.length);
+          }
+          const result = validateTypedArray(new C(length), "from");
+          if (lengthOf(result) < length) throw new TypeError("TypedArray.from constructor returned a short array");
+          for (let index = 0; index < length; index++) {
+            const value = values[index];
+            result[index] = mapping ? apply(mapper, thisArg, [value, index]) : value;
+          }
+          return result;
+        },
+      }.from,
       writable: true,
       configurable: true,
     });
@@ -398,7 +433,7 @@ delete (globalThis as any).__kilnDataViewState;
   }
 
   function toIntegerOrInfinity(val: any): number {
-    const n = Number(val);
+    const n = +val;
     if (Number.isNaN(n) || n === 0) return 0;
     if (!Number.isFinite(n)) return n;
     return Math.trunc(n);

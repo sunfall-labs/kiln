@@ -1180,7 +1180,11 @@ fn runtime_prelude_size() {
     // compact-cell tracing, deferred GC requests, and scoped direct-eval completion
     // bring the shared prelude to 80,983 lines. These are language/ownership kernels;
     // the Node VM and loader policy remain in TypeScript and the explicit runner.
-    const CEILING_LINES: usize = 81_050;
+    // Reviewed 2026-10-03: Script-goal eval validation (+38 lines), response-end
+    // completion callbacks (+20), Date TimeClip (+2), and the constructor predicate /
+    // default typed-constructor inheritance kernel (+19) bring the prelude to 81,062.
+    // The TypedArray.from algorithm is shared TypeScript; no runtime section is duplicated.
+    const CEILING_LINES: usize = 81_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

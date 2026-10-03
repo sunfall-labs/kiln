@@ -812,6 +812,7 @@ pub(crate) fn call_native(
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
             _ => Value::Boolean(false),
         },
+        Native::IsConstructorRaw => Value::Boolean(arguments.first().is_some_and(is_constructor)),
         Native::DataViewStateRaw => Value::Number(match arguments.first() {
             Some(Value::DataView(view)) if view.buffer.immutable => 2.0,
             Some(Value::DataView(_)) => 1.0,

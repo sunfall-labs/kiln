@@ -1316,6 +1316,7 @@ method_ids! {
     // DataView's TypeScript Float16 accessors need an internal-slot check before coercing any
     // arguments; unlike calling a numeric accessor, this does not inspect detachment or bounds.
     (KILN_C99_METHOD_DATA_VIEW_STATE_RAW, 572, Direct; 0, 0),
+    (KILN_C99_METHOD_IS_CONSTRUCTOR_RAW, 578, Direct; 0, 0),
     // The runtime's cross-realm ports and workers (realms issue 06), captured and deleted by
     // `kiln-builtins/src/web_events_streams.ts`: every synchronous operation, and the wait.
     (KILN_C99_METHOD_WORKER_OP_RAW, 539, Direct; 0, 0),
