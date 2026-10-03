@@ -50,14 +50,6 @@ int kiln_c99_error_prototype(uint64_t kind, kiln_value *out) {
     kiln_value store;
     int status;
     if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kind == KILN_C99_BUILTIN_ERROR) {
-        *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
-        return KILN_C99_OK;
-    }
-    if (kind == KILN_C99_BUILTIN_AGGREGATE_ERROR) {
-        *out = kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE);
-        return KILN_C99_OK;
-    }
     if (kiln_c99_error_name(kind) == NULL) return KILN_C99_INVALID_ARGUMENT;
     status = kiln_c99_callable_store(kiln_c99_builtin(kind), &store, 0);
     if (status == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT) {
@@ -70,7 +62,9 @@ int kiln_c99_error_prototype(uint64_t kind, kiln_value *out) {
         }
     }
     if (status != KILN_C99_OK && status != KILN_C99_THROWN) return status;
-    *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+    *out = kiln_c99_builtin(kind == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
     return KILN_C99_OK;
 }
 

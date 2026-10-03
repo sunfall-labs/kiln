@@ -551,6 +551,21 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     int status = kiln_c99_prototype_store_read_with_receiver(
                         host, current.bits, target, key, ikey, out, depth, thrown, &found);
                     if (status != KILN_C99_OK || found) return status;
+                    /* AggregateError.prototype inherits Error.prototype. The former is a
+                     * builtin-backed prototype, so that link is not represented by an ordinary
+                     * object [[Prototype]] edge. Preserve the receiver while consulting the
+                     * Error prototype's bootstrap-installed properties, then provide its
+                     * intrinsic toString method when no override exists. */
+                    if (current.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE) {
+                        status = kiln_c99_prototype_store_read_with_receiver(
+                            host, KILN_C99_BUILTIN_ERROR_PROTOTYPE, target, key, ikey,
+                            out, depth, thrown, &found);
+                        if (status != KILN_C99_OK || found) return status;
+                        if (kiln_c99_same_name_key(key, "toString")) {
+                            *out = kiln_c99_method(KILN_C99_METHOD_ERROR_TO_STRING);
+                            return KILN_C99_OK;
+                        }
+                    }
                 }
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
                     return kiln_c99_get_key(host, current, key, ikey, out, depth, thrown);
