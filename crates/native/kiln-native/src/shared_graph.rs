@@ -535,7 +535,7 @@ static __thread kiln_commonjs_context *kiln_shared_commonjs = NULL;
         )
         .unwrap();
         if let Some(instantiation) = &module.instantiation {
-            writeln!(output, "extern int {}(kiln_value *cells, size_t count);\nextern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);", instantiation.prepare_symbol, instantiation.symbol).unwrap();
+            writeln!(output, "extern int {}(kiln_host *host, kiln_value *cells, size_t count);\nextern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);", instantiation.prepare_symbol, instantiation.symbol).unwrap();
         }
         writeln!(
             output,
@@ -1014,7 +1014,7 @@ typedef struct {wrapper_symbol}_realm_context {{
         } else {
             format!("export_arrays[{index}]")
         };
-        writeln!(output, "    status = {}({cells}, (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.prepare_symbol).unwrap();
+        writeln!(output, "    status = {}(proxy_host, {cells}, (size_t){export_count}); if (status != KILN_C99_OK) goto cleanup;", instantiation.prepare_symbol).unwrap();
     }
     for (index, (_, module)) in modules.iter().enumerate() {
         if module.instantiation.is_some() {

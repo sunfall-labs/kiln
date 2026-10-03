@@ -3282,6 +3282,16 @@ pub(super) fn graph_launcher_source_with_imports(
             },
         ));
     }
+    // Runner referrer tables contain filesystem URLs and paths. They are needed only by the
+    // explicitly private loader policy used by test adapters; ordinary application graphs must
+    // remain relocatable and share launcher artifacts across equivalent project roots.
+    let needs_runner_policy = modules.iter().any(|(node, _)| {
+        matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+            && node.program.program.constants.iter().any(|constant| {
+                matches!(constant, kiln_ir::Constant::String(value)
+                    if value.to_scalar_string().ok().as_deref() == Some("__kilnHostModuleLoader"))
+            })
+    });
     // Diagnostic names remain project-relative, while CommonJS path roles are constructed as
     // distinct types below so observable runtime paths cannot be replaced with diagnostics by a
     // broad path-normalization refactor.
@@ -5362,49 +5372,55 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
     );
     output.push_str("\n/* Detach callbacks while the heap is live, but keep every registered root context alive\n * through kiln_realm_destroy: roots marked KILN_GC_ROOT_SURVIVES_TEARDOWN are invoked there. */\nstatic void kiln_graph_detach_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    for (graph = realm->instances; graph != NULL; graph = graph->next_instance)\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n}\nstatic void kiln_graph_free_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
     output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    int spy_authorized = 0;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; graph->realm->reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
-    for (index, (node, _)) in modules.iter().enumerate() {
-        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
-            continue;
-        }
-        let path = node.path.to_string_lossy();
-        if let Some(url) = Url::from_file_path(&node.path)
-            .ok()
-            .map(|value| value.to_string())
-        {
-            writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->runner_referrer_index = (size_t){index}; *result = kiln_c99_undefined(); return KILN_C99_OK; }}",
-                native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            if let Some(url) = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string())
+            {
+                writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->runner_referrer_index = (size_t){index}; *result = kiln_c99_undefined(); return KILN_C99_OK; }}",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
         }
     }
     output.push_str("        return KILN_C99_CONTROL_ERROR; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerSpyAdapter\", 18)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT; if (graph->realm->runner_referrer_index == SIZE_MAX) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n");
-    for (index, (node, _)) in modules.iter().enumerate() {
-        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
-            continue;
-        }
-        let path = node.path.to_string_lossy();
-        if let Some(url) = Url::from_file_path(&node.path)
-            .ok()
-            .map(|value| value.to_string())
-        {
-            writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->spy_adapter_referrer_index = (size_t){index}; *result = ((kiln_value){{ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 1 }}); return KILN_C99_OK; }}",
-                native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            if let Some(url) = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string())
+            {
+                writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->spy_adapter_referrer_index = (size_t){index}; *result = ((kiln_value){{ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 1 }}); return KILN_C99_OK; }}",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
         }
     }
     output.push_str("        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"spyExport\", 9)) { if (argc != 5 || arguments[1].tag != 9 || arguments[2].tag != KILN_VALUE_STRING || arguments[4].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n        spy_authorized = 0; switch (graph->realm->spy_adapter_referrer_index) {\n");
-    for (adapter_index, (adapter_node, _)) in modules.iter().enumerate() {
-        if !matches!(
-            adapter_node.source,
-            ModuleSource::Source | ModuleSource::CommonJs
-        ) {
-            continue;
+    if needs_runner_policy {
+        for (adapter_index, (adapter_node, _)) in modules.iter().enumerate() {
+            if !matches!(
+                adapter_node.source,
+                ModuleSource::Source | ModuleSource::CommonJs
+            ) {
+                continue;
+            }
+            let Some(adapter_url) = Url::from_file_path(&adapter_node.path)
+                .ok()
+                .map(|value| value.to_string())
+            else {
+                continue;
+            };
+            writeln!(output, "        case (size_t){adapter_index}: spy_authorized = kiln_c99_string_equals_ascii(arguments[4], {}, (size_t){}); break;",
+                native_c_string(&adapter_url), adapter_url.len()).unwrap();
         }
-        let Some(adapter_url) = Url::from_file_path(&adapter_node.path)
-            .ok()
-            .map(|value| value.to_string())
-        else {
-            continue;
-        };
-        writeln!(output, "        case (size_t){adapter_index}: spy_authorized = kiln_c99_string_equals_ascii(arguments[4], {}, (size_t){}); break;",
-            native_c_string(&adapter_url), adapter_url.len()).unwrap();
     }
     output.push_str("        default: break; } if (!spy_authorized) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n        for (selected = graph->realm->instances; selected != NULL; selected = selected->next_instance) {\n");
     for (index, (node, _)) in modules.iter().enumerate() {
@@ -5432,19 +5448,21 @@ static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, 
         );
     }
     output.push_str("        }\n        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if ((!kiln_c99_string_equals_ascii(arguments[0], \"importActual\", 12) && !kiln_c99_string_equals_ascii(arguments[0], \"import\", 6)) || argc != 4) return KILN_C99_INVALID_ARGUMENT;\n    if (arguments[1].tag != KILN_VALUE_STRING || arguments[2].tag != KILN_VALUE_STRING || arguments[3].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
-    for (index, (node, _)) in modules.iter().enumerate() {
-        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
-            continue;
-        }
-        let path = node.path.to_string_lossy();
-        let url = Url::from_file_path(&node.path)
-            .ok()
-            .map(|value| value.to_string());
-        if let Some(url) = url {
-            writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[3], {}, (size_t){})) target = {index};",
-                native_c_string(&url), url.len()).unwrap();
-            writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){})) referrer_valid = 1;",
-                native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            let url = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string());
+            if let Some(url) = url {
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[3], {}, (size_t){})) target = {index};",
+                    native_c_string(&url), url.len()).unwrap();
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){})) referrer_valid = 1;",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
         }
     }
     output.push_str("    if (target < 0 || !referrer_valid) return KILN_C99_CONTROL_ERROR; /* The adapter resolves specifiers; this capability only instantiates compiled targets. */\n    return kiln_graph_load_generation(graph, (size_t)target, result);\n}\n");

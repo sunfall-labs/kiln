@@ -601,9 +601,26 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         );
     }
     assert_eq!(
-        http_mask & groups::NODE_PATH,
+        http_mask & PRUNABLE_METHOD_GROUPS,
+        PRUNABLE_METHOD_GROUPS,
+        "node:http's built-in global-object/computed-access path retains the conservative full table"
+    );
+    let path_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import path from 'node:path';\nconsole.log(typeof path.join);\n",
+        )],
+    );
+    assert_ne!(
+        path_mask & groups::NODE_PATH,
         0,
-        "unrelated groups still drop"
+        "node:path retains the dispatch group for its methods"
+    );
+    assert_eq!(
+        path_mask & groups::NODE_HTTP,
+        0,
+        "node:path alone keeps no HTTP groups"
     );
     let buffer_mask = mask_for(
         "main.mjs",

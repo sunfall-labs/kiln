@@ -3871,15 +3871,44 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     let launcher =
         graph_launcher_source(&first_graph, &first_modules, &NativeRealmPolicy::default())
             .expect("launcher emits");
+    let second_modules = second_graph
+        .modules()
+        .map(|node| {
+            (
+                node,
+                kiln_backend_c::emit_module(&node.program).expect("sibling module emits"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let sibling_launcher = graph_launcher_source(
+        &second_graph,
+        &second_modules,
+        &NativeRealmPolicy::default(),
+    )
+    .expect("sibling launcher emits");
+    let first_difference = launcher
+        .lines()
+        .zip(sibling_launcher.lines())
+        .enumerate()
+        .find(|(_, (left, right))| left != right)
+        .map(|(line, (left, right))| (line + 1, left, right));
+    assert!(
+        first_difference.is_none() && launcher.len() == sibling_launcher.len(),
+        "logical sibling launcher sources differ: {first_difference:?}, sizes {} and {}",
+        launcher.len(),
+        sibling_launcher.len()
+    );
     let main = launcher
         .find("int main(int argc, char **argv)")
         .expect("launcher has main");
     // Generated code is shared, but mutable linker slots are owned by the explicit instance.
     assert!(launcher[..main].contains("    kiln_value exports_"));
     assert!(launcher[..main].contains("    kiln_value imports_"));
-    assert!(launcher[..main].contains("kiln_graph_module_instance module_instance;"));
+    assert!(launcher[..main].contains("typedef struct kiln_graph_module_instance {"));
     assert!(launcher[..main].contains("kiln_graph_module_instance *instance;"));
-    assert!(launcher[..main].contains("graph->instance = &run->module_instance;"));
+    assert!(launcher[..main].contains(
+        "graph->instance = (kiln_graph_module_instance *)calloc(1, sizeof *graph->instance);"
+    ));
     assert!(launcher[..main].contains("graph->host.module_context = graph;"));
     assert!(launcher[..main].contains("(graph->instance->exports_"));
     assert!(launcher[..main].contains("&graph->instance->module_states[index].result"));

@@ -989,10 +989,11 @@ pub fn retained_method_groups(
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
             Url => groups::URL,
             Crypto => groups::NODE_CRYPTO,
+            Path => groups::NODE_PATH,
             Actors | ActorsCore | ActorsWorker | Assert | Console | Dns | Module | Os | Process
             | Shared | Tty | Zlib | StringDecoder | QueryString | WorkerThreads | PerfHooks
             | AsyncHooks | ChildProcess | Timers | TimersPromises | Readline | ReadlinePromises
-            | Sqlite | Constants | V8 | Vm | Path | Util | UtilTypes | DiagnosticsChannel | Gui
+            | Sqlite | Constants | V8 | Vm | Util | UtilTypes | DiagnosticsChannel | Gui
             | GuiJsxRuntime | Tls => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
