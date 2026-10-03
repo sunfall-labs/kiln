@@ -260,7 +260,27 @@ def main():
     selected = [name for name in PIN['files'] if not args.path or any(name == p or name.startswith(p.rstrip('/') + '/') for p in args.path)]
     if not selected:
         parser.error('no pinned tests matched')
-    kiln = args.kiln.resolve()
+    kiln_source = args.kiln.resolve()
+    kiln = kiln_source
+    kiln_sha = None
+    if any(engine != 'bun' for engine in engines):
+        # mbx targets are shared, regenerable build outputs. A long corpus run owns its
+        # executable snapshot so cache reclamation cannot delete its future launchers.
+        kiln_sha = digest(kiln_source)
+        toolchain = out / 'toolchain'
+        toolchain.mkdir(exist_ok=True)
+        kiln = toolchain / ('kiln-' + kiln_sha)
+        if not kiln.exists():
+            temporary = toolchain / ('.kiln-' + str(os.getpid()))
+            try:
+                shutil.copy2(kiln_source, temporary)
+                if digest(temporary) != kiln_sha:
+                    raise RuntimeError('kiln executable changed while taking the run snapshot')
+                temporary.replace(kiln)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if digest(kiln) != kiln_sha:
+            raise RuntimeError('corrupt kiln executable snapshot: ' + str(kiln))
     with (workspace / '.runner.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         source = prepare(workspace)
@@ -272,7 +292,9 @@ def main():
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
                   'clock_policy': {e: 'wall' for e in engines},
-                  'kiln_binary_sha256': digest(kiln) if any(e != 'bun' for e in engines) else None,
+                  'kiln_binary_sha256': kiln_sha,
+                  'kiln_binary_source': str(kiln_source) if kiln_sha else None,
+                  'kiln_binary_snapshot': str(kiln) if kiln_sha else None,
                   'runner_sha256': digest(Path(__file__).resolve()),
                   'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
