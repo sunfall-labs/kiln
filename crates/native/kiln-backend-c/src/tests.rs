@@ -15,6 +15,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
         local_count,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 

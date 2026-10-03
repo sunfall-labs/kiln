@@ -6,7 +6,7 @@
 //! otherwise bakes CLI policy into an object file).
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
 };
@@ -42,8 +42,9 @@ pub const C99_HOST_MODULE_LOADER: u16 = HOST_OP_MODULE_LOADER;
 // epoch 45 packs source ranges observable through live closures; epoch 46 decouples compact C
 // source from generic-only emission. Epoch 47 preserves inherited class evaluation and budgets
 // release specialization using only retained code. Epoch 48 carries the canonical unit-string
-// value bridge and its provider-boundary codecs through generated C.
-pub const C_GENERATOR_VERSION: u32 = 48;
+// value bridge and its provider-boundary codecs through generated C. Epoch 49 includes source
+// coordinates at generated call and construction sites for native stack frames.
+pub const C_GENERATOR_VERSION: u32 = 49;
 
 /// Content identity of this emitter checkout, including dirty source changes. Input-keyed
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
@@ -1737,6 +1738,7 @@ fn compact_closure_source(
         packed.push_str(&original[start..end]);
         packed_intervals.push((start, end, packed_start));
     }
+    let mut span_map = HashMap::new();
     for (index, function) in program.functions.iter_mut().enumerate() {
         let start = function.span.start as usize;
         let end = function.span.end as usize;
@@ -1749,6 +1751,13 @@ fn compact_closure_source(
             })
             .flatten();
         if let Some((start, end)) = mapped {
+            span_map.insert(
+                function.span,
+                kiln_ir::Span {
+                    start: start as u32,
+                    end: end as u32,
+                },
+            );
             function.span.start = start as u32;
             function.span.end = end as u32;
         } else {
@@ -1757,6 +1766,16 @@ fn compact_closure_source(
             function.span.end = 0;
         }
     }
+    for site in &mut program.debug_call_sites {
+        if let Some(original) = site.function_span
+            && let Some(compacted) = span_map.get(&original)
+        {
+            site.function_span = Some(*compacted);
+        }
+    }
+    program
+        .debug_call_sites
+        .sort_by_key(|site| (site.function_span, site.instruction));
     program.source = packed.into();
 }
 
@@ -4282,7 +4301,7 @@ static int {unit_symbol}_invoke_body(kiln_host *host, kiln_value *result,
     const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{
     kiln_js_frame module_frame;
     kiln_c99_js_frame_enter(&module_frame, NULL);
-    kiln_c99_js_frame_note_instruction({source}, 0);
+    kiln_c99_js_frame_note_instruction({source}, 0, 0, 0);
     int status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
     kiln_c99_js_frame_leave(&module_frame);
     return status;

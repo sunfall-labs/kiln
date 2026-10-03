@@ -994,6 +994,8 @@ typedef struct kiln_js_frame {
     const kiln_closure *closure;
     const char *instruction_source;
     size_t instruction;
+    size_t line;
+    size_t column;
 } kiln_js_frame;
 
 /* Properties attached to runtime-provided callables. Method identity is its append-only numeric

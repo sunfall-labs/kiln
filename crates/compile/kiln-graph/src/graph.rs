@@ -182,12 +182,16 @@ pub enum GraphOp {
         callee: ValueId,
         args: Vec<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
     CallMethod {
         object: ValueId,
         name: u32,
         args: Vec<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
     NewArray {
         elements: Vec<ValueId>,
@@ -203,6 +207,8 @@ pub enum GraphOp {
         callee: ValueId,
         args: Vec<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
 
     // Super and Private Members
@@ -907,6 +913,7 @@ pub fn build_function_graph(
     );
 
     let code = &proto.code;
+    let debug_function_span = (proto.span.end > proto.span.start).then_some(proto.span);
     if code.is_empty() {
         let block_id = BlockId(0);
         graph.blocks.push(BasicBlock {
@@ -1656,7 +1663,19 @@ pub fn build_function_graph(
                     let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::Call { callee, args, site }));
+                    let (line, column) = program
+                        .debug_call_site(debug_function_span, pc)
+                        .map_or((0, 0), |entry| (entry.line, entry.column));
+                    operations.push((
+                        result,
+                        GraphOp::Call {
+                            callee,
+                            args,
+                            site,
+                            line,
+                            column,
+                        },
+                    ));
                     frame.stack.push(result);
                 }
                 Instruction::CallMethod { name, argc } => {
@@ -1675,6 +1694,12 @@ pub fn build_function_graph(
                             name: *name,
                             args,
                             site,
+                            line: program
+                                .debug_call_site(debug_function_span, pc)
+                                .map_or(0, |entry| entry.line),
+                            column: program
+                                .debug_call_site(debug_function_span, pc)
+                                .map_or(0, |entry| entry.column),
                         },
                     ));
                     frame.stack.push(result);
@@ -1871,7 +1896,19 @@ pub fn build_function_graph(
                     let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
                     let site = graph.alloc_site();
-                    operations.push((res, GraphOp::New { callee, args, site }));
+                    let (line, column) = program
+                        .debug_call_site(debug_function_span, pc)
+                        .map_or((0, 0), |entry| (entry.line, entry.column));
+                    operations.push((
+                        res,
+                        GraphOp::New {
+                            callee,
+                            args,
+                            site,
+                            line,
+                            column,
+                        },
+                    ));
                     frame.stack.push(res);
                 }
                 Instruction::NewObject { count } => {

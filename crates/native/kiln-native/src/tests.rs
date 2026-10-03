@@ -428,6 +428,7 @@ fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -527,6 +528,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                 },
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -553,6 +555,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: Vec::new(),
@@ -600,6 +603,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -620,6 +624,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -654,6 +659,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./barrel.js".into()],
         imports: vec![ImportBinding {
@@ -700,6 +706,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -728,6 +735,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -1077,6 +1085,7 @@ fn stdout_program(text: &str, result: f64) -> Program {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -1157,6 +1166,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let number = |value: f64| Constant::Number(value.to_bits());
@@ -1261,6 +1271,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     vec![
@@ -1299,6 +1310,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 1,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1327,6 +1339,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1416,6 +1429,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         ("scalar-operators", operator_program),
@@ -1443,6 +1457,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1469,6 +1484,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
     ]

@@ -1615,6 +1615,8 @@ pub(super) fn emit_call_method(
     object: &ValueId,
     name: &u32,
     args: &[ValueId],
+    line: u32,
+    column: u32,
     ctx: &OpContext,
 ) {
     let v = vid.0;
@@ -1746,7 +1748,7 @@ pub(super) fn emit_call_method(
     let diagnostic_source = diagnostic_source(diagnostic_site);
     writeln!(
         output,
-        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc});"
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
     )
     .unwrap();
     let argc = args.len();

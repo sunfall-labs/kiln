@@ -627,6 +627,22 @@ pub(super) fn emit_graph_op(
             operands,
             pushes,
         } => {
+            if matches!(
+                instruction,
+                Instruction::Apply
+                    | Instruction::SuperApply
+                    | Instruction::SuperCall { .. }
+                    | Instruction::ConstructSpread
+                    | Instruction::CallComputed { .. }
+                    | Instruction::DirectEval(_)
+            ) {
+                let function_span =
+                    (ctx.proto.span.end > ctx.proto.span.start).then_some(ctx.proto.span);
+                let (line, column) = program
+                    .debug_call_site(function_span, pc as usize)
+                    .map_or((0, 0), |site| (site.line, site.column));
+                writeln!(output, "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});").unwrap();
+            }
             // The operands go onto a local stack of exactly the depth the instruction wants,
             // the tail's lowering (`tail.rs`) runs on it, and the results come back off the top.
             let depth = operands.len() + usize::from(*pushes) + 2;
@@ -865,14 +881,24 @@ pub(super) fn emit_graph_op(
         // A call is the direct path on `kiln_val`: a plain closure that
         // publishes no frame is entered directly, a body this unit compiled is called by name so
         // the C compiler may inline it, and everything else goes through the runtime.
-        GraphOp::Call { callee, args, .. }
-            if plan.known.get(callee).is_some_and(|&target| {
-                direct_callable(
-                    &program.functions[target as usize],
-                    plan.publishes_frame[target as usize],
-                )
-            }) =>
+        GraphOp::Call {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } if plan.known.get(callee).is_some_and(|&target| {
+            direct_callable(
+                &program.functions[target as usize],
+                plan.publishes_frame[target as usize],
+            )
+        }) =>
         {
+            writeln!(
+                output,
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+            )
+            .unwrap();
             // The callee is the closure of a proto this unit compiled, so the body is called by
             // name: no callable test, no body-pointer comparison, and the receiver the language
             // gives a plain function, decided here. A site that proved every argument a number
@@ -1143,7 +1169,18 @@ pub(super) fn emit_graph_op(
                 .unwrap();
             }
         }
-        GraphOp::Call { callee, args, .. } => {
+        GraphOp::Call {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } => {
+            writeln!(
+                output,
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+            )
+            .unwrap();
             let argc = args.len();
             let mut init = format!("v{}", callee.0);
             for arg in args {
@@ -1235,18 +1272,29 @@ pub(super) fn emit_graph_op(
             let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL && plain != NULL) { kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0; kiln_c99_diagnostic_function_key = plain->name; }";
             writeln!(
                 output,
-                "    {{ kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}); kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; kiln_c99_normalize_closure_receiver(&recv, plain); kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); {indirect} kiln_c99_js_frame_leave(&js_frame); {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
+                "    {{ kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column}); kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; kiln_c99_normalize_closure_receiver(&recv, plain); kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); {indirect} kiln_c99_js_frame_leave(&js_frame); {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
         }
         GraphOp::CallMethod {
-            object, name, args, ..
-        } => call_method::emit_call_method(output, vid, object, name, args, &ctx),
-        GraphOp::New { callee, args, .. } => {
+            object,
+            name,
+            args,
+            line,
+            column,
+            ..
+        } => call_method::emit_call_method(output, vid, object, name, args, *line, *column, &ctx),
+        GraphOp::New {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } => {
             writeln!(
                 output,
-                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc});"
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
             )
             .unwrap();
             let argc = args.len();

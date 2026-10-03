@@ -1,6 +1,11 @@
 use super::*;
 
 impl super::Compiler {
+    pub(super) fn note_call_site(&mut self, span: Span) {
+        self.debug_call_sites
+            .push((self.active_function_span, self.code.len() as u32, span));
+    }
+
     pub(super) fn set_property_instruction(&self, name: u32) -> Instruction {
         Instruction::SetPropertyStrict {
             name,
@@ -49,6 +54,8 @@ impl super::Compiler {
             code: Vec::new(),
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            active_function_span: None,
             strict_functions: Vec::new(),
             removable_declarations: Vec::new(),
             module_instantiation_end: 0,
@@ -218,6 +225,44 @@ impl super::Compiler {
         self,
     ) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
         if self.diagnostics.is_empty() {
+            let mut raw_sites = self.debug_call_sites;
+            raw_sites.sort_by_key(|(_, _, span)| span.start);
+            let mut debug_call_sites = Vec::with_capacity(raw_sites.len());
+            let mut chars = self.source.char_indices().peekable();
+            let (mut line, mut column) = (1u32, 1u32);
+            for (function_span, instruction, span) in raw_sites {
+                while chars
+                    .peek()
+                    .is_some_and(|(offset, _)| *offset < span.start as usize)
+                {
+                    let (_, ch) = chars.next().expect("peeked source character");
+                    match ch {
+                        '\n' => {
+                            line += 1;
+                            column = 1;
+                        }
+                        '\r' => {
+                            if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                                chars.next();
+                            }
+                            line += 1;
+                            column = 1;
+                        }
+                        '\u{2028}' | '\u{2029}' => {
+                            line += 1;
+                            column = 1;
+                        }
+                        _ => column += ch.len_utf16() as u32,
+                    }
+                }
+                debug_call_sites.push(DebugCallSite {
+                    function_span,
+                    instruction,
+                    line,
+                    column,
+                });
+            }
+            debug_call_sites.sort_by_key(|site| (site.function_span, site.instruction));
             Ok((
                 Program {
                     version: BYTECODE_VERSION,
@@ -228,6 +273,7 @@ impl super::Compiler {
                     source: self.source,
                     source_origin: self.source_origin,
                     template_sites: self.template_sites,
+                    debug_call_sites,
                 },
                 Strictness {
                     body: self.strict,

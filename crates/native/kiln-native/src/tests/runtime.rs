@@ -1161,6 +1161,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let first = builder
@@ -1226,6 +1227,7 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let report = builder
         .build_shared_library(
@@ -1368,6 +1370,7 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
         .build_shared_library(
@@ -1686,6 +1689,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let deterministic = builder
@@ -1808,6 +1812,7 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let run = |name: &str, entropy: NativeEntropyPolicy| {
         builder

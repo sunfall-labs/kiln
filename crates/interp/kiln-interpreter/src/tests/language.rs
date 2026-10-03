@@ -174,6 +174,7 @@ fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct(
             Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: kiln_ir::BYTECODE_VERSION,
                 source_origin: None,
                 constants: vec![Constant::Number(7.0f64.to_bits())],
@@ -195,6 +196,7 @@ fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct(
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
             constants: vec![Constant::String(source)],
@@ -284,6 +286,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![Constant::String("later".to_owned().into())],
@@ -353,6 +356,7 @@ fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),

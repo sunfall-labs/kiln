@@ -55,6 +55,7 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();
@@ -146,6 +147,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &prog).unwrap();
     let candidates = crate::graph::candidate_number_parameters(&graph, &proto);
@@ -240,6 +242,7 @@ fn speculation_disabled_emits_generic_clone_alone() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(
         &prog,
@@ -315,6 +318,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -426,6 +430,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -474,6 +479,7 @@ fn value_graph_builds_and_verifies_try_catch() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -520,6 +526,7 @@ fn value_graph_does_not_protect_an_operation_before_try() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -575,6 +582,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
             local_count: 2,
             functions: vec![function(), function()],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![
@@ -648,6 +656,7 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
                 function(vec![Upvalue::ParentLocal(0)]),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -717,6 +726,7 @@ fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions()
             local_count: 3,
             functions: vec![function],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -784,6 +794,7 @@ fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -864,6 +875,7 @@ fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
                 function(Vec::new()),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -947,6 +959,7 @@ fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
                 function(0, vec![Instruction::Const(0), Instruction::Return]),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -1028,6 +1041,7 @@ fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
                 ),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -1104,6 +1118,7 @@ fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
                 ),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -1146,6 +1161,7 @@ fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
         local_count: 1,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(
@@ -1192,6 +1208,7 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(
@@ -1234,6 +1251,7 @@ fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(closed_world_namespace_members(&program, 0, false), None);
@@ -1250,6 +1268,7 @@ fn closed_world_namespace_keeps_every_member_when_the_value_escapes() {
         local_count: 1,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(closed_world_namespace_members(&program, 0, false), None);
@@ -1310,6 +1329,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -1398,6 +1418,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
         local_count: 0,
         functions: vec![untyped_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
@@ -1408,6 +1429,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
         local_count: 0,
         functions: vec![typed_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
@@ -1510,6 +1532,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         local_count: 0,
         functions: vec![untyped_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
@@ -1520,6 +1543,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         local_count: 0,
         functions: vec![typed_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
@@ -1597,6 +1621,7 @@ fn type_profile_drives_candidate_speculation_and_recording() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &prog).unwrap();
@@ -1697,6 +1722,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
         local_count: 0,
         functions: vec![callback.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&callback, &program).expect("callback graph builds");
@@ -1726,6 +1752,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
         local_count: 0,
         functions: vec![callback],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&full_program).expect("parallelMap emission succeeds");
@@ -1807,6 +1834,7 @@ fn test_proven_types_recognize_new_object_and_method_returns() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     let proven = proven_types_with_bounds(&graph, &HashMap::new(), &HashSet::new());
@@ -1939,6 +1967,7 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();

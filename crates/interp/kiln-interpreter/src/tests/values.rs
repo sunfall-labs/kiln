@@ -160,6 +160,7 @@ fn realm_timezone_and_locale_are_resolved_once_at_entry() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -203,6 +204,7 @@ fn date_methods_stay_on_the_machine_dispatch_path() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -272,6 +274,7 @@ fn capturing_a_slot_that_was_never_boxed_is_rejected() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),

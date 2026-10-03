@@ -216,6 +216,7 @@ impl super::Compiler {
                     // against the instance being built is not an ordinary call.
                     self.load_super();
                     self.array_literal(arguments, expression.span);
+                    self.note_call_site(expression.span);
                     self.code.push(Instruction::SuperApply);
                     self.store_this_binding();
                     self.emit_elements_after_super(expression.span);
@@ -234,6 +235,7 @@ impl super::Compiler {
                 }
                 // The parent's return value is this expression's value, so `SuperCall` leaves
                 // exactly one thing on the stack and needs no epilogue here.
+                self.note_call_site(expression.span);
                 self.code.push(Instruction::SuperCall {
                     argc: arguments.len() as u16,
                 });
@@ -416,6 +418,7 @@ impl super::Compiler {
                 if Self::has_spread(arguments) {
                     self.expression(callee);
                     self.array_literal(arguments, expression.span);
+                    self.note_call_site(expression.span);
                     self.code.push(Instruction::ConstructSpread);
                     return;
                 }
@@ -426,6 +429,7 @@ impl super::Compiler {
                     };
                     self.expression(value);
                 }
+                self.note_call_site(expression.span);
                 self.code.push(Instruction::New {
                     argc: arguments.len() as u16,
                 });
@@ -1923,6 +1927,7 @@ impl super::Compiler {
         }
         self.load_hidden(&method);
         self.array_literal(arguments, span);
+        self.note_call_site(span);
         self.code.push(Instruction::Apply);
         self.scopes.pop().expect("call scope was just pushed");
     }
@@ -2059,6 +2064,7 @@ impl super::Compiler {
                     .push(Instruction::LoadGlobalBindingOrUndefined(eval_name));
                 Some(self.emit_arguments(arguments))
             };
+            self.note_call_site(span);
             self.code.push(Instruction::DirectEval(Box::new(EvalSite {
                 module_id: self.private_module_id.clone(),
                 source_offset: span.start,
@@ -2096,6 +2102,7 @@ impl super::Compiler {
                     self.code.push(Instruction::Dup);
                     self.code.push(Instruction::GetProperty(key));
                     self.array_literal(arguments, span);
+                    self.note_call_site(span);
                     self.code.push(Instruction::Apply);
                     found.push(self.emit_jump(Instruction::Jump(0)));
                     self.patch_jump(miss);
@@ -2103,6 +2110,7 @@ impl super::Compiler {
                 self.push_constant(Constant::Undefined);
                 self.load_lexically(name);
                 self.array_literal(arguments, span);
+                self.note_call_site(span);
                 self.code.push(Instruction::Apply);
                 for jump in found {
                     self.patch_jump(jump);
@@ -2125,6 +2133,7 @@ impl super::Compiler {
                 self.load_this();
                 self.expression(callee);
                 self.array_literal(arguments, span);
+                self.note_call_site(span);
                 self.code.push(Instruction::Apply);
                 return;
             }
@@ -2145,6 +2154,7 @@ impl super::Compiler {
                 self.push_private_brand(&brand);
                 self.code.push(Instruction::GetPrivate(name));
                 self.array_literal(arguments, span);
+                self.note_call_site(span);
                 self.code.push(Instruction::Apply);
                 return;
             }
@@ -2163,9 +2173,11 @@ impl super::Compiler {
                     self.code.push(Instruction::Dup);
                     self.code.push(Instruction::GetProperty(name));
                     self.array_literal(arguments, span);
+                    self.note_call_site(span);
                     self.code.push(Instruction::Apply);
                 } else {
                     let argc = self.emit_arguments(arguments);
+                    self.note_call_site(span);
                     self.code.push(Instruction::CallMethod { name, argc });
                 }
                 return;
@@ -2182,10 +2194,12 @@ impl super::Compiler {
                     self.expression(property);
                     self.code.push(Instruction::GetComputed);
                     self.array_literal(arguments, span);
+                    self.note_call_site(span);
                     self.code.push(Instruction::Apply);
                 } else {
                     self.expression(property);
                     let argc = self.emit_arguments(arguments);
+                    self.note_call_site(span);
                     self.code.push(Instruction::CallComputed { argc });
                 }
                 return;
@@ -2201,11 +2215,13 @@ impl super::Compiler {
             self.push_constant(Constant::Undefined);
             self.expression(callee);
             self.array_literal(arguments, span);
+            self.note_call_site(span);
             self.code.push(Instruction::Apply);
             return;
         }
         self.expression(callee);
         let argc = self.emit_arguments(arguments);
+        self.note_call_site(span);
         self.code.push(Instruction::Call { argc });
     }
 }

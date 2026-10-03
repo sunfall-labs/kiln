@@ -215,17 +215,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
             });
         }
-        let mut frames = std::iter::once(self.function.clone())
-            .chain(self.frames.iter().rev().map(|frame| frame.function.clone()))
+        let mut frames = self
+            .frames
+            .iter()
+            .rev()
+            .map(|frame| {
+                let span = frame
+                    .function
+                    .as_ref()
+                    .and_then(|closure| frame.program.functions.get(closure.function as usize))
+                    .map(|proto| proto.span);
+                let site = frame
+                    .program
+                    .debug_call_site(span, frame.instruction.saturating_sub(1));
+                (
+                    frame.function.clone(),
+                    frame.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
+                    site.map(|site| (site.line, site.column)),
+                )
+            })
             .collect::<Vec<_>>();
         // The primitive receives no public JavaScript CallSite objects. The facade is built in
         // errors.ts from these copied metadata records and cannot keep VM frames alive.
-        if !frames.is_empty() {
-            frames.remove(0);
-        }
         if let Some(Value::Function(constructor)) = arguments.get(1)
             && let Some(index) = frames.iter().position(|frame| {
                 frame
+                    .0
                     .as_ref()
                     .is_some_and(|candidate| Rc::ptr_eq(candidate, constructor))
             })
@@ -235,9 +250,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Array(ArrayData::new(
             frames
                 .into_iter()
-                .map(|frame| {
+                .map(|(frame, file_name, location)| {
                     ordinary_object([
-                        ("fileName".to_owned(), Value::String("<kiln>".into())),
+                        ("fileName".to_owned(), Value::String(file_name.into())),
                         (
                             "functionName".to_owned(),
                             frame
@@ -247,6 +262,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 }),
                         ),
                         ("instruction".to_owned(), Value::Number(0.0)),
+                        (
+                            "lineNumber".to_owned(),
+                            location
+                                .map_or(Value::Undefined, |(line, _)| Value::Number(line as f64)),
+                        ),
+                        (
+                            "columnNumber".to_owned(),
+                            location.map_or(Value::Undefined, |(_, column)| {
+                                Value::Number(column as f64)
+                            }),
+                        ),
                     ])
                 })
                 .collect(),
@@ -346,23 +372,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )),
             );
             let stack_frames = self.error_stack_frame_limit().map(|limit| {
-                let mut trace = self.trace();
-                trace.truncate(limit);
-                Value::Array(ArrayData::new(
-                    trace
-                        .into_iter()
-                        .map(|function_name| {
-                            ordinary_object([
-                                ("fileName".to_owned(), Value::String("<kiln>".into())),
-                                (
-                                    "functionName".to_owned(),
-                                    Value::String(function_name.into()),
-                                ),
-                                ("instruction".to_owned(), Value::Number(0.0)),
-                            ])
-                        })
-                        .collect(),
-                ))
+                let snapshot = |function: Option<&Rc<Closure>>,
+                                program: &Program,
+                                path: Option<&str>,
+                                instruction: usize| {
+                    let span = function
+                        .and_then(|closure| program.functions.get(closure.function as usize))
+                        .map(|proto| proto.span);
+                    let site = program.debug_call_site(span, instruction);
+                    ordinary_object([
+                        (
+                            "fileName".to_owned(),
+                            Value::String(path.unwrap_or("<kiln>").into()),
+                        ),
+                        (
+                            "functionName".to_owned(),
+                            function
+                                .and_then(|closure| closure.name.as_deref())
+                                .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        ("instruction".to_owned(), Value::Number(instruction as f64)),
+                        (
+                            "lineNumber".to_owned(),
+                            site.map_or(Value::Undefined, |site| Value::Number(site.line as f64)),
+                        ),
+                        (
+                            "columnNumber".to_owned(),
+                            site.map_or(Value::Undefined, |site| Value::Number(site.column as f64)),
+                        ),
+                    ])
+                };
+                let mut frames = Vec::new();
+                if self.function.is_some() {
+                    frames.push(snapshot(
+                        self.function.as_ref(),
+                        &self.program,
+                        self.module_path.as_deref(),
+                        self.instruction.saturating_sub(1),
+                    ));
+                }
+                for frame in self.frames.iter().rev() {
+                    frames.push(snapshot(
+                        frame.function.as_ref(),
+                        &frame.program,
+                        frame.module_path.as_deref(),
+                        frame.instruction.saturating_sub(1),
+                    ));
+                }
+                frames.truncate(limit);
+                Value::Array(ArrayData::new(frames))
             });
             object.error_stack_frames = stack_frames;
         }

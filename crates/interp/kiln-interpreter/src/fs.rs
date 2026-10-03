@@ -1313,6 +1313,7 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
             constants: Vec::new(),
@@ -1444,6 +1445,7 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
             constants: Vec::new(),
@@ -1541,6 +1543,7 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
             constants: Vec::new(),

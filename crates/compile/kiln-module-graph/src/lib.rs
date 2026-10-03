@@ -2540,6 +2540,7 @@ fn json_module_program() -> ModuleProgram {
             local_count: 1,
             functions: vec![],
             template_sites: vec![],
+            debug_call_sites: vec![],
             // The JSON text is the node's `data`, not a program the compiler produced.
             source: "".into(),
         },

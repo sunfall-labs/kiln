@@ -256,6 +256,7 @@ mod tests {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             source: "".into(),
         }
     }

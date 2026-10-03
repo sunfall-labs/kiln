@@ -2372,6 +2372,7 @@ mod tests {
             local_count: 0,
             functions: vec![proto.clone()],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 
@@ -3219,6 +3220,7 @@ mod tests {
             local_count: 0,
             functions,
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 

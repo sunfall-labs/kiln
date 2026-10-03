@@ -101,7 +101,7 @@ extern _Thread_local kiln_value kiln_c99_frame_callee;
 extern _Thread_local kiln_js_frame *kiln_c99_js_frame_top;
 extern void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure);
 extern void kiln_c99_js_frame_leave(kiln_js_frame *frame);
-extern void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction);
+extern void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction, size_t line, size_t column);
 extern int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
                                               const kiln_value *args, size_t argc, int depth,
                                               kiln_value *thrown);

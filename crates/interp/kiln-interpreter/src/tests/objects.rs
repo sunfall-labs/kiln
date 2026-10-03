@@ -316,6 +316,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
     let coercion_program = Rc::new(Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![Constant::String(key.clone())],
@@ -711,6 +712,7 @@ fn inferred_closure_name_property_preserves_utf16_units() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -751,6 +753,7 @@ fn array_species_definition_observes_a_proxy_define_property_trap() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -787,6 +790,7 @@ fn array_species_definition_writes_typed_array_elements() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -1144,6 +1148,7 @@ fn setting_a_property_on_a_primitive_is_rejected() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![Constant::String("x".to_owned().into()), number(1.0)],
@@ -1169,6 +1174,7 @@ fn closures_from_separate_calls_capture_separate_cells() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![number(1.0)],
@@ -1447,6 +1453,7 @@ fn symbol_registry_and_symbol_key_names_preserve_units() {
     let Value::Function(function) = run(&Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -2158,6 +2165,7 @@ fn template_object_is_cached_by_site_and_frozen() {
                 raw: vec!["hello\\x20".into(), "world".into()],
             },
         ],
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -2188,6 +2196,7 @@ fn template_object_is_cached_by_site_and_frozen() {
             cooked: vec![Some("hello ".into())],
             raw: vec!["hello".into()],
         }],
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -2208,6 +2217,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -2290,6 +2300,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
             Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: kiln_ir::BYTECODE_VERSION,
                 source_origin: None,
                 constants: vec![Constant::Number(42.0f64.to_bits())],

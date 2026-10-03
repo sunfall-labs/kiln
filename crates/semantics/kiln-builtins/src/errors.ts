@@ -65,16 +65,19 @@
         defineHidden(site, "getFunctionName", () => functionName);
         defineHidden(site, "getMethodName", () => functionName);
         defineHidden(site, "getFileName", () => frame.fileName);
-        defineHidden(site, "getLineNumber", () => undefined);
-        defineHidden(site, "getColumnNumber", () => undefined);
+        defineHidden(site, "getLineNumber", () => frame.lineNumber ?? null);
+        defineHidden(site, "getColumnNumber", () => frame.columnNumber ?? null);
         defineHidden(site, "getEvalOrigin", () => undefined);
         defineHidden(site, "isToplevel", () => false);
         defineHidden(site, "isEval", () => false);
         defineHidden(site, "isNative", () => false);
         defineHidden(site, "isConstructor", () => false);
-        defineHidden(site, "toString", () => functionName
-          ? `at ${functionName} (${frame.fileName})`
-          : `at ${frame.fileName}`);
+        defineHidden(site, "toString", () => {
+          const where = frame.lineNumber == null
+            ? frame.fileName
+            : `${frame.fileName}:${frame.lineNumber}:${frame.columnNumber}`;
+          return functionName ? `at ${functionName} (${where})` : `at ${where}`;
+        });
         sites.push(site);
       }
       return sites;

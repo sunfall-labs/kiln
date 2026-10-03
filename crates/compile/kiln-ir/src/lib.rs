@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 14;
+pub const BYTECODE_VERSION: u16 = 15;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -571,6 +571,16 @@ pub struct TemplateSite {
     pub raw: Vec<StringUnits>,
 }
 
+/// Source coordinates for a call-like bytecode instruction, retained only at call sites.
+/// `function_span` identifies the containing function prototype; `None` is the program body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugCallSite {
+    pub function_span: Option<Span>,
+    pub instruction: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
 /// A compiled module body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -602,6 +612,8 @@ pub struct Program {
     /// Syntactic template literal sites compiled in this program, referenced by
     /// [`Instruction::LoadTemplateObject`].
     pub template_sites: Vec<TemplateSite>,
+    /// Sparse source coordinates for call-like instructions used by stack frames.
+    pub debug_call_sites: Vec<DebugCallSite>,
 }
 
 impl Default for Program {
@@ -615,11 +627,26 @@ impl Default for Program {
             source: "".into(),
             source_origin: None,
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 }
 
 impl Program {
+    /// Look up the sparse call-site coordinate table without scanning unrelated functions.
+    pub fn debug_call_site(
+        &self,
+        function_span: Option<Span>,
+        instruction: usize,
+    ) -> Option<DebugCallSite> {
+        self.debug_call_sites
+            .binary_search_by_key(&(function_span, instruction as u32), |site| {
+                (site.function_span, site.instruction)
+            })
+            .ok()
+            .map(|index| self.debug_call_sites[index])
+    }
+
     /// Whether this program or any nested function prototype contains [`Instruction::DirectEval`].
     pub fn has_direct_eval(&self) -> bool {
         self.code

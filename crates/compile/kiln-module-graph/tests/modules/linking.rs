@@ -1006,6 +1006,7 @@ fn deep_linear_graph_is_stack_safe() {
             program: Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: BYTECODE_VERSION,
                 source_origin: None,
                 constants: Vec::new(),
@@ -1043,6 +1044,7 @@ fn step_limit_diagnostic_reports_total_graph_steps() {
             program: Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: BYTECODE_VERSION,
                 source_origin: None,
                 constants: Vec::new(),

@@ -548,6 +548,7 @@ fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
                 },
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         })
         .expect("symbol conversion order probe emits");
         let wrapper = format!(
@@ -1307,6 +1308,7 @@ fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
         local_count: 3,
         functions: vec![callback],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("borrowed typed-array methods emit");
     let wrapper = format!(
@@ -1795,6 +1797,7 @@ fn loop_induction_and_string_length_emit_assigned_twins() {
         local_count: 0,
         functions: vec![proto],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&prog).expect("emits");
     assert!(generated.source.contains("str->unit_len"));
@@ -1844,6 +1847,7 @@ fn object_profile_selects_only_simple_array_parameter_receivers() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     let profile = FunctionTypeProfile {
@@ -2019,6 +2023,7 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
         local_count: 3,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -2122,6 +2127,7 @@ fn executable_chained_intrinsic_array_and_string_devirtualization() {
         local_count: 6,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -2216,6 +2222,7 @@ fn executable_math_all_pure_functions_unboxed() {
         local_count: 4,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -2300,6 +2307,7 @@ fn executable_static_builtin_predicates_array_is_array() {
         local_count: 5,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -2419,6 +2427,7 @@ fn executable_static_builtin_predicates_number() {
         local_count: 9,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -2513,6 +2522,7 @@ fn executable_array_indexing_and_bounds() {
         local_count: 7,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("array indexing program emits");

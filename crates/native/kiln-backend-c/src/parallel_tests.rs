@@ -102,6 +102,7 @@ fn one_site(callback: Option<FunctionProto>, extra: usize, constants: Constants)
         local_count: 0,
         functions: callback.into_iter().collect(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -367,6 +368,7 @@ fn tier_1_a_capture_written_once_is_parallel_and_one_written_twice_is_not() {
             local_count: 1,
             functions: vec![callback],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         };
         let records = sites(&program, EmissionPolicy::default());
         assert_eq!(records.len(), 1, "{records:?}");
@@ -648,6 +650,7 @@ fn compare_with(
         local_count: 3,
         functions,
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, policy).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);
@@ -958,6 +961,7 @@ fn family_site(
         local_count: 0,
         functions: callbacks,
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -1190,6 +1194,7 @@ fn tier_2_reads_run_in_the_pool_and_match_the_sequential_methods() {
         local_count: 1,
         functions: vec![product(), product(), positive(), positive()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);
@@ -1348,6 +1353,7 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
         local_count: 1,
         functions: vec![joined(), joined(), enriched, read(s), read(q)],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     // Both sites sit at the same (empty) source position, so their records are one.
@@ -1513,6 +1519,7 @@ fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
         local_count: 1,
         functions: vec![parse(), parse(), shout(), shout(), upper_case],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);

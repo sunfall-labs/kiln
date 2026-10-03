@@ -40,6 +40,32 @@ fn builtin_global_bindings_round_trip_and_keep_global_alias() {
     assert_eq!(Builtin::from_name("global"), Some(Builtin::GlobalThis));
 }
 
+#[test]
+fn call_debug_sites_keep_expression_coordinates() {
+    let mut source_module = module(vec![]);
+    source_module.source = "\n f()".into();
+    let mut invocation = call(identifier("f"), vec![]);
+    invocation.span = Span::new(2, 5);
+    source_module
+        .body
+        .push(statement(StatementKind::Expression(invocation)));
+    let program = compile(&source_module).expect("module compiles");
+    let site = program
+        .debug_call_sites
+        .first()
+        .expect("call has a debug site");
+    assert_eq!((site.line, site.column), (2, 2));
+    assert_eq!(
+        site.instruction as usize,
+        program
+            .code
+            .iter()
+            .position(|op| matches!(op, Instruction::Call { .. }))
+            .unwrap()
+    );
+    assert_eq!(site.function_span, None);
+}
+
 fn number(value: f64) -> Expression {
     Expression {
         kind: ExpressionKind::Literal(Literal::Number(value.to_bits())),

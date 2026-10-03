@@ -97,6 +97,7 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let legacy = emit(&program).expect("default program emits");
     let explicit_default =
@@ -219,6 +220,7 @@ fn decoupled_modules_include_one_external_runtime_header() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let policy = EmissionPolicy {
         decoupled_prelude: true,
@@ -431,6 +433,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("nested refusal probe emits");
     let wrapper = format!(
@@ -980,6 +983,7 @@ fn executable_compact_closure_executes_correctly() {
             local_count: 2,
             functions: vec![bump],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         EmissionPolicy {
             compact: true,
@@ -1486,6 +1490,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
                 ],
             )],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -1589,6 +1594,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         Vec::new(),

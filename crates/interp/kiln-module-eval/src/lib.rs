@@ -1180,6 +1180,7 @@ impl GraphExecutor<'_> {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             source: "".into(),
         };
         let module = kiln_ir::ModuleProgram {

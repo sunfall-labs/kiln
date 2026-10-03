@@ -23,6 +23,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["node:querystring".to_owned()],
         imports: Vec::new(),

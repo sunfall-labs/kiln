@@ -1124,8 +1124,10 @@ impl super::Compiler {
             upvalue_names: std::mem::take(&mut self.upvalue_names),
             captured: std::mem::replace(&mut self.captured, captured),
             cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
+            active_function_span: self.active_function_span,
         };
         self.enclosing.push(outer);
+        self.active_function_span = Some(function.span);
 
         // A class constructor is not callable. `[[Call]]` on one throws before it looks at an
         // argument, which is why this is the first thing in the body rather than part of the
@@ -1337,6 +1339,7 @@ impl super::Compiler {
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
         self.cell_everything = restored.cell_everything;
+        self.active_function_span = restored.active_function_span;
         self.parameter_scope = outer_parameter_scope;
 
         let index = self.functions.len() as u32;

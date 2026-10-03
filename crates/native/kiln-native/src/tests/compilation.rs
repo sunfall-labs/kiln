@@ -269,6 +269,7 @@ fn release_module_specialization_budget_counts_all_instructions() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     assert!(!release_module_uses_generic_bodies(
         &budget_module(program.clone()),
@@ -293,6 +294,7 @@ fn release_module_specialization_budget_counts_functions() {
         local_count: 0,
         functions: vec![empty_function(); MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     assert!(!release_module_uses_generic_bodies(
         &budget_module(program.clone()),

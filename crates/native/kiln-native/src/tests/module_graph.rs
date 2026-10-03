@@ -3444,6 +3444,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let colliding_output = root.path.join("embedded-header.H");
     let collision = builder
@@ -3677,6 +3678,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -3797,6 +3799,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -3826,6 +3829,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -3950,6 +3954,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4162,6 +4167,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4182,6 +4188,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -4422,6 +4429,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -4449,6 +4457,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -4648,6 +4657,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
     let first = builder

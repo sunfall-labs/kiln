@@ -673,6 +673,7 @@ struct FunctionState {
     captured: HashSet<String>,
     /// Whether every binding of this function is boxed, because a direct `eval` can see them.
     cell_everything: bool,
+    active_function_span: Option<kiln_hir::Span>,
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
@@ -772,6 +773,8 @@ struct Compiler {
     constant_indices: rustc_hash::FxHashMap<Constant, u32>,
     functions: Vec<FunctionProto>,
     template_sites: Vec<TemplateSite>,
+    debug_call_sites: Vec<(Option<kiln_hir::Span>, u32, kiln_hir::Span)>,
+    active_function_span: Option<kiln_hir::Span>,
     /// Whether `functions[i]` was compiled as strict code, in the same order.
     ///
     /// Beside the protos rather than on them, because a proto is bytecode the C backend reads

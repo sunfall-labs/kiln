@@ -578,6 +578,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             // The body's own bytes are hashed by the caller; this synthetic program exists only
             // to reach the canonical instruction encoder.
             source: Arc::from(""),

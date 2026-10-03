@@ -1745,6 +1745,7 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
         local_count: 2,
         functions: vec![bump],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -1809,6 +1810,7 @@ fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
         local_count: 3,
         functions: vec![function(vec![Instruction::Return])],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("prototype enumeration probe emits");
     let wrapper = format!(
@@ -6512,6 +6514,7 @@ fn executable_cached_shape_object_literal_executes_correctly() {
         local_count: 3,
         functions: vec![maker],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");

@@ -41,6 +41,7 @@ fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -118,6 +119,7 @@ fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -262,6 +264,7 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -1293,6 +1296,7 @@ fn executable_arrow_captures_its_defining_receiver() {
         local_count: 3,
         functions: vec![maker, arrow],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("arrow receiver program emits");
     let wrapper = format!(
@@ -1341,6 +1345,7 @@ fn executable_runaway_recursion_reports_rather_than_crashing() {
         local_count: 1,
         functions: vec![forever],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -1729,6 +1734,7 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         local_count: 2,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -1821,6 +1827,7 @@ fn executable_generic_clone_reads_a_speculated_sum_boxed_after_an_exit() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -1918,6 +1925,7 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
         local_count: 1,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -1985,6 +1993,7 @@ fn executable_branch_on_a_number_remainder_reads_a_live_twin() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -2056,6 +2065,7 @@ fn executable_unary_plus_of_a_product_copies_a_written_box() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     let wrapper = format!(
@@ -2128,6 +2138,7 @@ fn executable_length_specialization() {
         local_count: 6,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("length program emits");

@@ -20,6 +20,8 @@ void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure) 
     frame->closure = closure;
     frame->instruction_source = closure != NULL ? closure->diagnostic_source : NULL;
     frame->instruction = 0;
+    frame->line = 0;
+    frame->column = 0;
     kiln_c99_js_frame_top = frame;
 }
 
@@ -27,10 +29,13 @@ void kiln_c99_js_frame_leave(kiln_js_frame *frame) {
     if (kiln_c99_js_frame_top == frame) kiln_c99_js_frame_top = frame->previous;
 }
 
-void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction) {
+void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction,
+                                        size_t line, size_t column) {
     if (kiln_c99_js_frame_top == NULL) return;
     kiln_c99_js_frame_top->instruction_source = source;
     kiln_c99_js_frame_top->instruction = instruction;
+    kiln_c99_js_frame_top->line = line;
+    kiln_c99_js_frame_top->column = column;
 }
 
 kiln_value kiln_c99_builtin(uint64_t code) {
@@ -80,6 +85,16 @@ static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
         status = kiln_c99_put_mode(host, *out, "instruction", 11,
                                    kiln_c99_number((double)frame->instruction), 1, depth,
                                    thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "lineNumber", 10,
+                                   frame->line ? kiln_c99_number((double)frame->line)
+                                               : kiln_c99_undefined(),
+                                   1, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "columnNumber", 12,
+                                   frame->column ? kiln_c99_number((double)frame->column)
+                                                 : kiln_c99_undefined(),
+                                   1, depth, thrown);
     return status;
 }
 

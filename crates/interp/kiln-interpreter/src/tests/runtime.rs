@@ -171,6 +171,7 @@ fn new_on_a_non_constructor_is_rejected() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![number(1.0)],
@@ -220,6 +221,7 @@ fn an_uncaught_throw_names_what_was_thrown() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![Constant::String("boom".to_owned().into())],
@@ -240,6 +242,7 @@ fn unwinding_restores_the_stack_the_handler_expected() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![
@@ -292,6 +295,7 @@ fn a_captured_cell_outlives_the_frame_that_created_it() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![number(5.0)],
@@ -396,6 +400,7 @@ fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![number(1.0)],
@@ -423,6 +428,7 @@ fn runaway_recursion_is_bounded_by_call_depth() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -488,6 +494,7 @@ fn an_unknown_function_index_is_rejected_rather_than_indexed() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -538,6 +545,7 @@ fn a_marked_local_read_throws_a_reference_error() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -805,6 +813,7 @@ fn an_async_arrow_captures_its_defining_receiver() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![

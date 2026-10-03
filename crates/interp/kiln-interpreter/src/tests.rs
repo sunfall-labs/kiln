@@ -65,6 +65,7 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![number(1.0), number(2.0), number(3.0)],
@@ -100,6 +101,7 @@ fn no_program() -> Rc<Program> {
     Rc::new(Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: Vec::new(),
@@ -156,6 +158,7 @@ fn stub_eval_compiler(request: &EvalSource<'_>) -> Result<(Program, Strictness),
         Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
             // `x = 2; x` against the cell installed in slot 0.
@@ -190,6 +193,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants,
@@ -206,6 +210,7 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants: vec![
@@ -397,6 +402,7 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants,
@@ -533,6 +539,7 @@ fn generator_receiver_program() -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
         constants,
