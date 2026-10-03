@@ -37,7 +37,7 @@ use oxc_ast::{
         TSEnumMemberName, VariableDeclaration, VariableDeclarationKind,
     },
 };
-use oxc_ast_visit::{Visit, walk};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
@@ -2289,12 +2289,21 @@ fn parse_source_in_context_with_units(
         if !has_eval_call {
             expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
             dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
-            // Oxc's side-effect model assumes coercions are pure and that some global functions
-            // never throw; guard what the language can observe before it runs (issue 19).
-            dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
-            Compressor::new(&allocator)
-                .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
-            dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+            erase_type_only_declarations_for_dce(&mut parsed.program);
+            // Oxc's side-effect traversal is for JavaScript declarations and marks its TypeScript
+            // declaration variants unreachable. Type-only declarations are safely erased here,
+            // but runtime enums/namespaces/import-equals stay in the source tree because Owned
+            // HIR is the sole runtime lowering authority for them. Keep those modules out of the
+            // JS-only pass instead of asking Oxc to reinterpret or delete runtime TypeScript.
+            let has_runtime_typescript = contains_runtime_typescript_declaration(&parsed.program);
+            if !has_runtime_typescript {
+                // Oxc's side-effect model assumes coercions are pure and that some global functions
+                // never throw; guard what the language can observe before it runs (issue 19).
+                dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
+                Compressor::new(&allocator)
+                    .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+                dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+            }
         }
     }
     let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
@@ -2858,6 +2867,124 @@ fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Remove declarations that TypeScript erases before asking Oxc's JavaScript-only DCE pass to
+/// inspect the tree. Runtime TypeScript declarations are deliberately left alone and cause DCE to
+/// be skipped by [`contains_runtime_typescript_declaration`].
+fn erase_type_only_declarations_for_dce(program: &mut oxc_ast::ast::Program<'_>) {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+
+    fn erased_declaration(declaration: &Declaration<'_>) -> bool {
+        match declaration {
+            Declaration::VariableDeclaration(declaration) => declaration.declare,
+            Declaration::FunctionDeclaration(declaration) => {
+                declaration.declare || declaration.body.is_none()
+            }
+            Declaration::ClassDeclaration(declaration) => declaration.declare,
+            Declaration::TSImportEqualsDeclaration(declaration) => {
+                declaration.import_kind.is_type()
+            }
+            Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            Declaration::TSEnumDeclaration(declaration) => declaration.declare,
+            Declaration::TSExternalModuleDeclaration(_)
+            | Declaration::TSGlobalDeclaration(_)
+            | Declaration::TSInterfaceDeclaration(_)
+            | Declaration::TSTypeAliasDeclaration(_) => true,
+        }
+    }
+
+    fn erased_statement(statement: &Statement<'_>) -> bool {
+        match statement {
+            Statement::VariableDeclaration(declaration) => declaration.declare,
+            Statement::FunctionDeclaration(declaration) => {
+                declaration.declare || declaration.body.is_none()
+            }
+            Statement::ClassDeclaration(declaration) => declaration.declare,
+            Statement::TSImportEqualsDeclaration(declaration) => declaration.import_kind.is_type(),
+            Statement::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            Statement::TSEnumDeclaration(declaration) => declaration.declare,
+            Statement::TSExternalModuleDeclaration(_)
+            | Statement::TSGlobalDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSNamespaceExportDeclaration(_) => true,
+            Statement::ExportDeclaration(export) => erased_declaration(&export.declaration),
+            Statement::ExportDefaultDeclaration(export) => matches!(
+                export.declaration,
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+            ),
+            Statement::ExportNamedDeclaration(export) => export.export_kind.is_type(),
+            _ => false,
+        }
+    }
+
+    struct TypeOnlyDeclarationEraser;
+    impl<'ast> VisitMut<'ast> for TypeOnlyDeclarationEraser {
+        fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'ast, Statement<'ast>>) {
+            statements.retain(|statement| !erased_statement(statement));
+            walk_mut::walk_statements(self, statements);
+        }
+    }
+
+    TypeOnlyDeclarationEraser.visit_program(program);
+}
+
+/// Oxc's JS side-effect model intentionally treats TypeScript runtime declaration variants as
+/// unreachable. Keep the original source AST for Owned HIR's lowering and only run JS DCE when no
+/// such runtime declaration remains anywhere in the module.
+fn contains_runtime_typescript_declaration(program: &oxc_ast::ast::Program<'_>) -> bool {
+    struct RuntimeDeclarationFinder(bool);
+
+    impl<'ast> Visit<'ast> for RuntimeDeclarationFinder {
+        fn visit_statement(&mut self, statement: &Statement<'ast>) {
+            match statement {
+                Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+                    self.0 = true;
+                }
+                Statement::TSNamespaceDeclaration(declaration)
+                    if !type_only_namespace(declaration) =>
+                {
+                    self.0 = true;
+                }
+                Statement::TSImportEqualsDeclaration(declaration)
+                    if !declaration.import_kind.is_type() =>
+                {
+                    self.0 = true;
+                }
+                _ => {}
+            }
+            if !self.0 {
+                walk::walk_statement(self, statement);
+            }
+        }
+
+        fn visit_declaration(&mut self, declaration: &Declaration<'ast>) {
+            match declaration {
+                Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+                    self.0 = true;
+                }
+                Declaration::TSNamespaceDeclaration(declaration)
+                    if !type_only_namespace(declaration) =>
+                {
+                    self.0 = true;
+                }
+                Declaration::TSImportEqualsDeclaration(declaration)
+                    if !declaration.import_kind.is_type() =>
+                {
+                    self.0 = true;
+                }
+                _ => {}
+            }
+            if !self.0 {
+                walk::walk_declaration(self, declaration);
+            }
+        }
+    }
+
+    let mut finder = RuntimeDeclarationFinder(false);
+    finder.visit_program(program);
+    finder.0
 }
 
 fn global_literal_eval_call_spans<'a>(
@@ -6344,6 +6471,86 @@ mod tests {
             hir.contains("Chain"),
             "optional chain should remain intact: {hir}"
         );
+    }
+
+    #[test]
+    fn native_dce_erases_type_only_declarations_and_preserves_runtime_enum_for_owned_hir() {
+        let module = parse_dce_native(
+            "declarations.ts",
+            r#"
+                export interface Shape { value: number }
+                export type Alias = Shape | null
+                declare const ambient: Shape
+                declare global { interface GlobalShape { value: number } }
+                declare module "ambient-package" { export interface ModuleShape { value: number } }
+                declare namespace Ambient { interface NestedShape { value: number } }
+                const unused = "dead";
+                enum RuntimeKind { First = 1, Second }
+                export function answer(): number {
+                    interface LocalShape { value: number }
+                    type LocalAlias = LocalShape | null
+                    return RuntimeKind.Second
+                }
+            "#,
+            &BTreeSet::from(["answer".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            !hir.contains("Shape"),
+            "type declarations leaked to HIR: {hir}"
+        );
+        assert!(!hir.contains("Alias"), "type alias leaked to HIR: {hir}");
+        assert!(
+            !hir.contains("ambient"),
+            "ambient binding leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("GlobalShape"),
+            "global declaration leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("ModuleShape"),
+            "ambient module leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("Ambient"),
+            "ambient namespace leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("dead"),
+            "ordinary dead code survived DCE: {hir}"
+        );
+        assert!(hir.contains("RuntimeKind"), "runtime enum was lost: {hir}");
+        assert!(hir.contains("answer"), "demanded export was lost: {hir}");
+        assert!(
+            !hir.contains("LocalShape"),
+            "nested interface leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("LocalAlias"),
+            "nested type alias leaked to HIR: {hir}"
+        );
+    }
+
+    #[test]
+    fn dce_declaration_erasure_keeps_runtime_namespace_for_owned_hir() {
+        let allocator = Allocator::default();
+        let source = "namespace Runtime { export const value = 1; }";
+        let source_type = SourceType::from_path(Path::new("runtime-namespace.ts"))
+            .unwrap()
+            .with_module(true);
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        assert!(!parsed.panicked);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        erase_type_only_declarations_for_dce(&mut parsed.program);
+        assert!(contains_runtime_typescript_declaration(&parsed.program));
+        assert!(matches!(
+            parsed.program.body.first(),
+            Some(Statement::TSNamespaceDeclaration(_))
+        ));
     }
 
     #[test]
