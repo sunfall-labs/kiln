@@ -8,6 +8,7 @@ adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertion
 [[test]]
 id = "kiln/host-clock/timer-fairness"
 requires_host = "node"
+clock = "wall"
 source = "host-clock-timer-fairness.cjs"
 status = "runnable"
 features = ["node:timers", "host-clock", "setImmediate", "zero-delay-timers"]

@@ -58,6 +58,9 @@ pub struct ManifestTest {
     /// there is no run to judge at all. Reading it converts 37 identical, mysterious assertion
     /// failures into 37 statements of which flag is missing.
     pub requires_host: Option<String>,
+    /// Whether this case observes elapsed host time. Omitted or `"virtual"` keeps deterministic
+    /// timer advancement; `"wall"` opts a host-backed Node case into real elapsed time.
+    pub wall_clock: bool,
     /// Exactly what the program must write, including its trailing newline.
     pub expected_stdout: String,
     /// Text the report of the uncaught exception the program must end with contains -- node's
@@ -271,6 +274,23 @@ fn canonical_with_missing_tail(path: &Path) -> Option<PathBuf> {
 }
 
 fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
+    let requires_host = optional_string(table, "requires_host")?.map(str::to_owned);
+    let wall_clock = match optional_string(table, "clock")? {
+        None | Some("virtual") => false,
+        Some("wall") => true,
+        Some(_) => {
+            return Err(UnlocatedError::Schema {
+                line: table.get("clock").map_or(table.line, |entry| entry.line),
+                message: "`clock` must be `virtual` or `wall`".to_owned(),
+            });
+        }
+    };
+    if wall_clock && requires_host.as_deref() != Some("node") {
+        return Err(UnlocatedError::Schema {
+            line: table.get("clock").map_or(table.line, |entry| entry.line),
+            message: "`clock = \"wall\"` requires `requires_host = \"node\"`".to_owned(),
+        });
+    }
     Ok(ManifestTest {
         id: required_string(table, "id")?.to_owned(),
         source: PathBuf::from(required_string(table, "source")?),
@@ -281,7 +301,8 @@ fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
             .collect(),
         features: optional_strings(table, "features")?,
         status: optional_string(table, "status")?.map(str::to_owned),
-        requires_host: optional_string(table, "requires_host")?.map(str::to_owned),
+        requires_host,
+        wall_clock,
         expected_stdout: required_string(table, "expected_stdout")?.to_owned(),
         expected_uncaught: optional_string(table, "expected_uncaught")?.map(str::to_owned),
     })
@@ -504,9 +525,29 @@ ok
         assert_eq!(test.features, ["iteration"]);
         assert_eq!(test.status.as_deref(), Some("runnable"));
         assert!(test.bundle_inputs.is_empty());
+        assert!(!test.wall_clock);
         assert_eq!(
             manifest.source_path(test),
             Path::new("/corpus/guard/probe.js")
+        );
+    }
+
+    #[test]
+    fn host_clock_is_an_explicit_node_manifest_policy() {
+        let parsed = manifest(
+            "[[test]]\nid = \"clock\"\nsource = \"clock.cjs\"\nrequires_host = \"node\"\nclock = \"wall\"\nexpected_stdout = \"pass\\n\"\n",
+        )
+        .expect("valid Node wall-clock policy");
+        assert!(parsed.tests()[0].wall_clock);
+
+        let invalid = manifest(
+            "[[test]]\nid = \"clock\"\nsource = \"clock.js\"\nclock = \"wall\"\nexpected_stdout = \"pass\\n\"\n",
+        )
+        .expect_err("wall time requires the Node host capability");
+        assert!(
+            invalid
+                .to_string()
+                .contains("requires `requires_host = \"node\"`")
         );
     }
 

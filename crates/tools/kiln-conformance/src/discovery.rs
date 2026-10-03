@@ -66,6 +66,8 @@ enum Declaration {
         /// A host adapter without which this program cannot run at all; see
         /// [`crate::manifest::ManifestTest::requires_host`].
         requires_host: Option<String>,
+        /// Whether this manifest case opts into wall-clock timer scheduling.
+        wall_clock: bool,
     },
 }
 
@@ -200,6 +202,7 @@ impl ConformanceTest {
                 expected,
                 uncaught,
                 unavailable_reason: None,
+                wall_clock,
                 ..
             } => {
                 let expected = program::Expectation {
@@ -207,8 +210,13 @@ impl ConformanceTest {
                     uncaught: uncaught.as_deref(),
                 };
                 if matches!(mode, RunMode::Node) {
-                    vec![program::run_node_against_expectation(
-                        &self.path, expected, mode,
+                    let clock = if *wall_clock {
+                        kiln_runtime::ClockCapability::Host
+                    } else {
+                        kiln_runtime::ClockCapability::Virtual
+                    };
+                    vec![program::run_node_against_expectation_with_clock(
+                        &self.path, expected, mode, clock,
                     )]
                 } else {
                     vec![program::run_against_expected_stdout_with_worker(
@@ -237,6 +245,7 @@ impl ConformanceTest {
                 uncaught: test.expected_uncaught.clone(),
                 unavailable_reason: resolution.unavailable_reason,
                 requires_host: test.requires_host.clone(),
+                wall_clock: test.wall_clock,
             },
         }
     }
