@@ -200,6 +200,12 @@ def measure_cli(name, src, needs_node, argv, work):
         {
             "program": name,
             "ms": measured,
+            "checksum_reference": "node",
+            "checksum_sha256": {
+                runtime: [hashlib.sha256(output).hexdigest() for output in outputs]
+                for runtime, outputs in checksums.items()
+            },
+            "checksum_excluded": sorted(excluded),
             "peak_rss_kb": rss,
             "peak_rss_scope": "maximum child-lifetime peak across repetitions; excludes builds; includes inherited pre-exec image",
             "artifact_bytes": artifacts,
@@ -281,7 +287,7 @@ def measure_server(work):
     unsupported["porffor"] = "no node:http capability (tier B)"
     unsupported["hermes"] = "no node:http capability (tier B)"
 
-    rps, notes, divergences = {}, {}, []
+    rps, notes, divergences, driver_reports = {}, {}, [], {}
     for runtime, argv in commands.items():
         server = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -311,9 +317,10 @@ def measure_server(work):
             except (ValueError, IndexError):
                 divergences.append(f"{name} {runtime}: driver output unreadable")
                 continue
-            if report.get("wrong"):
+            driver_reports[runtime] = report
+            if report.get("requests") != int(SERVER_REQUESTS) or report.get("wrong") != 0:
                 divergences.append(
-                    f"{name} {runtime}: {report['wrong']} wrong responses"
+                    f"{name} {runtime}: incomplete or wrong responses: {report}"
                 )
                 continue
             rps[runtime] = report["rps"]
@@ -322,6 +329,8 @@ def measure_server(work):
             server.wait()
         wait_for_port_closed(18091)
     return {"program": name, "rps": rps,
+            "driver_reports": driver_reports,
+            "connection_mode": "sequential requests with one shared keep-alive agent",
             "execution_modes": {
                 "node": "direct TypeScript",
                 "bun": "direct TypeScript",
