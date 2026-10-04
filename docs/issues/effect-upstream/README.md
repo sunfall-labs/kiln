@@ -172,6 +172,9 @@ suite passes 82 tests, and four affected allocation-stress probes match. A metho
 passes its 83-test object suite plus representative multi-realm probes with and without GC
 stress, but has not increased the quiet Sharding result beyond 60/66. These candidates need the
 integrated gate; diagnostic profiles under concurrent builds are not accepted timing gains.
+A subsequent [quiet paired allocation comparison](../../performance/object-allocation-2026-10-04.md)
+reduces native warm time from 5.0625 ms to 4.4375 ms (12.3%), with matching checksums;
+Bun takes 0.0188 ms. The pair includes both object initialization and finalizer changes.
 Benchmark result validation now checks every independent checksum sample, with five controls
 passing, so a later repetition cannot silently report different work as a timing result.
 

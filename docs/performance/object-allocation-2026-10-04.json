@@ -1,0 +1,187 @@
+{
+  "scope": "Paired in-process warm object-literal comparison. Candidate includes explicit external_owner initialization and empty side-storage finalization guard; gains cannot be assigned to one change. No Effect coverage inference.",
+  "baseline_source": "6ad63f26aee4d25684293c71476d336e2af5668e",
+  "candidate_source": "e5ae3120b06728d82b2a1f3b65ecb945229460c6",
+  "binary_sha256": {
+    "baseline": "e0a9fde939348282ef1601e3effea5eb548ac86e3b549107d8250c60a3774bb5",
+    "candidate": "931beee7bea1411f2cde6008dda4d0969ad68bd0132b3274c8ce915a77c8e179"
+  },
+  "bun_version": "1.4.2",
+  "samples": [
+    {
+      "runtime": "baseline",
+      "round": 1,
+      "wall_seconds": 2.287218348006718,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":7,\"warm_median\":5.125,\"warm_best\":5,\"batch\":16,\"samples\":25,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 7,
+        "warm_median": 5.125,
+        "warm_best": 5,
+        "batch": 16,
+        "samples": 25,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "candidate",
+      "round": 1,
+      "wall_seconds": 2.275401753024198,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":8,\"warm_median\":4.4375,\"warm_best\":4.375,\"batch\":16,\"samples\":29,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 8,
+        "warm_median": 4.4375,
+        "warm_best": 4.375,
+        "batch": 16,
+        "samples": 29,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 1,
+      "wall_seconds": 2.2288745270343497,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":2,\"warm_median\":0.018798828125,\"warm_best\":0.0185546875,\"batch\":4096,\"samples\":26,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 2,
+        "warm_median": 0.018798828125,
+        "warm_best": 0.0185546875,
+        "batch": 4096,
+        "samples": 26,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "candidate",
+      "round": 2,
+      "wall_seconds": 2.269456945010461,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":7,\"warm_median\":4.4375,\"warm_best\":4.375,\"batch\":16,\"samples\":29,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 7,
+        "warm_median": 4.4375,
+        "warm_best": 4.375,
+        "batch": 16,
+        "samples": 29,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "baseline",
+      "round": 2,
+      "wall_seconds": 2.267247370094992,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":7,\"warm_median\":5.0625,\"warm_best\":5,\"batch\":16,\"samples\":25,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 7,
+        "warm_median": 5.0625,
+        "warm_best": 5,
+        "batch": 16,
+        "samples": 25,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 2,
+      "wall_seconds": 2.197787302080542,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":2,\"warm_median\":0.01904296875,\"warm_best\":0.018798828125,\"batch\":4096,\"samples\":26,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 2,
+        "warm_median": 0.01904296875,
+        "warm_best": 0.018798828125,
+        "batch": 4096,
+        "samples": 26,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "baseline",
+      "round": 3,
+      "wall_seconds": 2.270209693000652,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":8,\"warm_median\":5.0625,\"warm_best\":5,\"batch\":16,\"samples\":25,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 8,
+        "warm_median": 5.0625,
+        "warm_best": 5,
+        "batch": 16,
+        "samples": 25,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "candidate",
+      "round": 3,
+      "wall_seconds": 2.2855237659532577,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":6,\"warm_median\":4.4375,\"warm_best\":4.3125,\"batch\":16,\"samples\":29,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 6,
+        "warm_median": 4.4375,
+        "warm_best": 4.3125,
+        "batch": 16,
+        "samples": 29,
+        "checksum": "600130000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 3,
+      "wall_seconds": 2.187144780997187,
+      "exit": 0,
+      "stdout": "{\"name\":\"object-literal\",\"mode\":\"in-process\",\"cold\":2,\"warm_median\":0.018798828125,\"warm_best\":0.018798828125,\"batch\":4096,\"samples\":26,\"checksum\":\"600130000\"}\n",
+      "stderr": "",
+      "result": {
+        "name": "object-literal",
+        "mode": "in-process",
+        "cold": 2,
+        "warm_median": 0.018798828125,
+        "warm_best": 0.018798828125,
+        "batch": 4096,
+        "samples": 26,
+        "checksum": "600130000"
+      }
+    }
+  ],
+  "valid": true,
+  "warm_median_ms": {
+    "baseline": 5.0625,
+    "candidate": 4.4375,
+    "bun": 0.018798828125
+  },
+  "measurement_conditions": "Three alternating fresh-process rounds with existing in-process harness; all three Luna agents held compiles/tests. Compilation, startup and module setup excluded from warm medians. No active program paused.",
+  "compiler_sha256": {
+    "baseline": "4b657e6d6a9ad66a96cc7777aac12232cf3993b081386148a8fa0abafdfe7215",
+    "candidate": "27b59b37d8f9d7fb75bddd3dabd3e755867673fca7eeb79bb33a88f3e28e2aeb"
+  },
+  "benchmark_sha256": "3eb7898adebe7410845d530dda3b006d3cd74f52607d346d5724f347a80a04e7",
+  "harness_sha256": "b041101125e8f8e789321983bd5ec1579c3a8a8d63abf584adaae43afdcaf827"
+}
