@@ -171,6 +171,51 @@ fn two_dynamic_importers_share_one_instance() {
 }
 
 #[test]
+fn computed_file_url_loads_a_new_graph_and_reuses_static_dependencies() {
+    let project = Project::new();
+    project.write(
+        "shared.mjs",
+        "globalThis.sharedRuns = (globalThis.sharedRuns || 0) + 1; export const shared = {};",
+    );
+    project.write(
+        "late module.mjs",
+        "import { shared } from './shared.mjs';\n\
+         globalThis.lateRuns = (globalThis.lateRuns || 0) + 1;\n\
+         export { shared }; export const marker = 'loaded';",
+    );
+    let directory_url = url::Url::from_directory_path(&project.root).expect("directory URL");
+    expect_lines(
+        &project,
+        &format!(
+            "import {{ shared }} from './shared.mjs';\n\
+             const target = [{directory_url:?}, 'late%20module.mjs'].join('');\n\
+             const first = await import(target);\n\
+             const second = await import(target);\n\
+             console.log(first.marker, first === second, first.shared === shared,\n\
+                         globalThis.sharedRuns, globalThis.lateRuns);",
+            directory_url = directory_url.as_str(),
+        ),
+        &["loaded true true 1 1"],
+    );
+}
+
+#[test]
+fn computed_file_url_rejects_a_missing_file() {
+    let project = Project::new();
+    let directory_url = url::Url::from_directory_path(&project.root).expect("directory URL");
+    expect_lines(
+        &project,
+        &format!(
+            "const target = [{directory_url:?}, 'missing.mjs'].join('');\n\
+             try {{ await import(target); console.log('unexpected success'); }}\n\
+             catch (error) {{ console.log(error instanceof TypeError); }}",
+            directory_url = directory_url.as_str(),
+        ),
+        &["true"],
+    );
+}
+
+#[test]
 fn builtin_modules_are_one_instance_per_realm() {
     let project = Project::new();
     expect_lines(

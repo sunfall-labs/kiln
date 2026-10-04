@@ -378,58 +378,56 @@ fn export_epilogue(program: &Program, slots: Vec<u32>) -> Program {
 /// issued them. The service owns the graph through `Arc`; no thread-local or process-global
 /// resolver state is involved.
 ///
-/// One kind of request reaches past that snapshot: the module an actor realm is asked to run
-/// (`spawnActor({ module })`, ADR 0072). Its name is a run-time value -- an absolute path or a
-/// file URL -- so the compiler may not have seen it, and the interpreter answers it the way it
-/// answers any module: it resolves the name with node's resolver and builds that module's graph
-/// from disk. Graphs built that way are kept, so the module's own dynamic imports resolve from
-/// it like any other importer's. Every other request stays within the snapshot.
+/// File-URL imports can reach past the snapshot: their paths are runtime values, as are the
+/// modules an actor realm is asked to run (`spawnActor({ module })`, ADR 0072). The host resolves
+/// these files with the project's Node resolver and retains their graphs, so each module's own
+/// imports resolve from it. Plans still link through the realm's canonical module map; loading
+/// a graph does not duplicate an already evaluated dependency. Other requests use the snapshot.
 pub struct GraphModuleLoader {
     graph: Arc<ModuleGraph>,
-    /// Graphs rooted at actor modules the snapshot did not contain, by entry path.
-    actor_graphs: std::sync::Mutex<HashMap<PathBuf, Arc<ModuleGraph>>>,
+    /// Graphs loaded outside the initial snapshot, by canonical entry and request paths.
+    runtime_graphs: std::sync::Mutex<HashMap<PathBuf, Arc<ModuleGraph>>>,
 }
 
 impl GraphModuleLoader {
     pub fn new(graph: Arc<ModuleGraph>) -> Self {
         Self {
             graph,
-            actor_graphs: std::sync::Mutex::new(HashMap::new()),
+            runtime_graphs: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// The graph that holds `importer`: the snapshot, or a graph built for an actor module.
+    /// The graph that holds `importer`: the snapshot, or a graph loaded at runtime.
     fn graph_holding(&self, importer: &Path) -> Option<Arc<ModuleGraph>> {
         if self.graph.module(importer).is_some() {
             return Some(Arc::clone(&self.graph));
         }
-        let graphs = self.actor_graphs.lock().ok()?;
+        let graphs = self.runtime_graphs.lock().ok()?;
         graphs
             .values()
             .find(|graph| graph.module(importer).is_some())
             .cloned()
     }
 
-    /// The actor module `specifier` names, loaded from disk when the snapshot lacks it.
-    ///
-    /// Only the actor worker entry asks this, and only for the absolute names `spawnActor`
-    /// admits; the referrer for resolution is the named file itself, never the worker entry's
-    /// virtual path under `.kiln/builtins`. `None` leaves the request to the snapshot's answer.
-    fn load_actor_module(
+    /// Load a file URL the initial snapshot did not contain. An actor worker may also name
+    /// its entry by absolute path; other computed specifiers retain the snapshot's authority.
+    /// The resulting plan uses canonical module keys, so dependencies already evaluated by
+    /// the snapshot keep their existing bindings and namespace identity.
+    fn load_runtime_module(
         &self,
         graph: &ModuleGraph,
         importer: &Path,
         request: &ModuleLoadRequest,
     ) -> Option<Result<ModulePlan, ModuleLoadError>> {
         let node = graph.module(importer)?;
-        if node.source != ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker) {
-            return None;
-        }
         let path = if request.specifier.starts_with("file:") {
             url::Url::parse(&request.specifier)
                 .ok()
                 .and_then(|url| url.to_file_path().ok())?
         } else {
+            if node.source != ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker) {
+                return None;
+            }
             let path = PathBuf::from(&request.specifier);
             if !path.is_absolute() {
                 return None;
@@ -437,7 +435,7 @@ impl GraphModuleLoader {
             path
         };
         Some(
-            self.actor_graph(graph.project_root(), &path)
+            self.runtime_graph(graph.project_root(), &path)
                 .and_then(|built| {
                     built
                         .import_plan_for_request(built.entry(), request.attributes.as_ref())
@@ -446,13 +444,14 @@ impl GraphModuleLoader {
         )
     }
 
-    fn actor_graph(
+    fn runtime_graph(
         &self,
         project_root: &Path,
         path: &Path,
     ) -> Result<Arc<ModuleGraph>, ModuleLoadError> {
+        // An already resolved request keeps its instance even if the file later disappears.
         if let Some(graph) = self
-            .actor_graphs
+            .runtime_graphs
             .lock()
             .ok()
             .and_then(|graphs| graphs.get(path).cloned())
@@ -461,15 +460,23 @@ impl GraphModuleLoader {
         }
         let not_found = |message: String| {
             ModuleLoadError::NotFound(format!(
-                "could not resolve actor module `{}`: {message}",
+                "could not resolve runtime module `{}`: {message}",
                 path.display()
             ))
         };
+        // File URLs name a file exactly: no extension or directory probing. Normalize the
+        // cache key as well as the module plan, including aliases containing `..` or symlinks.
+        let entry = std::fs::canonicalize(path).map_err(|error| not_found(error.to_string()))?;
+        if let Some(graph) = self
+            .runtime_graphs
+            .lock()
+            .ok()
+            .and_then(|graphs| graphs.get(&entry).cloned())
+        {
+            return Ok(graph);
+        }
         let resolver = kiln_module_resolver::NodeRuntimeResolver::new(project_root)
             .map_err(|error| not_found(error.to_string()))?;
-        // An absolute ESM name is the file itself, as node's loader treats it: no extension
-        // or directory probing.
-        let entry = std::fs::canonicalize(path).map_err(|error| not_found(error.to_string()))?;
         let built = ModuleGraph::build_node(
             &entry,
             resolver,
@@ -489,8 +496,9 @@ impl GraphModuleLoader {
             _ => ModuleLoadError::Unsupported(error.to_string()),
         })?;
         let built = Arc::new(built);
-        if let Ok(mut graphs) = self.actor_graphs.lock() {
+        if let Ok(mut graphs) = self.runtime_graphs.lock() {
             graphs.insert(path.to_path_buf(), Arc::clone(&built));
+            graphs.insert(entry, Arc::clone(&built));
         }
         Ok(built)
     }
@@ -577,7 +585,7 @@ impl ModuleLoaderService for GraphModuleLoader {
                 None
             });
         let Some(target) = target else {
-            if let Some(answer) = self.load_actor_module(graph, &importer, &request) {
+            if let Some(answer) = self.load_runtime_module(graph, &importer, &request) {
                 return answer;
             }
             return Err(ModuleLoadError::NotFound(format!(
