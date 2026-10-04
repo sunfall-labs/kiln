@@ -26,3 +26,17 @@ the released-alias retry and the complete native stress corpus. Do not skip the 
 ownership certification to accept a graph with a real sender alias.
 
 Binary/provider identities and complete retained output are in [evidence.json](evidence.json).
+
+## Authority localization
+
+A diagnostic build based on `340a7d88` records a clear first request, followed
+by `KILN_C99_GRAPH_MACHINE_ALIAS` for both the retained-alias refusal and the
+released-alias retry. Both refusals encounter the same raw pointer at word
+index 328 in the captured machine span. A debugger frame inventory places
+that slot inside the provider Rust `kiln_realm_drive` stack frame. The exact
+local owner and its liveness remain unproven; do not exclude this span or
+weaken certification on this evidence alone.
+
+`machine-witness-evidence.json` records diagnostic source/binary digests and
+retains full raw and debugger logs. These diagnostic prints are confined to an
+isolated worktree and are not integrated into production.
