@@ -25,6 +25,18 @@ ok = pairs.length === 2 * n;
 for (let i = 0; i < n; i++) ok = ok && pairs[2 * i] === i && pairs[2 * i + 1] === "q" + (i % 7);
 console.log("flat pairs", ok);
 
+// Flattening removes only the callback's outer array. Retain its inner arrays while a
+// sequential replay allocates new arrays and collects, then read every retained child.
+const nestedOnce = r => [[r.id], r.id];
+const nested = rows.parallelFlatMap(nestedOnce);
+const nestedReplay = rows.flatMap(nestedOnce);
+ok = nested.length === 2 * n && nestedReplay.length === nested.length;
+for (let i = 0; i < n; i++) {
+  ok = ok && nested[2 * i][0] === i && nested[2 * i + 1] === i;
+  ok = ok && nestedReplay[2 * i][0] === i && nestedReplay[2 * i + 1] === i;
+}
+console.log("retained flat children", ok);
+
 const kept = rows.parallelFilter(r => ("k" + r.qty).length > 1 && r.qty > 3);
 ok = true;
 for (let i = 0, k = 0; i < n; i++) if (rows[i].qty > 3) ok = ok && kept[k++] === rows[i];
