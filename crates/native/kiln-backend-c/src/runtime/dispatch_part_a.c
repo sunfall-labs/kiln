@@ -2941,6 +2941,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     if (status == KILN_C99_OK)
                         status = kiln_c99_put(NULL, record, "removed", 7, kiln_c99_boolean(0), 0, NULL);
                     if (status == KILN_C99_OK) status = kiln_c99_array_push(listeners, record);
+                    if (status == KILN_C99_OK) {
+                        kiln_value dispatch;
+                        status = kiln_c99_get(host, receiver, "@@abort-dispatch", 16, &dispatch, depth,
+                                              thrown);
+                        if (status == KILN_C99_OK && dispatch.tag == KILN_VALUE_ARRAY)
+                            status = kiln_c99_array_push(dispatch, record);
+                    }
                     if (status != KILN_C99_OK) return status;
                 }
             }

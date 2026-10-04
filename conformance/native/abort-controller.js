@@ -45,9 +45,13 @@ dispatch.signal.addEventListener("abort", () => {
   dispatch.signal.removeEventListener("abort", removedListener);
   dispatch.signal.addEventListener("abort", () => order.push("late"));
 });
+let onceAgain = false;
 const once = () => {
   order.push("once");
-  dispatch.signal.removeEventListener("abort", once);
+  if (!onceAgain) {
+    onceAgain = true;
+    dispatch.signal.addEventListener("abort", once, { once: true });
+  }
 };
 dispatch.signal.addEventListener("abort", once, { once: true });
 const removedListener = () => order.push("removed");

@@ -948,12 +948,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                     if !duplicate {
-                        listeners.borrow_mut().push(ordinary_object([
+                        let record = ordinary_object([
                             ("listener".to_owned(), listener),
                             ("capture".to_owned(), Value::Boolean(capture)),
                             ("once".to_owned(), Value::Boolean(once)),
                             ("removed".to_owned(), Value::Boolean(false)),
-                        ]));
+                        ]);
+                        listeners.borrow_mut().push(record.clone());
+                        if let Some(Value::Array(dispatch)) =
+                            object.borrow().get_own("@@abort-dispatch").cloned()
+                        {
+                            dispatch.borrow_mut().push(record);
+                        }
                     }
                 }
                 return Ok(Value::Undefined);

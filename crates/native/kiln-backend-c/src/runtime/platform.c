@@ -499,6 +499,7 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     kiln_value event;
     size_t index;
     int single_listener;
+    int dispatch_active;
     int status;
     if (signal.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
     status = kiln_c99_get(host, signal, "aborted", 7, &aborted, depth, thrown);
@@ -525,7 +526,9 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     }
     single_listener = status == KILN_C99_OK &&
                       (listeners.tag != KILN_VALUE_ARRAY ||
-                       kiln_c99_array_of(listeners)->count <= 1);
+                       kiln_c99_array_of(listeners)->count +
+                               (kiln_c99_is_callable(handler) ? 1u : 0u) <=
+                           1);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&event);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, event, "type", 4, kiln_c99_copy_text("abort", 5), 0, NULL);
@@ -534,31 +537,20 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, event, "currentTarget", 12, signal, 0, NULL);
     if (status != KILN_C99_OK) return status;
+    dispatch_active = listeners.tag == KILN_VALUE_ARRAY && !single_listener;
+    if (dispatch_active) {
+        status = kiln_c99_put(NULL, signal, "@@abort-dispatch", 16, snapshot, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+    }
     if (kiln_c99_is_callable(handler)) {
         kiln_value ignored;
         status = kiln_c99_call(host, &ignored, handler, signal, &event, 1, depth, thrown);
-        if (status != KILN_C99_OK) return status;
     }
-    if (listeners.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
-    /* Node's multi-listener path dispatches registrations appended while a callback is running.
-     * Preserve the single-listener fast path's fixed callback behavior, and retain stable records
-     * so removal cannot shift the dispatch cursor or suppress an unrelated listener. */
-    {
-        kiln_array *registered = kiln_c99_array_of(listeners);
-        kiln_array *pending = kiln_c99_array_of(snapshot);
-        for (size_t at = 0; !single_listener && at < registered->count; ++at) {
-            kiln_value record = kiln_val_to_boundary(registered->elements[at]);
-            size_t seen;
-            for (seen = 0; seen < pending->count; ++seen)
-                if (kiln_c99_strict_equal(kiln_val_to_boundary(pending->elements[seen]), record))
-                    break;
-            if (seen == pending->count) {
-                status = kiln_c99_array_push(snapshot, record);
-                if (status != KILN_C99_OK) return status;
-            }
-        }
-    }
-    for (index = 0; index < kiln_c99_array_of(snapshot)->count; ++index) {
+    /* The signal points at this snapshot only during multi-listener dispatch. Registrations
+     * append their new records directly; removed records remain stable and are skipped. */
+    for (index = 0; status == KILN_C99_OK && listeners.tag == KILN_VALUE_ARRAY &&
+                    index < kiln_c99_array_of(snapshot)->count;
+         ++index) {
         kiln_value ignored;
         kiln_value record = kiln_val_to_boundary(kiln_c99_array_of(snapshot)->elements[index]);
         kiln_value removed, listener, once;
@@ -567,16 +559,53 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
             status = kiln_c99_get(host, record, "listener", 8, &listener, depth, thrown);
         if (status == KILN_C99_OK)
             status = kiln_c99_get(host, record, "once", 4, &once, depth, thrown);
-        if (status != KILN_C99_OK) return status;
+        if (status != KILN_C99_OK) break;
         if (kiln_c99_truthy(removed)) continue;
         if (kiln_c99_truthy(once)) {
             status = kiln_c99_put(NULL, record, "removed", 7, kiln_c99_boolean(1), 0, NULL);
-            if (status != KILN_C99_OK) return status;
+            if (status != KILN_C99_OK) break;
+            if (!dispatch_active) {
+                kiln_array *registered = kiln_c99_array_of(listeners);
+                size_t write = 0;
+                for (size_t at = 0; at < registered->count; ++at) {
+                    if (kiln_c99_strict_equal(kiln_val_to_boundary(registered->elements[at]), record))
+                        continue;
+                    if (write != at)
+                        kiln_c99_heap_store_val(registered, &registered->elements[write],
+                                                registered->elements[at]);
+                    ++write;
+                }
+                registered->count = write;
+            }
+        }
+        if (status != KILN_C99_OK) break;
+        status = kiln_c99_call(host, &ignored, listener, signal, &event, 1, depth, thrown);
+    }
+
+    {
+        int dispatch_status = status;
+        int cleanup_status = KILN_C99_OK;
+        if (dispatch_active)
+            cleanup_status = kiln_c99_put(NULL, signal, "@@abort-dispatch", 16,
+                                           kiln_c99_undefined(), 0, NULL);
+        if (listeners.tag == KILN_VALUE_ARRAY) {
             kiln_array *registered = kiln_c99_array_of(listeners);
             size_t write = 0;
             for (size_t at = 0; at < registered->count; ++at) {
-                if (kiln_c99_strict_equal(kiln_val_to_boundary(registered->elements[at]), record))
-                    continue;
+                kiln_value record = kiln_val_to_boundary(registered->elements[at]);
+                kiln_value removed;
+                int read_status = kiln_c99_get(NULL, record, "removed", 7, &removed, depth, NULL);
+                if (read_status != KILN_C99_OK) {
+                    if (cleanup_status == KILN_C99_OK) cleanup_status = read_status;
+                    for (; at < registered->count; ++at) {
+                        if (write != at)
+                            kiln_c99_heap_store_val(registered, &registered->elements[write],
+                                                    registered->elements[at]);
+                        ++write;
+                    }
+                    break;
+                }
+                if (kiln_c99_truthy(removed)) continue;
                 if (write != at)
                     kiln_c99_heap_store_val(registered, &registered->elements[write],
                                             registered->elements[at]);
@@ -584,26 +613,9 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
             }
             registered->count = write;
         }
-        status = kiln_c99_call(host, &ignored, listener, signal, &event, 1, depth, thrown);
-        if (status != KILN_C99_OK) return status;
-        {
-            kiln_array *registered = kiln_c99_array_of(listeners);
-            kiln_array *pending = kiln_c99_array_of(snapshot);
-            for (size_t at = 0; !single_listener && at < registered->count; ++at) {
-                kiln_value candidate = kiln_val_to_boundary(registered->elements[at]);
-                size_t seen;
-                for (seen = 0; seen < pending->count; ++seen)
-                    if (kiln_c99_strict_equal(
-                            kiln_val_to_boundary(pending->elements[seen]), candidate))
-                        break;
-                if (seen == pending->count) {
-                    status = kiln_c99_array_push(snapshot, candidate);
-                    if (status != KILN_C99_OK) return status;
-                }
-            }
-        }
+        status = dispatch_status != KILN_C99_OK ? dispatch_status : cleanup_status;
     }
-    return KILN_C99_OK;
+    return status;
 }
 
 /* CompressionStream owns one incremental flate2 codec. The opaque state is attached to the
