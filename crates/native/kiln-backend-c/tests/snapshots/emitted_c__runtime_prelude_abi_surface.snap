@@ -3291,6 +3291,10 @@ typedef struct kiln_builtin_member_entry {
 static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_MEMBER_COUNT];
 static size_t kiln_c99_builtin_member_index_len;
 static int kiln_c99_builtin_member_index_ready;
+typedef struct kiln_builtin_method_name_entry {
+static kiln_builtin_method_name_entry kiln_c99_builtin_method_name_index[KILN_C99_SURFACE_MEMBER_COUNT];
+static size_t kiln_c99_builtin_method_name_index_len;
+static int kiln_c99_builtin_method_name_entry_before(
 static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry *left,
 static void kiln_c99_builtin_member_index_build(void) {
 static size_t kiln_c99_builtin_member_lower_bound(uint64_t builtin, const char *key, size_t key_len) {

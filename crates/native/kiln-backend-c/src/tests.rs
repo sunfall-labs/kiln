@@ -3,6 +3,9 @@ use kiln_ir::Builtin;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
+mod c99_state_owners;
+use c99_state_owners::{C99_MUTABLE_STATE_OWNERS, C99StateOwner};
+
 mod fixture_cache;
 
 fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {

@@ -1206,7 +1206,11 @@ fn runtime_prelude_size() {
     // Reviewed 2026-10-03: remembered-owner minor collection adds the generation barrier,
     // diagnostic audit and safe full-collection fallback; it remains in the existing heap
     // runtime and adds 55 prelude lines without duplicating a runtime section.
-    const CEILING_LINES: usize = 84_500;
+    // Reviewed 2026-10-04: private HTTP cancellation/late-close state, the canonical
+    // method-name index, and object-owner/finalizer fixes add 105 net runtime lines.
+    // The minimal unit is 84,572 lines; these extend existing kernels, with no
+    // duplicated section or new public C builtin implementation.
+    const CEILING_LINES: usize = 85_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
