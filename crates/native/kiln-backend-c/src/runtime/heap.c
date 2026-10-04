@@ -8536,6 +8536,14 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         break;
     }
     case KILN_GC_OBJECT:
+        /* Ordinary inline-shaped objects own no side allocations. Avoid passing their
+         * null buffers through the general finalizer on every dead literal. Interior
+         * tail slots belong to this GC block too; the ownership predicate excludes them. */
+        if (((kiln_object *)payload)->properties == NULL &&
+            ((kiln_object *)payload)->dictionary_index == NULL &&
+            ((kiln_object *)payload)->sealed == NULL &&
+            !kiln_c99_object_slots_owned((kiln_object *)payload) &&
+            ((kiln_object *)payload)->elements == NULL) break;
         kiln_c99_object_properties_free((kiln_object *)payload);
         if (((kiln_object *)payload)->sealed != NULL) {
             free(kiln_c99_sealed_values_of((kiln_object *)payload));
