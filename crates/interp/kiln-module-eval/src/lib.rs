@@ -2004,7 +2004,8 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
         // if any accessor exists, read every key in order because a getter can mutate later keys.
         let data = match &value {
             Value::Object(object) => {
-                let object = object.borrow();
+                let mut object = object.borrow_mut();
+                object.refresh_namespace();
                 keys.iter()
                     .map(|key| match object.get_own_property(key) {
                         Some(Property::Value(value)) => Some((key.clone(), value.clone())),
@@ -2180,12 +2181,11 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                         })?;
                         std::rc::Rc::new(std::cell::RefCell::new(read_through_cell(&value)))
                     } else {
-                        let mut entries: Vec<_> = provider
-                            .iter()
-                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
-                            .collect();
-                        entries.sort_by(|left, right| left.0.cmp(&right.0));
-                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                        // require(ESM) returns the canonical namespace, whose properties
+                        // remain live views of the exporting module's binding cells.
+                        std::rc::Rc::new(std::cell::RefCell::new(
+                            self.records.namespace(&dependency.target),
+                        ))
                     }
                 } else {
                     return Err(ExecutionError::Host {
@@ -2552,6 +2552,7 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                             }
                         });
                     }
+                    return Ok(self.records.namespace(&target));
                 }
                 return Err(ExecutionError::Host {
                     instruction,

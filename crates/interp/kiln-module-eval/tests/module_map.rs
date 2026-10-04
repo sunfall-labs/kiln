@@ -492,3 +492,40 @@ fn commonjs_namespace_failure_is_cached_without_invalidating_require() {
         &["true true 1 true"],
     );
 }
+
+#[test]
+fn commonjs_namespace_snapshots_cells_from_required_esm() {
+    let project = Project::new();
+    project.write(
+        "live.mjs",
+        "export let n = 1; export function bump() { n++; }",
+    );
+    project.write(
+        "proxy.cjs",
+        "exports.n = undefined; exports.bump = undefined; module.exports = require('./live.mjs');",
+    );
+    expect_lines(
+        &project,
+        "import { n, bump } from './proxy.cjs'; import live from './proxy.cjs'; bump(); console.log(n, live.n);",
+        &["1 2"],
+    );
+}
+
+#[test]
+fn require_esm_keeps_namespace_identity_and_late_commonjs_snapshot() {
+    let project = Project::new();
+    project.write(
+        "live.mjs",
+        "export let n = 1; export function bump() { n++; }",
+    );
+    project.write(
+        "proxy.cjs",
+        "exports.n = undefined; exports.bump = undefined; module.exports = require('./live.mjs');",
+    );
+    project.write("loader.cjs", "exports.load = () => require('./proxy.cjs');");
+    expect_lines(
+        &project,
+        "import loader from './loader.cjs'; const live = loader.load(); live.bump(); const esm = await import('./live.mjs'); const proxy = await import('./proxy.cjs'); console.log(live === esm, proxy.default === esm, proxy.n, live.n); live.bump(); console.log(proxy.n, live.n);",
+        &["true true 2 2", "2 3"],
+    );
+}
