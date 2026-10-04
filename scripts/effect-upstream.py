@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run pinned upstream Effect tests as TypeScript, with Bun as the reference."""
+"""Run pinned Effect tests as TypeScript with separate Bun and Node/Vitest oracles."""
 import argparse
 import concurrent.futures
 import fcntl
@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 import shutil
 import signal
@@ -20,11 +21,20 @@ HARNESS = REPO / 'conformance/effect-upstream'
 PIN = json.loads((HARNESS / 'corpus.json').read_text())
 RUNTIME_TARGETS = json.loads((HARNESS / 'runtime-targets.json').read_text())
 ENGINE_MODE_POLICY = json.loads((HARNESS / 'engine-mode-policy.json').read_text())
+NODE_VITEST_ORACLE_PATH = HARNESS / 'node-vitest-reference.json'
+NODE_VITEST_ORACLE = json.loads(NODE_VITEST_ORACLE_PATH.read_text())
+NODE_VITEST_MAPPINGS_PATH = HARNESS / 'node-vitest-case-mapping.json'
+NODE_VITEST_MAPPINGS = json.loads(NODE_VITEST_MAPPINGS_PATH.read_text())
+NODE_VITEST_GAPS_PATH = HARNESS / 'node-vitest-comparison-gaps.json'
+NODE_VITEST_GAPS = json.loads(NODE_VITEST_GAPS_PATH.read_text())
 PREFIX = 'KILN_EFFECT '
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+NODE_VITEST_ORACLE_SHA256 = digest(NODE_VITEST_ORACLE_PATH)
 
 
 def write_json(path, value):
@@ -302,10 +312,66 @@ def aggregate(report, engines):
             'reference_mode_mismatches': sum(row['matches_reference_modes'] is False for row in rows),
             'reference_outcome_mismatches': sum(row['matches_reference_outcomes'] is False for row in rows),
             'engine_conditional_mode_cases': sum(len(row.get('engine_conditional_mode_cases', [])) for row in rows),
+            'node_vitest_mapped_cases': sum((row.get('node_vitest') or {}).get('mapped_cases', 0) for row in rows),
+            'node_vitest_unmapped_cases': sum(len((row.get('node_vitest') or {}).get('unmapped_cases', [])) for row in rows),
+            'node_vitest_official_unmapped_cases': sum(len((row.get('node_vitest') or {}).get('official_unmapped_cases', [])) for row in rows),
+            'node_vitest_mapping_errors': sum(len((row.get('node_vitest') or {}).get('mapping_errors', [])) for row in rows),
+            'node_vitest_mode_mismatches': sum(len((row.get('node_vitest') or {}).get('mode_mismatches', [])) for row in rows),
+            'node_vitest_outcome_mismatches': sum(len((row.get('node_vitest') or {}).get('outcome_mismatches', [])) for row in rows),
+            'node_vitest_known_source_transform_gaps': sum(len((row.get('node_vitest') or {}).get('known_source_transform_gaps', [])) for row in rows),
+            'bun_adapter_unsupported_cases': sum(len(row.get('bun_adapter_unsupported_cases', [])) for row in rows),
         }
     return {'reported_files': len(report['files']),
             'pending_files': report['selected'] - len(report['files']),
             'deferred_files': report['deferred'], 'engines': totals}
+
+
+def comparison_verdicts(report, engines):
+    rows = report['files']
+    result = {'node_vitest_conformance': {}, 'direct_bun_differential': {},
+              'bun_adapter_unsupported': []}
+    for engine in ('native', 'interpreter'):
+        if engine not in engines:
+            result['node_vitest_conformance'][engine] = {'status': 'not_run'}
+            continue
+        comparisons = [row['engines'][engine].get('node_vitest', {}) for row in rows
+                       if engine in row['engines']]
+        if not comparisons:
+            result['node_vitest_conformance'][engine] = {'status': 'not_run'}
+            continue
+        incomplete = any(c.get('complete') is not True for c in comparisons)
+        mode_mismatches = sum(len(c.get('mode_mismatches', [])) for c in comparisons)
+        outcome_mismatches = sum(len(c.get('outcome_mismatches', [])) for c in comparisons)
+        mapped = sum(c.get('mapped_cases', 0) for c in comparisons)
+        unmapped = sum(len(c.get('unmapped_cases', [])) for c in comparisons)
+        official_unmapped = sum(len(c.get('official_unmapped_cases', [])) for c in comparisons)
+        status = 'incomplete' if incomplete else ('fail' if mode_mismatches or outcome_mismatches else 'pass')
+        result['node_vitest_conformance'][engine] = {
+            'status': status, 'mapped_cases': mapped, 'unmapped_direct_cases': unmapped,
+            'unmatched_official_cases': official_unmapped, 'mode_mismatches': mode_mismatches,
+            'outcome_mismatches': outcome_mismatches}
+    if 'bun' in engines and any(engine in engines for engine in ('native', 'interpreter')):
+        candidates = [
+            (engine, row['engines'][engine])
+            for engine in ('native', 'interpreter') for row in rows if engine in row['engines']]
+        if not candidates:
+            result['direct_bun_differential'] = {'status': 'not_run'}
+            return result
+        inv_mismatches = sum(candidate.get('matches_reference_inventory') is False for _, candidate in candidates)
+        mode_mismatches = sum(candidate.get('matches_reference_modes') is False for _, candidate in candidates)
+        outcome_mismatches = sum(candidate.get('matches_reference_outcomes') is False for _, candidate in candidates)
+        unknown = any(candidate.get('matches_reference_inventory') is None or
+                      candidate.get('matches_reference_modes') is None or
+                      candidate.get('matches_reference_outcomes') is None for _, candidate in candidates)
+        status = 'diverged' if inv_mismatches or mode_mismatches or outcome_mismatches else ('incomplete' if unknown else 'match')
+        result['direct_bun_differential'] = {'status': status,
+                                             'inventory_mismatches': inv_mismatches,
+                                             'mode_mismatches': mode_mismatches,
+                                             'outcome_mismatches': outcome_mismatches}
+    result['bun_adapter_unsupported'] = [
+        {'file': row['file'], **case}
+        for row in rows for case in row['engines'].get('bun', {}).get('bun_adapter_unsupported_cases', [])]
+    return result
 
 
 def compare_reference(reference, candidate, engine, file_name):
@@ -400,6 +466,185 @@ def compare_reference(reference, candidate, engine, file_name):
             'conditional_modes': conditional_modes}
 
 
+def node_vitest_case_map(file_name, inventory, source_sha256):
+    """Map direct-source cases to official Vitest cases without positional fallback."""
+    oracle_file = NODE_VITEST_ORACLE['files'].get(file_name)
+    if oracle_file is None:
+        return {'complete': False, 'mapped': [], 'unmapped': [
+            {'id': case.get('id'), 'reason': 'file_absent_from_node_oracle'} for case in inventory or []],
+            'official_unmapped': [], 'mapping_errors': ['file absent from pinned Node/Vitest oracle']}
+    if source_sha256 != oracle_file['source_sha256']:
+        return {'complete': False, 'mapped': [], 'unmapped': [
+            {'id': case.get('id'), 'reason': 'source_digest_mismatch'} for case in inventory or []],
+            'official_unmapped': [case['id'] for case in oracle_file['cases']],
+            'mapping_errors': [{'expected': oracle_file['source_sha256'], 'actual': source_sha256}]}
+
+    exact = {}
+    for index, case in enumerate(oracle_file['cases']):
+        exact.setdefault(case['id'], []).append(index)
+    explicit = [row for row in NODE_VITEST_MAPPINGS['mappings'] if row['file'] == file_name]
+    explicit_by_id = {}
+    mapping_errors = []
+    for row in explicit:
+        if row['source_sha256'] != source_sha256 or row['direct_id'] in explicit_by_id:
+            mapping_errors.append({'direct_id': row['direct_id'], 'reason': 'stale_or_duplicate_mapping'})
+        explicit_by_id[row['direct_id']] = row
+
+    selected = set()
+    mapped = []
+    unmapped = []
+    direct_ids = [case.get('id') for case in inventory or []]
+    if len(direct_ids) != len(set(direct_ids)):
+        mapping_errors.append({'reason': 'direct_inventory_contains_duplicate_ids'})
+    for direct in inventory or []:
+        direct_id = direct.get('id')
+        candidates = exact.get(direct_id, [])
+        node_index = candidates[0] if len(candidates) == 1 else None
+        explicit_row = explicit_by_id.get(direct_id)
+        if explicit_row is not None:
+            matches = exact.get(explicit_row['official_id'], [])
+            occurrence = explicit_row.get('official_occurrence')
+            if not explicit_row.get('source_line') or not explicit_row.get('evidence'):
+                mapping_errors.append({'direct_id': direct_id, 'reason': 'mapping_lacks_source_evidence'})
+            if len(candidates) == 1:
+                mapping_errors.append({'direct_id': direct_id, 'reason': 'explicit_override_of_unique_exact_match'})
+            if not isinstance(occurrence, int) or occurrence < 0 or occurrence >= len(matches):
+                mapping_errors.append({'direct_id': direct_id, 'reason': 'invalid_official_occurrence'})
+            else:
+                node_index = matches[occurrence]
+        if node_index is None:
+            unmapped.append({'id': direct_id, 'reason': 'missing_exact_or_explicit_mapping',
+                             'official_candidates': len(candidates)})
+            continue
+        if node_index in selected:
+            mapping_errors.append({'direct_id': direct_id, 'reason': 'non_one_to_one_mapping'})
+            unmapped.append({'id': direct_id, 'reason': 'non_one_to_one_mapping',
+                             'official_candidates': len(candidates)})
+            continue
+        selected.add(node_index)
+        mapped.append({'direct_id': direct_id, 'official_index': node_index,
+                       'official': oracle_file['cases'][node_index]})
+    official_unmapped = [{'index': i, 'id': case['id']} for i, case in enumerate(oracle_file['cases'])
+                         if i not in selected]
+    return {'complete': not unmapped and not official_unmapped and not mapping_errors,
+            'mapped': mapped, 'unmapped': unmapped, 'official_unmapped': official_unmapped,
+            'mapping_errors': mapping_errors}
+
+
+def compare_node_vitest(candidate, file_name, source_sha256):
+    inventory = candidate.get('inventory')
+    cases = candidate.get('cases')
+    if inventory is None or cases is None:
+        return {'applicable': True, 'complete': False, 'matches_modes': None,
+                'matches_outcomes': None, 'mapped_cases': 0, 'unmapped_cases': [],
+                'official_unmapped_cases': [], 'mapping_errors': ['candidate inventory unavailable'],
+                'mode_mismatches': [], 'outcome_mismatches': [], 'known_source_transform_gaps': []}
+    mapping = node_vitest_case_map(file_name, inventory, source_sha256)
+    candidate_by_id = {case.get('id'): case for case in cases}
+    mode_by_id = {case.get('id'): case.get('mode') for case in inventory}
+    mode_mismatches = []
+    outcome_mismatches = []
+    gap_ids = {(row['file'], row['id']): row for row in NODE_VITEST_GAPS['cases']}
+    known_gaps = []
+    for pair in mapping['mapped']:
+        direct_id = pair['direct_id']
+        official = pair['official']
+        actual = candidate_by_id.get(direct_id)
+        if actual is None:
+            outcome_mismatches.append({'id': direct_id, 'expected': official['outcome'],
+                                       'actual': 'missing_case_record'})
+            continue
+        if mode_by_id.get(direct_id) != official['mode']:
+            mode_mismatches.append({'id': direct_id, 'expected': official['mode'],
+                                    'actual': mode_by_id.get(direct_id)})
+        if actual.get('outcome') != official['outcome']:
+            detail = {'id': direct_id, 'expected': official['outcome'], 'actual': actual.get('outcome')}
+            gap = gap_ids.get((file_name, direct_id))
+            if gap is not None:
+                detail['classification'] = gap['classification']
+                detail['reason'] = gap['reason']
+                known_gaps.append(detail)
+            outcome_mismatches.append(detail)
+    return {'applicable': True, 'complete': mapping['complete'],
+            'matches_modes': not mode_mismatches if mapping['complete'] else None,
+            'matches_outcomes': not outcome_mismatches if mapping['complete'] else None,
+            'mapped_cases': len(mapping['mapped']), 'unmapped_cases': mapping['unmapped'],
+            'official_unmapped_cases': mapping['official_unmapped'],
+            'mapping_errors': mapping['mapping_errors'],
+            'mode_mismatches': mode_mismatches, 'outcome_mismatches': outcome_mismatches,
+            'known_source_transform_gaps': known_gaps}
+
+
+def bun_adapter_unsupported(cases):
+    """Keep adapter omissions distinct from Bun runtime outcomes and upstream skips."""
+    return [{'id': case['id'], 'error': case.get('error')}
+            for case in cases or []
+            if isinstance(case.get('error'), str) and 'HARNESS_UNSUPPORTED:' in case['error']]
+
+
+def validate_node_vitest_policy():
+    if NODE_VITEST_ORACLE.get('schema') != 1 or NODE_VITEST_ORACLE.get('pin') != PIN['commit']:
+        raise ValueError('Node/Vitest oracle schema or Effect pin mismatch')
+    summary = NODE_VITEST_ORACLE.get('summary', {})
+    if (summary.get('files') != len(PIN['files']) or summary.get('registered') != 11019 or
+            summary.get('pass') != 10974 or summary.get('fail') != 0 or summary.get('skip') != 45 or
+            set(NODE_VITEST_ORACLE.get('files', {})) != set(PIN['files'])):
+        raise ValueError('Node/Vitest oracle coverage does not match the pinned full corpus')
+    if NODE_VITEST_MAPPINGS.get('schema') != 1 or NODE_VITEST_MAPPINGS.get('oracle_sha256') != NODE_VITEST_ORACLE_SHA256:
+        raise ValueError('Node/Vitest explicit mapping file does not match the oracle digest')
+    if NODE_VITEST_GAPS.get('schema') != 1 or NODE_VITEST_GAPS.get('oracle_sha256') != NODE_VITEST_ORACLE_SHA256:
+        raise ValueError('Node/Vitest comparability-gap file does not match the oracle digest')
+    for name, file in NODE_VITEST_ORACLE.get('files', {}).items():
+        if len(file.get('source_sha256', '')) != 64:
+            raise ValueError('Node/Vitest oracle has invalid source digest for ' + name)
+        if any(case.get('mode') not in ('run', 'skip') or case.get('outcome') not in ('pass', 'fail', 'skip')
+               for case in file.get('cases', [])):
+            raise ValueError('Node/Vitest oracle has invalid mode/outcome for ' + name)
+    unresolved = NODE_VITEST_ORACLE.get('unmapped_direct_cases', [])
+    categories = NODE_VITEST_ORACLE.get('summary', {}).get('unmapped_categories', {})
+    category_counts = {}
+    for category in ('parameterized_title_label', 'occurrence_disambiguated_label', 'ambiguous_official_title'):
+        rows = [row for row in unresolved if
+                (('[case ' in row['direct_id']) if category == 'parameterized_title_label' else
+                 ('[occurrence ' in row['direct_id']) if category == 'occurrence_disambiguated_label' else
+                 (row['reason'] == 'ambiguous_official_title'))]
+        category_counts[category] = {'cases': len(rows), 'files': len({row['file'] for row in rows})}
+        if categories.get(category) != category_counts[category]:
+            raise ValueError('Node/Vitest unmapped-case category totals are inconsistent: ' + category)
+        for row in rows:
+            if row.get('source_sha256') != NODE_VITEST_ORACLE['files'].get(row['file'], {}).get('source_sha256'):
+                raise ValueError('unmapped direct case has stale source digest: ' + repr(row['direct_id']))
+    if sum(category_counts[k]['cases'] for k in category_counts) != summary.get('unmapped_direct_cases'):
+        raise ValueError('Node/Vitest unmapped-case total is inconsistent')
+    unique_official_ids = sum(count == 1 for file in NODE_VITEST_ORACLE['files'].values()
+                              for count in Counter(c['id'] for c in file['cases']).values())
+    auto = unique_official_ids - category_counts['parameterized_title_label']['cases']
+    if auto != summary.get('automatic_exact_unique_mappings'):
+        raise ValueError('Node/Vitest automatic mapping total is inconsistent')
+    seen = set()
+    for row in NODE_VITEST_MAPPINGS['mappings']:
+        key = (row.get('file'), row.get('direct_id'))
+        if key in seen:
+            raise ValueError('duplicate explicit Node/Vitest mapping: ' + repr(key))
+        seen.add(key)
+        if row.get('source_sha256') != NODE_VITEST_ORACLE.get('files', {}).get(row.get('file'), {}).get('source_sha256'):
+            raise ValueError('explicit Node/Vitest mapping has stale source digest: ' + repr(key))
+        if not row.get('evidence') or not isinstance(row.get('source_line'), int) or row['source_line'] < 1:
+            raise ValueError('explicit Node/Vitest mapping lacks source evidence: ' + repr(key))
+    gap_keys = set()
+    for row in NODE_VITEST_GAPS.get('cases', []):
+        key = (row.get('file'), row.get('id'))
+        if key in gap_keys:
+            raise ValueError('duplicate Node/Vitest source-transformation gap: ' + repr(key))
+        gap_keys.add(key)
+        oracle_file = NODE_VITEST_ORACLE['files'].get(row.get('file'))
+        if (oracle_file is None or oracle_file.get('source_sha256') != row.get('source_sha256') or
+                not any(case['id'] == row.get('id') for case in oracle_file['cases']) or
+                not row.get('classification') or not row.get('reason') or
+                not isinstance(row.get('source_line'), int) or row['source_line'] < 1):
+            raise ValueError('invalid Node/Vitest source-transformation gap: ' + repr(key))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workspace', type=Path, default=Path.home() / '.cache/kiln' / ('effect-direct-' + PIN['commit'][:12]))
@@ -415,6 +660,10 @@ def main():
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--kiln-memory-mb', type=int, default=8192, help='hard address-space limit per kiln process (children inherit)')
     args = parser.parse_args()
+    try:
+        validate_node_vitest_policy()
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.jobs < 1 or args.timeout <= 0 or args.kiln_memory_mb < 1 or args.runtime_jobs < 1:
         parser.error('jobs and timeout must be positive')
     workspace = args.workspace.resolve()
@@ -463,6 +712,18 @@ def main():
             versions[engine] = subprocess.check_output(cmd, text=True).strip()
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
+                  'node_vitest_oracle': {
+                      'file': str(NODE_VITEST_ORACLE_PATH.relative_to(REPO)),
+                      'sha256': NODE_VITEST_ORACLE_SHA256,
+                      'official_report_sha256': NODE_VITEST_ORACLE['provenance']['official_report_sha256'],
+                      'node': NODE_VITEST_ORACLE['provenance']['node'],
+                      'vitest': NODE_VITEST_ORACLE['provenance']['vitest'],
+                      'case_mapping': 'unique exact direct-source ID or a versioned source-anchored one-to-one exception; no positional fallback',
+                      'mapping_file': str(NODE_VITEST_MAPPINGS_PATH.relative_to(REPO)),
+                      'mapping_sha256': digest(NODE_VITEST_MAPPINGS_PATH),
+                      'gaps_file': str(NODE_VITEST_GAPS_PATH.relative_to(REPO)),
+                      'gaps_sha256': digest(NODE_VITEST_GAPS_PATH),
+                  },
                   'engine_mode_policy': {'file': 'conformance/effect-upstream/engine-mode-policy.json',
                                          'sha256': digest(HARNESS / 'engine-mode-policy.json'),
                                          'cases': ENGINE_MODE_POLICY['cases']},
@@ -536,6 +797,13 @@ def main():
                 envelope['reference_outcome_mismatches'] = comparison.get('reference_outcome_mismatches', [])
                 envelope['candidate_outcome_mismatches'] = comparison.get('candidate_outcome_mismatches', [])
                 envelope['engine_conditional_mode_cases'] = comparison['conditional_modes']
+                if engine == 'bun':
+                    envelope['node_vitest'] = {'applicable': False,
+                                               'reason': 'Bun is the direct-runtime differential reference, not the native conformance oracle.'}
+                    envelope['bun_adapter_unsupported_cases'] = bun_adapter_unsupported(envelope.get('cases'))
+                else:
+                    envelope['node_vitest'] = compare_node_vitest(
+                        envelope, name, report['source_sha256'].get(name))
                 write_json(out / name / (engine + '.json'), envelope)
             return row
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -551,8 +819,13 @@ def main():
                     and r['matches_reference_inventory'] is not False
                     and r['matches_reference_modes'] is not False
                     and r['matches_reference_outcomes'] is not False
-                    for row in report['files'] for r in row['engines'].values())
+                    and (engine == 'bun' or (
+                        r.get('node_vitest', {}).get('complete') is True
+                        and r.get('node_vitest', {}).get('matches_modes') is True
+                        and r.get('node_vitest', {}).get('matches_outcomes') is True))
+                    for row in report['files'] for engine, r in row['engines'].items())
         report['passed'] = clean
+        report['comparisons'] = comparison_verdicts(report, engines)
         write_json(out / 'report.json', report)
         print('aggregate', json.dumps(report['aggregate'], sort_keys=True), flush=True)
         return 0 if clean else 1

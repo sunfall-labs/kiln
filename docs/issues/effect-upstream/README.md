@@ -41,13 +41,31 @@ a mismatch, with mode and outcome mismatches reported independently. A Bun
 native pass into a Bun failure or skip, and the runner continues to report that direct-Bun
 divergence until the harness capability has an appropriate oracle.
 
+The complete Node/Vitest results are now a separate, archived oracle rather than only a summary.
+`conformance/effect-upstream/node-vitest-reference.json` stores its per-case pass/skip outcome,
+the Node 26.8.1 and Vitest 5.0.3 provenance, the official report SHA-256, and every pinned test source digest. Its counts match the direct Bun inventory: 11,019 cases across 322 files. Unique
+exact case IDs map automatically (10,713 cases). The remaining 306 parameterized or duplicate
+labels stay unmapped until `node-vitest-case-mapping.json` receives a versioned one-to-one mapping
+with source digest, source line and evidence; no ordinal fallback is allowed. Reports expose
+native/interpreter conformance to Node/Vitest separately from direct Bun differential results,
+and keep unmapped direct cases, unmatched official cases and adapter `HARNESS_UNSUPPORTED`
+results visible. These gaps prevent an incomplete mapping from being reported as complete
+conformance. The 306 outstanding mappings are itemized: 278 expanded parameterized labels in 24
+files, 14 repeated-label occurrence IDs in 7 files, and 14 ambiguous official titles in 7 files.
+
+`node-vitest-comparison-gaps.json` retains known runner transformation differences by exact case
+and source digest. In particular, Vitest transforms TypeScript before the Formatter function
+string assertion, while direct-source execution preserves original source. The report retains
+the official outcome and the actual direct-source outcome as a named mismatch; it never counts
+that case as a pass by normalization.
+
 `Formatter > format > function` remains a genuine direct-source failure. Its assertion expects
-tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The
-test source contains ten-space indentation and no semicolon; Node 26.8.1 with
-`--experimental-strip-types` preserves that source text, while Bun 1.4.2 reformats it to two
-spaces plus a semicolon. Kiln's direct TypeScript path also preserves the source text. The
-official Node/Vitest case passes because Vite transforms the source before execution, so that
-runner does not establish the direct-source `Function.prototype.toString()` expectation. Do not
+ tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The
+ test source has space indentation and no semicolon. Node 26.8.1 with
+ `--experimental-strip-types` and kiln preserve that source text; Bun 1.4.2 emits a different
+ space-indented form with a semicolon. The official Node/Vitest case passes because Vite transforms
+ the source before execution. The mismatch therefore describes the transformed Vitest fixture,
+ not a direct-source function-string contract. Do not
 change source fidelity or rewrite this assertion to make this case appear compatible; it needs
 an upstream/runtime contract decision. The pinned Bun failure remains recorded in
 `bun-reference.json`, and the native failure remains in

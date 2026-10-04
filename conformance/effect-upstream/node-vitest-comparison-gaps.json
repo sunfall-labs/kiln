@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "oracle_sha256": "f44c8b82d31d38f00e209475c02e2426d480bce17f92e5d4abc3e9bfedca6919",
+  "cases": [
+    {
+      "file": "Formatter",
+      "id": "Formatter > format > function",
+      "source_sha256": "9d816f3751b14da252a9fa3c5082668a08d8d2b683bd4878ae5da3d87f503399",
+      "source_line": 150,
+      "classification": "vitest_source_transform_difference",
+      "reason": "Official Vitest's Vite transform produces the tab-indented, semicolon-terminated function text expected by this assertion. Direct-source Node TypeScript stripping preserves the source text, while Bun emits a different space-indented form; both direct runtimes can fail this transformed-source assertion. Keep official and direct outcomes separate; do not normalize the mismatch."
+    }
+  ]
+}
