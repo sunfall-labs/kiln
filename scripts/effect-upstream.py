@@ -4,9 +4,11 @@ import argparse
 import concurrent.futures
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 import shutil
@@ -31,7 +33,116 @@ PREFIX = 'KILN_EFFECT '
 
 
 def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with path.open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+class NativeArtifactError(RuntimeError):
+    pass
+
+
+def _stderr_tail(path, limit=4096):
+    size = path.stat().st_size
+    with path.open('rb') as stream:
+        stream.seek(max(0, size - limit))
+        return stream.read(limit).decode(errors='replace').strip()
+
+
+def compress_native_artifact(binary, zstd, original_sha256=None):
+    """Compress and verify an artifact without loading it into Python memory."""
+    binary = Path(binary)
+    original_sha256 = original_sha256 or digest(binary)
+    original_size = binary.stat().st_size
+    archive = binary.with_name(binary.name + '.zst')
+    partial = archive.with_name(archive.name + '.partial')
+    try:
+        with tempfile.TemporaryDirectory(prefix='kiln-zstd-') as temporary:
+            stderr_path = Path(temporary) / 'zstd.stderr'
+            with partial.open('wb') as output, stderr_path.open('wb') as error_output:
+                result = subprocess.run([str(zstd), '-q', '-T1', '-c', '--', str(binary)],
+                                        stdout=output, stderr=error_output, check=False)
+            if result.returncode != 0:
+                raise NativeArtifactError('zstd compression exited ' + str(result.returncode)
+                                          + (': ' + _stderr_tail(stderr_path) if stderr_path.stat().st_size else ''))
+
+            archive_sha256 = digest(partial)
+            roundtrip = hashlib.sha256()
+            roundtrip_size = 0
+            with stderr_path.open('wb') as error_output:
+                process = subprocess.Popen([str(zstd), '-q', '-d', '-c', '--', str(partial)],
+                                           stdout=subprocess.PIPE, stderr=error_output)
+                assert process.stdout is not None
+                for chunk in iter(lambda: process.stdout.read(1024 * 1024), b''):
+                    roundtrip.update(chunk)
+                    roundtrip_size += len(chunk)
+                process.stdout.close()
+                code = process.wait()
+            if code != 0:
+                raise NativeArtifactError('zstd verification exited ' + str(code)
+                                          + (': ' + _stderr_tail(stderr_path) if stderr_path.stat().st_size else ''))
+            verified_sha256 = roundtrip.hexdigest()
+            if roundtrip_size != original_size or verified_sha256 != original_sha256:
+                raise NativeArtifactError('zstd round-trip digest/size mismatch '
+                                          f'(expected {original_sha256}/{original_size}, '
+                                          f'got {verified_sha256}/{roundtrip_size})')
+
+        partial.replace(archive)
+        archive_size = archive.stat().st_size
+        # Recheck the published archive before deleting the only raw copy.
+        if digest(archive) != archive_sha256:
+            raise NativeArtifactError('published zstd archive changed before raw artifact removal')
+        binary.unlink()
+        return {'status': 'verified', 'archive': str(archive),
+                'archive_sha256': archive_sha256, 'archive_size_bytes': archive_size,
+                'original_sha256': original_sha256, 'original_size_bytes': original_size,
+                'verification': 'streamed_sha256_and_size'}
+    except (OSError, subprocess.SubprocessError, NativeArtifactError) as exc:
+        partial.unlink(missing_ok=True)
+        # If publication succeeded but the final check failed, retain both copies.
+        raise NativeArtifactError(f'{binary}: {exc}') from exc
+
+
+def preflight_zstd():
+    executable = shutil.which('zstd')
+    if executable is None:
+        raise RuntimeError('--compress-native-artifacts requires the zstd executable on PATH')
+    result = subprocess.run([executable, '--version'], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError('zstd preflight failed: ' + result.stdout.strip())
+    return {'path': executable, 'version': result.stdout.strip()}
+
+
+def cache_gc_command(kiln, memory_mb):
+    return [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(memory_mb),
+            str(kiln), '--one-shot', 'cache', 'gc']
+
+
+def native_resource_env(provider, workspace, cache_gc):
+    environment = {'KILN_NATIVE_PROVIDER_MANIFEST': provider['manifest']} if provider else {}
+    if cache_gc:
+        # Native builds target per-test entry directories. A shared writable layer makes
+        # their content-addressed outputs collectable from this runner-owned project root.
+        environment['KILN_SHARED_CACHE'] = str(Path(workspace) / '.kiln/cache')
+    return environment
+
+
+def run_cache_gc(kiln, workspace, log, runtime_jobs, memory_mb):
+    """Sweep the project's own cache; caller serializes concurrent native files."""
+    try:
+        result = execute(cache_gc_command(kiln, memory_mb), workspace, log, 300, runtime_jobs)
+        result['project_context'] = str(workspace)
+        return result
+    except OSError as exc:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f'could not start cache gc: {exc}\n')
+        return {'command': cache_gc_command(kiln, memory_mb), 'project_context': str(workspace),
+                'exit_code': 127,
+                'timed_out': False, 'wall_s': 0, 'log': str(log),
+                'start_error': str(exc)}
 
 
 NODE_VITEST_ORACLE_SHA256 = digest(NODE_VITEST_ORACLE_PATH)
@@ -761,19 +872,7 @@ def validate_node_vitest_policy():
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--workspace', type=Path, default=Path.home() / '.cache/kiln' / ('effect-direct-' + PIN['commit'][:12]))
-    parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--engine', action='append', choices=['bun', 'interpreter', 'native'])
-    parser.add_argument('--path', action='append', default=[], help='test stem or directory prefix (repeatable)')
-    parser.add_argument('--kiln', type=Path, default=REPO / 'target/release/kiln')
-    parser.add_argument('--provider-manifest', type=Path, help='native provider to snapshot; defaults to an installed package or one built from this repository')
-    parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
-    parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
-    parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
-                        help='native compilation profile (recorded in the report; case timeouts are unchanged)')
-    parser.add_argument('--timeout', type=float, default=180)
-    parser.add_argument('--kiln-memory-mb', type=int, default=8192, help='hard address-space limit per kiln process (children inherit)')
+    parser = build_parser()
     args = parser.parse_args()
     try:
         validate_node_vitest_policy()
@@ -788,6 +887,12 @@ def main():
     engines = args.engine or ['bun', 'native']
     if len(set(engines)) != len(engines):
         parser.error('engines must be distinct')
+    if (args.compress_native_artifacts or args.cache_gc) and 'native' not in engines:
+        parser.error('--compress-native-artifacts and --cache-gc require the native engine')
+    try:
+        zstd = preflight_zstd() if args.compress_native_artifacts else None
+    except RuntimeError as exc:
+        parser.error(str(exc))
     unmatched = [p for p in args.path if not any(name == p or name.startswith(p.rstrip('/') + '/') for name in PIN['files'])]
     if unmatched:
         parser.error('unknown pinned test selectors: ' + ', '.join(unmatched))
@@ -815,8 +920,37 @@ def main():
                 temporary.unlink(missing_ok=True)
         if digest(kiln) != kiln_sha:
             raise RuntimeError('corrupt kiln executable snapshot: ' + str(kiln))
+    try:
+        return _run_suite(args, engines, selected, workspace, out, kiln_source, kiln,
+                          kiln_sha, zstd)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--workspace', type=Path, default=Path.home() / '.cache/kiln' / ('effect-direct-' + PIN['commit'][:12]))
+    parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--engine', action='append', choices=['bun', 'interpreter', 'native'])
+    parser.add_argument('--path', action='append', default=[], help='test stem or directory prefix (repeatable)')
+    parser.add_argument('--kiln', type=Path, default=REPO / 'target/release/kiln')
+    parser.add_argument('--provider-manifest', type=Path, help='native provider to snapshot; defaults to an installed package or one built from this repository')
+    parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
+    parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
+    parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
+                        help='native compilation profile (recorded in the report; case timeouts are unchanged)')
+    parser.add_argument('--compress-native-artifacts', action='store_true',
+                        help='zstd-compress verified native binaries after execution (requires zstd)')
+    parser.add_argument('--cache-gc', action='store_true',
+                        help='run `kiln cache gc` in the native project workspace after each completed native file')
+    parser.add_argument('--timeout', type=float, default=180)
+    parser.add_argument('--kiln-memory-mb', type=int, default=8192, help='hard address-space limit per kiln process (children inherit)')
+    return parser
+
+
+def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_sha, zstd):
     provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, args.runtime_jobs, args.kiln_memory_mb) if 'native' in engines else None
-    native_env = {'KILN_NATIVE_PROVIDER_MANIFEST': provider['manifest']} if provider else {}
+    native_env = native_resource_env(provider, workspace, args.cache_gc)
     with (workspace / '.runner.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         source = prepare(workspace)
@@ -845,6 +979,12 @@ def main():
                                          'cases': ENGINE_MODE_POLICY['cases']},
                   'clock_policy': {e: 'wall' for e in engines},
                   'native_profile': args.native_profile if 'native' in engines else None,
+                  'resource_policy': {
+                      'compress_native_artifacts': bool(args.compress_native_artifacts),
+                      'zstd': zstd,
+                      'cache_gc': bool(args.cache_gc),
+                      'cache_gc_shared_layer': str(workspace / '.kiln/cache') if args.cache_gc else None,
+                  },
                   'native_provider': provider,
                   'kiln_binary_sha256': kiln_sha,
                   'kiln_binary_source': str(kiln_source) if kiln_sha else None,
@@ -856,6 +996,19 @@ def main():
                   'harness_sha256': {p.name: digest(p) for p in HARNESS.iterdir() if p.is_file()},
                   'source_sha256': {n: digest(source / PIN['directory'] / (n + '.test.ts')) for n in selected},
                   'files': []}
+        cache_gc_lock = threading.Lock()
+        cache_gc_sequence = itertools.count(1)
+
+        def collect_cache(name):
+            if not args.cache_gc:
+                return None
+            safe_name = name.replace('/', '--')
+            with cache_gc_lock:
+                sequence = next(cache_gc_sequence)
+                log = out / '_cache_gc' / f'{sequence:04d}-{safe_name}.log'
+                log.parent.mkdir(parents=True, exist_ok=True)
+                return run_cache_gc(kiln, workspace, log, args.runtime_jobs, args.kiln_memory_mb)
+
         def run(name):
             directory = out / name
             directory.mkdir(parents=True, exist_ok=True)
@@ -882,6 +1035,12 @@ def main():
                     if build['exit_code'] != 0 or not binary.is_file():
                         envelope = {**build, 'build': build, 'inventory': None, 'cases': [],
                                     'summary': None, 'errors': [{'kind': 'runner_error', 'error': 'native build failed'}], 'complete': False}
+                        gc_result = collect_cache(name)
+                        if gc_result is not None:
+                            envelope['cache_gc'] = gc_result
+                            if gc_result['exit_code'] != 0 or gc_result['timed_out']:
+                                envelope['errors'].append({'kind': 'runner_error',
+                                    'error': 'cache gc failed; see ' + gc_result['log']})
                         row['engines'][engine] = envelope
                         write_json(directory / (engine + '.json'), envelope)
                         continue
@@ -892,13 +1051,32 @@ def main():
                 if build is not None:
                     envelope['build'] = build
                     envelope['binary_sha256'] = digest(binary)
+                    if args.compress_native_artifacts:
+                        try:
+                            envelope['native_artifact'] = compress_native_artifact(
+                                binary, zstd['path'], envelope['binary_sha256'])
+                        except NativeArtifactError as exc:
+                            envelope['native_artifact'] = {'status': 'failed',
+                                'raw_artifact_preserved': binary.is_file(),
+                                'error': str(exc)}
+                            envelope.setdefault('_resource_errors', []).append({
+                                'kind': 'runner_error', 'error': 'native artifact compression failed: ' + str(exc)})
+                    gc_result = collect_cache(name)
+                    if gc_result is not None:
+                        envelope['cache_gc'] = gc_result
+                        if gc_result['exit_code'] != 0 or gc_result['timed_out']:
+                            envelope.setdefault('_resource_errors', []).append({
+                                'kind': 'runner_error', 'error': 'cache gc failed; see ' + gc_result['log']})
                 envelope.update(records(log))
+                resource_errors = envelope.pop('_resource_errors', [])
+                envelope['errors'].extend(resource_errors)
                 summary = envelope['summary']
                 expected_exit = (1 if summary['failed'] else 0) if summary else None
                 envelope['matches_expected_exit'] = envelope['exit_code'] == expected_exit
                 # A crash after the summary is an incomplete execution, even when
                 # every recorded case passed. Failed assertions normally exit 1.
-                envelope['complete'] &= not envelope['timed_out'] and envelope['matches_expected_exit']
+                envelope['complete'] &= (not envelope['timed_out'] and envelope['matches_expected_exit']
+                                         and not resource_errors)
                 row['engines'][engine] = envelope
                 write_json(directory / (engine + '.json'), envelope)
             reference = row['engines'].get('bun')

@@ -1,7 +1,9 @@
 import importlib.util
 import copy
 from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location(
     'effect_upstream', Path(__file__).with_name('effect-upstream.py'))
@@ -82,6 +84,110 @@ class EngineModeComparisonTests(unittest.TestCase):
             self.assertEqual(case['outcomes'], {'bun': 'skip', 'interpreter': 'pass', 'native': 'pass'})
             self.assertIn('official Node/Vitest', case['reason'])
             self.assertEqual(case['official_node_vitest'], {'mode': 'run', 'outcome': 'pass'})
+
+
+class NativeResourcePolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='effect-runner-resource-test-')
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def fake_zstd(self, body):
+        executable = self.root / 'zstd-fixture'
+        executable.write_text('#!/usr/bin/env python3\n' + body)
+        executable.chmod(0o755)
+        return executable
+
+    def test_resource_flags_are_off_by_default_and_opt_in(self):
+        defaults = runner.build_parser().parse_args(['--out', str(self.root / 'out')])
+        enabled = runner.build_parser().parse_args([
+            '--out', str(self.root / 'out'), '--compress-native-artifacts', '--cache-gc'])
+        self.assertFalse(defaults.compress_native_artifacts)
+        self.assertFalse(defaults.cache_gc)
+        self.assertTrue(enabled.compress_native_artifacts)
+        self.assertTrue(enabled.cache_gc)
+
+    def test_cache_gc_uses_first_writable_shared_layer_and_same_gc_root(self):
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        provider = {'manifest': '/owned/provider.json'}
+        default_env = runner.native_resource_env(provider, workspace, False)
+        shared_env = runner.native_resource_env(provider, workspace, True)
+        self.assertNotIn('KILN_SHARED_CACHE', default_env)
+        self.assertEqual(shared_env['KILN_SHARED_CACHE'], str(workspace / '.kiln/cache'))
+        log = self.root / 'gc.log'
+        with mock.patch.object(runner, 'execute', return_value={'exit_code': 0, 'timed_out': False,
+                                                                 'wall_s': 0.1, 'log': str(log)}) as execute:
+            result = runner.run_cache_gc(Path('/owned/kiln'), workspace, log, 1, 8192)
+        _, cwd, _, _, _ = execute.call_args.args
+        self.assertEqual(Path(cwd) / '.kiln/cache', Path(shared_env['KILN_SHARED_CACHE']))
+        self.assertEqual(result['project_context'], str(workspace))
+
+    def test_compression_verifies_archive_before_removing_raw_binary(self):
+        zstd = self.fake_zstd('''import pathlib,sys
+args=sys.argv[1:]
+if '--version' in args:
+ print('zstd fixture'); raise SystemExit(0)
+data=pathlib.Path(args[-1]).read_bytes()
+sys.stdout.buffer.write(data)
+''')
+        binary = self.root / 'native.bin'
+        binary.write_bytes(b'native artifact payload' * 100)
+        original_sha = runner.digest(binary)
+        result = runner.compress_native_artifact(binary, zstd, original_sha)
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(result['original_sha256'], original_sha)
+        self.assertEqual(result['archive_sha256'], runner.digest(Path(result['archive'])))
+        self.assertEqual(Path(result['archive']).read_bytes(), b'native artifact payload' * 100)
+        self.assertEqual(result['verification'], 'streamed_sha256_and_size')
+        self.assertFalse(binary.exists())
+
+    def test_compression_failure_preserves_raw_binary_and_reports_reason(self):
+        zstd = self.fake_zstd('''import pathlib,sys
+args=sys.argv[1:]
+if '-d' in args:
+ data=pathlib.Path(args[-1]).read_bytes(); sys.stdout.buffer.write(data)
+else:
+ print('injected compression failure', file=sys.stderr); raise SystemExit(7)
+''')
+        binary = self.root / 'native.bin'
+        binary.write_bytes(b'keep me')
+        with self.assertRaisesRegex(runner.NativeArtifactError, 'exited 7.*injected compression failure'):
+            runner.compress_native_artifact(binary, zstd)
+        self.assertEqual(binary.read_bytes(), b'keep me')
+        self.assertFalse((self.root / 'native.bin.zst').exists())
+        self.assertFalse((self.root / 'native.bin.zst.partial').exists())
+
+    def test_round_trip_mismatch_preserves_raw_binary(self):
+        zstd = self.fake_zstd('''import pathlib,sys
+args=sys.argv[1:]
+data=pathlib.Path(args[-1]).read_bytes()
+sys.stdout.buffer.write(data + (b'corrupt' if '-d' in args else b''))
+''')
+        binary = self.root / 'native.bin'
+        binary.write_bytes(b'original')
+        with self.assertRaisesRegex(runner.NativeArtifactError, 'round-trip digest/size mismatch'):
+            runner.compress_native_artifact(binary, zstd)
+        self.assertEqual(binary.read_bytes(), b'original')
+        self.assertFalse((self.root / 'native.bin.zst').exists())
+
+    def test_cache_gc_runs_in_build_workspace_and_retains_full_log(self):
+        project_directory = self.root / 'files' / 'Example'
+        project_directory.mkdir(parents=True)
+        log = self.root / 'gc.log'
+        with mock.patch.object(runner, 'execute', return_value={'exit_code': 0, 'timed_out': False,
+                                                                 'wall_s': 0.1, 'log': str(log)}) as execute:
+            result = runner.run_cache_gc(Path('/owned/kiln'), project_directory, log, 1, 8192)
+        command, cwd, actual_log, timeout, runtime_jobs = execute.call_args.args
+        self.assertEqual(Path(cwd), project_directory)
+        self.assertEqual(Path(actual_log), log)
+        self.assertEqual(result['project_context'], str(project_directory))
+        self.assertEqual(command[-4:], ['/owned/kiln', '--one-shot', 'cache', 'gc'])
+        self.assertEqual(timeout, 300)
+        self.assertEqual(runtime_jobs, 1)
+        self.assertEqual(result['exit_code'], 0)
 
 
 class NodeVitestOracleTests(unittest.TestCase):

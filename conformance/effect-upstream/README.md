@@ -24,6 +24,24 @@ for the entire run. `--workspace` selects another owned directory. `--jobs`,
 an 8 GiB address-space cap. Bun reserves a large virtual heap, so use an external
 cgroup if a physical memory cap is needed for the whole run.
 
+Long native surveys can opt into bounded artifact and cache retention without changing the
+default corpus behavior:
+
+```sh
+./scripts/effect-upstream.py --engine native --compress-native-artifacts --cache-gc --out target/effect-native
+```
+
+Artifact compression requires `zstd` on `PATH`. The runner records each executable's original
+SHA-256, compresses it with one zstd worker, streams a decompression pass to verify the original
+SHA-256 and size, and only then removes the raw executable. A failed compression or verification
+keeps the raw file and marks that file incomplete as an infrastructure failure. With `--cache-gc`,
+native builds use `KILN_SHARED_CACHE=<workspace>/.kiln/cache` as their first writable cache layer,
+so otherwise separate per-file project roots share content-addressed build artifacts. After each
+native file, the runner serializes `kiln --one-shot cache gc` from the workspace; this sweeps that
+same shared layer, and complete GC output is retained under `<out>/_cache_gc/`. This delegates
+retention and grace-period decisions to kiln's cache collector.
+Both controls are opt-in; without them native executables and caches are left as before.
+
 Read `report.json` and per-file engine JSON/logs. An incomplete run, timeout,
 missing case or unsupported runner capability fails the run. A selected subset
 reports deferred files. Aggregate counts distinguish pending files, incomplete
