@@ -4323,7 +4323,7 @@ fn emit_call_prepared_method(
         for arg in args {
             if ctx.live_numbers.contains(arg) {
                 call_args.push_str(&format!(", d{}", arg.0));
-            } else if ctx.live_ints.contains(arg) {
+            } else if ctx.ints.contains(arg) && ctx.live_ints.contains(arg) {
                 call_args.push_str(&format!(", (double)i{}", arg.0));
             } else {
                 call_args.push_str(&format!(", d{}", arg.0));
@@ -4408,7 +4408,7 @@ fn emit_call_prepared_method(
         }
         if ctx.live_numbers.contains(arg) {
             arguments.push_str(&format!("kiln_c99_val_from_double(d{})", arg.0));
-        } else if ctx.live_ints.contains(arg) {
+        } else if ctx.ints.contains(arg) && ctx.live_ints.contains(arg) {
             arguments.push_str(&format!("kiln_c99_val_from_double((double)i{})", arg.0));
         } else {
             arguments.push_str(&format!("v{}", arg.0));
