@@ -10,6 +10,7 @@ let deadLocal;
 let capturedLocal;
 let returnedLocal;
 let thrownLocal;
+let asyncThrownLocal;
 let escaped;
 let finallyRan = false;
 function* completed() {
@@ -36,13 +37,19 @@ function* completedByThrow() {
   thrownLocal = new WeakRef(dead);
   yield 0;
 }
+async function* completedAsyncByThrow() {
+  const dead = { marker: 'async-throw' };
+  asyncThrownLocal = new WeakRef(dead);
+  yield 0;
+}
 
 const iterator = completed();
 iterator.next();
 const result = iterator.next();
 const returnIterator = completedByReturn();
 returnIterator.next();
-returnIterator.return('returned');
+const returnValue = { marker: 'return-value' };
+const returnResult = returnIterator.return(returnValue);
 const throwIterator = completedByThrow();
 throwIterator.next();
 const thrown = new Error('terminal throw');
@@ -51,6 +58,14 @@ try {
   throwIterator.throw(thrown);
 } catch (error) {
   caught = error;
+}
+const asyncThrowIterator = completedAsyncByThrow();
+await asyncThrowIterator.next();
+let asyncCaught;
+try {
+  await asyncThrowIterator.throw(thrown);
+} catch (error) {
+  asyncCaught = error;
 }
 
 async function finish() {
@@ -63,8 +78,12 @@ async function finish() {
     deadLocalCollected: deadLocal.deref() === undefined,
     returnedLocalCollected: returnedLocal.deref() === undefined,
     thrownLocalCollected: thrownLocal.deref() === undefined,
+    asyncThrownLocalCollected: asyncThrownLocal.deref() === undefined,
     finallyRan,
     caughtSame: caught === thrown,
+    asyncCaughtSame: asyncCaught === thrown,
+    returnDone: returnResult.done,
+    returnValuePreserved: returnResult.value === returnValue,
     capturedLocalAlive: capturedLocal.deref() !== undefined,
     escapedValue: escaped(),
     done: iterator.next().done,
