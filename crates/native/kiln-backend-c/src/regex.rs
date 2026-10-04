@@ -756,7 +756,10 @@ pub fn emit_regex_matcher(
     compiled: &CompiledRegex,
     should_chunk: bool,
 ) {
-    writeln!(output, "// Lowered regex matcher for /{}/", compiled.source).unwrap();
+    // Keep the source pattern out of C comments. In particular, a pattern ending in `??/`
+    // becomes the `\\` trigraph during C translation phase 1 and can comment out the next
+    // generated declaration even though the regex is valid JavaScript.
+    writeln!(output, "// Lowered regex matcher.").unwrap();
 
     // 1. Emit character class predicates
     for (i, class) in compiled.classes.iter().enumerate() {
@@ -1319,6 +1322,18 @@ mod tests {
         assert!(try_compile_regex(r"[^a-z]", "i").is_some());
         assert!(try_compile_regex(r"x*", "g").is_some());
         assert!(try_compile_regex(r"a|b", "").is_some());
+    }
+
+    #[test]
+    fn generated_comment_cannot_swallow_a_regex_helper_via_trigraph() {
+        let pattern = r"a??/";
+        assert!(pattern.contains("??/"));
+        let compiled = try_compile_regex(pattern, "").expect("valid lazy-optional regex");
+        let mut output = String::new();
+        emit_regex_matcher(&mut output, "trigraph_regex", &compiled, false);
+        assert!(output.starts_with("// Lowered regex matcher.\n"));
+        assert!(!output.contains("??/"));
+        assert!(output.contains("static inline int trigraph_regex_class_0"));
     }
 
     #[test]
