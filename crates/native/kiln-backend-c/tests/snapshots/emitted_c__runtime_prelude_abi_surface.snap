@@ -2495,6 +2495,7 @@ done:
 static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
 typedef enum kiln_c99_graph_incoming_result {
 #define KILN_C99_GRAPH_DRIVE_BOUNDARY_LIMIT 16
+extern _Thread_local kiln_js_frame *kiln_c99_js_frame_top;
 typedef struct kiln_c99_graph_drive_boundary {
 static _Thread_local struct {
 __attribute__((visibility("hidden"))) int
