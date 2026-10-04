@@ -345,6 +345,7 @@ pub enum Native {
     /// The private host half of `serve()` (`__kilnNativeModules.http`).
     NodeHttpCreateFetchServer,
     NodeHttpFetchRespond,
+    NodeHttpCancelRequest,
     NodeHttpServerResponse,
     NodeClientRequestWrite,
     NodeClientRequestEnd,

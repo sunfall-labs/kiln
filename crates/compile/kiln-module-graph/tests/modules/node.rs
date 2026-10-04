@@ -4925,3 +4925,43 @@ fn mts_with_static_imports_builds_as_esm_under_commonjs_manifest() {
         ModuleSource::Source
     );
 }
+
+#[test]
+fn fetch_abort_and_reader_cancel_release_live_http_connections() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../conformance/native/fetch-live-response-cancel.mjs"
+        )),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build live fetch cancellation graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("cancel live fetch connections");
+    assert_eq!(
+        host.output,
+        [
+            "abort 200 first false",
+            "read rejected AbortError",
+            "server closed",
+            "cancel 200 first false",
+            "reader cancelled",
+            "server closed",
+            "pending rejected AbortError",
+            "pending server closed",
+        ]
+    );
+}

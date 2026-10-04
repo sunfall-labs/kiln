@@ -25,6 +25,7 @@ pub(crate) struct HttpClientRequestState {
     /// The ended body has been handed to the host request slot. Socket/read events may
     /// revisit `flush_http_client_request`; `ended` alone is not an instruction to end twice.
     pub(crate) end_sent: bool,
+    pub(crate) cancelled: bool,
     pub(crate) request_id: u64,
 }
 
@@ -346,6 +347,10 @@ pub(crate) fn native_capabilities() -> Value {
             module.set_non_enumerable(name, value);
         }
     }
+    module.set_non_enumerable(
+        "__cancelRequest",
+        Value::Native(Native::NodeHttpCancelRequest, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(module)))
 }
 
@@ -384,6 +389,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeHttpGet => Some("get"),
         Native::NodeHttpCreateFetchServer => Some("createFetchServer"),
         Native::NodeHttpFetchRespond => Some("fetchRespond"),
+        Native::NodeHttpCancelRequest => Some("__cancelRequest"),
         Native::NodeHttpServerResponse => Some("ServerResponse"),
         Native::NodeHttps => Some("https"),
         Native::NodeHttpsCreateServer => Some("createServer"),

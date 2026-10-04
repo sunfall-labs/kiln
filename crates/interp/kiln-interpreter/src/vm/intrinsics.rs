@@ -1080,6 +1080,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeHttpGet
                 | Native::NodeHttpCreateFetchServer
                 | Native::NodeHttpFetchRespond
+                | Native::NodeHttpCancelRequest
                 | Native::NodeClientRequestWrite
                 | Native::NodeClientRequestEnd
                 | Native::NodeClientRequestAssignSocket

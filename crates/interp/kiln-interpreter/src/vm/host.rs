@@ -1951,6 +1951,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     ended: false,
                     started: false,
                     end_sent: false,
+                    cancelled: false,
                     request_id,
                 }));
                 let request_object = node_http_client_request_object(&state);
@@ -1991,11 +1992,74 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 }
                 Ok(request_object)
             }
+            Native::NodeHttpCancelRequest => {
+                let request =
+                    arguments
+                        .first()
+                        .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                            message: "HTTP cancellation requires a ClientRequest".into(),
+                        })?;
+                let state = node_http_client_request(request)?;
+                let (socket, origin, request_id) = {
+                    let mut state = state.borrow_mut();
+                    if state.cancelled {
+                        return Ok(Value::Undefined);
+                    }
+                    state.cancelled = true;
+                    (
+                        state.socket.clone(),
+                        HttpOrigin::http(&state.host, state.port),
+                        state.request_id,
+                    )
+                };
+                if let Some(socket) = socket {
+                    let object = socket
+                        .borrow()
+                        .object
+                        .as_ref()
+                        .and_then(|object| object.upgrade());
+                    if let Some(object) = object {
+                        self.dispatch_node_socket(
+                            Native::NodeSocketDestroy,
+                            &Value::Object(object),
+                            &[],
+                            instruction,
+                        )?;
+                    }
+                } else if let Some(runtime) = self.http_runtime {
+                    let cancellation = unsafe {
+                        ActiveHttpRuntime::cancel_client_connection(
+                            &mut *runtime,
+                            &origin,
+                            request_id,
+                        )
+                    };
+                    if let AgentCancellation::Connecting {
+                        next: Some(next_id),
+                    } = cancellation
+                    {
+                        let queued = self.http_client_request(next_id).ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message:
+                                    "HTTP Agent lost a queued ClientRequest after cancellation"
+                                        .into(),
+                            }
+                        })?;
+                        self.start_http_client_connection(&queued, instruction)?;
+                    }
+                }
+                self.remove_http_client_request(request_id);
+                Ok(Value::Undefined)
+            }
             Native::NodeClientRequestWrite | Native::NodeClientRequestEnd => {
                 self.dispatch_node_client_request(native, receiver, arguments, instruction)
             }
             Native::NodeClientRequestAssignSocket => {
                 let request_state = node_http_client_request(receiver)?;
+                if request_state.borrow().cancelled {
+                    return Ok(Value::Undefined);
+                }
                 let socket_value =
                     arguments
                         .first()
@@ -4838,6 +4902,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         socket: &Rc<RefCell<NetSocketState>>,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        if state.borrow().cancelled {
+            return Ok(());
+        }
         let resource = {
             let socket = socket.borrow();
             socket.resource.ok_or_else(|| ExecutionError::Host {
