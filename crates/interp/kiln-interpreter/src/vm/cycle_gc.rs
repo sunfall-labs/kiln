@@ -801,6 +801,12 @@ fn object_children(data: &ObjectData) -> Vec<Value> {
     values.extend(data.prototype.iter().cloned());
     values.extend(data.primitive.iter().cloned());
     values.extend(data.error_stack_frames.iter().cloned());
+    values.extend(data.node_events.iter().flatten().flat_map(|bucket| {
+        bucket
+            .listeners
+            .iter()
+            .map(|listener| listener.callback.clone())
+    }));
     for cell in &data.finalization_cells {
         values.push(cell.held.clone());
         // `target` and `token` are weak slots. Upgrading them here would invent strong graph
@@ -964,6 +970,67 @@ mod tests {
         drop(keeper);
         vm.collect_closure_cycles();
         assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn event_listener_sidecar_cycle_does_not_keep_weak_target_alive() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let target = Rc::new(RefCell::new(ObjectData::default()));
+        target.borrow_mut().node_events = Some(vec![NodeEventBucket {
+            name: "tick".into(),
+            listeners: vec![NodeEventListener {
+                callback: Value::Bound(Rc::new(BoundFunction {
+                    target: Value::Undefined,
+                    this_value: Value::Object(Rc::clone(&target)),
+                    arguments: Vec::new(),
+                    properties: RefCell::new(ObjectData::default()),
+                })),
+                once: false,
+            }],
+        }]);
+        let weak_target = Rc::downgrade(&target);
+        let keeper = Rc::clone(&target);
+        let weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external owner keeps it alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn active_node_socket_registry_is_a_strong_weakref_root_until_removed() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let object = Rc::new(RefCell::new(ObjectData::default()));
+        let weak_object = Rc::downgrade(&object);
+        let weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&object))], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        vm.active_node_socket_objects
+            .insert(17, Value::Object(Rc::clone(&object)));
+        drop(object);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_object.upgrade().is_some(),
+            "active registry roots socket"
+        );
+        vm.active_node_socket_objects.remove(&17);
+        vm.collect_closure_cycles();
+        assert!(weak_object.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
     }
 
