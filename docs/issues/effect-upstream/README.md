@@ -4,6 +4,31 @@ Goal: execute every pinned Effect test directly in kiln, prioritizing native, wi
 bundling sources. Bun is the primary direct-TypeScript reference. The official
 Node/Vitest runner checks runner fidelity separately.
 
+## Current checkpoint, 2026-10-04
+
+The latest integrated module-generation reclamation candidate passes 254 interpreter tests
+(one ignored), 21 module-evaluation tests and all 195 unchanged cases in `Config`,
+`EffectKeepAlive`, `StackTraceLimit`, `rpc/RpcClient` and `schema/HMR`.
+[The validation report and raw logs](../interpreter-module-generation-reclamation/evidence/)
+bind the source, frozen CLI, pinned test sources and official oracle. This is targeted
+interpreter evidence; a new regression for resetting during an externally suspended
+top-level await exposed a separate resumption/settlement defect under investigation.
+
+The [latest complete gate attempt](milestone-gate-full-20261004/) passed 2,615 crate tests,
+third-party correctness and all 13 unchanged third-party performance baselines, including
+PostCSS, after external task workers were stopped for timing. It failed native parity on
+three parallel-allocation probes and aborted one full-Test262 batch at its 1 GiB process
+cap. The [gate memory-floor repair](../gate-test262-memory-floor/evidence/) reruns that
+exact batch at 4 GiB without an allocation abort; it does not replace a fresh full gate.
+Native allocation diagnostics identified omitted metadata in duplicated parallel object
+and array initializers. Their shared-initializer repair is undergoing focused validation.
+
+The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
+final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
+records the preserved survey and verified binary archives. Full 322-file interpreter and
+native validation, final quiet Bun benchmark comparison, allocation stress and a passing
+integration gate remain required before completion. The compiler milestone has not been pushed.
+
 ## Corpus and measurement
 
 `conformance/effect-upstream/corpus.json` pins Effect 4.0.0 at
