@@ -8,7 +8,7 @@
 // the entry -- before anything has run -- and a receiver that cannot take one gets the boxed call,
 // exactly as a callee without a typed entry would. A throw from inside the entry stays a throw.
 
-class V { constructor(v) { this.v = v; } val() { return this.v; } twice(k) { return this.v * k; } }
+class V { constructor(v) { this.v = v; this.calls = 0; } val() { this.calls++; return this.v; } twice(k) { return this.v * k; } }
 const objs = [new V(1), new V("x"), new V(3)];
 function sumVals() { let s = 0; for (let i = 0; i < objs.length; i++) s += objs[i].val(); return s; }
 console.log(sumVals());
@@ -23,6 +23,9 @@ const vals = [new V(2), new V(4)].map(function (o) { return o.val() * 2; });
 console.log(vals);
 const mixed = [new V(2), new V("y")].map((o) => o.val() + 1);
 console.log(mixed);
+const counted = [new V(2), new V("y")];
+console.log(counted.map((o) => o.val() + 1));
+console.log(counted.map((o) => o.calls));
 // a throw from inside the typed method stays a throw
 class T { constructor(v) { this.v = v; } get() { if (this.v > 10) throw new RangeError("big"); return this.v; } }
 const ts = [new T(1), new T("s"), new T(20)];
