@@ -34,6 +34,9 @@ PASSES = int(os.environ.get("PASSES", "3"))
 SERVER_REQUESTS = os.environ.get("SERVER_REQUESTS", "2000")
 KILN = os.environ.get("KILN_BIN", "target/release/kiln")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
+from bench.checksum_validation import validate_repeated_checksums
+
 _TOOLCHAIN_BIN = os.path.join(
     ROOT, "bench", "realworld", ".toolchains", "node_modules", ".bin"
 )
@@ -190,8 +193,7 @@ def measure_cli(name, src, needs_node, argv, work):
 
     measured, rss, checksums, divergences = {}, {}, {}, []
     for runtime, argv in commands.items():
-        samples, rss_before = [], peak_rss_kb()
-        stdout = b""
+        samples, outputs, rss_before = [], [], peak_rss_kb()
         for _ in range(PASSES):
             wall, stdout, code, err = run(argv)
             if wall is None or code != 0:
@@ -199,21 +201,17 @@ def measure_cli(name, src, needs_node, argv, work):
                 samples = []
                 break
             samples.append(wall)
+            outputs.append(stdout)
         if samples:
             measured[runtime] = statistics.median(samples)
             after = peak_rss_kb()
             if rss_before is not None and after is not None:
                 rss[runtime] = max(after - rss_before, 0) or after
-            checksums[runtime] = stdout
-    want = checksums.get("node")
-    if want is not None:
-        for runtime, got in list(checksums.items()):
-            if got != want:
-                divergences.append(
-                    f"{name} {runtime}: stdout differs from node's "
-                    f"({len(got)} vs {len(want)} bytes)"
-                )
-                measured.pop(runtime, None)
+            checksums[runtime] = outputs
+    excluded, checksum_diagnostics = validate_repeated_checksums(checksums, PASSES)
+    divergences.extend(f"{name} {diagnostic}" for diagnostic in checksum_diagnostics)
+    for runtime in excluded:
+        measured.pop(runtime, None)
     return (
         {
             "program": name,
