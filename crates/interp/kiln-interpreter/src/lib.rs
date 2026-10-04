@@ -2032,12 +2032,20 @@ pub(crate) fn new_engine_private(realm: RealmId) -> Value {
         for (name, native) in [
             ("share", Native::ShareRaw),
             ("sharedIs", Native::SharedIsRaw),
-            ("hostProcessStart", Native::ProcessStartRaw),
-            ("hostProcessCancel", Native::ProcessCancelRaw),
         ] {
             private.set_non_enumerable(name, Value::Native(native, realm));
         }
     }
+    // Node's child_process adapter shares this private asynchronous host capability with
+    // kiln:process. Keep it available when public Kiln extensions are disabled as well.
+    private.set_non_enumerable(
+        "hostProcessStart",
+        Value::Native(Native::ProcessStartRaw, realm),
+    );
+    private.set_non_enumerable(
+        "hostProcessCancel",
+        Value::Native(Native::ProcessCancelRaw, realm),
+    );
     private.set_non_enumerable(
         "processExitCodeGet",
         Value::Native(Native::ProcessExitCodeGet, realm),

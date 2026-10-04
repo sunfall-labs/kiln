@@ -9,44 +9,8 @@ const enginePrivate: any = ((): any => { const G = globalThis as any; return G._
 if (enginePrivate?.extensions !== true) {
   throw new TypeError("kiln:process requires enabled Kiln extensions");
 }
-const hostProcessStart: (frame: Uint8Array) => any = enginePrivate.hostProcessStart;
+const hostProcessRun: (command: string, args: string[], input?: any) => any = enginePrivate.processRun;
 const hostProcessCancel: (id: any) => void = enginePrivate.hostProcessCancel;
-
-function bytes(value: any): Uint8Array {
-  if (typeof value === "string") return new TextEncoder().encode(value);
-  if (value instanceof Uint8Array) return value;
-  throw new TypeError("process.run input must be a string or Uint8Array");
-}
-
-function rejectNul(value: Uint8Array, field: string): void {
-  for (let index = 0; index < value.length; index++) {
-    if (value[index] === 0) throw new TypeError("process.run " + field + " contains NUL");
-  }
-}
-
-function frame(command: string, args: string[], input: any): Uint8Array {
-  const commandBytes = bytes(command);
-  const argBytes = args.map((arg) => bytes(arg));
-  const inputBytes = input === undefined ? undefined : bytes(input);
-  rejectNul(commandBytes, "command");
-  for (const arg of argBytes) rejectNul(arg, "argument");
-  const size = 24 + commandBytes.length + argBytes.reduce((total, arg) => total + 8 + arg.length, 0) + (inputBytes === undefined ? 0 : inputBytes.length);
-  const result = new Uint8Array(size);
-  const view = new DataView(result.buffer);
-  let offset = 0;
-  view.setUint32(offset, 1, true); offset += 4;
-  view.setUint32(offset, args.length, true); offset += 4;
-  view.setUint32(offset, inputBytes === undefined ? 0xffffffff : inputBytes.length, true); offset += 4;
-  view.setUint32(offset, inputBytes === undefined ? 0xffffffff : 0, true); offset += 4;
-  view.setUint32(offset, commandBytes.length, true); offset += 4; view.setUint32(offset, 0, true); offset += 4;
-  result.set(commandBytes, offset); offset += commandBytes.length;
-  for (const arg of argBytes) {
-    view.setUint32(offset, arg.length, true); offset += 4; view.setUint32(offset, 0, true); offset += 4;
-    result.set(arg, offset); offset += arg.length;
-  }
-  if (inputBytes !== undefined) result.set(inputBytes, offset);
-  return result;
-}
 
 export interface RunOptions {
   /** Bytes (or UTF-8 text) written to the child's standard input, which is then closed. */
@@ -56,6 +20,7 @@ export interface RunOptions {
 }
 
 export interface RunResult {
+  pid: number | undefined;
   stdout: Uint8Array;
   stderr: Uint8Array;
   /** The exit status, or `null` when a signal ended the child. */
@@ -73,7 +38,7 @@ export async function run(command: string, args: string[] = [], options: RunOpti
   const signal = signalOption === null ? undefined : signalOption;
   if (signal !== undefined && (typeof signal !== "object" || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) throw new TypeError("process.run signal must be an AbortSignal");
   if (signal && signal.aborted) throw signal.reason;
-  const pending = hostProcessStart(frame(command, args, options.input));
+  const pending = hostProcessRun(command, args, options.input);
   let onAbort: any;
   let abortPromise: Promise<any> | undefined;
   if (signal) {

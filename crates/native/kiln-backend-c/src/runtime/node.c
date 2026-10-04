@@ -3370,6 +3370,7 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
     kiln_c99_typed_array_of(stderr_value)->is_buffer = 1;
     status = kiln_c99_put(NULL, result, "stdout", 6, stdout_value, 0, NULL);
     if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "stderr", 6, stderr_value, 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "pid", 3, completion->value_u64 == UINT64_MAX ? kiln_c99_undefined() : kiln_c99_number((double)completion->value_u64), 0, NULL);
     if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "exitCode", 8, completion->exit_code == INT32_MIN ? kiln_c99_null() : kiln_c99_number((double)completion->exit_code), 0, NULL);
     if (status == KILN_C99_OK) status = kiln_c99_put(NULL, result, "signal", 6, completion->signal == INT32_MIN ? kiln_c99_null() : kiln_c99_number((double)completion->signal), 0, NULL);
     if (status == KILN_C99_OK) status = kiln_c99_settle(work->promise, result, 0);

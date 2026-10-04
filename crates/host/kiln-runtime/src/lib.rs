@@ -4978,6 +4978,7 @@ async fn execute_process(
     let mut child = process
         .spawn()
         .map_err(|error| io_error("spawn", command.clone(), error))?;
+    let pid = child.id();
     let mut child_stdout = child.stdout.take().ok_or_else(|| {
         AsyncHostError::new(
             "EIO",
@@ -5052,6 +5053,7 @@ async fn execute_process(
     #[cfg(not(unix))]
     let signal = None;
     Ok(AsyncHostValue::ProcessOutput(ProcessOutput {
+        pid,
         stdout,
         stderr,
         exit_code: status.code(),

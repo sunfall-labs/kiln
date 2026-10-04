@@ -13,12 +13,54 @@ delete (globalThis as any).__kilnExtensions;
 
 // The realm's engine-private object (`__kilnPrivate`): the one channel between the engine, this
 // bootstrap and the builtin modules, captured here and removed from the global object before any
-// program line runs. The engine's own operations (`share`, `sharedIs`, `hostProcessStart`,
-// `hostProcessCancel`) are on it only when extensions are installed, and the bootstrap pieces
-// publish what the modules need (`messagePort`, `structuredClone`) by assigning onto it. A builtin
-// module reads it from `globalThis.__kilnPrivate` only during its own initialization, in a window
-// the engine opens and closes around that code; no program ever sees the name, or a symbol key.
+// program line runs. Host process hooks are engine operations, available independently of public
+// Kiln extensions; this bootstrap owns their shared request framing for both process facades.
+// Other bootstrap pieces publish what modules need (`messagePort`, `structuredClone`) on the same
+// object. A builtin reads it only during initialization, in a window the engine opens and closes.
 const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
+
+const hostProcessStart: (frame: Uint8Array) => any = kilnPrivate.hostProcessStart;
+const hostProcessCancel: (id: any) => void = kilnPrivate.hostProcessCancel;
+
+function processBytes(value: any, field: string): Uint8Array {
+  if (typeof value === "string") return new TextEncoder().encode(value);
+  if (value instanceof Uint8Array) return value;
+  throw new TypeError("process.run " + field + " must be a string or Uint8Array");
+}
+
+function processFrame(command: string, args: string[], input?: any): Uint8Array {
+  const commandBytes = processBytes(command, "command");
+  const argBytes = args.map((arg) => processBytes(arg, "argument"));
+  const inputBytes = input === undefined ? undefined : processBytes(input, "input");
+  const rejectNul = (value: Uint8Array, field: string) => {
+    for (let index = 0; index < value.length; index++) {
+      if (value[index] === 0) throw new TypeError("process.run " + field + " contains NUL");
+    }
+  };
+  rejectNul(commandBytes, "command");
+  for (const arg of argBytes) rejectNul(arg, "argument");
+  const size = 24 + commandBytes.length + argBytes.reduce((total, arg) => total + 8 + arg.length, 0) + (inputBytes === undefined ? 0 : inputBytes.length);
+  const result = new Uint8Array(size);
+  const view = new DataView(result.buffer);
+  let offset = 0;
+  view.setUint32(offset, 1, true); offset += 4;
+  view.setUint32(offset, args.length, true); offset += 4;
+  view.setUint32(offset, inputBytes === undefined ? 0xffffffff : inputBytes.length, true); offset += 4;
+  view.setUint32(offset, inputBytes === undefined ? 0xffffffff : 0, true); offset += 4;
+  view.setUint32(offset, commandBytes.length, true); offset += 4;
+  view.setUint32(offset, 0, true); offset += 4;
+  result.set(commandBytes, offset); offset += commandBytes.length;
+  for (const arg of argBytes) {
+    view.setUint32(offset, arg.length, true); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    result.set(arg, offset); offset += arg.length;
+  }
+  if (inputBytes !== undefined) result.set(inputBytes, offset);
+  return result;
+}
+
+kilnPrivate.processRun = (command: string, args: string[], input?: any) =>
+  hostProcessStart(processFrame(command, args, input));
 
 // The public Node-compatible property is policy in TypeScript; the private methods only retain
 // and report a realm's requested status. Natural completion reads this after the turn loop drains.

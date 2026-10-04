@@ -583,6 +583,7 @@ impl CompletionPayload {
                 payload.stderr = output.stderr;
                 payload.exit_code = output.exit_code.unwrap_or(i32::MIN);
                 payload.signal = output.signal.unwrap_or(i32::MIN);
+                payload.value_u64 = output.pid.map_or(u64::MAX, u64::from);
                 payload
             }
             Ok(AsyncHostValue::FileStat(stat)) => {

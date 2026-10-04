@@ -186,6 +186,12 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
         AsyncHostValue::ProcessOutput(output) => {
             let mut object = ObjectData::default();
             object.set(
+                "pid",
+                output
+                    .pid
+                    .map_or(Value::Undefined, |pid| Value::Number(pid as f64)),
+            );
+            object.set(
                 "stdout",
                 node_host_value(AsyncHostValue::Bytes(output.stdout))?,
             );

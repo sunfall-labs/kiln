@@ -299,6 +299,8 @@ pub enum AsyncHostValue {
 /// Owned output from a completed child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessOutput {
+    /// Operating-system process identity assigned when the child was spawned.
+    pub pid: Option<u32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,

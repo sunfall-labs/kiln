@@ -6,8 +6,10 @@ import { Buffer } from "node:buffer";
 const nativeModules =
   typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
 const nativeModule = nativeModules ? nativeModules.child_process || null : null;
+const enginePrivate: any = (globalThis as any).__kilnPrivate;
 
 export class ChildProcess extends EventEmitter {
+  /** Set when ProcessRun returns; this host operation does not expose the pid at start time. */
   pid?: number;
   stdin: any = null;
   stdout: any = null;
@@ -22,21 +24,16 @@ export class ChildProcess extends EventEmitter {
     super();
   }
 
-  kill(signal?: string | number): boolean {
-    if (this.killed) return false;
-    this.killed = true;
-    if (nativeModule && typeof nativeModule.kill === "function" && this.pid) {
-      return nativeModule.kill(this.pid, signal);
-    }
-    return true;
+  kill(_signal?: string | number): boolean {
+    throw new Error("node:child_process kill is unavailable: this host operation has no child handle");
   }
 
   ref(): this {
-    return this;
+    throw new Error("ChildProcess.ref is unavailable for this host operation");
   }
 
   unref(): this {
-    return this;
+    throw new Error("ChildProcess.unref is unavailable for this host operation");
   }
 
   disconnect(): void {}
@@ -106,6 +103,15 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
     callback = args;
     args = [];
     options = undefined;
+  } else if (!Array.isArray(args) && args !== undefined && args !== null) {
+    if (typeof options === "function") {
+      callback = options;
+      options = args;
+      args = [];
+    } else if (options === undefined) {
+      options = args;
+      args = [];
+    }
   } else if (typeof options === "function") {
     callback = options;
     options = undefined;
@@ -113,7 +119,90 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
   if (nativeModule && typeof nativeModule.execFile === "function") {
     return nativeModule.execFile(file, args, options, callback);
   }
-  throw new Error("node:child_process execFile is unavailable in this runtime");
+  if (args === undefined || args === null) args = [];
+  if (!Array.isArray(args)) throw new TypeError("execFile arguments must be an array");
+  if (typeof file !== "string") throw new TypeError("execFile file must be a string");
+  const settings = normalizeExecFileOptions(options);
+  const strings = args.map((argument: any) => {
+    if (typeof argument !== "string") throw new TypeError("execFile arguments must be strings");
+    return argument;
+  });
+  const task = startHostProcess(file, strings);
+  const child = new ChildProcess();
+  // ProcessRun reports its identity with the completed output. Until then pid is undefined.
+  if (typeof callback === "function") child.on("error", () => {});
+  void task.promise.then((result) => {
+    child.pid = result.pid;
+    child.exitCode = result.exitCode;
+    child.signalCode = result.signal === null ? null : signalName(result.signal);
+    const stdout = outputValue(result.stdout, settings.encoding);
+    const stderr = outputValue(result.stderr, settings.encoding);
+    let error: any = null;
+    if (result.exitCode !== 0 || result.signal !== null) {
+      error = new Error("Command failed: " + file + " " + args.join(" "));
+      error.code = result.exitCode;
+      error.signal = child.signalCode;
+      error.cmd = file + " " + args.join(" ");
+      error.stdout = stdout;
+      error.stderr = stderr;
+    }
+    child.emit("exit", result.exitCode, child.signalCode);
+    try {
+      if (typeof callback === "function") callback(error, stdout, stderr);
+    } finally {
+      child.emit("close", result.exitCode, child.signalCode);
+    }
+  }, (error) => {
+    // A spawn failure has no exit event; Node reports -2 on close and emits the callback
+    // before the error and close events. Keep the failure's real spawn metadata intact.
+    child.exitCode = null;
+    const stdout = outputValue(new Uint8Array(0), settings.encoding);
+    const stderr = outputValue(new Uint8Array(0), settings.encoding);
+    try {
+      if (typeof callback === "function") callback(error, stdout, stderr);
+    } finally {
+      try {
+        child.emit("error", error);
+      } finally {
+        child.emit("close", -2, null);
+      }
+    }
+  });
+  return child;
+}
+
+function normalizeExecFileOptions(options: any): { encoding: string | null } {
+  if (options === undefined || options === null) return { encoding: "utf8" };
+  const settings = typeof options === "string" ? { encoding: options } : options;
+  if (typeof settings !== "object" || Array.isArray(settings)) {
+    throw new TypeError("execFile options must be a string or object");
+  }
+  for (const key of Object.keys(settings)) {
+    if (key !== "encoding") throw new Error("node:child_process execFile option is not supported: " + key);
+  }
+  const encoding = settings.encoding;
+  if (encoding === undefined || encoding === "utf8" || encoding === "utf-8") return { encoding: "utf8" };
+  if (encoding === "buffer" || encoding === null) return { encoding: null };
+  throw new Error("node:child_process execFile encoding is not supported: " + String(encoding));
+}
+
+function outputValue(bytes: Uint8Array, encoding: string | null): any {
+  const buffer = Buffer.from(bytes);
+  return encoding === null ? buffer : buffer.toString(encoding);
+}
+
+function signalName(signal: number): string {
+  if (signal === 9) return "SIGKILL";
+  return "SIG" + signal;
+}
+
+function startHostProcess(command: string, args: string[]): { promise: Promise<any> } {
+  const start = enginePrivate?.processRun;
+  if (typeof start !== "function") throw new Error("asynchronous child process execution is unavailable in this runtime");
+  const pending = start(command, args);
+  return {
+    promise: pending.promise,
+  };
 }
 
 export function execFileSync(file: string, args?: any, options?: any): any {
