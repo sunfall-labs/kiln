@@ -19,6 +19,165 @@ use std::fmt::Write;
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
 
+/// Local slots in a suspended generated function are part of its traced GC frame. Keep only
+/// the locals the resume CFG can still read; otherwise a consumed iterator result (and every
+/// value reachable through it) remains alive until the generator finishes. The graph's normal
+/// value liveness is SSA-based and does not cover these frame slots.
+fn suspended_local_liveness(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+) -> HashMap<BlockId, HashSet<u32>> {
+    let all = || (0..proto.local_count).collect::<HashSet<_>>();
+    if proto
+        .code
+        .iter()
+        .any(|op| matches!(op, Instruction::DirectEval(_)))
+    {
+        return graph.blocks.iter().map(|block| (block.id, all())).collect();
+    }
+
+    let upvalue_values: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|block| &block.operations)
+        .filter_map(|(value, op)| matches!(op, GraphOp::LoadUpvalue(_)).then_some(*value))
+        .collect();
+    let cells: HashSet<u32> = graph
+        .blocks
+        .iter()
+        .flat_map(|block| &block.operations)
+        .filter_map(|(_, op)| match op {
+            GraphOp::MakeCell(slot) => Some(*slot),
+            // Loading an enclosing binding yields its shared cell, not the cell's
+            // payload. A copied frame local can therefore still be a cell edge even
+            // when this function never creates a cell of its own.
+            GraphOp::StoreLocal { slot, value } if upvalue_values.contains(value) => Some(*slot),
+            _ => None,
+        })
+        .collect();
+    let mut uses = HashMap::<BlockId, HashSet<u32>>::new();
+    let mut defs = HashMap::<BlockId, HashSet<u32>>::new();
+    for block in &graph.blocks {
+        let block_uses = uses.entry(block.id).or_default();
+        let block_defs = defs.entry(block.id).or_default();
+        for (_, op) in &block.operations {
+            let (use_slot, def_slot) = match op {
+                GraphOp::LoadLocal(slot) | GraphOp::LoadCell(slot) => (Some(*slot), None),
+                GraphOp::StoreLocal { slot, .. } => (None, Some(*slot)),
+                GraphOp::StoreCell { slot, .. } => (Some(*slot), None),
+                GraphOp::MakeCell(slot) => (Some(*slot), Some(*slot)),
+                GraphOp::MarkUninitialized(slot) if cells.contains(slot) => (Some(*slot), None),
+                GraphOp::MarkUninitialized(slot) => (None, Some(*slot)),
+                GraphOp::MakeFunction { index, .. } => {
+                    for upvalue in &program.functions[*index as usize].upvalues {
+                        let slot = match upvalue {
+                            kiln_ir::Upvalue::ParentLocal(slot)
+                            | kiln_ir::Upvalue::NamedParentLocal { slot, .. } => Some(*slot),
+                            kiln_ir::Upvalue::ParentUpvalue(_)
+                            | kiln_ir::Upvalue::NamedParentUpvalue { .. } => None,
+                        };
+                        if let Some(slot) = slot.filter(|slot| !block_defs.contains(slot)) {
+                            block_uses.insert(slot);
+                        }
+                    }
+                    (None, None)
+                }
+                GraphOp::Bridge {
+                    instruction: Instruction::LoadArguments,
+                    ..
+                } if proto.mapped_arguments => {
+                    for slot in 0..proto.parameter_count {
+                        if !block_defs.contains(&slot) {
+                            block_uses.insert(slot);
+                        }
+                    }
+                    (None, None)
+                }
+                GraphOp::Bridge {
+                    instruction: Instruction::DirectEval(_),
+                    ..
+                } => {
+                    return graph.blocks.iter().map(|block| (block.id, all())).collect();
+                }
+                _ => (None, None),
+            };
+            if let Some(slot) = use_slot.filter(|slot| !block_defs.contains(slot)) {
+                block_uses.insert(slot);
+            }
+            if let Some(slot) = def_slot {
+                block_defs.insert(slot);
+            }
+        }
+    }
+
+    let mut live_in = graph
+        .blocks
+        .iter()
+        .map(|block| (block.id, HashSet::<u32>::new()))
+        .collect::<HashMap<_, _>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in graph.blocks.iter().rev() {
+            let mut normal_out = HashSet::new();
+            for successor in &block.successors {
+                if let Some(incoming) = live_in.get(successor) {
+                    normal_out.extend(incoming.iter().copied());
+                }
+            }
+            let mut incoming = uses.get(&block.id).cloned().unwrap_or_default();
+            incoming.extend(normal_out.into_iter().filter(|slot| {
+                !defs
+                    .get(&block.id)
+                    .is_some_and(|defined| defined.contains(slot))
+            }));
+            // Any operation in the block may throw before a later StoreLocal takes effect.
+            // Handler inputs therefore flow around block definitions rather than through the
+            // normal edge's kill set.
+            if let Some(handler) = block.exception_handler
+                && let Some(handler_live) = live_in.get(&handler)
+            {
+                incoming.extend(handler_live.iter().copied());
+            }
+            if live_in.get(&block.id) != Some(&incoming) {
+                live_in.insert(block.id, incoming);
+                changed = true;
+            }
+        }
+    }
+
+    graph
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let Terminator::Suspend {
+                resume, delegate, ..
+            } = &block.terminator
+            else {
+                return None;
+            };
+            let mut live = live_in.get(resume).cloned().unwrap_or_default();
+            if let Some((_, exit, _)) = delegate {
+                live.extend(live_in.get(exit).into_iter().flatten().copied());
+            }
+            // `throw()` and `return()` can enter the active catch/finally chain at a
+            // suspension. The nearest recorded handler and its outer handlers contribute
+            // their locals even if the normal resume edge does not use them.
+            if let Some(handler) = block.exception_handler {
+                live.extend(live_in.get(&handler).into_iter().flatten().copied());
+            }
+            // Cell slots can be shared with escaped closures and participate in the
+            // generated frame's external-owner ledger. Keep their frame edge even when
+            // this resume path has no direct LoadCell: an independently-created closure
+            // may outlive the activation and the frame remains an explicit owner while
+            // suspended.
+            live.extend(cells.iter().copied());
+            Some((block.id, live))
+        })
+        .collect()
+}
+
 /// Return arguments-object loads whose only observed use is an own `length` read.
 /// The arguments object exposes a writable length and can be aliased, so this is safe only
 /// when every live load in the function has that exact use and no nested arrow closes over it.
@@ -1238,6 +1397,12 @@ fn emit_block_sequence(
     spec: &Speculation,
     argument_length_values: &HashSet<ValueId>,
 ) {
+    let suspended_locals =
+        if matches!(site, Site::Function { .. }) && (proto.generator || proto.asynchronous) {
+            suspended_local_liveness(graph, proto, program)
+        } else {
+            HashMap::new()
+        };
     // A proven number nothing reads boxed is never boxed: its box statement is dropped from
     // the operation's text, and its twin is all that lives. In a versioned body the generic
     // clone always boxes, and a box the generic clone reads that the fast clone dropped
@@ -1668,6 +1833,8 @@ fn emit_block_sequence(
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
             &used,
             boxed.as_ref(),
+            &suspended_locals,
+            proto.local_count,
         );
     }
     if is_fast_clone && !exit_boxes.is_empty() {
@@ -3569,6 +3736,8 @@ fn emit_terminator(
     indexed_values: bool,
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
+    suspended_locals: &HashMap<BlockId, HashSet<u32>>,
+    local_count: u32,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -3863,6 +4032,17 @@ fn emit_terminator(
             output.push_str(
                 "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
             );
+            if let Some(live) = suspended_locals.get(&current_block.id) {
+                for slot in 0..local_count {
+                    if !live.contains(&slot) {
+                        writeln!(
+                            output,
+                            "    kiln_c99_heap_store_val(frame, &frame->locals[{slot}], KILN_VAL_UNDEFINED);"
+                        )
+                        .unwrap();
+                    }
+                }
+            }
             writeln!(
                 output,
                 "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered};{delegate_set} *result = v{}; return KILN_C99_YIELDED;",
@@ -4157,7 +4337,143 @@ fn typed_receiver_row_safe(
 
 #[cfg(test)]
 mod tests {
-    use super::{index_large_ssa_values, retain_used_context};
+    use super::{index_large_ssa_values, retain_used_context, suspended_local_liveness};
+    use crate::BYTECODE_VERSION;
+    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
+    use kiln_ir::{FunctionProto, Program};
+    use std::collections::HashSet;
+
+    fn generator_proto(local_count: u32) -> FunctionProto {
+        FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count,
+            code: Vec::new(),
+            arrow: false,
+            generator: true,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            mapped_arguments: false,
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }
+    }
+
+    fn empty_program() -> Program {
+        Program {
+            source: String::new().into(),
+            version: BYTECODE_VERSION,
+            source_origin: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        }
+    }
+
+    fn block(
+        id: u32,
+        operations: Vec<(u32, GraphOp)>,
+        terminator: Terminator,
+        successors: Vec<u32>,
+        exception_handler: Option<u32>,
+    ) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(id),
+            operations: operations
+                .into_iter()
+                .map(|(value, operation)| (ValueId(value), operation))
+                .collect(),
+            terminator,
+            predecessors: Vec::new(),
+            successors: successors.into_iter().map(BlockId).collect(),
+            exception_handler: exception_handler.map(BlockId),
+        }
+    }
+
+    fn suspend(resume: u32) -> Terminator {
+        Terminator::Suspend {
+            value: ValueId(0),
+            resume: BlockId(resume),
+            spilled: Vec::new(),
+            pc: 1,
+            awaiting: false,
+            delegate: None,
+        }
+    }
+
+    #[test]
+    fn suspended_locals_keep_future_reads_and_release_dead_temporaries() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::LoadLocal(0))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn suspended_locals_keep_active_finally_reads_on_injected_completion() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], Some(2)),
+            block(1, Vec::new(), Terminator::Return(None), vec![], None),
+            block(
+                2,
+                vec![(2, GraphOp::LoadLocal(1))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([1])));
+    }
+
+    #[test]
+    fn handler_live_in_survives_a_later_local_store_in_the_protected_block() {
+        let mut graph = FunctionGraph::new(None, 0, 2);
+        graph.blocks = vec![
+            block(
+                0,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 0,
+                        value: ValueId(2),
+                    },
+                )],
+                suspend(1),
+                vec![1],
+                Some(2),
+            ),
+            block(1, Vec::new(), Terminator::Return(None), vec![], None),
+            block(
+                2,
+                vec![(3, GraphOp::LoadLocal(0))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(2), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
 
     #[test]
     fn compact_operation_macros_retain_the_context_their_expansions_capture() {
