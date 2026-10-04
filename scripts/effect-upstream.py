@@ -330,6 +330,10 @@ def compare_reference(reference, candidate, engine, file_name):
     policies = {case['id']: case for case in ENGINE_MODE_POLICY['cases'] if case['file'] == file_name}
     mode_mismatches = []
     outcome_mismatches = []
+    reference_mode_mismatches = []
+    candidate_mode_mismatches = []
+    reference_outcome_mismatches = []
+    candidate_outcome_mismatches = []
     conditional_modes = []
     for reference_mode, candidate_mode, reference_case, candidate_case in zip(
             reference_inventory, candidate_inventory, reference_cases, candidate_cases):
@@ -339,45 +343,60 @@ def compare_reference(reference, candidate, engine, file_name):
             expected_candidate_mode = policy['modes'].get(engine)
             expected_reference_outcome = policy['outcomes'].get('bun')
             expected_candidate_outcome = policy['outcomes'].get(engine)
+            if reference_mode['mode'] != expected_reference_mode:
+                detail = {'id': candidate_mode['id'], 'actual': reference_mode['mode'],
+                          'expected': expected_reference_mode}
+                mode_mismatches.append(detail)
+                reference_mode_mismatches.append(detail)
+            if reference_case['outcome'] != expected_reference_outcome:
+                detail = {'id': candidate_mode['id'], 'actual': reference_case['outcome'],
+                          'expected': expected_reference_outcome}
+                outcome_mismatches.append(detail)
+                reference_outcome_mismatches.append(detail)
+            if candidate_mode['mode'] != expected_candidate_mode:
+                detail = {'id': candidate_mode['id'], 'actual': candidate_mode['mode'],
+                          'expected': expected_candidate_mode}
+                mode_mismatches.append(detail)
+                candidate_mode_mismatches.append(detail)
+            if candidate_case['outcome'] != expected_candidate_outcome:
+                detail = {'id': candidate_mode['id'], 'actual': candidate_case['outcome'],
+                          'expected': expected_candidate_outcome}
+                outcome_mismatches.append(detail)
+                candidate_outcome_mismatches.append(detail)
             if (reference_mode['mode'] != expected_reference_mode or
-                    reference_case['outcome'] != expected_reference_outcome):
-                mode_mismatches.append({'id': candidate_mode['id'], 'reference': reference_mode['mode'],
-                                        'expected_reference': expected_reference_mode})
-                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
-                                           'expected_reference': expected_reference_outcome})
-                continue
-            if (candidate_mode['mode'] != expected_candidate_mode or
+                    reference_case['outcome'] != expected_reference_outcome or
+                    candidate_mode['mode'] != expected_candidate_mode or
                     candidate_case['outcome'] != expected_candidate_outcome):
-                mode_mismatches.append({'id': candidate_mode['id'], 'actual': candidate_mode['mode'],
-                                        'expected_actual': expected_candidate_mode})
-                outcome_mismatches.append({'id': candidate_mode['id'], 'actual': candidate_case['outcome'],
-                                           'expected_actual': expected_candidate_outcome})
                 continue
+            if reference_mode['mode'] != candidate_mode['mode']:
+                conditional_modes.append({'id': candidate_mode['id'], 'bun_mode': reference_mode['mode'],
+                                          'engine': engine, 'engine_mode': candidate_mode['mode'],
+                                          'expected_outcome': expected_candidate_outcome,
+                                          'reason': policy['reason']})
+            continue
         if reference_mode['mode'] == candidate_mode['mode']:
             if reference_case['outcome'] != candidate_case['outcome']:
-                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
-                                           'actual': candidate_case['outcome']})
+                detail = {'id': candidate_mode['id'], 'reference': reference_case['outcome'],
+                          'actual': candidate_case['outcome']}
+                outcome_mismatches.append(detail)
+                candidate_outcome_mismatches.append(detail)
             continue
-        expected_reference_mode = policy['modes'].get('bun') if policy else None
-        expected_candidate_mode = policy['modes'].get(engine) if policy else None
-        expected_reference_outcome = policy['outcomes'].get('bun') if policy else None
-        expected_candidate_outcome = policy['outcomes'].get(engine) if policy else None
-        if (policy is None or reference_mode['mode'] != expected_reference_mode or
-                candidate_mode['mode'] != expected_candidate_mode or
-                reference_case['outcome'] != expected_reference_outcome or
-                candidate_case['outcome'] != expected_candidate_outcome):
-            mode_mismatches.append({'id': candidate_mode['id'], 'reference': reference_mode['mode'],
-                                    'actual': candidate_mode['mode']})
-            if candidate_case['outcome'] != reference_case['outcome']:
-                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
-                                           'actual': candidate_case['outcome']})
-            continue
-        conditional_modes.append({'id': candidate_mode['id'], 'bun_mode': reference_mode['mode'],
-                                  'engine': engine, 'engine_mode': candidate_mode['mode'],
-                                  'expected_outcome': expected_candidate_outcome,
-                                  'reason': policy['reason']})
+        detail = {'id': candidate_mode['id'], 'reference': reference_mode['mode'],
+                  'actual': candidate_mode['mode']}
+        mode_mismatches.append(detail)
+        reference_mode_mismatches.append(detail)
+        candidate_mode_mismatches.append(detail)
+        if reference_case['outcome'] != candidate_case['outcome']:
+            detail = {'id': candidate_mode['id'], 'reference': reference_case['outcome'],
+                      'actual': candidate_case['outcome']}
+            outcome_mismatches.append(detail)
+            candidate_outcome_mismatches.append(detail)
     return {'inventory': True, 'modes': not mode_mismatches, 'outcomes': not outcome_mismatches,
             'mode_mismatches': mode_mismatches, 'outcome_mismatches': outcome_mismatches,
+            'reference_mode_mismatches': reference_mode_mismatches,
+            'candidate_mode_mismatches': candidate_mode_mismatches,
+            'reference_outcome_mismatches': reference_outcome_mismatches,
+            'candidate_outcome_mismatches': candidate_outcome_mismatches,
             'conditional_modes': conditional_modes}
 
 
@@ -512,8 +531,10 @@ def main():
                 envelope['matches_reference_inventory'] = comparison['inventory']
                 envelope['matches_reference_modes'] = comparison['modes']
                 envelope['matches_reference_outcomes'] = comparison['outcomes']
-                envelope['reference_mode_mismatches'] = comparison.get('mode_mismatches', [])
-                envelope['reference_outcome_mismatches'] = comparison.get('outcome_mismatches', [])
+                envelope['reference_mode_mismatches'] = comparison.get('reference_mode_mismatches', [])
+                envelope['candidate_mode_mismatches'] = comparison.get('candidate_mode_mismatches', [])
+                envelope['reference_outcome_mismatches'] = comparison.get('reference_outcome_mismatches', [])
+                envelope['candidate_outcome_mismatches'] = comparison.get('candidate_outcome_mismatches', [])
                 envelope['engine_conditional_mode_cases'] = comparison['conditional_modes']
                 write_json(out / name / (engine + '.json'), envelope)
             return row

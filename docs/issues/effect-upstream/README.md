@@ -30,12 +30,16 @@ measurements. Runtime-specific skip modes are preserved and compared explicitly.
 
 The runner keeps Bun as the direct-source reference for ordinary cross-engine comparisons,
 but runtime-conditional cases use exact per-engine expectations in
-`conformance/effect-upstream/engine-mode-policy.json`. The Cache WeakRef test above is one
-such case: its upstream `skipIf` checks `process.versions.bun`, so Bun skips it while Node,
-the interpreter and native run it. The policy records Bun's skip and the pass observed in
-official Node/Vitest; only that exact case is exempt from Bun-versus-kiln mode comparison.
-An unexpected mode or outcome remains a mismatch, and the report records each accepted
-conditional difference.
+`conformance/effect-upstream/engine-mode-policy.json`. Ten GC cases across Cache,
+MutableHashMap, Pool, ScopedCache, McpServer and Atom have an upstream guard on
+`process.versions.bun` or `process.versions.deno`. Bun skips these; Node, the interpreter
+and native run them. The policy records each exact test ID, source-file digest, guard,
+expected modes and outcomes, and the official Node/Vitest pass evidence and report digest.
+Only listed cases receive this per-engine comparison; an unexpected mode or outcome remains
+a mismatch, with mode and outcome mismatches reported independently. A Bun
+`HARNESS_UNSUPPORTED` result is a separate adapter fidelity gap: the policy does not turn a
+native pass into a Bun failure or skip, and the runner continues to report that direct-Bun
+divergence until the harness capability has an appropriate oracle.
 
 `Formatter > format > function` remains a genuine direct-source failure. Its assertion expects
 tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The

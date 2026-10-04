@@ -1,9 +1,20 @@
 {
   "schema": 1,
+  "oracle": {
+    "node": "26.8.1",
+    "vitest": "5.0.3",
+    "report": "official full Vitest run; 11,019 tests, 10,974 passed, 45 skipped",
+    "case_mapping": "The listed case title matched the direct-source ID and official assertion fullName in file order.",
+    "official_node_report_sha256": "b3187622ca962aae2a43b86b08bf0f2bd2291893c866f3d15d7f02725688808b",
+    "direct_bun_report_sha256": "d7e25303a2b392015cff32e1a7877b52e3c4b2f35040587072b6fe8d285dbe82"
+  },
   "cases": [
     {
       "file": "Cache",
       "id": "Cache > does not retain prior equal object keys on cache hits",
+      "source": "Cache.test.ts",
+      "source_sha256": "244c404f8f7d935f5c316eb50b0fa17f842cb0233c55edb5bb28a4e35c6cdf11",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
       "modes": {
         "bun": "skip",
         "interpreter": "run",
@@ -14,7 +25,229 @@
         "interpreter": "pass",
         "native": "pass"
       },
-      "reason": "The pinned source skips this WeakRef/finalization case when process.versions.bun is defined. Bun 1.4.2 sets that version; Node 26.8.1 and both kiln engines run it. The official Node/Vitest report records a pass."
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 8,
+      "guard_form": "it.effect.skipIf"
+    },
+    {
+      "file": "MutableHashMap",
+      "id": "MutableHashMap > does not retain replaced equal keys after removal and reinsertion",
+      "source": "MutableHashMap.test.ts",
+      "source_sha256": "82dfad8fd4672d6aa7bcea90381a4b0b5f21aa6f6ee6abaeb25bea153c34c0b3",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 39,
+      "guard_form": "it.effect.skipIf"
+    },
+    {
+      "file": "Pool",
+      "id": "Pool > usage TTL retention > releases invalidated resources while at minimum size",
+      "source": "Pool.test.ts",
+      "source_sha256": "a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 841,
+      "guard_form": "describe.skipIf"
+    },
+    {
+      "file": "Pool",
+      "id": "Pool > usage TTL retention > releases consumed acquisition failures",
+      "source": "Pool.test.ts",
+      "source_sha256": "a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 841,
+      "guard_form": "describe.skipIf"
+    },
+    {
+      "file": "Pool",
+      "id": "Pool > usage TTL retention > retries background failures during asynchronous cleanup without requeueing them",
+      "source": "Pool.test.ts",
+      "source_sha256": "a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 841,
+      "guard_form": "describe.skipIf"
+    },
+    {
+      "file": "Pool",
+      "id": "Pool > usage TTL retention > releases resources after shutdown while the pool remains reachable",
+      "source": "Pool.test.ts",
+      "source_sha256": "a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 841,
+      "guard_form": "describe.skipIf"
+    },
+    {
+      "file": "ScopedCache",
+      "id": "ScopedCache > does not retain prior equal object keys on cache hits",
+      "source": "ScopedCache.test.ts",
+      "source_sha256": "baa5f61e22cdce268acdde019a63e01e241df7b552ca7c246b0668fb004d60af",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 21,
+      "guard_form": "it.effect.skipIf"
+    },
+    {
+      "file": "ai/McpServer/McpServer",
+      "id": "McpServer > should release request metadata when HTTP requests complete without server notifications",
+      "source": "ai/McpServer/McpServer.test.ts",
+      "source_sha256": "17b5123b0db829a216a91b3f2de0ccfe1ee00e93e84a423ea73fe7bab714724e",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 406,
+      "guard_form": "it.effect.skipIf"
+    },
+    {
+      "file": "ai/McpServer/McpServer",
+      "id": "McpServer > should release disconnected clients when a reverse request is cancelled without a reply",
+      "source": "ai/McpServer/McpServer.test.ts",
+      "source_sha256": "17b5123b0db829a216a91b3f2de0ccfe1ee00e93e84a423ea73fe7bab714724e",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 406,
+      "guard_form": "it.effect.skipIf"
+    },
+    {
+      "file": "reactivity/Atom",
+      "id": "Atom > family keeps a replacement atom when the collected atom is finalized late",
+      "source": "reactivity/Atom.test.ts",
+      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
+      "source_guard": "process.versions.bun !== undefined || process.versions.deno !== undefined",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "Pinned source skipIf checks process.versions.bun or process.versions.deno. Bun 1.4.2 has a defined bun version; Node 26.8.1 and the kiln engines do not. The official Node/Vitest 5.0.3 report marks this exact test passed.",
+      "official_node_vitest": {
+        "mode": "run",
+        "outcome": "pass"
+      },
+      "source_line": 1071,
+      "guard_form": "it.skipIf"
     }
   ]
 }
