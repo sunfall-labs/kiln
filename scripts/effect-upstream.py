@@ -731,8 +731,11 @@ def validate_node_vitest_policy():
         parameterized = '[case ' in row.get('direct_id', '')
         if parameterized:
             indices = re.findall(r'\[case (\d+)\]', row['direct_id'])
+            expected_indices = [int(index) for index in indices]
+            recorded_indices = row.get('parameter_indices', [row.get('parameter_index')])
             if (not indices or not isinstance(row.get('parameter_index'), int) or
-                    row['parameter_index'] != int(indices[-1]) or
+                    row['parameter_index'] != expected_indices[-1] or
+                    recorded_indices != expected_indices or
                     not isinstance(row.get('parameter_source_line'), int) or row['parameter_source_line'] < 1 or
                     not isinstance(row.get('parameter_value'), str) or not row['parameter_value']):
                 raise ValueError('parameterized mapping lacks exact source argument evidence: ' + repr(key))

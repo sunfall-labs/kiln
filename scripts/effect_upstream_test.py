@@ -248,6 +248,28 @@ class NodeVitestOracleTests(unittest.TestCase):
         self.assertEqual(mapped['mapping_errors'], [])
         self.assertEqual(len({row['official_index'] for row in mapped['mapped']}), 39)
 
+    def test_full_official_inventory_is_covered_by_exact_and_explicit_source_maps(self):
+        explicit_by_file = {}
+        for row in self.mappings['mappings']:
+            explicit_by_file.setdefault(row['file'], []).append(row)
+        mapped_total = 0
+        for file, official_file in self.oracle['files'].items():
+            occurrences = {}
+            for case in official_file['cases']:
+                occurrences[case['id']] = occurrences.get(case['id'], 0) + 1
+            explicit = explicit_by_file.get(file, [])
+            overridden = {row['official_id'] for row in explicit}
+            direct_ids = [identifier for identifier, count in occurrences.items()
+                          if count == 1 and identifier not in overridden]
+            direct_ids.extend(row['direct_id'] for row in explicit)
+            mapping = runner.node_vitest_case_map(
+                file, [{'id': identifier, 'mode': 'run'} for identifier in direct_ids],
+                official_file['source_sha256'])
+            self.assertTrue(mapping['complete'], (file, mapping))
+            self.assertEqual(len(mapping['mapped']), len(official_file['cases']))
+            mapped_total += len(mapping['mapped'])
+        self.assertEqual(mapped_total, self.oracle['summary']['registered'])
+
     def test_comparison_verdicts_keep_bun_divergence_and_node_coverage_separate(self):
         report = {'selected_files': ['X'], 'files': [{'file': 'X', 'engines': {
             'bun': {'bun_adapter_unsupported_cases': [{'id': 'adapter-gap'}]},
