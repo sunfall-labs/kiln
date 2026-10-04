@@ -88,6 +88,7 @@ five-second case budgets. The quiet replay took 20.6 seconds without an outer me
 second replay with the matched 8 GiB cap also passed all 178. The focused evidence retains these
 separate conditions, compiler digests, inventories and profiles.
 These results are separate selections and do not replace the incomplete whole-suite diagnostic.
+A later URL-focused production run passes all 19 unchanged cases under native and Bun.
 
 The next milestone's first gate attempt is not green: routine Test262 passed its chunk floors
 with 97,606 passes, but the benchmark preparation lane timed out waiting for correctness lanes
@@ -100,7 +101,7 @@ server and regression corpora, and the 31-target facts baseline. It failed eight
 (one missing private-slot reservation, one obsolete launcher-text assertion, and six native
 top-level-await lifecycle cases), plus the benchmark coordination timeout during cold builds.
 Those failures remain recorded; the slot, assertion and TLA fixes have focused verification,
-and the final gate is still required before pushing. Full allocation-stress parity on the
+and the subsequent final gate passed before pushing. Full allocation-stress parity on the
 integrated compiler separately passed 591 matches, five refusals and zero divergences, with
 45 explicit stress skips. Stress execution paused only its dispatcher during the gate; active
 programs were never suspended.
@@ -116,6 +117,18 @@ values by href plus enumerable user properties; three focused parity probes pass
 normally and four pass with allocation stress. The native parity runner now compares
 captured raw files, preserving NUL bytes and trailing newlines. Persistent controls
 exercise byte differences, equal binary output and exit-status-only differences.
+
+The final integrated routine gate (`run.TGCbJX4K`, frozen `e872e3a0`) passed all ten
+steps in 1,227 seconds: 2,565 crate tests passed with zero failures (110 suites,
+nine ignored); native parity matched 637 probes with six named refusals and zero
+byte/status divergences; routine Test262 passed 97,606 of 102,522 selected variants
+without a regression across 122 chunks (116 extended variants deferred). All 17
+present third-party bundles matched, all 12 routine performance baselines passed,
+and the Node/server/regression corpora and 31-target facts baseline passed.
+Pre-push HTTP and native-provider contracts and core crate tests also passed.
+This milestone is on main at `e872e3a0`; `gate-green-reference.json` retains the
+frozen source/binary/report digests. Complete production Effect selection and
+remaining Cluster/Sharding timeouts remain outstanding.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
