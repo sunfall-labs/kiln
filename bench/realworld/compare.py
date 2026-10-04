@@ -159,20 +159,14 @@ def measure_cli(name, src, needs_node, argv, work):
     artifacts = {}
     unsupported = {}
 
-    # Tier A (pure compute) builds a standalone binary: nothing it needs lives
-    # outside it. Tier B needs host capabilities (FS) that standalone binaries
-    # are not provisioned with, so it runs native in-process (`run --native`),
-    # exactly like scripts/native.sh's parity pairs.
-    if not needs_node:
-        native, note = build_kiln(src, needs_node, work, name)
-        if native:
-            commands["kiln-native"] = [native, *argv]
-            artifacts["kiln-native"] = artifact_bytes(native)
-        else:
-            unsupported["kiln-native"] = note
+    # Both tiers use the same native-release AOT path. `--node` provisions the
+    # filesystem adapter for Tier B while keeping the executable standalone.
+    native, note = build_kiln(src, needs_node, work, name)
+    if native:
+        commands["kiln-native"] = [native, *argv]
+        artifacts["kiln-native"] = artifact_bytes(native)
     else:
-        commands["kiln-native"] = [KILN, "--one-shot", *kiln_flags, "run",
-                                   "--native", src, *argv]
+        unsupported["kiln-native"] = note
 
     if name in ("json-transform", "template-render"):  # tier A: portable subset
         porf_bin, note = build_porffor(src, work, name)
@@ -218,6 +212,13 @@ def measure_cli(name, src, needs_node, argv, work):
             "ms": measured,
             "peak_rss_kb": rss,
             "artifact_bytes": artifacts,
+            "execution_modes": {
+                "node": "direct TypeScript",
+                "bun": "direct TypeScript",
+                "kiln": {"kind": "interpreter", "node_adapter": needs_node},
+                "kiln-native": {"kind": "AOT", "profile": "native-release",
+                                "node_adapter": needs_node},
+            },
         },
         unsupported,
         divergences,
@@ -329,7 +330,14 @@ def measure_server(work):
             server.kill()
             server.wait()
         wait_for_port_closed(18091)
-    return {"program": name, "rps": rps}, unsupported, divergences, notes
+    return {"program": name, "rps": rps,
+            "execution_modes": {
+                "node": "direct TypeScript",
+                "bun": "direct TypeScript",
+                "kiln": {"kind": "interpreter", "node_adapter": True},
+                "kiln-native": {"kind": "AOT", "profile": "native-release",
+                                "node_adapter": True},
+            }}, unsupported, divergences, notes
 
 
 def repo_provenance():

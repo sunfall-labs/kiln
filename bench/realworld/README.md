@@ -16,8 +16,10 @@ node so a fast wrong answer reads as a divergence, never as a win.
 
 Tier A runs everywhere a runtime can execute the language subset; tier B needs
 the Node adapter, so porffor and Hermes report it as unsupported (a capability
-gate, not a failure). `inputs/users.json` is committed; regenerate it with
-`node inputs/gen-users.mjs`.
+gate, not a failure). Kiln's native column builds all four programs as
+`native-release` AOT executables; tier B passes `--node` at build time to include
+the filesystem or HTTP adapter. The Bun column runs the `.ts` source directly.
+`inputs/users.json` is committed; regenerate it with `node inputs/gen-users.mjs`.
 
 ## Runtimes
 
