@@ -7,7 +7,7 @@ line is the truth.
 
 | | in progress | ready | needs triage | other open | closed |
 |---|---:|---:|---:|---:|---:|
-| **all features** | 5 | 31 | 4 | 10 | 160 |
+| **all features** | 5 | 31 | 4 | 10 | 162 |
 
 | feature | PRD | in progress | ready | needs triage | other open | closed |
 |---|---|---:|---:|---:|---:|---:|
@@ -35,6 +35,9 @@ line is the truth.
 | [`deploy-with-kiln`](deploy-with-kiln/) | PRD: Deploy with kiln |  | 13 | 2 |  | 3 |
 | [`differential-parity`](differential-parity/) | PRD: Differential Conformance Parity & Refusal Classification |  |  |  |  |  |
 | [`dynamic-import-hang`](dynamic-import-hang/) | PRD: Dynamic `import()` Promise Settling and Host Loader Resolution |  |  |  |  | 1 |
+| [`effect-benchmark-validation`](effect-benchmark-validation/) | Direct-TypeScript benchmark milestone validation |  |  |  |  |  |
+| [`effect-namespace-demand`](effect-namespace-demand/) | Escaping namespace demand |  |  |  |  |  |
+| [`effect-upstream`](effect-upstream/) |  |  |  |  |  |  |
 | [`extended-limits`](extended-limits/) |  |  |  |  |  |  |
 | [`extended-mixed`](extended-mixed/) |  |  |  |  |  |  |
 | [`extended-sparse-array`](extended-sparse-array/) |  |  |  |  |  |  |
@@ -45,6 +48,7 @@ line is the truth.
 | [`fs-promises-order`](fs-promises-order/) | PRD: the two concurrent `fs.promises` ordering probes assert a race |  |  |  |  | 2 |
 | [`full-runtime`](full-runtime/) | PRD: Full runtime — the native surface converges on the interpreter's |  | 3 |  |  | 6 |
 | [`function-has-instance`](function-has-instance/) | PRD: Function.prototype[Symbol.hasInstance] Builtin Property |  |  |  |  | 1 |
+| [`generational-midturn-gc`](generational-midturn-gc/) | Generational mid-turn collection |  |  |  |  |  |
 | [`generator-throw-never-resumes`](generator-throw-never-resumes/) | PRD: Generator.throw() Resumes Catch Handler in Suspended Body |  |  |  |  | 1 |
 | [`ghui-opentui`](ghui-opentui/) | Run ghui with OpenTUI | 2 |  |  | 2 | 2 |
 | [`ghui-perf`](ghui-perf/) |  |  |  |  |  |  |
@@ -63,6 +67,7 @@ line is the truth.
 | [`module-namespace-liveness`](module-namespace-liveness/) | PRD: Live Module Namespace Object Bindings |  |  |  |  | 1 |
 | [`multicore-concurrency`](multicore-concurrency/) | Multicore In-Process Concurrency: Native Actors, Zero-Copy Region Transfer, and Effect v4 Integration |  |  |  |  | 6 |
 | [`native-date-value-argument`](native-date-value-argument/) | PRD: Native Date Constructor Object Coercion via ToPrimitive |  |  |  |  | 1 |
+| [`native-graph-transfer-gc-stress`](native-graph-transfer-gc-stress/) |  |  |  |  |  |  |
 | [`native-link-cas`](native-link-cas/) |  |  |  |  |  |  |
 | [`native-module-gc-roots`](native-module-gc-roots/) | PRD: Module-Scope Globals GC Roots in Native C Compilation |  |  |  |  | 1 |
 | [`native-object-layout`](native-object-layout/) | PRD: Native Object Layout Field Alignment with Private Members |  |  |  |  | 1 |
@@ -74,11 +79,12 @@ line is the truth.
 | [`object-literal-accessor-override`](object-literal-accessor-override/) |  |  |  |  |  |  |
 | [`open-world-speculation`](open-world-speculation/) | PRD: Open-World Speculation & SSA Unboxing Completeness |  |  |  |  | 3 |
 | [`ownkeys-linear`](ownkeys-linear/) |  |  |  |  |  |  |
-| [`parallel-builtins`](parallel-builtins/) | PRD: Parallel built-ins that are extremely effective, and never change Node behaviour |  |  |  |  | 30 |
+| [`parallel-builtins`](parallel-builtins/) | PRD: Parallel built-ins that are extremely effective, and never change Node behaviour |  |  |  |  | 32 |
 | [`perf`](perf/) |  |  |  |  |  |  |
 | [`perf-consolidation`](perf-consolidation/) |  |  |  |  |  |  |
 | [`perf-key-hash`](perf-key-hash/) |  |  |  |  |  |  |
 | [`pi-in-kiln`](pi-in-kiln/) | Run Pi in Kiln |  |  |  |  |  |
+| [`prepared-method-call-cache`](prepared-method-call-cache/) | Prepared method-call lookup cache |  |  |  |  |  |
 | [`private-names-per-evaluation`](private-names-per-evaluation/) | PRD: Per-Evaluation Brand Check for Private Class Members |  |  |  |  | 1 |
 | [`pworkers`](pworkers/) |  |  |  |  |  |  |
 | [`realms-and-concurrency`](realms-and-concurrency/) | PRD: Realms and concurrency |  |  |  | 1 | 25 |
@@ -87,6 +93,7 @@ line is the truth.
 | [`removable-declarations`](removable-declarations/) | PRD: Side-Effect-Free Top-Level Declaration Pruning in Closed-World Graphs |  |  |  |  | 1 |
 | [`review-six`](review-six/) |  |  |  |  |  |  |
 | [`run-parses-script-executes-module`](run-parses-script-executes-module/) | PRD: Align Parser Goal with Execution Goal in `kiln run` |  |  |  |  | 1 |
+| [`runtime-generated-esm`](runtime-generated-esm/) | Runtime-generated ESM in native realms |  |  |  |  |  |
 | [`runtime-introspection`](runtime-introspection/) | PRD: Runtime introspection for a natively compiled server |  |  |  |  | 5 |
 | [`rust-parallel-engine`](rust-parallel-engine/) | PRD: Rust-Backed Native Concurrency and Runtime Engine |  |  |  |  | 6 |
 | [`server-throughput`](server-throughput/) | PRD: Server HTTP Throughput Optimization and Dispatch Architecture |  |  |  |  | 2 |
