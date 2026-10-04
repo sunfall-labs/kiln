@@ -1499,43 +1499,35 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
     };
 
     let clientReq: any;
+    const cancelNativeRequest = processObject?.__kilnNativeModules?.http?.__cancelRequest;
+    const cancelTransport = () => {
+      if (!clientReq) return;
+      if (typeof cancelNativeRequest === "function") cancelNativeRequest(clientReq);
+      else if (typeof clientReq.destroy === "function") clientReq.destroy();
+    };
+    let onAbort: any = null;
+    let failResponse: any = null;
+    const removeAbort = () => {
+      if (onAbort !== null && typeof req.signal?.removeEventListener === "function") {
+        req.signal.removeEventListener("abort", onAbort);
+      }
+    };
+    let finishResponse: any = removeAbort;
     try {
       clientReq = httpReqFn.call(httpModule, options, (res: any) => {
-        const chunks: any[] = [];
-        res.on("data", (chunk: any) => {
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          let bodyBytes: Uint8Array;
-          if (typeof Buffer !== "undefined" && typeof Buffer.concat === "function") {
-            const buf = Buffer.concat(chunks);
-            bodyBytes = new Uint8Array(buf);
-          } else {
-            let total = 0;
-            for (let i = 0; i < chunks.length; i++) total += chunks[i].length || 0;
-            bodyBytes = new Uint8Array(total);
-            let off = 0;
-            for (let i = 0; i < chunks.length; i++) {
-              const c = chunks[i];
-              if (c instanceof Uint8Array) {
-                bodyBytes.set(c, off);
-                off += c.length;
-              } else if (typeof c === "string") {
-                const enc = new TextEncoder().encode(c);
-                bodyBytes.set(enc, off);
-                off += enc.length;
-              }
-            }
-          }
-
+          res.on("error", reject);
           const status = res.statusCode || 200;
           const location = res.headers?.location;
           const isRedirect = status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
           if (isRedirect && typeof location === "string" && req.redirect === "error") {
+            removeAbort();
+            cancelTransport();
             reject(new TypeError("fetch: redirect mode is 'error'"));
             return;
           }
           if (isRedirect && typeof location === "string" && req.redirect === "follow") {
+            removeAbort();
+            cancelTransport();
             if (redirectCount >= 20) {
               reject(new TypeError("fetch: redirect limit exceeded"));
               return;
@@ -1574,16 +1566,61 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
             fetch(target, nextInit, redirectCount + 1, true).then(resolve, reject);
             return;
           }
+          // Publish headers immediately. A response body can be unbounded, so waiting
+          // for its end here prevents callers from reading or cancelling the response.
+          let ended = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller: any) {
+              let onSocketClose: any = null;
+              const finish = () => {
+                removeAbort();
+                failResponse = null;
+                if (onSocketClose !== null && typeof res.socket?.removeListener === "function") {
+                  res.socket.removeListener("close", onSocketClose);
+                }
+              };
+              finishResponse = finish;
+              const fail = (error: any) => {
+                if (ended) return;
+                ended = true;
+                finish();
+                controller.error(error);
+              };
+              failResponse = fail;
+              res.on("data", (chunk: any) => {
+                if (ended) return;
+                controller.enqueue(typeof chunk === "string"
+                  ? getSharedEncoder().encode(chunk) : new Uint8Array(chunk));
+                if (controller.desiredSize <= 0 && typeof res.pause === "function") res.pause();
+              });
+              res.on("end", () => {
+                if (ended) return;
+                ended = true;
+                finish();
+                controller.close();
+              });
+              res.on("error", fail);
+              res.on("aborted", () => fail(new TypeError("Response body was aborted")));
+              if (res.socket && typeof res.socket.on === "function") {
+                onSocketClose = () => fail(new TypeError("Response body connection closed"));
+                res.socket.on("close", onSocketClose);
+              }
+            },
+            pull() {
+              if (!ended && typeof res.resume === "function") res.resume();
+            },
+            cancel() {
+              ended = true;
+              finishResponse();
+              cancelTransport();
+            },
+          });
           resolve(makeResponse(
             status,
             headerListFromNodeHeaders(res.headers),
-            bodyBytes,
+            req.method === "HEAD" || status === 204 || status === 205 || status === 304 ? null : stream,
             responseExtra(res.statusMessage || "", "basic", req.url, alreadyRedirected)
           ));
-        });
-        res.on("error", (err: any) => {
-          reject(err);
-        });
       });
     } catch (err) {
       return reject(err);
@@ -1597,14 +1634,15 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
 
     let requestReader: any = null;
     if (req.signal) {
-      const onAbort = () => {
+      onAbort = () => {
         if (requestReader !== null) {
           requestReader.cancel(req.signal.reason).catch(() => {});
         }
-        if (clientReq && typeof clientReq.destroy === "function") {
-          clientReq.destroy();
-        }
-        reject(req.signal.reason || new Error("The operation was aborted"));
+        const reason = req.signal.reason || new Error("The operation was aborted");
+        if (failResponse !== null) failResponse(reason);
+        cancelTransport();
+        removeAbort();
+        reject(reason);
       };
       if (typeof req.signal.addEventListener === "function") {
         req.signal.addEventListener("abort", onAbort);

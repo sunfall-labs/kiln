@@ -5021,6 +5021,9 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, http_obj, "__incomingMessageEnded", 22,
                           http_incoming_ended, 0, NULL);
     if (status != KILN_C99_OK) return status;
+    kiln_value http_cancel_request = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 585 /* KILN_C99_METHOD_NODE_HTTP_CANCEL_REQUEST */ };
+    status = kiln_c99_put(host, http_obj, "__cancelRequest", 15, http_cancel_request, 0, NULL);
+    if (status != KILN_C99_OK) return status;
     kiln_value incoming_message_prototype = kiln_c99_undefined();
     status = kiln_c99_node_incoming_message_prototype(&incoming_message_prototype);
     if (status != KILN_C99_OK) return status;

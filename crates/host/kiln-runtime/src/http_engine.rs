@@ -1622,9 +1622,6 @@ async fn serve(
         }
     };
     let service = server_service(Rc::clone(&shared));
-    // Node's http.Server always allows a half-open socket: a client may shut its write side
-    // after the request and still receive the response. HTTP keeps Node's rule.
-    let _ = allow_half_close;
     let mut transferred = false;
     let result = if is_http2 {
         let builder = auto::Builder::new(LocalExecutor).http2_only();
@@ -1647,7 +1644,9 @@ async fn serve(
         // HTTP, and into_parts discards the unflushed HTTP output. Keep ordinary flushing
         // so every response is on the wire before handing the transport to the upgrade.
         builder.pipeline_flush(false);
-        builder.half_close(true);
+        // Honor the connection's half-close policy. Keeping every connection half-open
+        // leaves an unfinished streaming response alive after its client disconnects.
+        builder.half_close(allow_half_close);
         let mut connection = builder.serve_connection(TokioIo::new(io), service);
         enum H1Progress {
             Complete(Result<(), hyper::Error>),

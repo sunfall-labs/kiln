@@ -3500,6 +3500,7 @@ typedef struct kiln_node_client_request {
     uint64_t connect_request;
     uint64_t request_id;
     int ended;
+    int cancelled;
     int sent;
     int response_started;
     int response_ended;

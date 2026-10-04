@@ -6412,6 +6412,41 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown) {
     kiln_node_response *response;
+    if (code == KILN_C99_METHOD_NODE_HTTP_CANCEL_REQUEST) {
+        kiln_node_client_request *request = argc > 0
+            ? (kiln_node_client_request *)kiln_c99_node_hidden_pointer(args[0], "@@node:client", 13)
+            : NULL;
+        int status;
+        if (request == NULL) return KILN_C99_INVALID_ARGUMENT;
+        if (request->cancelled) {
+            *result = kiln_c99_boolean(1);
+            return KILN_C99_OK;
+        }
+        request->cancelled = 1;
+        if (request->socket != NULL) {
+            kiln_value ignored;
+            status = kiln_c99_node_net(host, &ignored, KILN_C99_METHOD_NODE_SOCKET_DESTROY,
+                                       request->socket->object, NULL, 0, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            uint64_t next_request_id = 0;
+            int decision = kiln_realm_http_agent_cancel_connect_active(
+                (const uint8_t *)request->host_name, request->host_name_len,
+                request->port, request->request_id, &next_request_id);
+            if (decision < 0 || decision > 3)
+                KILN_C99_REFUSE("an HTTP agent cancellation decision this backend does not model");
+            kiln_c99_node_client_request_unregister(request);
+            if (decision == 3) {
+                kiln_node_client_request *next = kiln_c99_node_client_request_find(next_request_id);
+                if (next == NULL)
+                    KILN_C99_REFUSE("a canceled HTTP request successor without rooted request state");
+                status = kiln_c99_node_client_start_connect(next, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED) {
         kiln_node_client_request *request = argc > 0
             ? (kiln_node_client_request *)kiln_c99_node_hidden_pointer(
@@ -6429,6 +6464,10 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                   args[0], "@@node:client", 13)
             : NULL;
         int status;
+        if (request != NULL && request->cancelled) {
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
         if (request == NULL || request->socket == NULL)
             KILN_C99_REFUSE("a queued ClientRequest socket assignment without its request state");
         if (request->socket_published) {
