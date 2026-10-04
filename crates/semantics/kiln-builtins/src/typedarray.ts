@@ -34,6 +34,15 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
 // default `sort` 2.5 s as element loops here, against node's 2.6 ms and 84 ms.
 const __kilnTypedArrayCopy: (target: any, targetIndex: number, source: any, sourceIndex: number, count: number) => boolean =
   (globalThis as any).__kilnTypedArrayCopy;
+// Buffer's bootstrap follows this one, after this module has deleted the host primitive from the
+// global object. Hand the validated byte-copy operation across that fixed bootstrap boundary;
+// Buffer captures and deletes the temporary slot before user code can run.
+const __kilnBufferHandoffGlobal = globalThis as any;
+if (typeof __kilnTypedArrayCopy === "function" &&
+    typeof __kilnBufferHandoffGlobal.Buffer === "function" &&
+    typeof __kilnBufferHandoffGlobal.__kilnBufferToString === "function") {
+  __kilnBufferHandoffGlobal.__kilnBufferTypedArrayCopy = __kilnTypedArrayCopy;
+}
 delete (globalThis as any).__kilnTypedArrayCopy;
 const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
 delete (globalThis as any).__kilnTypedArraySort;

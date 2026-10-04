@@ -26,3 +26,11 @@ console.log(Buffer.concat([big.subarray(8), big.subarray(0, 2)]).toString("utf8"
 
 const high = Buffer.from([0, 1, 127, 128, 200, 255]);
 console.log(Array.from(Buffer.concat([high, high])).join(","));
+console.log(Buffer.concat([high], 3).toString("hex"));
+console.log(Buffer.concat([high.subarray(2, 4)], 5).toString("hex"));
+
+const typed = new Uint8Array([9, 8, 7, 6]);
+console.log(Buffer.concat([typed.subarray(1, 3), new Uint8Array([5])]).toString("hex"));
+console.log(Buffer.concat([typed], 2).toString("hex"));
+console.log(Buffer.concat([typed.subarray(1, 3)], 5).toString("hex"));
+console.log("__kilnBufferTypedArrayCopy" in globalThis);

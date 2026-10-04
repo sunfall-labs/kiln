@@ -20,6 +20,9 @@
   const G = globalThis as any;
   const B = G.Buffer;
   const rawToString: (this: Uint8Array, encoding?: string) => string = G.__kilnBufferToString;
+  const rawTypedArrayCopy: ((target: any, targetIndex: number, source: any, sourceIndex: number, count: number) => boolean) | undefined =
+    G.__kilnBufferTypedArrayCopy;
+  delete G.__kilnBufferTypedArrayCopy;
   if (typeof B !== "function" || typeof rawToString !== "function") return;
   // Captured, not called: this bootstrap runs in every Node-mode program, and a call into
   // Buffer here would be a call into a group the program may not have retained.
@@ -778,6 +781,16 @@
     for (let i = 0; i < list.length && at < total; i++) {
       const item = list[i];
       const count = item.length < total - at ? item.length : total - at;
+      // Both the destination and ordinary Buffer/Uint8Array inputs have the same Uint8 element
+      // representation. Reuse the typed-array bootstrap's validated raw copy so large buffers
+      // move as bytes instead of crossing the generic property-access path for every element.
+      // The helper returns false for spoofed tags, proxies, detached or otherwise incompatible
+      // views; keep the old observable element loop for those cases.
+      if (count > 0 && rawTypedArrayCopy !== undefined &&
+          rawTypedArrayCopy(out, at, item, 0, count)) {
+        at += count;
+        continue;
+      }
       for (let j = 0; j < count; j++) out[at + j] = item[j];
       at += count;
     }

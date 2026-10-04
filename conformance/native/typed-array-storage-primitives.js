@@ -33,3 +33,4 @@ for (const K of kinds) {
 const bi = new BigInt64Array([5n, -9223372036854775808n, 0n, 9223372036854775807n, -1n]);
 const bu = new BigUint64Array([5n, 18446744073709551615n, 0n, 7n]);
 console.log("bigint", bi.slice().sort().join(","), bu.toSorted().join(","), bi.slice(1, 3).join(","));
+console.log("__kilnBufferTypedArrayCopy" in globalThis);
