@@ -155,6 +155,26 @@ transport, and the server honors its half-close policy. The native regression ma
 under ordinary and allocation-stressed execution, and the HTTP close contract passes.
 `http-client-reference.json` records this focused evidence; 321 files were deferred.
 
+The streaming candidate is not yet a landed milestone. Its integrated gate was cancelled after
+three existing raw HTTP request-FIN tests hung; routine Test262 had already passed its unchanged
+97,606-pass chunk floors. The FIN fix must preserve synchronous response flushing, default
+cancellation of an unfinished response, and explicitly enabled half-open behavior. A separate
+interpreter defect made fetch cancellation reject the reader without closing its client socket:
+the private native cancellation hook had no interpreter equivalent. The added interpreter hook
+passes the original live-response cancellation fixture and its graph regression, including abort,
+reader cancellation and cancellation before connection assignment. Native FIN cancellation is
+still being checked before the next routine gate and push.
+
+The object initializer now explicitly clears `external_owner`, including reused arena storage;
+a poisoned-memory fixture reproduces the previous uninitialized field. The inline-object
+finalizer also skips cleanup when no separately owned side storage exists. Its backend object
+suite passes 82 tests, and four affected allocation-stress probes match. A method-name index
+passes its 83-test object suite plus representative multi-realm probes with and without GC
+stress, but has not increased the quiet Sharding result beyond 60/66. These candidates need the
+integrated gate; diagnostic profiles under concurrent builds are not accepted timing gains.
+Benchmark result validation now checks every independent checksum sample, with five controls
+passing, so a later repetition cannot silently report different work as a timing result.
+
 Wall timers now arm, refresh and rearm from the current call time, including after synchronous
 work; provider tests and native parity cover this correction. Release builds can retain symbols
 with `KILN_NATIVE_KEEP_SYMBOLS=1` for profiling without changing compilation optimization.
