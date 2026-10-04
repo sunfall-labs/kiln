@@ -285,3 +285,19 @@ three affected native suspension-liveness checks pass.
 upstream Pool retest still passes 44/47: retention assertions at source lines
 871, 935 and 966 remain unresolved. These focused checks are not full Effect or
 native GC-stress verification.
+
+## Real-world benchmark correctness
+
+A four-program run on the pushed `340a7d88` compiler passes CLI checksums for
+all three repetitions on native, the interpreter, Bun and Node. Native builds
+use `native-release`, including the filesystem program. The server client now
+shares one keep-alive agent: a regression test verifies 100 responses arrive
+over one connection, and the benchmark verifies 2,000 correct responses per
+runtime. The previous per-request agent allocation measured repeated
+connections and must not be described as keep-alive throughput.
+
+`realworld-main-diagnostic-reference.json` retains the binary and runner
+identities, every CLI checksum digest, server response counts and raw report
+digest. Execution was pinned to CPU 14 while other jobs continued; timings are
+bounded-background diagnostics rather than accepted final performance claims.
+CLI process startup is included and native AOT build time is excluded.
