@@ -528,7 +528,9 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
             pending.push(' ');
             pending.push_str(line);
         }
-        if pending.ends_with(';') {
+        if pending.ends_with(';')
+            && pending.matches('{').count() == pending.matches('}').count()
+        {
             statements.push(std::mem::take(&mut pending));
         } else if pending
             .split('{')
@@ -543,7 +545,16 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
         .filter_map(|line| {
             let line = line.trim();
             let declaration = line.split('=').next().unwrap_or(line);
-            let name_start = line.find("kiln_c99_")?;
+            // An anonymous struct can contain domain-prefixed types and fields. Its
+            // declarator follows the closing brace; for named types, the variable is
+            // the last identifier before an optional array suffix.
+            let declarator = declaration.rsplit('}').next().unwrap_or(declaration);
+            let declarator = declarator.split('[').next().unwrap_or(declarator);
+            let name = declarator
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .filter(|word| word.starts_with("kiln_c99_"))
+                .next_back()?;
+            let name_start = line.rfind(name)?;
             let before_name = &line[..name_start];
             let immutable = if before_name.contains('*') {
                 // `*const` and `* const` declare the same thing, so the guard must not depend

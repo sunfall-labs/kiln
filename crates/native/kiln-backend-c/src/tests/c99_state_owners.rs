@@ -26,6 +26,9 @@ pub(super) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
     ("kiln_c99_frame_mapped_arguments", C99StateOwner::Frame),
     ("kiln_c99_frame_callee", C99StateOwner::Frame),
+    // Nested managed launcher calls save their stack/register boundary until the
+    // matching pop. The TLS stack is frame bookkeeping, not persistent realm state.
+    ("kiln_c99_graph_drive_boundaries", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_status", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_host", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_thrown", C99StateOwner::Frame),
