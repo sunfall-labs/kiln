@@ -1,0 +1,23 @@
+const assert = require('node:assert/strict');
+const { isDeepStrictEqual } = require('node:util');
+
+const actual = new URL('https://example.com/test?existing=true');
+actual.searchParams.append('foo', 'bar');
+actual.searchParams.append('foo', 'baz');
+actual.hash = 'section';
+const expected = new URL('https://example.com/test?existing=true&foo=bar&foo=baz#section');
+assert.deepStrictEqual(actual, expected);
+assert.equal(isDeepStrictEqual(actual, new URL('https://example.com/other')), false);
+assert.equal(Object.assign({}, actual)[Object.getOwnPropertySymbols(actual)[0]], undefined);
+const field = Symbol('field');
+actual[field] = { value: 1 };
+assert.equal(isDeepStrictEqual(actual, expected), false);
+expected[field] = { value: 1 };
+assert.deepStrictEqual(actual, expected);
+expected[field].value = 2;
+assert.equal(isDeepStrictEqual(actual, expected), false);
+const withCachedParams = new URL('https://example.com/?a=1');
+withCachedParams.searchParams;
+assert.deepStrictEqual(withCachedParams, new URL(withCachedParams.href));
+assert.deepStrictEqual(Object.assign({}, new URLSearchParams('a=1')), {});
+console.log('URL value and enumerable properties compare independently of caches');

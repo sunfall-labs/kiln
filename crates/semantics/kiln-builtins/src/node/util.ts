@@ -243,6 +243,9 @@ export function isDeepStrictEqual(actual: any, expected: any): boolean {
     if (left instanceof Date || right instanceof Date) {
       if (!(left instanceof Date) || !(right instanceof Date) || !Object.is(left.getTime(), right.getTime())) return false;
     }
+    if (left instanceof URL || right instanceof URL) {
+      if (!(left instanceof URL) || !(right instanceof URL) || left.href !== right.href) return false;
+    }
     if (left instanceof RegExp || right instanceof RegExp) {
       if (!(left instanceof RegExp) || !(right instanceof RegExp) ||
           left.source !== right.source || left.flags !== right.flags || left.lastIndex !== right.lastIndex) return false;
