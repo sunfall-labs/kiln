@@ -2,6 +2,7 @@
 
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
+import { signals } from "node:constants";
 
 const nativeModules =
   typeof process !== "undefined" ? (process as any).__kilnNativeModules : undefined;
@@ -123,10 +124,7 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
   if (!Array.isArray(args)) throw new TypeError("execFile arguments must be an array");
   if (typeof file !== "string") throw new TypeError("execFile file must be a string");
   const settings = normalizeExecFileOptions(options);
-  const strings = args.map((argument: any) => {
-    if (typeof argument !== "string") throw new TypeError("execFile arguments must be strings");
-    return argument;
-  });
+  const strings = args.map((argument: any) => String(argument));
   const task = startHostProcess(file, strings);
   const child = new ChildProcess();
   // ProcessRun reports its identity with the completed output. Until then pid is undefined.
@@ -139,10 +137,10 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
     const stderr = outputValue(result.stderr, settings.encoding);
     let error: any = null;
     if (result.exitCode !== 0 || result.signal !== null) {
-      error = new Error("Command failed: " + file + " " + args.join(" "));
+      error = new Error("Command failed: " + file + " " + strings.join(" "));
       error.code = result.exitCode;
       error.signal = child.signalCode;
-      error.cmd = file + " " + args.join(" ");
+      error.cmd = file + " " + strings.join(" ");
       error.stdout = stdout;
       error.stderr = stderr;
     }
@@ -153,8 +151,8 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
       child.emit("close", result.exitCode, child.signalCode);
     }
   }, (error) => {
-    // A spawn failure has no exit event; Node reports -2 on close and emits the callback
-    // before the error and close events. Keep the failure's real spawn metadata intact.
+    // A spawn failure has no exit event. Node emits the callback before error/close,
+    // and its negative OS errno is also the close status. Preserve the host metadata.
     child.exitCode = null;
     const stdout = outputValue(new Uint8Array(0), settings.encoding);
     const stderr = outputValue(new Uint8Array(0), settings.encoding);
@@ -164,7 +162,7 @@ export function execFile(file: string, args?: any, options?: any, callback?: any
       try {
         child.emit("error", error);
       } finally {
-        child.emit("close", -2, null);
+        child.emit("close", typeof error.errno === "number" ? error.errno : null, null);
       }
     }
   });
@@ -192,8 +190,10 @@ function outputValue(bytes: Uint8Array, encoding: string | null): any {
 }
 
 function signalName(signal: number): string {
-  if (signal === 9) return "SIGKILL";
-  return "SIG" + signal;
+  for (const name of Object.keys(signals)) {
+    if (signals[name] === signal) return name;
+  }
+  throw new Error("node:child_process cannot identify host signal " + signal);
 }
 
 function startHostProcess(command: string, args: string[]): { promise: Promise<any> } {

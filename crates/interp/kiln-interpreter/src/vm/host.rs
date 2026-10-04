@@ -2690,6 +2690,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let object = self.construct_error(ErrorKind::Error, &[Value::String(error.message.into())]);
         if let Value::Object(object) = &object {
             let mut object = object.borrow_mut();
+            if let Some(errno) = error.os_errno.filter(|errno| *errno > 0) {
+                object.set_non_enumerable("errno", Value::Number(-(errno as f64)));
+            }
             object.set_non_enumerable("code", Value::String(error.code.into()));
             object.set_non_enumerable("syscall", Value::String(error.syscall.into()));
             if let Some(path) = error.path {

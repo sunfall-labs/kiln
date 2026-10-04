@@ -311,6 +311,8 @@ pub struct ProcessOutput {
 /// Stable error information that a Node compatibility Adapter can turn into a JavaScript error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsyncHostError {
+    /// Positive native OS error number when the host supplied one.
+    pub os_errno: Option<i32>,
     /// Node-compatible short error code where one exists, such as `ENOENT`.
     pub code: String,
     /// Operation name, such as `open` or `stat`.
@@ -330,6 +332,7 @@ impl AsyncHostError {
         message: impl Into<String>,
     ) -> Self {
         Self {
+            os_errno: None,
             code: code.into(),
             syscall: syscall.into(),
             path,

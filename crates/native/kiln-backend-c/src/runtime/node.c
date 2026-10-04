@@ -1220,6 +1220,9 @@ static int kiln_c99_node_completion_error_value(const kiln_async_completion *com
     if (status == KILN_C99_OK && completion->error_path_len != 0)
         status = kiln_c99_node_fs_error_property(*out, "path", 4, completion->error_path,
                                                  completion->error_path_len);
+    if (status == KILN_C99_OK && completion->value_u64 > 0 && completion->value_u64 <= INT32_MAX)
+        status = kiln_c99_commit_own_data(*out, "errno", 5,
+                                           kiln_c99_number(-(double)completion->value_u64), 0, 1, 1);
     return status;
 }
 
@@ -3322,30 +3325,9 @@ static int kiln_c99_node_process_complete(void *opaque, const kiln_async_complet
     (void)host; (void)thrown;
     if (work == NULL || completion == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (completion->status != KILN_REALM_ASYNC_OK) {
-        if (completion->error_message_len > SIZE_MAX || completion->error_code_len > SIZE_MAX ||
-            completion->error_syscall_len > SIZE_MAX || completion->error_path_len > SIZE_MAX)
-            KILN_C99_REFUSE("a process error field longer than this platform can address");
-        if ((completion->error_message_len != 0 && completion->error_message == NULL) ||
-            (completion->error_code_len != 0 && completion->error_code == NULL) ||
-            (completion->error_syscall_len != 0 && completion->error_syscall == NULL) ||
-            (completion->error_path_len != 0 && completion->error_path == NULL))
-            return KILN_C99_INVALID_ARGUMENT;
-        status = kiln_c99_new_error(
-            &result, KILN_C99_BUILTIN_ERROR,
-            kiln_c99_copy_text((const char *)completion->error_message,
-                               (size_t)completion->error_message_len));
-        kiln_c99_heap_store_value(work, &work->result, result);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_fs_error_property(result, "code", 4, completion->error_code,
-                                                     completion->error_code_len);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_fs_error_property(result, "syscall", 7,
-                                                     completion->error_syscall,
-                                                     completion->error_syscall_len);
-        if (status == KILN_C99_OK && completion->error_path_len != 0)
-            status = kiln_c99_node_fs_error_property(result, "path", 4, completion->error_path,
-                                                     completion->error_path_len);
+        status = kiln_c99_node_completion_error_value(completion, &result);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_heap_store_value(work, &work->result, result);
         return kiln_c99_settle(work->promise, result, 1);
     }
     if (completion->value_kind != KILN_REALM_ASYNC_PROCESS_OUTPUT)

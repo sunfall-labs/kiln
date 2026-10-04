@@ -91,3 +91,39 @@ await new Promise((resolve, reject) => {
   });
 });
 console.log("kill-refusal");
+
+await new Promise((resolve, reject) => {
+  execFile("printf", [123], (error, stdout, stderr) => {
+    if (error || stdout !== "123" || stderr !== "") return reject(new Error("argument coercion failed"));
+    resolve(undefined);
+  });
+});
+console.log("argument-coercion");
+
+await new Promise((resolve, reject) => {
+  const child = execFile("sh", ["-c", "kill -TERM $$"], (error) => {
+    if (!error || error.code !== null || error.signal !== "SIGTERM") {
+      return reject(new Error("wrong termination error"));
+    }
+  });
+  child.on("close", (code, signal) => {
+    if (code !== null || signal !== "SIGTERM" || child.signalCode !== signal) {
+      return reject(new Error("wrong termination signal"));
+    }
+    resolve(undefined);
+  });
+});
+console.log("termination-signal");
+
+await new Promise((resolve, reject) => {
+  const child = execFile("/", (error) => {
+    if (!error || error.code !== "EACCES" || error.errno !== -13) {
+      return reject(new Error("wrong permission error"));
+    }
+  });
+  child.on("close", (code, signal) => {
+    if (code !== -13 || signal !== null) return reject(new Error("wrong permission close status"));
+    resolve(undefined);
+  });
+});
+console.log("permission-error");

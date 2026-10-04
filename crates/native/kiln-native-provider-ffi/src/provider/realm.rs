@@ -168,6 +168,7 @@ pub struct CompletionView {
     pub stderr_len: u64,
     pub exit_code: i32,
     pub signal: i32,
+    /// Kind-specific scalar on success; positive OS errno (zero if absent) on failure.
     pub value_u64: u64,
     pub resource: u64,
     pub resource_kind: u32,
@@ -627,14 +628,22 @@ impl CompletionPayload {
                 payload
             }
             Ok(AsyncHostValue::DirEntries(_)) => Self::empty(request, sequence, VALUE_DIR_ENTRIES),
-            Err(error) => Self::error(
-                request,
-                sequence,
-                &error.code,
-                &error.syscall,
-                error.path.as_deref(),
-                &error.message,
-            ),
+            Err(error) => {
+                let mut payload = Self::error(
+                    request,
+                    sequence,
+                    &error.code,
+                    &error.syscall,
+                    error.path.as_deref(),
+                    &error.message,
+                );
+                // On failure this scalar carries a positive OS errno, or zero when absent.
+                payload.value_u64 = error
+                    .os_errno
+                    .filter(|errno| *errno > 0)
+                    .map_or(0, |errno| errno as u64);
+                payload
+            }
         }
     }
 

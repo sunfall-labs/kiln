@@ -265,6 +265,7 @@ fn throw_node_error<H: HostOps + ?Sized>(
         format!("{code}: {err}, {syscall}")
     };
     let error = kiln_host_abi::AsyncHostError {
+        os_errno: err.raw_os_error(),
         code: code.to_owned(),
         message,
         syscall: syscall.to_owned(),

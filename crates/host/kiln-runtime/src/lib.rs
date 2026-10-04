@@ -5206,7 +5206,9 @@ fn io_error(syscall: &str, path: String, error: std::io::Error) -> AsyncHostErro
         std::io::ErrorKind::NotADirectory => "ENOTDIR",
         _ => "EIO",
     };
-    AsyncHostError::new(code, syscall, Some(path), error.to_string())
+    let mut result = AsyncHostError::new(code, syscall, Some(path), error.to_string());
+    result.os_errno = error.raw_os_error();
+    result
 }
 
 /// A single-thread-owned realm scheduler.
