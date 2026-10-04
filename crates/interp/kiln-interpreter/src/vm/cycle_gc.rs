@@ -1355,6 +1355,54 @@ mod tests {
     }
 
     #[test]
+    fn inactive_timer_handle_traces_callback_arguments_and_context() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let timer = Rc::new(RefCell::new(ObjectData::default()));
+        let target = Rc::new(RefCell::new(ObjectData::default()));
+        let context = Rc::new(vec![(
+            Rc::new(AsyncStorage {
+                disabled: std::cell::Cell::new(false),
+            }),
+            Value::Object(Rc::clone(&target)),
+        )]);
+        timer.borrow_mut().node_object = Some(NodeObject::TimerHandle(Box::new(TimerRecord {
+            id: 1,
+            delay: std::time::Duration::ZERO,
+            interval: false,
+            immediate: false,
+            callback: Value::Bound(Rc::new(BoundFunction {
+                target: Value::Undefined,
+                this_value: Value::Object(Rc::clone(&timer)),
+                arguments: Vec::new(),
+                properties: RefCell::new(ObjectData::default()),
+            })),
+            arguments: vec![Value::Object(Rc::clone(&target))],
+            context,
+            ran: true,
+            unreferenced: false,
+            cleared: false,
+        })));
+        let weak_timer = Rc::downgrade(&timer);
+        let weak_target = Rc::downgrade(&target);
+        let timer_weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&timer))], 0)
+            .expect("timer handle can be held weakly");
+        let target_weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .expect("context target can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(timer);
+        drop(target);
+
+        vm.collect_closure_cycles();
+        assert!(weak_timer.upgrade().is_none());
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&timer_weak_ref, 0), Ok(Value::Undefined));
+        assert_eq!(vm.weak_ref_deref(&target_weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
     fn weak_map_ephemerons_collect_value_to_key_cycles_but_follow_live_keys() {
         let mut host = TestHost;
         let (mut vm, _) = test_vm(&mut host);
