@@ -18,7 +18,8 @@ pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
     "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 pub const FULL_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi";
-pub const FULL_GUI_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi,gui";
+pub const FULL_GUI_FEATURES: &str =
+    "realm,realm-http,regexp,bigint,temporal,json,intl,parallel,ffi,gui";
 pub const SLIM_FEATURES: &str = "realm,regexp,bigint,json";
 pub const FULL_ARCHIVE: &str = "libkiln_native_provider_ffi.a";
 pub const SLIM_ARCHIVE: &str = "libkiln_native_provider_ffi.slim.a";
@@ -618,6 +619,36 @@ mod tests {
             assert!(manifests.insert(variant.manifest()));
             assert_eq!(ProviderVariant::parse(variant.as_str()), Some(variant));
         }
+    }
+
+    #[test]
+    fn http_capability_variants_explicitly_enable_http_runtime() {
+        for variant in ProviderVariant::ALL {
+            if variant.capabilities().contains(ProviderCapability::Http)
+                && variant != ProviderVariant::Full
+            {
+                assert!(
+                    variant
+                        .features()
+                        .split(',')
+                        .any(|feature| feature == "realm-http"),
+                    "{variant:?} claims HTTP but its no-default-features package omits realm-http: {}",
+                    variant.features()
+                );
+            }
+        }
+        assert!(
+            FULL_GUI_FEATURES
+                .split(',')
+                .any(|feature| feature == "realm"),
+            "full-gui disables Cargo defaults and must explicitly enable realm"
+        );
+        assert!(
+            FULL_GUI_FEATURES
+                .split(',')
+                .any(|feature| feature == "realm-http"),
+            "full-gui advertises HTTP but must explicitly enable realm-http"
+        );
     }
 
     #[test]
