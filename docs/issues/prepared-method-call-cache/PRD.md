@@ -21,7 +21,7 @@ receiver. Emission diagnostic labels use the normal C-string escaping helper.
 
 The regression fixture covers saved intrinsic identity when an argument replaces `Math.imul`, an
 overridden intrinsic result, non-callable argument evaluation, and quoted/backslashed property
-names. The final source candidate passed native parity (1/1), GC-stress parity (1/1), native realms
+names. The shared-cache candidate passed focused native parity (1/1), GC-stress parity (1/1), native realms
 at N=1, 2, and 16 (1/1), and stressed realms at N=1 and 2 (1/1). The backend C library tests passed
 316 tests, with 0 failures and 1 ignored. The separate emitted-C integration target
 (`mbx test -p kiln-backend-c --test emitted_c`) passed all 37 tests after reviewing the snapshot
@@ -59,3 +59,16 @@ probes with 1, 2 and 16 concurrent realms. Those two also passed stressed realms
 The separate emitted-C integration suite passed 37/37. `integration-reference.json` records
 the compiler/provider identities and retained raw logs. These checks do not replace the
 full Effect suite or the landing gate.
+
+## Full-suite argument regression
+
+The fresh full-suite run on combined source `319b320d` exposes a regression missed by the focused
+checks. Array's `dropWhile` and `dropWhileFilter` fail, then its execution exits with out-of-memory
+before completing its case inventory. Chunk has two assertion failures and ConfigProvider has four
+filesystem assertion failures. `argument-regression-reference.json` and the retained raw logs
+record these failures; the candidate is not ready to land.
+
+A reduced Array experiment reaches loop index 2 but a patched `slice` observes argument 0.
+The prepared-call argument pack's numeric representation selection is under investigation.
+Standalone loop/callback controls pass; preserve source-level callee-before-argument order and
+fix the representation defect rather than restoring member-name-based invocation shortcuts.
