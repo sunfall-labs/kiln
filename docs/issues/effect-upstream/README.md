@@ -44,14 +44,17 @@ divergence until the harness capability has an appropriate oracle.
 The complete Node/Vitest results are now a separate, archived oracle rather than only a summary.
 `conformance/effect-upstream/node-vitest-reference.json` stores its per-case pass/skip outcome,
 the Node 26.8.1 and Vitest 5.0.3 provenance, the official report SHA-256, and every pinned test source digest. Its counts match the direct Bun inventory: 11,019 cases across 322 files. Unique
-exact case IDs map automatically (10,713 cases). The remaining 306 parameterized or duplicate
-labels stay unmapped until `node-vitest-case-mapping.json` receives a versioned one-to-one mapping
-with source digest, source line and evidence; no ordinal fallback is allowed. Reports expose
+exact case IDs map automatically (10,713 cases). All 306 parameterized or duplicate
+labels now have explicit one-to-one mappings in `node-vitest-case-mapping.json`,
+with pinned source digest, source line, parameter-table values or duplicate occurrence
+evidence. Nested parameter tables retain their full index path; no ordinal fallback is used. Reports expose
 native/interpreter conformance to Node/Vitest separately from direct Bun differential results,
 and keep unmapped direct cases, unmatched official cases and adapter `HARNESS_UNSUPPORTED`
 results visible. These gaps prevent an incomplete mapping from being reported as complete
-conformance. The 306 outstanding mappings are itemized: 278 expanded parameterized labels in 24
-files, 14 repeated-label occurrence IDs in 7 files, and 14 ambiguous official titles in 7 files.
+conformance. The completed exceptions cover 278 expanded parameterized labels in 24
+files, 14 repeated-label occurrence IDs in 7 files, and 14 duplicate official titles in 7 files.
+All 11,019 cases map one-to-one in the complete synthetic inventory check. This is
+runner identity coverage, not proof that every runtime case has passed.
 
 `node-vitest-comparison-gaps.json` retains known runner transformation differences by exact case
 and source digest. In particular, Vitest transforms TypeScript before the Formatter function
