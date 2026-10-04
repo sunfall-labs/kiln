@@ -9,3 +9,5 @@ OpenTelemetry initializes `exports.ValueType` and then replaces it with an enume
 The fix must observe property getters in the same realm, preserve CommonJS require identity and lazy require behavior, snapshot ESM named exports, propagate getter failures, and retain namespace identity across repeated imports. Invoking every getter whenever require evaluates a module would change behavior and is not a sufficient solution.
 
 A minimal source regression is under development. Complete unchanged Metric execution and focused require/accessor/namespace tests must pass before this issue is complete.
+
+The first implementation is committed as `2ef02041` in the owned loader worktree. All 16 module-map tests pass, including a named accessor import, lazy getter evaluation after require, stable snapshots and default identity, and repeated getter rejection with the same thrown value while require remains usable. Data-only snapshots avoid a VM; accessor snapshots use normal GetProperty bytecode in the same realm and Node session. This is focused validation; unchanged upstream Metric execution remains pending the frozen release build.
