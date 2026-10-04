@@ -201,7 +201,7 @@ def measure_cli(name, src, needs_node, argv, work):
             "program": name,
             "ms": measured,
             "peak_rss_kb": rss,
-            "peak_rss_scope": "maximum per-process peak across repetitions; excludes builds",
+            "peak_rss_scope": "maximum child-lifetime peak across repetitions; excludes builds; includes inherited pre-exec image",
             "artifact_bytes": artifacts,
             "execution_modes": {
                 "node": "direct TypeScript",
