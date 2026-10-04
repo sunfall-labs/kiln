@@ -210,6 +210,51 @@ class NativeTimeoutTests(unittest.TestCase):
             self.assertIn("none were classified as refusals", result.stdout)
             self.assertNotIn("Refused by the native backend", result.stdout)
 
+    def test_runner_compares_captured_output_as_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            probe = root / "bytes.ts"
+            probe.write_text("// byte parity fixture\n")
+            kiln = root / "kiln"
+            kiln.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "native = '--native' in sys.argv\n"
+                "mode = os.environ['BYTE_MODE']\n"
+                "outputs = {\n"
+                " 'nul': (b'left\\0right', b'leftright'),\n"
+                " 'newline': (b'same', b'same\\n'),\n"
+                " 'equal-binary': (b'\\0same\\n\\n', b'\\0same\\n\\n'),\n"
+                " 'status-only': (b'same bytes', b'same bytes'),\n"
+                "}\n"
+                "sys.stdout.buffer.write(outputs[mode][int(native)])\n"
+                "if mode == 'status-only' and native: sys.exit(7)\n"
+            )
+            kiln.chmod(0o755)
+
+            cases = (
+                ("nul", 1, "0 matched, 0 refused, 1 diverged", "6c 65 66 74 00 72 69 67 68 74"),
+                ("newline", 1, "0 matched, 0 refused, 1 diverged", "73 61 6d 65 0a"),
+                ("equal-binary", 0, "1 matched, 0 refused, 0 diverged", None),
+                ("status-only", 1, "0 matched, 0 refused, 1 diverged", "bytes agree; only the exit status differs"),
+            )
+            for mode, expected_status, summary, detail in cases:
+                with self.subTest(mode=mode):
+                    environment = dict(os.environ, KILN_BIN=str(kiln), KILN_JOBS="1", BYTE_MODE=mode)
+                    environment.pop("KILN_NATIVE_TIMEOUT_SECONDS", None)
+                    result = subprocess.run(
+                        [str(RUNNER), str(probe)],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
+                    self.assertIn(summary, result.stdout)
+                    if detail is not None:
+                        self.assertIn(detail, result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
