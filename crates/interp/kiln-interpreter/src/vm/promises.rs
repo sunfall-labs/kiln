@@ -910,6 +910,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         loop {
             self.advance_host_scheduler_clock(self.instruction)?;
             self.drain_microtasks(runtime)?;
+            // WeakRef targets survive their creating job through its microtask checkpoint.
+            // Release that realm-wide job keepalive before the next host turn, which may run
+            // timers or I/O callbacks in another VM sharing this module realm.
+            self.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
             // Before asking for a timer, because settling a wait queues reactions and those are
             // microtasks: going straight on to the timer -- or worse, to the return below --
             // would leave a resolved promise with its `then` unrun.

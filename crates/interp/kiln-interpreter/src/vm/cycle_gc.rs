@@ -19,6 +19,8 @@ enum Key {
     Array(usize),
     Promise(usize),
     Generator(usize),
+    AsyncDisposal(usize),
+    ModuleSuspension(usize),
 }
 
 enum Owner {
@@ -28,6 +30,8 @@ enum Owner {
     Array(Rc<ArrayData>),
     Promise(Rc<PromiseData>),
     Generator(Rc<GeneratorData>),
+    AsyncDisposal(Rc<AsyncDisposal>),
+    ModuleSuspension(Rc<RefCell<ModuleSuspension>>),
 }
 
 impl Owner {
@@ -39,6 +43,8 @@ impl Owner {
             Self::Array(value) => Key::Array(Rc::as_ptr(value) as usize),
             Self::Promise(value) => Key::Promise(Rc::as_ptr(value) as usize),
             Self::Generator(value) => Key::Generator(Rc::as_ptr(value) as usize),
+            Self::AsyncDisposal(value) => Key::AsyncDisposal(Rc::as_ptr(value) as usize),
+            Self::ModuleSuspension(value) => Key::ModuleSuspension(Rc::as_ptr(value) as usize),
         }
     }
 
@@ -50,6 +56,8 @@ impl Owner {
             Self::Array(value) => Rc::strong_count(value),
             Self::Promise(value) => Rc::strong_count(value),
             Self::Generator(value) => Rc::strong_count(value),
+            Self::AsyncDisposal(value) => Rc::strong_count(value),
+            Self::ModuleSuspension(value) => Rc::strong_count(value),
         }
     }
 
@@ -86,6 +94,15 @@ impl Owner {
                 state.delegate = None;
                 drop(state);
                 value.properties.replace(ObjectData::default());
+            }
+            Self::AsyncDisposal(value) => {
+                value.pending.borrow_mut().clear();
+                value.thrown.borrow_mut().take();
+            }
+            Self::ModuleSuspension(value) => {
+                let mut state = value.borrow_mut();
+                state.stack.clear();
+                state.handlers.clear();
             }
         }
     }
@@ -155,12 +172,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 self.prune_suspended_generator_locals(generator);
             }
-            let children = owner_children(
+            let owner = nodes
+                .get(&parent)
+                .and_then(|node| node.owner.as_ref())
+                .expect("work node exists");
+            let children = owner_children(owner);
+            for child_owner in owner_sidecar_children(owner) {
+                let key = child_owner.key();
                 nodes
-                    .get(&parent)
-                    .and_then(|node| node.owner.as_ref())
-                    .expect("work node exists"),
-            );
+                    .get_mut(&parent)
+                    .expect("parent exists")
+                    .edges
+                    .push(key);
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(child_owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
             for child in children {
                 if let Some(owner) = owner_for_value(&child) {
                     let key = owner.key();
@@ -443,8 +474,37 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
             drop(state);
             values.extend(object_children(&value.properties.borrow()));
         }
+        Owner::AsyncDisposal(value) => {
+            values.push(Value::Promise(Rc::clone(&value.result)));
+            values.extend(value.pending.borrow().iter().cloned());
+            values.extend(value.thrown.borrow().iter().cloned());
+        }
+        Owner::ModuleSuspension(value) => {
+            values.extend(value.borrow().stack.iter().cloned());
+        }
     }
     values
+}
+
+/// Rc containers stored inside promise reactions need identities in the owner graph of their
+/// own. Without these edges, Values they contain look like unexplained external references and
+/// conservatively pin otherwise-unreachable WeakRef targets.
+fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
+    let mut owners = Vec::new();
+    if let Owner::Promise(value) = owner {
+        for reaction in &value.state.borrow().reactions {
+            match &reaction.sink {
+                Sink::AsyncDisposal(state) => {
+                    owners.push(Owner::AsyncDisposal(Rc::clone(state)));
+                }
+                Sink::ModuleAwait(state) => {
+                    owners.push(Owner::ModuleSuspension(Rc::clone(state)));
+                }
+                _ => {}
+            }
+        }
+    }
+    owners
 }
 
 fn object_children(data: &ObjectData) -> Vec<Value> {
@@ -466,4 +526,162 @@ fn object_children(data: &ObjectData) -> Vec<Value> {
         let _ = (&cell.target, &cell.token);
     }
     values
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestHost;
+
+    impl HostOps for TestHost {
+        fn call(
+            &mut self,
+            _operation: HostOp,
+            _arguments: &[HostValue],
+        ) -> Result<HostValue, kiln_host_abi::HostError> {
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    fn test_vm<'a>(host: &'a mut TestHost) -> (Vm<'a, TestHost>, Rc<Program>) {
+        let program = Rc::new(Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        });
+        let vm = Vm::with_entropy_seed(
+            Rc::clone(&program),
+            Rc::new(Strictness::sloppy(&program)),
+            host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("test realm initializes");
+        (vm, program)
+    }
+
+    fn closure_reaching_promise(program: &Rc<Program>, promise: &Rc<PromiseData>) -> Rc<Closure> {
+        Rc::new(Closure {
+            program: Rc::clone(program),
+            function: 0,
+            strictness: Rc::new(Strictness::sloppy(program)),
+            module_path: None,
+            name: None,
+            inferred_name: None,
+            upvalues: Vec::new(),
+            realm: RealmId::PRIMARY,
+            captured_arguments: Some(Value::Promise(Rc::clone(promise))),
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        })
+    }
+
+    #[test]
+    fn async_disposal_promise_edges_reclaim_dead_target_and_preserve_external_owner() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let Value::Object(target_object) = &target else {
+            unreachable!();
+        };
+        let weak_target = Rc::downgrade(target_object);
+        let keeper = Rc::clone(target_object);
+        let state = Rc::new(AsyncDisposal {
+            result: PromiseState::pending(),
+            pending: RefCell::new(vec![target.clone()]),
+            thrown: RefCell::new(None),
+            needs_await: std::cell::Cell::new(false),
+            has_awaited: std::cell::Cell::new(false),
+        });
+        let promise = PromiseState::pending();
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Undefined,
+            on_rejected: Value::Undefined,
+            sink: Sink::AsyncDisposal(Rc::clone(&state)),
+            passthrough: false,
+            context: Rc::new(Vec::new()),
+        });
+        let closure = closure_reaching_promise(&program, &promise);
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        let weak_ref = vm
+            .construct_weak_ref(&[target.clone()], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(promise);
+        drop(state);
+        drop(closure);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external owner keeps target alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn module_await_promise_edges_reclaim_dead_target_and_preserve_external_owner() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let Value::Object(target_object) = &target else {
+            unreachable!();
+        };
+        let weak_target = Rc::downgrade(target_object);
+        let keeper = Rc::clone(target_object);
+        let state = Rc::new(RefCell::new(ModuleSuspension {
+            stack: vec![target.clone()],
+            handlers: Vec::new(),
+            instruction: 0,
+        }));
+        let promise = PromiseState::pending();
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Undefined,
+            on_rejected: Value::Undefined,
+            sink: Sink::ModuleAwait(Rc::clone(&state)),
+            passthrough: false,
+            context: Rc::new(Vec::new()),
+        });
+        let closure = closure_reaching_promise(&program, &promise);
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        let weak_ref = vm
+            .construct_weak_ref(&[target.clone()], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(promise);
+        drop(state);
+        drop(closure);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external owner keeps target alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
 }
