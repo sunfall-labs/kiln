@@ -23,11 +23,19 @@ three parallel-allocation probes and aborted one full-Test262 batch at its 1 GiB
 cap. The [gate memory-floor repair](../gate-test262-memory-floor/evidence/) reruns that
 exact batch at 4 GiB without an allocation abort; it does not replace a fresh full gate.
 Native allocation diagnostics identified omitted metadata in duplicated parallel object
-and array initializers. Their shared-initializer repair passes the poisoned-memory fixture,
-the two original object/budget probes and the small allocation-stress companion. The third
-probe still diverges on nested parallel flatMap results during later allocations. Logging
-changes conservative root visibility and hides that failure, so its causal trace must use
-the uninstrumented failing program. These checks do not replace final-candidate native stress.
+and array initializers, plus an uninitialized generation flag in worker nursery chunks.
+Worker chunks bypassed the ordinary nursery reset: a stale `tenured` byte made minor
+collection skip reachable arrays, then reclaim them during the flattened-result allocation.
+The [shared chunk-header repair and evidence](../parallel-builtins/evidence/parallel-chunk-tenuring-20261004.md)
+include a poisoned-memory child-survival regression that fails against the exact original
+initializer and passes after the repair, with an assertion that collection was minor.
+All three original parallel-allocation probes now match. The expanded small GC-stress
+companion also matches, retaining nested flatMap children across a sequential allocation
+replay. These targeted checks do not replace final-candidate native stress.
+
+A fresh full gate is running on the combined allocator, async-module and memory-floor
+repairs in an isolated checkout, with an eight-CPU budget and a 4 GiB Test262 cap. The prior
+failed gate remains the latest completed integration result until that run finishes.
 
 The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
 final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
