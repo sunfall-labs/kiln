@@ -52,6 +52,16 @@ replacement, text encoding and WebCrypto. Focused results from those fixes must
 not be added to this older run. A fresh complete run on one frozen compiler is
 required for an updated comparison.
 
+A later complete 322-file selection on frozen binary `cff955384200` recorded 10,815
+native passes, 21 failures and 45 skips, with two incomplete files (Cause and
+SchemaAOTCompiler). It ran the development profile and predates the subsequent GC,
+module, AbortSignal, process and production-profile fixes. Cause encountered workspace
+interference; the AOT build exceeded its outer deadline across a documented gate pause.
+Neither is a passing result. The complete Bun reference again reproduced 10,936 passes,
+28 failures and 55 skips. Raw evidence remains in
+`.scratch/native-full-completion-current/report.json`; focused fixes are not aggregated
+into this diagnostic. A fresh isolated production-profile run is required.
+
 A separate frozen run on `e61fe6fb` passes all 46 TestSchema cases after sharing
 strict graph comparison with `node:util` and fixing native own-property
 enumerability. Its three-file selection still records two native RegExp codec
@@ -83,6 +93,22 @@ The next milestone's first gate attempt is not green: routine Test262 passed its
 with 97,606 passes, but the benchmark preparation lane timed out waiting for correctness lanes
 under a six-worker budget. The run was stopped and its full evidence retained. A complete gate
 must be rerun on the final integrated fixes before that milestone is pushed.
+
+The subsequent integrated gate (`run.vugC5khE`) passed native parity (635 matches, six named
+refusals, zero divergences), routine Test262 (97,606 passes), third-party correctness, the Node,
+server and regression corpora, and the 31-target facts baseline. It failed eight crate tests
+(one missing private-slot reservation, one obsolete launcher-text assertion, and six native
+top-level-await lifecycle cases), plus the benchmark coordination timeout during cold builds.
+Those failures remain recorded; the slot, assertion and TLA fixes have focused verification,
+and the final gate is still required before pushing. Full allocation-stress parity on the
+integrated compiler separately passed 591 matches, five refusals and zero divergences, with
+45 explicit stress skips. Stress execution paused only its dispatcher during the gate; active
+programs were never suspended.
+The six TLA failures now pass within 14 focused native tests. A separate production
+build failure in Cluster and Sharding came from a regex pattern in a generated C
+comment: C trigraph translation joined the next declaration into that comment.
+Generated regex comments now contain fixed text; a matching regression passes
+normal and allocation-stress parity. Cluster and Sharding are being rerun unchanged.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream

@@ -1326,8 +1326,9 @@ mod tests {
 
     #[test]
     fn generated_comment_cannot_swallow_a_regex_helper_via_trigraph() {
-        let pattern = r"a??/";
-        assert!(pattern.contains("??/"));
+        let pattern = r"a??";
+        // The old comment appended `/`, completing a trigraph at the end of its line.
+        assert!(pattern.ends_with("??"));
         let compiled = try_compile_regex(pattern, "").expect("valid lazy-optional regex");
         let mut output = String::new();
         emit_regex_matcher(&mut output, "trigraph_regex", &compiled, false);
