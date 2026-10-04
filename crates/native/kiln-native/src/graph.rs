@@ -2851,8 +2851,7 @@ import_attributes_valid:
         // closed graph. Route it to that module's original namespace so runtime import observes
         // the same instance and live bindings as its static imports, instead of reparsing source
         // from disk in the restricted runtime-module evaluator.
-        if (node.source == ModuleSource::Source
-            || graph.declared_includes().contains(&node.path))
+        if (node.source == ModuleSource::Source || graph.declared_includes().contains(&node.path))
             && let Ok(url) = Url::from_file_path(&node.path)
         {
             resolutions.insert((url.to_string(), modules.len()));
