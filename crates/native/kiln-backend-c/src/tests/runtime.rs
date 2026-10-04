@@ -528,9 +528,7 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
             pending.push(' ');
             pending.push_str(line);
         }
-        if pending.ends_with(';')
-            && pending.matches('{').count() == pending.matches('}').count()
-        {
+        if pending.ends_with(';') && pending.matches('{').count() == pending.matches('}').count() {
             statements.push(std::mem::take(&mut pending));
         } else if pending
             .split('{')
