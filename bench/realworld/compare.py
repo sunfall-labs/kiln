@@ -12,6 +12,7 @@ Rules (same as bench/compare.sh, extended to AOT competitors and servers):
   startup-dominated, which is exactly what this suite measures.
 - The server row reports requests/s plus body verification from drive-server.mjs.
 """
+import hashlib
 import json
 import os
 import select
@@ -331,14 +332,22 @@ def measure_server(work):
 
 
 def repo_provenance():
-    """Record what was measured: kiln commit, binary mtime, competitor versions."""
+    """Record binary identity separately from the checkout running the harness."""
     def run_quiet(argv):
         try:
             done = subprocess.run(argv, capture_output=True, timeout=30)
             return done.stdout.decode().strip()
         except Exception:
             return ""
-    kiln_rev = run_quiet(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"])
+    runner_rev = run_quiet(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    binary_path = os.path.abspath(os.path.join(ROOT, KILN))
+    binary_digest = hashlib.sha256()
+    with open(binary_path, "rb") as binary:
+        for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+            binary_digest.update(chunk)
+    binary_sha256 = binary_digest.hexdigest()
+    with open(__file__, "rb") as runner:
+        runner_sha256 = hashlib.sha256(runner.read()).hexdigest()
     try:
         kiln_mtime = int(os.path.getmtime(os.path.join(ROOT, KILN)))
     except OSError:
@@ -352,7 +361,12 @@ def repo_provenance():
         if argv:
             versions[name] = run_quiet(argv)[:40]
     return {
-        "kiln_rev": kiln_rev,
+        "kiln_rev": os.environ.get("KILN_SOURCE_REV"),
+        "kiln_rev_source": "caller declaration; binary identity recorded independently",
+        "kiln_binary": binary_path,
+        "kiln_binary_sha256": binary_sha256,
+        "runner_rev": runner_rev,
+        "runner_sha256": runner_sha256,
         "kiln_bin_mtime": kiln_mtime,
         "versions": versions,
     }
