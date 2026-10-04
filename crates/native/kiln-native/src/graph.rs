@@ -2846,9 +2846,15 @@ import_attributes_valid:
         }
         if graph.declared_includes().contains(&node.path) {
             resolutions.insert((node.path.to_string_lossy().into_owned(), modules.len()));
-            if let Ok(url) = Url::from_file_path(&node.path) {
-                resolutions.insert((url.to_string(), modules.len()));
-            }
+        }
+        // A runtime-computed file URL can still name a module that is already part of the
+        // closed graph. Route it to that module's original namespace so runtime import observes
+        // the same instance and live bindings as its static imports, instead of reparsing source
+        // from disk in the restricted runtime-module evaluator.
+        if node.source == ModuleSource::Source
+            && let Ok(url) = Url::from_file_path(&node.path)
+        {
+            resolutions.insert((url.to_string(), modules.len()));
         }
         // `spawnActor({ module })` includes its statically named target as a lazy graph node.
         // The actor worker loads that node by the absolute URL passed from the spawning realm;

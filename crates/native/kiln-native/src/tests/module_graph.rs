@@ -3313,6 +3313,8 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
              import {{ value }} from 'pkg/runtime';\n\
              const path = '{}';\n\
              writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; import * as runtime from './node_modules/pkg/src/runtime.js'; function helper() {{ return runtime.value + value - value; }} export let count = 0; export function answer() {{ return helper(); }} export function bump() {{ count++; return count; }}\");\n\
+             const computedUrl = new URL('./node_modules/pkg/src/runtime.js', import.meta.url).href;\n\
+             console.log((await import(computedUrl)) === await import('pkg/runtime'));\n\
              const url = 'file://' + path;\n\
              const first = await import(url);\n\
              const second = await import(url);\n\
@@ -3362,7 +3364,7 @@ fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and
     );
     assert_eq!(
         output.stdout,
-        b"true false false false 1 1 0 0\n42 42 true 0 true true false false false 1 1\nSyntaxError\n",
+        b"true\ntrue false false false 1 1 0 0\n42 42 true 0 true true false false false 1 1\nSyntaxError\n",
         "stderr={}, exit={:?}",
         String::from_utf8_lossy(&output.stderr),
         output.status.code()
