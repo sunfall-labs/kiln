@@ -5056,6 +5056,80 @@ typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_CLEAR = 9
 } kiln_c99_graph_incoming_result;
 
+/* A managed launcher calls the provider only after a language turn has returned. At that
+ * boundary, every language-owned value is in the graph/root registries or a registered host
+ * owner; the Rust executor/future frames below the launcher are implementation storage, not an
+ * additional language root set. Keep the caller-stack boundary and its callee-saved register
+ * image in TLS while the provider drive is active. Unregistered embedders retain the original
+ * conservative full-stack scan. */
+#define KILN_C99_GRAPH_DRIVE_BOUNDARY_LIMIT 16
+typedef struct kiln_c99_graph_drive_boundary {
+    uintptr_t stack_low;
+    jmp_buf registers;
+    uint64_t token;
+} kiln_c99_graph_drive_boundary;
+static _Thread_local struct {
+    kiln_c99_graph_drive_boundary entries[KILN_C99_GRAPH_DRIVE_BOUNDARY_LIMIT];
+    size_t depth;
+    size_t suppressed;
+    uint64_t next_token;
+} kiln_c99_graph_drive_boundaries;
+
+/* Private launcher seam, not an exposed JavaScript builtin or provider ABI. `stack_low` is the
+ * first word above the managed C drive wrapper's frame; the wrapper remains active until pop.
+ * Invalid/overflowing nested scopes suppress any outer boundary, forcing the safe full scan. */
+__attribute__((visibility("hidden"))) int
+kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
+                                   size_t registers_size, uint64_t *out_token) {
+    void *stack_high = kiln_c99_gc_stack_base();
+    uint64_t token;
+    if (out_token == NULL) return 0;
+    *out_token = 0;
+    if (kiln_c99_graph_drive_boundaries.suppressed != 0 ||
+        kiln_c99_graph_drive_boundaries.depth == KILN_C99_GRAPH_DRIVE_BOUNDARY_LIMIT ||
+        stack_low == 0 || stack_high == NULL || stack_low >= (uintptr_t)stack_high ||
+        stack_low % _Alignof(uintptr_t) != 0 || registers == NULL ||
+        registers_size != sizeof(jmp_buf) ||
+        kiln_c99_graph_drive_boundaries.next_token == UINT64_MAX) {
+        kiln_c99_graph_drive_boundaries.suppressed++;
+        return 0;
+    }
+    token = ++kiln_c99_graph_drive_boundaries.next_token;
+    kiln_c99_graph_drive_boundary *entry =
+        &kiln_c99_graph_drive_boundaries.entries[kiln_c99_graph_drive_boundaries.depth++];
+    entry->stack_low = stack_low;
+    memcpy(&entry->registers, registers, sizeof entry->registers);
+    entry->token = token;
+    *out_token = token;
+    return 1;
+}
+
+__attribute__((visibility("hidden"))) void kiln_c99_graph_drive_boundary_pop(uint64_t token) {
+    if (token == 0) {
+        if (kiln_c99_graph_drive_boundaries.suppressed != 0)
+            kiln_c99_graph_drive_boundaries.suppressed--;
+        return;
+    }
+    if (kiln_c99_graph_drive_boundaries.suppressed == 0 &&
+        kiln_c99_graph_drive_boundaries.depth != 0 &&
+        kiln_c99_graph_drive_boundaries.entries[kiln_c99_graph_drive_boundaries.depth - 1]
+                .token == token) {
+        kiln_c99_graph_drive_boundaries.depth--;
+        return;
+    }
+    /* A mismatched LIFO unwind must never leave a stale managed boundary installed. */
+    kiln_c99_graph_drive_boundaries.depth = 0;
+    kiln_c99_graph_drive_boundaries.suppressed = 0;
+}
+
+static const kiln_c99_graph_drive_boundary *kiln_c99_graph_drive_boundary_current(void) {
+    if (kiln_c99_graph_drive_boundaries.suppressed != 0 ||
+        kiln_c99_graph_drive_boundaries.depth == 0)
+        return NULL;
+    return &kiln_c99_graph_drive_boundaries.entries[
+        kiln_c99_graph_drive_boundaries.depth - 1];
+}
+
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
  * those from machine registers, so an incoming check must not accept only exact payload starts. */
 static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
@@ -6377,6 +6451,18 @@ __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_scan_with_manifest(
     kiln_gc_heap *heap, uint64_t request_id, int retain_clear_escrow,
     kiln_c99_graph_manifest_accept accept, void *accept_context) {
+    const kiln_c99_graph_drive_boundary *managed =
+        kiln_c99_graph_drive_boundary_current();
+    if (managed != NULL) {
+        uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();
+        if (high == NULL || managed->stack_low >= (uintptr_t)high) {
+            if (heap != NULL) kiln_c99_actor_isolated_request_rollback(heap, request_id);
+            return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+        }
+        return kiln_c99_graph_incoming_request_below_boundary(
+            heap, request_id, (const uintptr_t *)managed->stack_low, high,
+            &managed->registers, retain_clear_escrow, accept, accept_context);
+    }
     volatile uintptr_t anchor = 0;
     uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
     uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();

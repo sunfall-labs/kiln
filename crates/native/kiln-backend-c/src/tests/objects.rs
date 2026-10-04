@@ -5903,6 +5903,27 @@ fn executable_actor_request_machine_boundary_sees_older_frame_alias() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
+#include <setjmp.h>
+extern int kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
+                                               size_t registers_size, uint64_t *out_token);
+extern void kiln_c99_graph_drive_boundary_pop(uint64_t token);
+__attribute__((noinline)) static int actor_probe_managed_boundary(kiln_gc_heap *heap,
+                                                                   uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t token = 0;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2), &registers,
+                                               sizeof registers, &token);
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(token);
+    return result;
+}
 static int actor_boundary_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_value handle, graph, args[3], result, thrown;
@@ -5956,6 +5977,10 @@ static int actor_boundary_entry(void *context) {
         }
     }
     if (older_frame_alias != (uintptr_t)text) return 7;
+    /* Managed scans exclude only the helper/provider interval. The live caller frame above it
+     * still contains the candidate and must continue to refuse as an older machine alias. */
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_managed_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 17;
     registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
     {
         double at = kiln_c99_collection_find(registry, handle);

@@ -3471,6 +3471,7 @@ pub(super) fn graph_launcher_source_with_imports(
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -3724,6 +3725,11 @@ extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,
                                   uint32_t *kind, uint64_t *delay_ns);
+extern int kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
+                                               size_t registers_size, uint64_t *out_token)
+    __attribute__((visibility("hidden")));
+extern void kiln_c99_graph_drive_boundary_pop(uint64_t token)
+    __attribute__((visibility("hidden")));
 extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
                                  void *context, int *statuses);
@@ -6198,17 +6204,47 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
  * machine but lets its provider call wait until quiescence. */
 static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
+    jmp_buf caller_registers;
+    uint64_t boundary_token = 0;
+    int progress;
+    memset(&caller_registers, 0, sizeof caller_registers);
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_unwind_init();
+    if (setjmp(caller_registers) == 0) {{
+        uintptr_t *frame = (uintptr_t *)__builtin_frame_address(0);
+        if (frame != NULL && graph != NULL && graph->instance != NULL &&
+            graph->instance->roots_registered) {{
+            /* The drive wrapper owns the frame below `frame`; scan starts in its caller. */
+            (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2),
+                                                       &caller_registers,
+                                                       sizeof caller_registers,
+                                                       &boundary_token);
+        }} else {{
+            /* Without installed graph roots, retain the legacy complete machine scan. */
+            (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+        }}
+    }} else {{
+        /* No code may longjmp through this scope; keep any outer boundary suppressed if it does. */
+        (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+    }}
+#else
+    (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+#endif
     if (!run->scheduled) {{
         run->status = kiln_realm_drive(run->realm, &graph->host, &graph->instance->result);
-        return run->status == 0 ? 4 : 0;
+        progress = run->status == 0 ? 4 : 0;
+        goto boundary_done;
     }}
     uint32_t kind = 3;
     uint64_t delay_ns = 0;
     run->status = kiln_realm_drive_step(run->realm, &graph->host, &graph->instance->result,
                                         &kind, &delay_ns);
-    if (run->status != 0) return 0;
+    if (run->status != 0) {{ progress = 0; goto boundary_done; }}
     run->park_delay_ns = delay_ns;
-    return kind == 0 ? 1 : kind == 1 ? 2 : kind == 2 ? 3 : kind == 3 ? 4 : 0;
+    progress = kind == 0 ? 1 : kind == 1 ? 2 : kind == 2 ? 3 : kind == 3 ? 4 : 0;
+boundary_done:
+    kiln_c99_graph_drive_boundary_pop(boundary_token);
+    return progress;
 }}
 
 /* Advance at most one generated module body or one provider language turn. */
