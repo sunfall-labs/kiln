@@ -718,7 +718,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     http_agent_request: None,
                 }));
                 let socket = node_socket_object(&state);
-                self.retain_active_node_socket_object(&state, socket.clone());
                 self.decorate_node_socket(&socket, instruction)?;
                 if let Some(callback) = callback {
                     self.dispatch_node_event(
@@ -739,6 +738,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         true,
                     )
                 };
+                self.retain_active_node_socket_object(&state, socket.clone());
                 state.borrow_mut().connect_request = Some(request);
                 self.push_pending_node(PendingNodeRequest::Connect {
                     request,
@@ -2461,6 +2461,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let request = unsafe {
             ActiveAsyncHostOps::start(&mut *host_ops, AsyncHostOp::TcpConnect { host, port }, true)
         };
+        if let Some(socket) = state.borrow().socket.clone() {
+            let object = socket
+                .borrow()
+                .object
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .map(Value::Object);
+            if let Some(object) = object {
+                self.retain_active_node_socket_object(&socket, object);
+            }
+        }
         self.push_pending_node(PendingNodeRequest::Connect {
             request,
             target: PendingConnect::Http(Rc::clone(state)),
@@ -2505,7 +2516,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_agent_request: None,
         }));
         let socket = node_socket_object(&socket_state);
-        self.retain_active_node_socket_object(&socket_state, socket.clone());
         self.decorate_node_socket(&socket, instruction)?;
         let request = state
             .borrow()
