@@ -5924,6 +5924,63 @@ __attribute__((noinline)) static int actor_probe_managed_boundary(kiln_gc_heap *
     kiln_c99_graph_drive_boundary_pop(token);
     return result;
 }
+__attribute__((noinline)) static int actor_probe_boundary_scope(kiln_gc_heap *heap,
+                                                                  uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t token = 0;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(frame + 2), &registers, sizeof registers, &token))
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(token);
+    return result;
+}
+__attribute__((noinline)) static int actor_probe_nested_boundary(kiln_gc_heap *heap,
+                                                                  uint64_t request) {
+    jmp_buf outer_registers;
+    uintptr_t *outer_frame;
+    uint64_t outer_token = 0;
+    int result;
+    memset(&outer_registers, 0, sizeof outer_registers);
+    __builtin_unwind_init();
+    if (setjmp(outer_registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    outer_frame = (uintptr_t *)__builtin_frame_address(0);
+    if (outer_frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(outer_frame + 2), &outer_registers, sizeof outer_registers,
+            &outer_token)) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    result = actor_probe_boundary_scope(heap, request);
+    kiln_c99_graph_drive_boundary_pop(outer_token);
+    return result;
+}
+__attribute__((noinline)) static int actor_probe_invalid_nested_boundary(kiln_gc_heap *heap,
+                                                                          uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t outer_token = 0, invalid_token = 99;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(frame + 2), &registers, sizeof registers, &outer_token))
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    if (kiln_c99_graph_drive_boundary_push(0, NULL, 0, &invalid_token) ||
+        invalid_token != 0) {
+        kiln_c99_graph_drive_boundary_pop(outer_token);
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    }
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(invalid_token);
+    kiln_c99_graph_drive_boundary_pop(outer_token);
+    return result;
+}
 static int actor_boundary_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_value handle, graph, args[3], result, thrown;
@@ -5980,7 +6037,13 @@ static int actor_boundary_entry(void *context) {
     /* Managed scans exclude only the helper/provider interval. The live caller frame above it
      * still contains the candidate and must continue to refuse as an older machine alias. */
     if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
-        actor_probe_managed_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 17;
+        actor_probe_nested_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 17;
+    /* Invalid nesting suppresses the outer scope and uses the complete conservative scan;
+     * popping the invalid token must restore the outer scope for the next request. */
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_invalid_nested_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS ||
+        !kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_managed_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 18;
     registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
     {
         double at = kiln_c99_collection_find(registry, handle);

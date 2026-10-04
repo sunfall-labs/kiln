@@ -6202,19 +6202,23 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
 /* One provider drive answers 4 when quiescent, 1 for another ready turn, 2 for an I/O wake,
  * 3 for a pure timer deadline, and 0 for failure. The continuous launcher uses the same state
  * machine but lets its provider call wait until quiescence. */
-static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
+__attribute__((noinline)) static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
     jmp_buf caller_registers;
     uint64_t boundary_token = 0;
     int progress;
     memset(&caller_registers, 0, sizeof caller_registers);
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && \
+    (defined(__x86_64__) || defined(__aarch64__))
     __builtin_unwind_init();
     if (setjmp(caller_registers) == 0) {{
         uintptr_t *frame = (uintptr_t *)__builtin_frame_address(0);
         if (frame != NULL && graph != NULL && graph->instance != NULL &&
             graph->instance->roots_registered) {{
-            /* The drive wrapper owns the frame below `frame`; scan starts in its caller. */
+            /* x86-64 stores saved FP/return address at frame[0..1]; AArch64 stores
+             * previous FP/LR there. In both supported frame-chain ABIs, frame + 2 is
+             * the first word in the caller's frame. Keep this wrapper noinline so that
+             * the boundary remains the drive-call boundary. */
             (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2),
                                                        &caller_registers,
                                                        sizeof caller_registers,
@@ -6228,6 +6232,7 @@ static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
         (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
     }}
 #else
+    /* Unknown frame-chain ABI: the provider still works, but alias proof stays conservative. */
     (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
 #endif
     if (!run->scheduled) {{

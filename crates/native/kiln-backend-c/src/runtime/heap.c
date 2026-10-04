@@ -5077,7 +5077,8 @@ static _Thread_local struct {
 
 /* Private launcher seam, not an exposed JavaScript builtin or provider ABI. `stack_low` is the
  * first word above the managed C drive wrapper's frame; the wrapper remains active until pop.
- * Invalid/overflowing nested scopes suppress any outer boundary, forcing the safe full scan. */
+ * Properly nested scopes use the innermost boundary. Invalid/overflowing nested scopes suppress
+ * all active boundaries until their matching zero-token pops, forcing the safe full scan. */
 __attribute__((visibility("hidden"))) int
 kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
                                    size_t registers_size, uint64_t *out_token) {
