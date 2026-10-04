@@ -2448,28 +2448,75 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(reason) if !matches!(reason, Value::Undefined) => reason,
             _ => self.dom_exception("This operation was aborted", "AbortError", instruction)?,
         };
-        let listeners = {
+        let (listeners, handler) = {
             let mut held = object.borrow_mut();
             held.set_non_enumerable("aborted", Value::Boolean(true));
             held.set_non_enumerable("reason", reason);
             let listeners = match held.get_own(ABORT_LISTENERS) {
-                Some(Value::Array(listeners)) => listeners.borrow().clone(),
-                _ => Vec::new(),
+                Some(Value::Array(listeners)) => Some(Rc::clone(listeners)),
+                _ => None,
             };
             let handler = held.get_own("onabort").cloned();
-            handler
-                .filter(is_callable)
-                .into_iter()
-                .chain(listeners)
-                .collect::<Vec<_>>()
+            (listeners, handler.filter(is_callable))
         };
+        let single_listener = listeners
+            .as_ref()
+            .is_none_or(|listeners| listeners.borrow().len() <= 1);
         // One event object, shared by every listener, as a real dispatch would be.
         let event = ordinary_object([
             ("type".to_owned(), Value::String("abort".to_owned().into())),
             ("target".to_owned(), signal.clone()),
+            ("currentTarget".to_owned(), signal.clone()),
         ]);
-        for listener in listeners {
-            self.call_value(&listener, signal.clone(), vec![event.clone()], instruction)?;
+        if let Some(handler) = handler {
+            self.call_value(&handler, signal.clone(), vec![event.clone()], instruction)?;
+        }
+        let Some(listeners) = listeners else {
+            return Ok(());
+        };
+        // Snapshot records, not bare callbacks. Listener callbacks can remove themselves or
+        // another listener during dispatch; removed records are skipped without shifting later
+        // entries past the dispatch cursor. Node also runs listeners added during dispatch after
+        // the records already registered for this event.
+        let mut snapshot = listeners.borrow().clone();
+        let mut index = 0;
+        while index < snapshot.len() {
+            let record = snapshot[index].clone();
+            if self
+                .read_property(&record, "removed", instruction)?
+                .is_truthy()
+            {
+                index += 1;
+                continue;
+            }
+            let callback = self.read_property(&record, "listener", instruction)?;
+            let once = self
+                .read_property(&record, "once", instruction)?
+                .is_truthy();
+            if once {
+                if let Value::Object(record_object) = &record {
+                    record_object
+                        .borrow_mut()
+                        .set_non_enumerable("removed", Value::Boolean(true));
+                }
+                listeners
+                    .borrow_mut()
+                    .retain(|entry| !same_value(entry, &record));
+            }
+            if !is_callable(&callback) {
+                index += 1;
+                continue;
+            }
+            self.call_value(&callback, signal.clone(), vec![event.clone()], instruction)?;
+            if !single_listener {
+                let registered = listeners.borrow().clone();
+                for candidate in registered {
+                    if !snapshot.iter().any(|held| same_value(held, &candidate)) {
+                        snapshot.push(candidate);
+                    }
+                }
+            }
+            index += 1;
         }
         Ok(())
     }

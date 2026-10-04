@@ -2857,29 +2857,90 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN: {
             kiln_value listeners;
             kiln_value listener = argc > 1 ? args[1] : kiln_c99_undefined();
+            kiln_value options = argc > 2 ? args[2] : kiln_c99_undefined();
+            kiln_value once_value = kiln_c99_undefined();
+            kiln_value capture_value = kiln_c99_undefined();
+            int once = 0;
+            int capture = 0;
             size_t index;
             if (argc == 0 || args[0].tag != KILN_VALUE_STRING ||
                 !kiln_c99_string_equals_ascii(args[0], "abort", 5)) {
                 *result = kiln_c99_undefined();
                 return KILN_C99_OK;
             }
+            if (options.tag == KILN_VALUE_BOOLEAN) {
+                capture = kiln_c99_truthy(options);
+            } else if (options.tag != KILN_VALUE_UNDEFINED && options.tag != KILN_VALUE_NULL) {
+                status = kiln_c99_get(host, options, "capture", 7, &capture_value, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                capture = kiln_c99_truthy(capture_value);
+                if (code == KILN_C99_METHOD_ABORT_SIGNAL_LISTEN) {
+                    status = kiln_c99_get(host, options, "once", 4, &once_value, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    once = kiln_c99_truthy(once_value);
+                }
+            }
             status = kiln_c99_get(host, receiver, "@@abort-listeners", 17, &listeners, depth,
                                   thrown);
             if (status != KILN_C99_OK || listeners.tag != KILN_VALUE_ARRAY) return status;
             if (code == KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN) {
                 kiln_array *held = kiln_c99_array_of(listeners);
-                size_t write = 0;
                 for (index = 0; index < held->count; ++index) {
-                    if (!kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[index]), listener))
-                        kiln_c99_heap_store_val(held, &held->elements[write++], held->elements[index]);
+                    kiln_value record = kiln_val_to_boundary(held->elements[index]);
+                    kiln_value registered, registered_capture, removed;
+                    status = kiln_c99_get(host, record, "listener", 8, &registered, depth, thrown);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_get(host, record, "capture", 7, &registered_capture,
+                                              depth, thrown);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_get(host, record, "removed", 7, &removed, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!kiln_c99_truthy(removed) &&
+                        kiln_c99_strict_equal(registered, listener) &&
+                        kiln_c99_truthy(registered_capture) == capture) {
+                        status = kiln_c99_put(NULL, record, "removed", 7,
+                                              kiln_c99_boolean(1), 0, NULL);
+                        if (status != KILN_C99_OK) return status;
+                        size_t write = 0;
+                        for (size_t at = 0; at < held->count; ++at) {
+                            if (kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[at]), record))
+                                continue;
+                            if (write != at)
+                                kiln_c99_heap_store_val(held, &held->elements[write], held->elements[at]);
+                            ++write;
+                        }
+                        held->count = write;
+                        break;
+                    }
                 }
-                held->count = write;
             } else if (kiln_c99_is_callable(listener)) {
                 kiln_array *held = kiln_c99_array_of(listeners);
-                for (index = 0; index < held->count; ++index)
-                    if (kiln_c99_strict_equal(kiln_val_to_boundary(held->elements[index]), listener)) break;
+                for (index = 0; index < held->count; ++index) {
+                    kiln_value record = kiln_val_to_boundary(held->elements[index]);
+                    kiln_value registered, registered_capture, removed;
+                    status = kiln_c99_get(host, record, "listener", 8, &registered, depth, thrown);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_get(host, record, "capture", 7, &registered_capture,
+                                              depth, thrown);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_get(host, record, "removed", 7, &removed, depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!kiln_c99_truthy(removed) &&
+                        kiln_c99_strict_equal(registered, listener) &&
+                        kiln_c99_truthy(registered_capture) == capture) break;
+                }
                 if (index == held->count) {
-                    status = kiln_c99_array_push(listeners, listener);
+                    kiln_value record;
+                    status = kiln_c99_new_object(&record);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_put(NULL, record, "listener", 8, listener, 0, NULL);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_put(NULL, record, "once", 4, kiln_c99_boolean(once), 0, NULL);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_put(NULL, record, "capture", 7, kiln_c99_boolean(capture), 0, NULL);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_put(NULL, record, "removed", 7, kiln_c99_boolean(0), 0, NULL);
+                    if (status == KILN_C99_OK) status = kiln_c99_array_push(listeners, record);
                     if (status != KILN_C99_OK) return status;
                 }
             }

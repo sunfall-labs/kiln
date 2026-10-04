@@ -880,6 +880,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Undefined);
                 }
                 let listener = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let options = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                let (capture, once) = if let Value::Boolean(capture) = &options {
+                    (*capture, false)
+                } else if matches!(options, Value::Undefined | Value::Null) {
+                    (false, false)
+                } else {
+                    let capture = self
+                        .read_property(&options, "capture", instruction)?
+                        .is_truthy();
+                    let once = if remove {
+                        false
+                    } else {
+                        self.read_property(&options, "once", instruction)?
+                            .is_truthy()
+                    };
+                    (capture, once)
+                };
                 let Value::Object(object) = receiver else {
                     return Ok(Value::Undefined);
                 };
@@ -887,17 +904,57 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(Value::Array(listeners)) = held else {
                     return Ok(Value::Undefined);
                 };
+                let records = listeners.borrow().clone();
                 if remove {
-                    listeners
-                        .borrow_mut()
-                        .retain(|held| !same_value(held, &listener));
-                } else if is_callable(&listener)
-                    && !listeners
-                        .borrow()
-                        .iter()
-                        .any(|held| same_value(held, &listener))
-                {
-                    listeners.borrow_mut().push(listener);
+                    for record in records {
+                        if self
+                            .read_property(&record, "removed", instruction)?
+                            .is_truthy()
+                        {
+                            continue;
+                        }
+                        let registered = self.read_property(&record, "listener", instruction)?;
+                        let registered_capture = self
+                            .read_property(&record, "capture", instruction)?
+                            .is_truthy();
+                        if same_value(&registered, &listener) && registered_capture == capture {
+                            if let Value::Object(record) = &record {
+                                record
+                                    .borrow_mut()
+                                    .set_non_enumerable("removed", Value::Boolean(true));
+                            }
+                            listeners
+                                .borrow_mut()
+                                .retain(|entry| !same_value(entry, &record));
+                            break;
+                        }
+                    }
+                } else if is_callable(&listener) {
+                    let mut duplicate = false;
+                    for record in records {
+                        if self
+                            .read_property(&record, "removed", instruction)?
+                            .is_truthy()
+                        {
+                            continue;
+                        }
+                        let registered = self.read_property(&record, "listener", instruction)?;
+                        let registered_capture = self
+                            .read_property(&record, "capture", instruction)?
+                            .is_truthy();
+                        if same_value(&registered, &listener) && registered_capture == capture {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if !duplicate {
+                        listeners.borrow_mut().push(ordinary_object([
+                            ("listener".to_owned(), listener),
+                            ("capture".to_owned(), Value::Boolean(capture)),
+                            ("once".to_owned(), Value::Boolean(once)),
+                            ("removed".to_owned(), Value::Boolean(false)),
+                        ]));
+                    }
                 }
                 return Ok(Value::Undefined);
             }

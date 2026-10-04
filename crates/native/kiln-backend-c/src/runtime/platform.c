@@ -494,9 +494,11 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
                           kiln_value *thrown) {
     kiln_value aborted;
     kiln_value listeners;
+    kiln_value snapshot;
     kiln_value handler;
     kiln_value event;
     size_t index;
+    int single_listener;
     int status;
     if (signal.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
     status = kiln_c99_get(host, signal, "aborted", 7, &aborted, depth, thrown);
@@ -513,11 +515,24 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
         status = kiln_c99_get(host, signal, "@@abort-listeners", 17, &listeners, depth, thrown);
     if (status == KILN_C99_OK)
         status = kiln_c99_get(host, signal, "onabort", 7, &handler, depth, thrown);
+    if (status == KILN_C99_OK) status = kiln_c99_new_array(&snapshot);
+    if (status == KILN_C99_OK && listeners.tag == KILN_VALUE_ARRAY) {
+        kiln_array *registered = kiln_c99_array_of(listeners);
+        for (index = 0; status == KILN_C99_OK && index < registered->count; ++index) {
+            status = kiln_c99_array_push(
+                snapshot, kiln_val_to_boundary(registered->elements[index]));
+        }
+    }
+    single_listener = status == KILN_C99_OK &&
+                      (listeners.tag != KILN_VALUE_ARRAY ||
+                       kiln_c99_array_of(listeners)->count <= 1);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&event);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, event, "type", 4, kiln_c99_copy_text("abort", 5), 0, NULL);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, event, "target", 6, signal, 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, event, "currentTarget", 12, signal, 0, NULL);
     if (status != KILN_C99_OK) return status;
     if (kiln_c99_is_callable(handler)) {
         kiln_value ignored;
@@ -525,11 +540,68 @@ static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason,
         if (status != KILN_C99_OK) return status;
     }
     if (listeners.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
-    for (index = 0; index < kiln_c99_array_of(listeners)->count; ++index) {
+    /* Node's multi-listener path dispatches registrations appended while a callback is running.
+     * Preserve the single-listener fast path's fixed callback behavior, and retain stable records
+     * so removal cannot shift the dispatch cursor or suppress an unrelated listener. */
+    {
+        kiln_array *registered = kiln_c99_array_of(listeners);
+        kiln_array *pending = kiln_c99_array_of(snapshot);
+        for (size_t at = 0; !single_listener && at < registered->count; ++at) {
+            kiln_value record = kiln_val_to_boundary(registered->elements[at]);
+            size_t seen;
+            for (seen = 0; seen < pending->count; ++seen)
+                if (kiln_c99_strict_equal(kiln_val_to_boundary(pending->elements[seen]), record))
+                    break;
+            if (seen == pending->count) {
+                status = kiln_c99_array_push(snapshot, record);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+    }
+    for (index = 0; index < kiln_c99_array_of(snapshot)->count; ++index) {
         kiln_value ignored;
-        kiln_value listener = kiln_val_to_boundary(kiln_c99_array_of(listeners)->elements[index]);
+        kiln_value record = kiln_val_to_boundary(kiln_c99_array_of(snapshot)->elements[index]);
+        kiln_value removed, listener, once;
+        status = kiln_c99_get(host, record, "removed", 7, &removed, depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_get(host, record, "listener", 8, &listener, depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_get(host, record, "once", 4, &once, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_truthy(removed)) continue;
+        if (kiln_c99_truthy(once)) {
+            status = kiln_c99_put(NULL, record, "removed", 7, kiln_c99_boolean(1), 0, NULL);
+            if (status != KILN_C99_OK) return status;
+            kiln_array *registered = kiln_c99_array_of(listeners);
+            size_t write = 0;
+            for (size_t at = 0; at < registered->count; ++at) {
+                if (kiln_c99_strict_equal(kiln_val_to_boundary(registered->elements[at]), record))
+                    continue;
+                if (write != at)
+                    kiln_c99_heap_store_val(registered, &registered->elements[write],
+                                            registered->elements[at]);
+                ++write;
+            }
+            registered->count = write;
+        }
         status = kiln_c99_call(host, &ignored, listener, signal, &event, 1, depth, thrown);
         if (status != KILN_C99_OK) return status;
+        {
+            kiln_array *registered = kiln_c99_array_of(listeners);
+            kiln_array *pending = kiln_c99_array_of(snapshot);
+            for (size_t at = 0; !single_listener && at < registered->count; ++at) {
+                kiln_value candidate = kiln_val_to_boundary(registered->elements[at]);
+                size_t seen;
+                for (seen = 0; seen < pending->count; ++seen)
+                    if (kiln_c99_strict_equal(
+                            kiln_val_to_boundary(pending->elements[seen]), candidate))
+                        break;
+                if (seen == pending->count) {
+                    status = kiln_c99_array_push(snapshot, candidate);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+        }
     }
     return KILN_C99_OK;
 }
