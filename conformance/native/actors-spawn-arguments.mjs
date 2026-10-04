@@ -23,6 +23,11 @@ const prepared = transfer(prepareTransfer({ k: 1, list: [1, 2] }));
 await spawn("prepared ticket", "Initial", [prepared]);
 await spawn("prepared ticket again", "Initial", [prepared]);
 await spawn("isolated ticket", "Initial", [transfer(isolate(() => ({ k: 2 })))]);
+await spawn("isolated after candidate collection", "Initial", [transfer(isolate(() => {
+  let garbage = { nested: [{ discarded: true }, { discarded: true }] };
+  garbage = undefined;
+  return { k: 3, live: [1, 2, 3] };
+}))]);
 await spawn("uncloneable", "Initial", [() => 1]);
 const kept = new Uint8Array([9, 0, 0, 0]).buffer;
 await spawn("constructor throws", "Throws", [transfer(kept)], () => `left ${kept.byteLength}`);

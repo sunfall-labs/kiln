@@ -294,8 +294,9 @@ typedef struct kiln_nursery_chunk {
      * provenance, not a graph or incoming-root proof. */
     uint32_t candidate_epoch;
     uint64_t candidate_id;
-    /* Provisional between CANDIDATE_END and ISOLATE, sealed after the latter proves closure.
-     * Both states keep the original bitmap/layout while a live root still names this chunk. */
+    /* 0: ordinary chunk; 1: provisional between CANDIDATE_END and ISOLATE; 2: sealed after
+     * closure proof; 3: active builder retained through collection. Candidate states keep the
+     * chunk at its address while bitmap entries record only blocks still alive. */
     uint8_t candidate_state;
     /* Set after this chunk has survived a nursery collection. Mutations from these blocks to
      * the current/filled nursery are remembered for minor collections. */
@@ -4010,8 +4011,8 @@ static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
 }
 
 static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
-    /* Stress mode must still collect on its configured allocation cadence. A collection
-     * invalidates candidate provenance instead of silently weakening the stress probe. */
+    /* Stress mode keeps its configured cadence; normal runs may defer collection briefly to
+     * avoid repeatedly settling a small candidate that can stay in the nursery. */
     return heap->stress_every == 0 && heap->actor_candidate_id != 0 &&
            !heap->actor_candidate_collected &&
            heap->nursery.active &&
@@ -4024,10 +4025,9 @@ static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
  * below -- owes it once for the run rather than once per block, and the two must not drift: this
  * is where "is a mid-turn collection due" is decided for both. */
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
-    /* A candidate's current and sealed chunks are in this heap, but a collection could
-     * promote/reuse them before the factory publishes its result. Defer collection while its
-     * nursery stays active and the filled allocation is under its 64 MiB ceiling. Stress mode
-     * and either limit resume collection and invalidate candidate provenance. */
+    /* A candidate's current and sealed chunks are in this heap. Defer collection while its
+     * nursery stays active and the filled allocation is under its 64 MiB ceiling; otherwise the
+     * collector settles its live blocks in place so their provenance remains certifiable. */
     if (KILN_UNLIKELY(kiln_c99_actor_candidate_defer_gc(heap))) return;
     if (KILN_UNLIKELY(!heap->collecting && heap->enabled && !heap->fallback)) {
         /* A mid-turn collection scans the whole stack and sweeps every slab, so it earns its
@@ -4568,25 +4568,23 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
         size_t payload;
         size_t total;
         if ((offset & 15) != 0 || bit >> 6 >= nursery->bitmap_words ||
-            (chunk->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) == 0 ||
             remaining < sizeof(kiln_gc_block)) return 0;
         block = (const kiln_gc_block *)cursor;
-        if ((block->kind & (KILN_GC_FLAG_NURSERY | KILN_GC_FLAG_DEAD)) !=
-                KILN_GC_FLAG_NURSERY) return 0;
         payload = block->size == 0 ? 1 : block->size;
-        if (payload > remaining - sizeof(kiln_gc_block) || bytes > SIZE_MAX - block->size)
-            return 0;
+        if (payload > remaining - sizeof *block) return 0;
         total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         if (total > remaining) return 0;
-        {
+        if ((chunk->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0) {
+            if ((block->kind & (KILN_GC_FLAG_NURSERY | KILN_GC_FLAG_DEAD)) !=
+                    KILN_GC_FLAG_NURSERY || bytes > SIZE_MAX - block->size) return 0;
             int final_bit = (chunk->finals[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0;
             uint32_t kind = block->kind & KILN_GC_KIND_MASK;
             if (final_bit && !kiln_c99_graph_inert_finalizer_block(block)) return 0;
             if (!final_bit && (kind == KILN_GC_OBJECT || kind == KILN_GC_ARRAY)) return 0;
+            bytes += block->size;
+            count += 1;
         }
         cursor += total;
-        bytes += block->size;
-        count += 1;
     }
     return count != 0 && count == bits && count == chunk->alloc_count &&
            bytes == chunk->alloc_bytes;
@@ -4996,7 +4994,9 @@ static int kiln_c99_graph_candidate_closed_with_sides(
         for (cursor = chunk->base; cursor < chunk->limit;) {
             const kiln_gc_block *block = (const kiln_gc_block *)cursor;
             size_t payload = block->size == 0 ? 1 : block->size;
-            if (!kiln_c99_gc_ptrset_contains(&walk.reached, block)) {
+            size_t bit = (size_t)(cursor - chunk->base) >> 4;
+            if ((chunk->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0 &&
+                !kiln_c99_gc_ptrset_contains(&walk.reached, block)) {
                 if (!kiln_c99_graph_follow(&walk, block + 1)) goto done;
             }
             cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
@@ -6770,9 +6770,8 @@ static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
 
 /* Seal the factory's final chunk before any subsequent actor-registry allocation can enter it.
  * A throw abandons transfer eligibility, but cannot discard the blocks: user callbacks may
- * already have exposed some of them outside the factory. Collection may run during the scope
- * after the nursery runs out of chunks or exceeds its 64 MiB defer ceiling. Such a collection
- * invalidates the whole candidate ID, including promoted chunks, at this boundary. */
+ * already have exposed some of them outside the factory. Collections inside the scope settle
+ * dead blocks and retain live candidate chunks in place until this boundary. */
 static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed);
 
 static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
@@ -6797,7 +6796,15 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
     }
     heap->actor_candidate_id = 0;
     if (!completed || heap->actor_candidate_collected) {
-        while (group->head != NULL) kiln_c99_candidate_chunk_clear(group->head);
+        while (group->head != NULL) {
+            chunk = group->head;
+            if (chunk->candidate_state != 0) {
+                size_t filled = (size_t)(chunk->limit - chunk->base);
+                if (filled > heap->nursery.held_bytes) abort();
+                heap->nursery.held_bytes -= filled;
+            }
+            kiln_c99_candidate_chunk_clear(chunk);
+        }
         while (group->large_head != NULL)
             kiln_c99_candidate_large_remove(heap, group->large_head->block);
         heap->actor_candidate_group = NULL;
@@ -6805,8 +6812,9 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
     } else {
         for (chunk = group->head; chunk != NULL; chunk = chunk->candidate_next) {
             if (!kiln_c99_nursery_full_contains(&heap->nursery, chunk)) abort();
+            if (chunk->candidate_state == 0)
+                heap->nursery.held_bytes += (size_t)(chunk->limit - chunk->base);
             chunk->candidate_state = 1;
-            heap->nursery.held_bytes += (size_t)(chunk->limit - chunk->base);
         }
         heap->actor_candidate_pending_id = id;
     }
@@ -9410,7 +9418,6 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (kiln_c99_actor_candidate_defer_gc(heap)) return;
     if (!heap->enabled && !heap->stress && !heap->force_pending && !force) return;
-    if (heap->actor_candidate_id != 0) heap->actor_candidate_collected = 1;
     if (KILN_UNLIKELY(heap->parallel_paused != 0)) {
         fputs("kiln: a collection was due while a parallel call's worker arenas were open\n",
               stderr);
@@ -9496,6 +9503,28 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                 size_t filled = (size_t)(chunk->limit - chunk->base);
                 chunk->in_full = 0;
                 chunk->full_prev = NULL;
+                if (heap->actor_candidate_id != 0 &&
+                    chunk->candidate_id == heap->actor_candidate_id) {
+                    size_t survivors = kiln_c99_nursery_settle(heap, chunk, 0);
+                    chunk->live_count = survivors;
+                    if (survivors == 0) {
+                        kiln_c99_candidate_chunk_clear(chunk);
+                        reset_bytes += filled;
+                        heap->nursery.resets++;
+                        kiln_c99_nursery_spare(heap, chunk);
+                    } else {
+                        /* Keep live candidate blocks at their original addresses, but let the
+                         * normal settle path clear dead bitmap entries and run finalizers. The
+                         * capsule proof below walks only the resulting live bitmap. */
+                        chunk->candidate_epoch = heap->epoch;
+                        chunk->candidate_state = 3; /* active builder, retained after GC */
+                        kiln_c99_nursery_full_push(&heap->nursery, chunk);
+                        heap->nursery.full_bytes += filled;
+                        heap->nursery.held_bytes += filled;
+                    }
+                    chunk = next;
+                    continue;
+                }
                 if (chunk->candidate_state != 0 && chunk->mark_epoch == heap->epoch &&
                     chunk->marked_count != 0) {
                     /* Preserve the exact allocation layout until the graph is moved or dies.
@@ -9544,7 +9573,9 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                 current->limit = heap->nursery.bump;
                 current->alloc_count = (size_t)heap->nursery.count;
                 current->alloc_bytes = (size_t)heap->nursery.bytes;
-                kiln_c99_candidate_chunk_clear(current);
+                int active_candidate = heap->actor_candidate_id != 0 &&
+                                       current->candidate_id == heap->actor_candidate_id;
+                if (!active_candidate) kiln_c99_candidate_chunk_clear(current);
                 survivors = kiln_c99_nursery_settle(heap, current, 0);
                 heap->nursery.count = current->alloc_count;
                 heap->nursery.bytes = current->alloc_bytes;
@@ -9558,14 +9589,25 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                     heap->nursery.bytes = 0;
                     heap->nursery.resets++;
                 } else {
-                    kiln_nursery_chunk *promoted = kiln_c99_nursery_seal(&heap->nursery);
-                    promoted->live_count = survivors;
-                    promoted->tenured = 1;
-                    kiln_c99_nursery_reclaim_pages(promoted);
-                    promoted->next = heap->nursery.promoted;
-                    heap->nursery.promoted = promoted;
-                    heap->nursery.promotions += survivors;
-                    (void)kiln_c99_nursery_fresh_chunk(heap);
+                    if (active_candidate) {
+                        kiln_nursery_chunk *candidate = kiln_c99_nursery_seal(&heap->nursery);
+                        candidate->live_count = survivors;
+                        candidate->candidate_epoch = heap->epoch;
+                        candidate->candidate_state = 3;
+                        kiln_c99_nursery_full_push(&heap->nursery, candidate);
+                        heap->nursery.full_bytes += (size_t)(candidate->limit - candidate->base);
+                        heap->nursery.held_bytes += (size_t)(candidate->limit - candidate->base);
+                        (void)kiln_c99_nursery_fresh_chunk(heap);
+                    } else {
+                        kiln_nursery_chunk *promoted = kiln_c99_nursery_seal(&heap->nursery);
+                        promoted->live_count = survivors;
+                        promoted->tenured = 1;
+                        kiln_c99_nursery_reclaim_pages(promoted);
+                        promoted->next = heap->nursery.promoted;
+                        heap->nursery.promoted = promoted;
+                        heap->nursery.promotions += survivors;
+                        (void)kiln_c99_nursery_fresh_chunk(heap);
+                    }
                 }
             }
         }
@@ -9616,6 +9658,8 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
                                    ? " bytes) live (marking ran out of memory; nothing freed)\n"
                                    : " bytes) live\n");
     }
+    if (heap->mark_failed && heap->actor_candidate_id != 0)
+        heap->actor_candidate_collected = 1;
     heap->minor_collection = 0;
     heap->collecting = 0;
 }

@@ -1,5 +1,4 @@
-// kiln-native: stress=skip
-// Collection inside the factory invalidates direct candidate provenance by design.
+// Collection settles dead candidate blocks and preserves the live graph's provenance.
 import { isolate, spawnActor, transfer } from 'kiln:actors';
 
 const owner = await spawnActor({
