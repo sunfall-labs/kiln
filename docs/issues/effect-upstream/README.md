@@ -304,3 +304,10 @@ identities, every CLI checksum digest, server response counts and raw report
 digest. Execution was pinned to CPU 14 while other jobs continued; timings are
 bounded-background diagnostics rather than accepted final performance claims.
 CLI process startup is included and native AOT build time is excluded.
+
+The ongoing frozen production survey passes native Pool 47/47, including all
+four GC cases skipped by Bun. `pool-native-reference.json` retains the exact
+compiler, provider, source and adapter identities plus all case records. This
+uses frozen compiler `57424396`, not the later unlanded prepared-call compiler,
+and does not add focused successes to an older whole-suite score. The
+interpreter retention failures described above remain unresolved.
