@@ -10,6 +10,6 @@ The five budget unit tests pass, including one-worker allowance, low-physical-me
 
 ## Failed-batch rerun
 
-Using the same frozen release binary with one worker and a 4,096 MiB cap, all 14 variants in batch 0002 completed in 28.43 seconds without an allocation abort or RSS-cap violation. Both `regress/regress-610026.js` variants passed. The batch contains four passes and ten pre-existing step-budget failures; a case failure is recorded as a verdict rather than losing the entire batch document. The receipt, full case results and raw log are retained in `evidence/`.
+Using the same frozen release binary with one worker and a 4,096 MiB cap, all 14 variants in batch 0002 completed in 28.43 seconds without an allocation abort or RSS-cap violation. Both `regress/regress-610026.js` variants passed. The batch contains four passes and ten recorded step-budget failures; a case failure is recorded as a verdict rather than losing the entire batch document. The receipt, full case results and raw log are retained in `evidence/`.
 
 This rerun validates the memory allowance against the allocation-failing input. It does not replace the required fresh full gate or establish its chunk baseline verdict.
