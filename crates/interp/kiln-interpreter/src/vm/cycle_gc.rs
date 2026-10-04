@@ -1,7 +1,7 @@
 //! Conservative cycle collection for weakly seeded Rc graphs.
 //!
-//! The interpreter uses `Rc` rather than a tracing heap. Weak closure and WeakRef-target censuses
-//! shared by the realm's module map let collection discover object graphs across module VMs
+//! The interpreter uses `Rc` rather than a tracing heap. Weak closure, generator, and
+//! WeakRef-target censuses shared by the realm's module map let collection discover object graphs across module VMs
 //! without making the census itself a root. For each
 //! node, the collector subtracts all counted internal edges and its own census handle from the
 //! actual strong count. Any remainder is an external owner, so the node and everything it reaches
@@ -294,10 +294,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut ephemerons = Vec::<(Key, Key, Key)>::new();
 
         let module_map = self.gc_module_map();
-        let (shared_closures, shared_weak_objects, shared_weak_collections) = {
+        let (shared_closures, shared_generators, shared_weak_objects, shared_weak_collections) = {
             let map = module_map.borrow();
             (
                 map.gc_closures.clone(),
+                map.gc_generators.clone(),
                 map.gc_weak_ref_objects.clone(),
                 map.gc_weak_collections.clone(),
             )
@@ -305,6 +306,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         for weak in &shared_closures {
             if let Some(closure) = weak.upgrade() {
                 let owner = Owner::Closure(closure);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
+
+        // A suspended generator's locals and operand stack are strong Values but do not have
+        // to be reachable through a closure or ordinary object. Discover generators weakly so
+        // those physical edges participate in incoming-count accounting without making an
+        // otherwise dead iterator a root.
+        for weak in &shared_generators {
+            if let Some(generator) = weak.upgrade() {
+                let owner = Owner::Generator(generator);
                 let key = owner.key();
                 if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
                     entry.insert(Node {
@@ -522,6 +541,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .saturating_add(self.closures.len().max(1024));
         let mut map = module_map.borrow_mut();
         map.gc_closures.retain(|closure| closure.strong_count() > 0);
+        map.gc_generators
+            .retain(|generator| generator.strong_count() > 0);
         map.gc_weak_ref_objects
             .retain(|object| object.strong_count() > 0);
         map.gc_weak_collections
@@ -534,6 +555,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .gc_closures
             .len()
             .saturating_add(map.gc_closures.len().max(1024));
+        map.gc_generators_prune_at = map
+            .gc_generators
+            .len()
+            .saturating_add(map.gc_generators.len().max(1024));
         map.gc_weak_ref_objects_prune_at = map
             .gc_weak_ref_objects
             .len()
@@ -1020,7 +1045,25 @@ mod tests {
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,
-            functions: Vec::new(),
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: false,
+                name: None,
+                arrow: false,
+                generator: true,
+                async_generator: false,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 1,
+                code: vec![Instruction::Return],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
         });
         let vm = Vm::with_entropy_seed(
             Rc::clone(&program),
@@ -1052,6 +1095,99 @@ mod tests {
             prototype: RefCell::new(None),
             properties: RefCell::new(ObjectData::default()),
         })
+    }
+
+    fn make_registered_suspended_generator(
+        vm: &mut Vm<'_, TestHost>,
+        program: &Rc<Program>,
+        target: Value,
+    ) -> Rc<GeneratorData> {
+        let closure = Rc::new(Closure {
+            program: Rc::clone(program),
+            function: 0,
+            strictness: Rc::new(Strictness::sloppy(program)),
+            module_path: None,
+            name: None,
+            inferred_name: None,
+            upvalues: Vec::new(),
+            realm: RealmId::PRIMARY,
+            captured_arguments: None,
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        });
+        // `build_generator` is the production allocation/registration seam. A synthetic
+        // suspended state isolates census discovery from frontend lowering.
+        vm.stack.push(Value::Undefined);
+        let Value::Generator(generator) = vm
+            .build_generator(&closure, 0, 0, Value::Undefined, Value::Undefined)
+            .expect("generator construction succeeds")
+        else {
+            unreachable!();
+        };
+        {
+            let mut state = generator.state.borrow_mut();
+            state.locals[0] = target;
+            state.started = true;
+            state.instruction = 1;
+        }
+        generator
+            .properties
+            .borrow_mut()
+            .set("self", Value::Generator(Rc::clone(&generator)));
+        generator
+    }
+
+    #[test]
+    fn suspended_generator_census_accounts_local_edges_without_rooting_iterator() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+
+        let unreachable_target = Rc::new(RefCell::new(ObjectData::default()));
+        let unreachable_weak = Rc::downgrade(&unreachable_target);
+        let unreachable_generator = make_registered_suspended_generator(
+            &mut vm,
+            &program,
+            Value::Object(Rc::clone(&unreachable_target)),
+        );
+        let unreachable_generator_weak = Rc::downgrade(&unreachable_generator);
+        let unreachable_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&unreachable_target))], 0)
+            .expect("object can be held weakly");
+        vm.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
+        drop(unreachable_generator);
+        drop(unreachable_target);
+
+        vm.collect_closure_cycles();
+
+        assert!(unreachable_generator_weak.upgrade().is_none());
+        assert!(unreachable_weak.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&unreachable_ref, 0), Ok(Value::Undefined));
+
+        let live_target = Rc::new(RefCell::new(ObjectData::default()));
+        let live_weak = Rc::downgrade(&live_target);
+        let live_generator = make_registered_suspended_generator(
+            &mut vm,
+            &program,
+            Value::Object(Rc::clone(&live_target)),
+        );
+        let live_generator_weak = Rc::downgrade(&live_generator);
+        let live_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&live_target))], 0)
+            .expect("object can be held weakly");
+        vm.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
+        drop(live_target);
+
+        vm.collect_closure_cycles();
+        assert!(live_generator_weak.upgrade().is_some());
+        assert!(live_weak.upgrade().is_some());
+
+        drop(live_generator);
+        vm.collect_closure_cycles();
+        assert!(live_generator_weak.upgrade().is_none());
+        assert!(live_weak.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&live_ref, 0), Ok(Value::Undefined));
     }
 
     #[test]

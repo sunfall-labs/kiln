@@ -75,10 +75,15 @@ pub struct ModuleMap {
     runner_referrers: HashMap<RealmId, String>,
     spy_adapter_referrers: HashMap<RealmId, String>,
     /// Weak graph census shared by every VM in this realm session. Module execution allocates
-    /// closures in distinct machines, while explicit collection can be requested from any one
-    /// of them; keeping weak identities here lets that request see cross-module cycles.
+    /// closures and generators in distinct machines, while explicit collection can be requested
+    /// from any one of them; weak identities let that request see cross-module cycles.
     pub(super) gc_closures: Vec<Weak<Closure>>,
     pub(super) gc_closures_prune_at: usize,
+    /// Suspended generator frames can own Values that are otherwise outside the JS object graph.
+    /// Keep weak identities so cycle collection can account for those edges without rooting
+    /// generators merely because they were created.
+    pub(super) gc_generators: Vec<Weak<GeneratorData>>,
+    pub(super) gc_generators_prune_at: usize,
     pub(super) gc_weak_ref_objects: Vec<Weak<RefCell<ObjectData>>>,
     pub(super) gc_weak_ref_objects_prune_at: usize,
     /// Weak collections are census seeds so their conditional values can be traced even when a

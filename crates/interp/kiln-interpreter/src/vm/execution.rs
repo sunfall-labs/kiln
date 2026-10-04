@@ -2450,7 +2450,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             0
         };
 
-        Ok(Value::Generator(Rc::new(GeneratorData {
+        let generator = Rc::new(GeneratorData {
             properties: RefCell::new(ObjectData::default()),
             state: RefCell::new(GeneratorState {
                 closure: Rc::clone(closure),
@@ -2472,7 +2472,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 returning: None,
                 delegate: None,
             }),
-        })))
+        });
+        let module_map = self.gc_module_map();
+        let mut module_map = module_map.borrow_mut();
+        if module_map.gc_generators.len() >= module_map.gc_generators_prune_at {
+            module_map
+                .gc_generators
+                .retain(|entry| entry.strong_count() > 0);
+            module_map.gc_generators_prune_at = module_map
+                .gc_generators
+                .len()
+                .saturating_add(module_map.gc_generators.len().max(1024));
+        }
+        module_map.gc_generators.push(Rc::downgrade(&generator));
+        Ok(Value::Generator(generator))
     }
 
     /// Run a generator's parameter binding, before the generator object exists.
