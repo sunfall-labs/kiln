@@ -72,9 +72,11 @@ Subsequent frozen diagnostics pass all 223 codec cases and all 46 TestSchema cas
 The linked-source URL fix passes all 11 SchemaAOTCompiler cases. Native Pool passes all 47 cases,
 including four GC cases that Bun skips; interpreter Pool still fails those four GC cases.
 With the production `native-release` profile, JSON patch passes all 10 cases on native while Bun
-passes nine. Production Arbitrary records 176/178 native passes versus 178/178 on Bun; its two
-remaining failures are original five-second case timeouts during a run that overlapped gate work,
-so they require quiet confirmation. The focused evidence records each compiler digest and profile.
+passes nine. Production Arbitrary initially recorded 176/178 native passes during overlapping gate work.
+Execution replays of the same binary now pass all 178 cases, matching Bun, with the original
+five-second case budgets. The quiet replay took 20.6 seconds without an outer memory cap; a
+second replay with the matched 8 GiB cap also passed all 178. The focused evidence retains these
+separate conditions, compiler digests, inventories and profiles.
 These results are separate selections and do not replace the incomplete whole-suite diagnostic.
 
 The next milestone's first gate attempt is not green: routine Test262 passed its chunk floors
