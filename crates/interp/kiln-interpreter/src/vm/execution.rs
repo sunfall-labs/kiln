@@ -2214,6 +2214,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.strict = frame.strict;
                     self.module_path = frame.module_path;
                     self.function = frame.function;
+                    self.method_name = frame.method_name;
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
@@ -2354,6 +2355,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.strict = frame.strict;
                 self.module_path = frame.module_path;
                 self.function = frame.function;
+                self.method_name = frame.method_name;
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
@@ -2375,6 +2377,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.strict = frame.strict;
             self.module_path = frame.module_path;
             self.function = frame.function;
+            self.method_name = frame.method_name;
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
             self.arguments = frame.arguments;

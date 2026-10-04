@@ -1,6 +1,31 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn stack_function_name(closure: &Closure) -> Option<String> {
+        closure
+            .properties
+            .borrow()
+            .get_own("name")
+            .and_then(|value| match value {
+                Value::String(name) if !name.is_empty() => Some(name.to_lossy_string()),
+                _ => None,
+            })
+            .or_else(|| {
+                closure
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                closure
+                    .inferred_name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_lossy_string())
+            })
+    }
+
     fn error_stack_frame_limit(&self) -> Option<usize> {
         let constructor = Value::Native(Native::Error(ErrorKind::Error), self.current_realm);
         let identity = intrinsic_key(&constructor)?;
@@ -256,7 +281,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         (
                             "functionName".to_owned(),
                             frame
-                                .and_then(|closure| closure.name.as_deref().map(str::to_owned))
+                                .and_then(|closure| Self::stack_function_name(closure.as_ref()))
                                 .or_else(|| method_name.as_ref().map(|name| name.to_lossy_string()))
                                 .map_or(Value::Undefined, |name| Value::String(name.into())),
                         ),
@@ -392,7 +417,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         (
                             "functionName".to_owned(),
                             function
-                                .and_then(|closure| closure.name.as_deref().map(str::to_owned))
+                                .and_then(|closure| Self::stack_function_name(closure.as_ref()))
                                 .or_else(|| method_name.map(|name| name.to_lossy_string()))
                                 .map_or(Value::Undefined, |name| Value::String(name.into())),
                         ),
