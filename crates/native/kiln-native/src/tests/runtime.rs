@@ -1186,7 +1186,19 @@ fn native_static_top_level_await_resolves_before_entry() {
             },
         )
         .expect("static top-level await graph builds and runs");
-    assert_eq!(report.stdout, b"42\n");
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert_eq!(
+        report.stdout,
+        b"42\n",
+        "exit={:?} stderr={}",
+        report.exit_code,
+        String::from_utf8_lossy(&report.stderr)
+    );
 }
 
 #[test]
