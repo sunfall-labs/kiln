@@ -148,6 +148,13 @@ all 43 Cron cases and 94 runnable DateTime cases now pass with one upstream skip
 pinned sources, production optimization and a frozen provider. `date-cron-reference.json`
 records the focused evidence. These results do not replace a complete 322-file production run.
 
+Native HttpClient now passes all eight unchanged upstream cases against Bun, including
+interrupting an unbounded response and closing a body reader early. Fetch publishes headers
+and streams the body instead of waiting for the entire response; cancellation closes the
+transport, and the server honors its half-close policy. The native regression matches Node
+under ordinary and allocation-stressed execution, and the HTTP close contract passes.
+`http-client-reference.json` records this focused evidence; 321 files were deferred.
+
 Wall timers now arm, refresh and rearm from the current call time, including after synchronous
 work; provider tests and native parity cover this correction. Release builds can retain symbols
 with `KILN_NATIVE_KEEP_SYMBOLS=1` for profiling without changing compilation optimization.
