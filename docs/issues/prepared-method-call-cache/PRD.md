@@ -50,3 +50,12 @@ the measured shared lookup/invocation implementation is the same.
 These are diagnostic measurements taken with bounded background activity, not a quiet-window
 performance claim. Raw JSONL samples are retained in the ignored `.scratch/computed-call-final/`
 directory in the worktree.
+
+## Integrated verification
+
+At source `5014987a7bc611da2c3058b6cb995e80c01c1d78`, the frozen release CLI passed
+all five affected native probes, the same five under GC stress, and two representative
+probes with 1, 2 and 16 concurrent realms. Those two also passed stressed realms at 1 and 2.
+The separate emitted-C integration suite passed 37/37. `integration-reference.json` records
+the compiler/provider identities and retained raw logs. These checks do not replace the
+full Effect suite or the landing gate.
