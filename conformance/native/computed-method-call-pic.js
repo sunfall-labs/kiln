@@ -136,6 +136,13 @@ function namedArgument() {
 }
 console.log(namedCall.run(namedArgument()), namedOrder.join(","));
 
+// A saved closure with a numeric typed entry may still take that entry when its body identity,
+// argument facts, and builtin guards match. The ordinary body remains the fallback.
+const numericCall = {
+  sum(left, right) { return left + right; },
+};
+console.log("typed", numericCall.sum(20, 22));
+
 let noncallableArgumentRan = false;
 try {
   ({ run: 1 }).run((noncallableArgumentRan = true));
