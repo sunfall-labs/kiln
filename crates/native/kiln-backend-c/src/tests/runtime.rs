@@ -30,6 +30,27 @@ int main(void) {
 }
 
 #[test]
+fn object_initializer_clears_external_owner_in_poisoned_memory() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_object object;
+    memset(&object, 0xa5, sizeof object);
+    kiln_c99_object_init(&object, 0);
+    return object.external_owner == NULL ? 0 : 1;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "object-external-owner-initialized");
+    assert!(
+        run.status.success(),
+        "object initializer retained poisoned external_owner ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     let module = ModuleProgram {
         program: Program {

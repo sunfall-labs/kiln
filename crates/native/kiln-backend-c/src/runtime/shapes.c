@@ -1400,6 +1400,7 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     object->frozen = 0;
     object->not_extensible = 0;
     object->module_namespace = 0;
+    kiln_c99_heap_store_pointer(object, &object->external_owner, NULL);
     object->arguments_brand = 0;
     object->error_brand = 0;
     object->raw_json_brand = 0;
