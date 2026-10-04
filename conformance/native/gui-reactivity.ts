@@ -1,3 +1,6 @@
+// kiln-native: stress=skip
+// The 100,000-round write-cycle guard is deliberately expensive under allocation stress.
+// gui-reactivity-gc.ts covers reactive ownership with a bounded allocation workload.
 // kiln:gui reactivity: synchronous writes, glitch-free derivations, ownership and cleanup,
 // context, keyed mapping and async memos. No widgets: this is the core every widget binds to.
 import {
