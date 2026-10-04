@@ -552,8 +552,8 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .filter(|word| word.starts_with("kiln_c99_"))
                 .next_back()?;
-            let name_start = line.rfind(name)?;
-            let before_name = &line[..name_start];
+            let name_start = declaration.rfind(name)?;
+            let before_name = &declaration[..name_start];
             let immutable = if before_name.contains('*') {
                 // `*const` and `* const` declare the same thing, so the guard must not depend
                 // on which one somebody wrote.
@@ -572,11 +572,7 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
             {
                 return None;
             }
-            let tail = &line[name_start..];
-            let end = tail
-                .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .unwrap_or(tail.len());
-            Some(tail[..end].to_owned())
+            Some(name.to_owned())
         })
         .collect::<Vec<_>>();
     discovered.sort();
