@@ -2995,7 +2995,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // this the caller inherits whatever it had part-way through an expression.
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Ok((sent.clone(), true));
                 }
                 // The same ending, reached the other way: the innermost handler belongs to
@@ -3010,7 +3010,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.caught = None;
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Ok((sent.clone(), true));
                 }
                 // Any other abrupt completion leaves the body for good. The specification
@@ -3018,7 +3018,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `next()` answers `{value: undefined, done: true}` rather than re-entering a
                 // body that has already unwound -- which ran it a second time from the top.
                 Err(error) => {
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Err(error);
                 }
                 Ok(outcome) => outcome,
@@ -3029,7 +3029,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Same ending, reached from an ordinary `next()`: a throw out of the body is an
                 // abrupt completion, and a completed generator is finished.
                 Err(error) => {
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Err(error);
                 }
             }
@@ -3068,7 +3068,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
 
         // A normal return finished the generator; `run_frames` already restored the caller.
-        generator.borrow_mut().done = true;
+        generator.borrow_mut().complete();
         let _ = instruction;
         Ok((outcome.value, true))
     }

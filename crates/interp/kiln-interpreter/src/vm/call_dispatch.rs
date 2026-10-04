@@ -167,7 +167,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // completion is answered directly. `return` still awaits its argument --
                     // `AsyncGeneratorAwaitReturn` does -- which is observable as a tick and as a
                     // rejection when the argument is a rejected promise.
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     if returning {
                         let target = match sent {
                             Value::Promise(inner) => inner,
@@ -208,7 +208,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // A generator that never started, or that has finished, has no `try` to
                     // catch this: the specification marks it completed and rethrows at the
                     // caller, which is where the value came from.
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     self.caught = Some(thrown);
                     return Err(ExecutionError::ThrownAcrossNative);
                 }
@@ -261,7 +261,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     } else {
                         // Never entered, so there is nothing to unwind.
-                        generator.borrow_mut().done = true;
+                        generator.borrow_mut().complete();
                         (sent, true)
                     }
                 } else {

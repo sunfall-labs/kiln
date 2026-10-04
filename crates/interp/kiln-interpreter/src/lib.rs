@@ -749,6 +749,27 @@ pub struct GeneratorState {
     delegate: Option<(Value, usize, bool)>,
 }
 
+impl GeneratorState {
+    /// Mark the generator completed and release values that are only needed while it can run.
+    ///
+    /// The generator object keeps its closure and own properties after completion, but its
+    /// suspended frame is no longer reachable by a future `next`, `return`, or `throw` call.
+    /// Keeping that frame here would retain every local and argument for as long as callers keep
+    /// the completed iterator alive.
+    pub(crate) fn complete(&mut self) {
+        self.done = true;
+        self.locals.clear();
+        self.stack.clear();
+        self.arguments.clear();
+        self.handlers.clear();
+        self.this_value = Value::Undefined;
+        self.new_target = Value::Undefined;
+        self.awaiting = false;
+        self.returning = None;
+        self.delegate = None;
+    }
+}
+
 impl PartialEq for GeneratorState {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)

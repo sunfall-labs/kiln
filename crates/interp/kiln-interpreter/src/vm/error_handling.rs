@@ -90,8 +90,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if let (Value::Native(Native::ReturnSignal, _), Some(value)) = (&caught, returning)
                 {
                     let mut state = generator.borrow_mut();
-                    state.done = true;
-                    state.returning = None;
+                    state.complete();
                     drop(state);
                     return Ok(Ok((value, true)));
                 }
@@ -100,8 +99,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Err(ExecutionError::GeneratorReturned) => {
                 let mut state = generator.borrow_mut();
-                state.done = true;
-                state.returning = None;
+                state.complete();
                 drop(state);
                 Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
             }
