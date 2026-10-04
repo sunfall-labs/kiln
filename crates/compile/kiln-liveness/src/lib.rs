@@ -23,6 +23,29 @@ use kiln_module_graph::{
     Dependency, LiveDemand, ModuleGraph, ModuleGraphError, ModuleNode, ModuleSource, ResolvedExport,
 };
 
+/// Queue each module at most once while it is waiting to be visited. Demand is monotone and
+/// selection reads the latest accumulated slots when a path is popped, so pending requests can
+/// be coalesced; a new request after a pop still schedules another visit.
+#[derive(Default)]
+struct PendingModuleQueue {
+    items: VecDeque<PathBuf>,
+    pending: BTreeSet<PathBuf>,
+}
+
+impl PendingModuleQueue {
+    fn push_back(&mut self, path: PathBuf) {
+        if self.pending.insert(path.clone()) {
+            self.items.push_back(path);
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<PathBuf> {
+        let path = self.items.pop_front()?;
+        self.pending.remove(&path);
+        Some(path)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleSizeFacts {
     pub path: String,
@@ -153,7 +176,7 @@ fn demand_namespace_members(
     live_imports: &mut BTreeSet<(PathBuf, usize)>,
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     namespace_demands: &mut BTreeSet<PathBuf>,
-    queue: &mut VecDeque<PathBuf>,
+    queue: &mut PendingModuleQueue,
 ) -> Result<(), ModuleGraphError> {
     for name in members {
         match graph.resolved_export(namespace, name) {
@@ -257,7 +280,7 @@ fn demand_exported_namespace_members(
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
     namespace_demands: &mut BTreeSet<PathBuf>,
     partial_namespace_members: &mut BTreeMap<PathBuf, BTreeSet<String>>,
-    queue: &mut VecDeque<PathBuf>,
+    queue: &mut PendingModuleQueue,
 ) -> Result<(), ModuleGraphError> {
     let Some(node) = graph.module(origin) else {
         return Ok(());
@@ -330,7 +353,7 @@ fn mark_reexport_import_live(
     live: &mut BTreeSet<PathBuf>,
     live_imports: &mut BTreeSet<(PathBuf, usize)>,
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
-    queue: &mut VecDeque<PathBuf>,
+    queue: &mut PendingModuleQueue,
 ) {
     let Some(resolved) = graph.resolved_export(owner, exported_name).cloned() else {
         return;
@@ -359,7 +382,7 @@ fn mark_resolved_export_path_live(
     live: &mut BTreeSet<PathBuf>,
     live_imports: &mut BTreeSet<(PathBuf, usize)>,
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
-    queue: &mut VecDeque<PathBuf>,
+    queue: &mut PendingModuleQueue,
     visited: &mut BTreeSet<(PathBuf, String)>,
 ) {
     if !visited.insert((owner.to_path_buf(), exported_name.to_owned())) {
@@ -493,10 +516,10 @@ pub fn select_executable_modules<'a>(
     let mut namespace_member_cache = BTreeMap::new();
     let mut partial_namespace_members: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     let mut inactive_commonjs_dependencies = BTreeSet::new();
-    let mut queue = VecDeque::new();
+    let mut queue = PendingModuleQueue::default();
     let mut side_effect_free = BTreeMap::new();
 
-    let mark_live = |path: &Path, live: &mut BTreeSet<PathBuf>, queue: &mut VecDeque<PathBuf>| {
+    let mark_live = |path: &Path, live: &mut BTreeSet<PathBuf>, queue: &mut PendingModuleQueue| {
         if options.excluded.contains(path) {
             return;
         }
@@ -509,7 +532,7 @@ pub fn select_executable_modules<'a>(
     let mark_namespace_live = |path: &Path,
                                live: &mut BTreeSet<PathBuf>,
                                namespace_demands: &mut BTreeSet<PathBuf>,
-                               queue: &mut VecDeque<PathBuf>| {
+                               queue: &mut PendingModuleQueue| {
         if options.excluded.contains(path) {
             return;
         }
