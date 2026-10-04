@@ -141,10 +141,17 @@ warm native time from 1,162 ms to 28 ms (41.5×), with matching checksums; Bun t
 The integrated Buffer milestone passes all ten routine gate steps; `buffer-gate-reference.json`
 retains its frozen evidence.
 
-The new full production-profile run is still in progress. Its frozen compiler has exposed
-84 failures concentrated in Cron and DateTime; a direct Date setter probe reproduces optional
-argument loss in native-release while native-dev is correct. This is unresolved compiler work,
-and the passing routine gate does not establish full Effect correctness.
+The later production diagnostic exposed 84 Cron and DateTime failures. The specialized
+`arguments.length` emitter updated its boxed value but left live numeric representations stale,
+causing Date setters to lose optional arguments. The fix preserves those representations:
+all 43 Cron cases and 94 runnable DateTime cases now pass with one upstream skip, using unchanged
+pinned sources, production optimization and a frozen provider. `date-cron-reference.json`
+records the focused evidence. These results do not replace a complete 322-file production run.
+
+Wall timers now arm, refresh and rearm from the current call time, including after synchronous
+work; provider tests and native parity cover this correction. Release builds can retain symbols
+with `KILN_NATIVE_KEEP_SYMBOLS=1` for profiling without changing compilation optimization.
+The diagnostic option has a separate release link cache identity.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
