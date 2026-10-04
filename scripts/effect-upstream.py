@@ -328,6 +328,23 @@ def aggregate(report, engines):
 
 def comparison_verdicts(report, engines):
     rows = report['files']
+    selected_files = report.get('selected_files')
+    selected_set = set(selected_files) if isinstance(selected_files, list) else None
+    reported_files = [row.get('file') for row in rows]
+    coverage_errors = []
+    if selected_set is None:
+        coverage_errors.append('selected_files_missing')
+    else:
+        if len(selected_files) != len(selected_set):
+            coverage_errors.append('selected_files_contains_duplicates')
+        if len(reported_files) != len(set(reported_files)):
+            coverage_errors.append('runtime_report_contains_duplicate_files')
+        missing = sorted(selected_set - set(reported_files))
+        unexpected = sorted(set(reported_files) - selected_set)
+        if missing:
+            coverage_errors.append('selected_files_missing_from_report')
+        if unexpected:
+            coverage_errors.append('unselected_files_present_in_report')
     result = {'node_vitest_conformance': {}, 'direct_bun_differential': {},
               'bun_adapter_unsupported': []}
     for engine in ('native', 'interpreter'):
@@ -337,9 +354,24 @@ def comparison_verdicts(report, engines):
         comparisons = [row['engines'][engine].get('node_vitest', {}) for row in rows
                        if engine in row['engines']]
         if not comparisons:
-            result['node_vitest_conformance'][engine] = {'status': 'not_run'}
+            requested = isinstance(selected_files, list) and bool(selected_files)
+            result['node_vitest_conformance'][engine] = {
+                'status': 'incomplete' if requested else 'not_run',
+                'mapped_cases': 0, 'unmapped_direct_cases': 0, 'unmatched_official_cases': 0,
+                'mode_mismatches': 0, 'outcome_mismatches': 0,
+                'runtime_incomplete_files': sorted(selected_set) if requested else [],
+                'oracle_incomplete_files': sorted(selected_set) if requested else [],
+                'coverage_errors': ['runtime_records_missing'] if requested else []}
             continue
-        incomplete = any(c.get('complete') is not True for c in comparisons)
+        compared_rows = [row for row in rows if engine in row.get('engines', {})]
+        runtime_incomplete = [row.get('file') for row in compared_rows
+                              if row['engines'][engine].get('complete') is not True]
+        oracle_incomplete = [row.get('file') for row in compared_rows
+                             if row['engines'][engine].get('node_vitest', {}).get('complete') is not True]
+        expected_rows = len(selected_files) if isinstance(selected_files, list) else len(rows)
+        incomplete = (bool(coverage_errors) or len(compared_rows) != expected_rows or
+                      bool(runtime_incomplete) or bool(oracle_incomplete) or
+                      any(c.get('complete') is not True for c in comparisons))
         mode_mismatches = sum(len(c.get('mode_mismatches', [])) for c in comparisons)
         outcome_mismatches = sum(len(c.get('outcome_mismatches', [])) for c in comparisons)
         mapped = sum(c.get('mapped_cases', 0) for c in comparisons)
@@ -349,7 +381,10 @@ def comparison_verdicts(report, engines):
         result['node_vitest_conformance'][engine] = {
             'status': status, 'mapped_cases': mapped, 'unmapped_direct_cases': unmapped,
             'unmatched_official_cases': official_unmapped, 'mode_mismatches': mode_mismatches,
-            'outcome_mismatches': outcome_mismatches}
+            'outcome_mismatches': outcome_mismatches,
+            'runtime_incomplete_files': sorted(set(runtime_incomplete)),
+            'oracle_incomplete_files': sorted(set(oracle_incomplete)),
+            'coverage_errors': coverage_errors}
     if 'bun' in engines and any(engine in engines for engine in ('native', 'interpreter')):
         candidates = [
             (engine, row['engines'][engine])
@@ -540,6 +575,29 @@ def compare_node_vitest(candidate, file_name, source_sha256):
                 'official_unmapped_cases': [], 'mapping_errors': ['candidate inventory unavailable'],
                 'mode_mismatches': [], 'outcome_mismatches': [], 'known_source_transform_gaps': []}
     mapping = node_vitest_case_map(file_name, inventory, source_sha256)
+    envelope_errors = []
+    ids = [row.get('id') for row in inventory]
+    case_ids = [row.get('id') for row in cases]
+    if candidate.get('complete') is not True:
+        envelope_errors.append('runtime_envelope_incomplete')
+    if candidate.get('errors'):
+        envelope_errors.append('runtime_envelope_contains_errors')
+    if candidate.get('timed_out') is True or candidate.get('matches_expected_exit') is False:
+        envelope_errors.append('runtime_execution_did_not_complete_cleanly')
+    if len(ids) != len(set(ids)) or len(case_ids) != len(set(case_ids)):
+        envelope_errors.append('duplicate_runtime_case_ids')
+    if ids != case_ids:
+        envelope_errors.append('runtime_inventory_and_case_records_differ')
+    summary = candidate.get('summary')
+    if not isinstance(summary, dict):
+        envelope_errors.append('runtime_summary_missing')
+    else:
+        actual_counts = {outcome: sum(row.get('outcome') == outcome for row in cases)
+                         for outcome in ('pass', 'fail', 'skip')}
+        expected_summary = {'discovered': len(ids), 'passed': actual_counts['pass'],
+                            'failed': actual_counts['fail'], 'skipped': actual_counts['skip']}
+        if any(summary.get(key) != value for key, value in expected_summary.items()):
+            envelope_errors.append('runtime_summary_does_not_match_case_records')
     candidate_by_id = {case.get('id'): case for case in cases}
     mode_by_id = {case.get('id'): case.get('mode') for case in inventory}
     mode_mismatches = []
@@ -565,12 +623,13 @@ def compare_node_vitest(candidate, file_name, source_sha256):
                 detail['reason'] = gap['reason']
                 known_gaps.append(detail)
             outcome_mismatches.append(detail)
-    return {'applicable': True, 'complete': mapping['complete'],
-            'matches_modes': not mode_mismatches if mapping['complete'] else None,
-            'matches_outcomes': not outcome_mismatches if mapping['complete'] else None,
+    complete = mapping['complete'] and not envelope_errors
+    return {'applicable': True, 'complete': complete,
+            'matches_modes': not mode_mismatches if complete else None,
+            'matches_outcomes': not outcome_mismatches if complete else None,
             'mapped_cases': len(mapping['mapped']), 'unmapped_cases': mapping['unmapped'],
             'official_unmapped_cases': mapping['official_unmapped'],
-            'mapping_errors': mapping['mapping_errors'],
+            'mapping_errors': mapping['mapping_errors'], 'envelope_errors': envelope_errors,
             'mode_mismatches': mode_mismatches, 'outcome_mismatches': outcome_mismatches,
             'known_source_transform_gaps': known_gaps}
 
@@ -586,22 +645,52 @@ def validate_node_vitest_policy():
     if NODE_VITEST_ORACLE.get('schema') != 1 or NODE_VITEST_ORACLE.get('pin') != PIN['commit']:
         raise ValueError('Node/Vitest oracle schema or Effect pin mismatch')
     summary = NODE_VITEST_ORACLE.get('summary', {})
-    if (summary.get('files') != len(PIN['files']) or summary.get('registered') != 11019 or
-            summary.get('pass') != 10974 or summary.get('fail') != 0 or summary.get('skip') != 45 or
-            set(NODE_VITEST_ORACLE.get('files', {})) != set(PIN['files'])):
+    oracle_files = NODE_VITEST_ORACLE.get('files', {})
+    if set(oracle_files) != set(PIN['files']):
         raise ValueError('Node/Vitest oracle coverage does not match the pinned full corpus')
+    all_cases = [case for file in oracle_files.values() for case in file.get('cases', [])]
+    actual_totals = {'files': len(oracle_files), 'registered': len(all_cases),
+                     'pass': sum(case.get('outcome') == 'pass' for case in all_cases),
+                     'fail': sum(case.get('outcome') == 'fail' for case in all_cases),
+                     'skip': sum(case.get('outcome') == 'skip' for case in all_cases)}
+    per_file_totals = {}
+    for name, file in oracle_files.items():
+        cases = file.get('cases', [])
+        per_file_totals[name] = {'registered': len(cases), **{
+            outcome: sum(case.get('outcome') == outcome for case in cases)
+            for outcome in ('pass', 'fail', 'skip')}}
+    if summary.get('per_file_totals') != per_file_totals:
+        raise ValueError('Node/Vitest per-file totals do not match their case records')
+    if any(summary.get(key) != value for key, value in actual_totals.items()):
+        raise ValueError('Node/Vitest archive summary does not match its case records')
+    if actual_totals != {'files': len(PIN['files']), 'registered': 11019,
+                         'pass': 10974, 'fail': 0, 'skip': 45}:
+        raise ValueError('Node/Vitest oracle totals do not match the pinned full corpus')
     if NODE_VITEST_MAPPINGS.get('schema') != 1 or NODE_VITEST_MAPPINGS.get('oracle_sha256') != NODE_VITEST_ORACLE_SHA256:
         raise ValueError('Node/Vitest explicit mapping file does not match the oracle digest')
     if NODE_VITEST_GAPS.get('schema') != 1 or NODE_VITEST_GAPS.get('oracle_sha256') != NODE_VITEST_ORACLE_SHA256:
         raise ValueError('Node/Vitest comparability-gap file does not match the oracle digest')
-    for name, file in NODE_VITEST_ORACLE.get('files', {}).items():
+    for name, file in oracle_files.items():
         if len(file.get('source_sha256', '')) != 64:
             raise ValueError('Node/Vitest oracle has invalid source digest for ' + name)
+        cases = file.get('cases', [])
+        ids = [case.get('id') for case in cases]
+        if not cases or any(not isinstance(identifier, str) or not identifier for identifier in ids):
+            raise ValueError('Node/Vitest oracle has missing case identity for ' + name)
         if any(case.get('mode') not in ('run', 'skip') or case.get('outcome') not in ('pass', 'fail', 'skip')
-               for case in file.get('cases', [])):
+               for case in cases):
             raise ValueError('Node/Vitest oracle has invalid mode/outcome for ' + name)
     unresolved = NODE_VITEST_ORACLE.get('unmapped_direct_cases', [])
     categories = NODE_VITEST_ORACLE.get('summary', {}).get('unmapped_categories', {})
+    unresolved_keys = [(row.get('file'), row.get('direct_id')) for row in unresolved]
+    if len(unresolved_keys) != len(set(unresolved_keys)):
+        raise ValueError('Node/Vitest archive repeats an unresolved direct case')
+    reason_counts = Counter(row.get('reason') for row in unresolved)
+    reason_files = {reason: len({row.get('file') for row in unresolved if row.get('reason') == reason})
+                    for reason in reason_counts}
+    if (summary.get('unmapped_reason_counts') != dict(sorted(reason_counts.items())) or
+            summary.get('unmapped_reason_files') != dict(sorted(reason_files.items()))):
+        raise ValueError('Node/Vitest unmapped reason summary does not match its case records')
     category_counts = {}
     for category in ('parameterized_title_label', 'occurrence_disambiguated_label', 'ambiguous_official_title'):
         rows = [row for row in unresolved if
@@ -622,6 +711,7 @@ def validate_node_vitest_policy():
     if auto != summary.get('automatic_exact_unique_mappings'):
         raise ValueError('Node/Vitest automatic mapping total is inconsistent')
     seen = set()
+    seen_targets = set()
     for row in NODE_VITEST_MAPPINGS['mappings']:
         key = (row.get('file'), row.get('direct_id'))
         if key in seen:
@@ -631,6 +721,16 @@ def validate_node_vitest_policy():
             raise ValueError('explicit Node/Vitest mapping has stale source digest: ' + repr(key))
         if not row.get('evidence') or not isinstance(row.get('source_line'), int) or row['source_line'] < 1:
             raise ValueError('explicit Node/Vitest mapping lacks source evidence: ' + repr(key))
+        oracle_file = oracle_files.get(row.get('file'))
+        candidates = [case for case in oracle_file.get('cases', [])
+                      if case.get('id') == row.get('official_id')]
+        occurrence = row.get('official_occurrence')
+        if len(candidates) < 2 or not isinstance(occurrence, int) or occurrence < 0 or occurrence >= len(candidates):
+            raise ValueError('explicit Node/Vitest mapping has no valid duplicate official occurrence: ' + repr(key))
+        target = (row['file'], row['official_id'], occurrence)
+        if target in seen_targets:
+            raise ValueError('explicit Node/Vitest mappings reuse an official occurrence: ' + repr(target))
+        seen_targets.add(target)
     gap_keys = set()
     for row in NODE_VITEST_GAPS.get('cases', []):
         key = (row.get('file'), row.get('id'))
@@ -712,6 +812,7 @@ def main():
             versions[engine] = subprocess.check_output(cmd, text=True).strip()
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
+                  'selected_files': selected,
                   'node_vitest_oracle': {
                       'file': str(NODE_VITEST_ORACLE_PATH.relative_to(REPO)),
                       'sha256': NODE_VITEST_ORACLE_SHA256,
@@ -824,7 +925,8 @@ def main():
                         and r.get('node_vitest', {}).get('matches_modes') is True
                         and r.get('node_vitest', {}).get('matches_outcomes') is True))
                     for row in report['files'] for engine, r in row['engines'].items())
-        report['passed'] = clean
+        report['passed'] = clean and len(report['files']) == len(selected) and \
+            {row['file'] for row in report['files']} == set(selected)
         report['comparisons'] = comparison_verdicts(report, engines)
         write_json(out / 'report.json', report)
         print('aggregate', json.dumps(report['aggregate'], sort_keys=True), flush=True)

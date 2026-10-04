@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "oracle_sha256": "f44c8b82d31d38f00e209475c02e2426d480bce17f92e5d4abc3e9bfedca6919",
+  "oracle_sha256": "02864d002e7742d7a783ac337f21b4dc77a8196d441dd2525e922a7aa78c7f1f",
   "cases": [
     {
       "file": "Formatter",

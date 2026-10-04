@@ -9,7 +9,7 @@
     "official_report_location": "effect-oracle/all.json",
     "direct_bun_report_sha256": "2e4c6da92ec113f8af0d6f9f1cb5c5530dbbeffc4f9fc600c3b34d5b03c9e19e",
     "direct_bun_runner_commit": "b86fb1ce3f29d191152025075c0c09d715f8e649",
-    "mapping_rule": "Exact direct case ID (joined ancestorTitles and title), only when unique within the pinned source file. No ordinal fallback.",
+    "mapping_rule": "Unique exact direct-source ID where possible; repeated titles require a versioned source-line and official-occurrence one-to-one mapping. No positional fallback.",
     "source_root": "Effect packages/effect/test at pinned commit; each file digest is recorded below."
   },
   "summary": {
@@ -19,27 +19,1959 @@
     "fail": 0,
     "skip": 45,
     "automatic_exact_unique_mappings": 10713,
-    "unmapped_direct_cases": 306,
+    "unmapped_direct_cases": 278,
     "unmapped_reason_counts": {
-      "ambiguous_official_title": 14,
-      "no_exact_title_match": 292
+      "no_exact_title_match": 278
     },
     "unmapped_reason_files": {
-      "ambiguous_official_title": 7,
-      "no_exact_title_match": 28
+      "no_exact_title_match": 24
     },
     "unmapped_categories": {
-      "ambiguous_official_title": {
-        "cases": 14,
-        "files": 7
-      },
-      "occurrence_disambiguated_label": {
-        "cases": 14,
-        "files": 7
-      },
       "parameterized_title_label": {
         "cases": 278,
         "files": 24
+      },
+      "occurrence_disambiguated_label": {
+        "cases": 0,
+        "files": 0
+      },
+      "ambiguous_official_title": {
+        "cases": 0,
+        "files": 0
+      }
+    },
+    "per_file_totals": {
+      "Array": {
+        "registered": 146,
+        "pass": 146,
+        "fail": 0,
+        "skip": 0
+      },
+      "ArrayNaNIndex": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "AtomRef": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "BigDecimal": {
+        "registered": 62,
+        "pass": 60,
+        "fail": 0,
+        "skip": 2
+      },
+      "BigInt": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "Boolean": {
+        "registered": 43,
+        "pass": 43,
+        "fail": 0,
+        "skip": 0
+      },
+      "Brand": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "ByteSize": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "Cache": {
+        "registered": 102,
+        "pass": 102,
+        "fail": 0,
+        "skip": 0
+      },
+      "Cause": {
+        "registered": 127,
+        "pass": 127,
+        "fail": 0,
+        "skip": 0
+      },
+      "CauseMapAnnotations": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "Channel": {
+        "registered": 48,
+        "pass": 48,
+        "fail": 0,
+        "skip": 0
+      },
+      "Chunk": {
+        "registered": 105,
+        "pass": 105,
+        "fail": 0,
+        "skip": 0
+      },
+      "Clock": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "Combiner": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "Config": {
+        "registered": 173,
+        "pass": 173,
+        "fail": 0,
+        "skip": 0
+      },
+      "ConfigProvider": {
+        "registered": 101,
+        "pass": 101,
+        "fail": 0,
+        "skip": 0
+      },
+      "Context": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "Cron": {
+        "registered": 43,
+        "pass": 43,
+        "fail": 0,
+        "skip": 0
+      },
+      "Crypto": {
+        "registered": 13,
+        "pass": 13,
+        "fail": 0,
+        "skip": 0
+      },
+      "Data": {
+        "registered": 35,
+        "pass": 35,
+        "fail": 0,
+        "skip": 0
+      },
+      "DateTime": {
+        "registered": 95,
+        "pass": 94,
+        "fail": 0,
+        "skip": 1
+      },
+      "Deferred": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "Duration": {
+        "registered": 45,
+        "pass": 45,
+        "fail": 0,
+        "skip": 0
+      },
+      "Effect": {
+        "registered": 290,
+        "pass": 290,
+        "fail": 0,
+        "skip": 0
+      },
+      "EffectEager": {
+        "registered": 41,
+        "pass": 41,
+        "fail": 0,
+        "skip": 0
+      },
+      "EffectKeepAlive": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "Effectable": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "Equal": {
+        "registered": 135,
+        "pass": 135,
+        "fail": 0,
+        "skip": 0
+      },
+      "Equivalence": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "ExecutionPlan": {
+        "registered": 23,
+        "pass": 23,
+        "fail": 0,
+        "skip": 0
+      },
+      "Exit": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "Fiber": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "FiberHandle": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "FiberMap": {
+        "registered": 17,
+        "pass": 17,
+        "fail": 0,
+        "skip": 0
+      },
+      "FiberSet": {
+        "registered": 10,
+        "pass": 10,
+        "fail": 0,
+        "skip": 0
+      },
+      "FiberSetRuntimePropagation": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "Formatter": {
+        "registered": 67,
+        "pass": 67,
+        "fail": 0,
+        "skip": 0
+      },
+      "Function": {
+        "registered": 45,
+        "pass": 45,
+        "fail": 0,
+        "skip": 0
+      },
+      "Graph": {
+        "registered": 139,
+        "pass": 139,
+        "fail": 0,
+        "skip": 0
+      },
+      "Hash": {
+        "registered": 25,
+        "pass": 25,
+        "fail": 0,
+        "skip": 0
+      },
+      "HashMap": {
+        "registered": 57,
+        "pass": 57,
+        "fail": 0,
+        "skip": 0
+      },
+      "HashRing": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "HashSet": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "HttpClient": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "Iterable": {
+        "registered": 48,
+        "pass": 48,
+        "fail": 0,
+        "skip": 0
+      },
+      "JsonPatch": {
+        "registered": 81,
+        "pass": 81,
+        "fail": 0,
+        "skip": 0
+      },
+      "JsonPointer": {
+        "registered": 52,
+        "pass": 52,
+        "fail": 0,
+        "skip": 0
+      },
+      "JsonSchema": {
+        "registered": 140,
+        "pass": 140,
+        "fail": 0,
+        "skip": 0
+      },
+      "Latch": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "Layer": {
+        "registered": 39,
+        "pass": 39,
+        "fail": 0,
+        "skip": 0
+      },
+      "LayerMap": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "LayerRef": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "LogLevel": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "Logger": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "ManagedRuntime": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "Match": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "Metric": {
+        "registered": 69,
+        "pass": 69,
+        "fail": 0,
+        "skip": 0
+      },
+      "Migrator": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "MutableHashMap": {
+        "registered": 18,
+        "pass": 18,
+        "fail": 0,
+        "skip": 0
+      },
+      "MutableHashSet": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "MutableList": {
+        "registered": 17,
+        "pass": 17,
+        "fail": 0,
+        "skip": 0
+      },
+      "Newtype": {
+        "registered": 13,
+        "pass": 13,
+        "fail": 0,
+        "skip": 0
+      },
+      "Number": {
+        "registered": 74,
+        "pass": 74,
+        "fail": 0,
+        "skip": 0
+      },
+      "Optic": {
+        "registered": 51,
+        "pass": 51,
+        "fail": 0,
+        "skip": 0
+      },
+      "Option": {
+        "registered": 58,
+        "pass": 58,
+        "fail": 0,
+        "skip": 0
+      },
+      "Order": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "Ordering": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "PartitionedSemaphore": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "Pathfinding": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "Pool": {
+        "registered": 47,
+        "pass": 47,
+        "fail": 0,
+        "skip": 0
+      },
+      "Predicate": {
+        "registered": 56,
+        "pass": 56,
+        "fail": 0,
+        "skip": 0
+      },
+      "PubSub": {
+        "registered": 60,
+        "pass": 60,
+        "fail": 0,
+        "skip": 0
+      },
+      "Pull": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "Queue": {
+        "registered": 65,
+        "pass": 65,
+        "fail": 0,
+        "skip": 0
+      },
+      "Random": {
+        "registered": 28,
+        "pass": 28,
+        "fail": 0,
+        "skip": 0
+      },
+      "RcMap": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "RcRef": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "Record": {
+        "registered": 42,
+        "pass": 42,
+        "fail": 0,
+        "skip": 0
+      },
+      "Redacted": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "Reducer": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "Ref": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "Request": {
+        "registered": 33,
+        "pass": 33,
+        "fail": 0,
+        "skip": 0
+      },
+      "Resource": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "Result": {
+        "registered": 44,
+        "pass": 44,
+        "fail": 0,
+        "skip": 0
+      },
+      "Schedule": {
+        "registered": 31,
+        "pass": 31,
+        "fail": 0,
+        "skip": 0
+      },
+      "Scheduler": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "Scope": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "ScopedCache": {
+        "registered": 132,
+        "pass": 132,
+        "fail": 0,
+        "skip": 0
+      },
+      "ScopedRef": {
+        "registered": 10,
+        "pass": 10,
+        "fail": 0,
+        "skip": 0
+      },
+      "Semaphore": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "Sink": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "StackCapture": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "StackTraceLimit": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "Stdio": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "Stream": {
+        "registered": 349,
+        "pass": 349,
+        "fail": 0,
+        "skip": 0
+      },
+      "String": {
+        "registered": 141,
+        "pass": 141,
+        "fail": 0,
+        "skip": 0
+      },
+      "Struct": {
+        "registered": 27,
+        "pass": 27,
+        "fail": 0,
+        "skip": 0
+      },
+      "SubscriptionRef": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "Symbol": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "SynchronizedRef": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "SynchronizedRef.modifySomeEffect": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "TestClock": {
+        "registered": 13,
+        "pass": 13,
+        "fail": 0,
+        "skip": 0
+      },
+      "Tracer": {
+        "registered": 31,
+        "pass": 31,
+        "fail": 0,
+        "skip": 0
+      },
+      "Trie": {
+        "registered": 44,
+        "pass": 44,
+        "fail": 0,
+        "skip": 0
+      },
+      "Tuple": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxChunk": {
+        "registered": 25,
+        "pass": 25,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxDeferred": {
+        "registered": 18,
+        "pass": 18,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxHashMap": {
+        "registered": 49,
+        "pass": 49,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxHashSet": {
+        "registered": 30,
+        "pass": 30,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxPriorityQueue": {
+        "registered": 23,
+        "pass": 23,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxPubSub": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxQueue": {
+        "registered": 91,
+        "pass": 91,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxReentrantLock": {
+        "registered": 28,
+        "pass": 28,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxSemaphore": {
+        "registered": 21,
+        "pass": 21,
+        "fail": 0,
+        "skip": 0
+      },
+      "TxSubscriptionRef": {
+        "registered": 17,
+        "pass": 17,
+        "fail": 0,
+        "skip": 0
+      },
+      "UndefinedOr": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/AiError": {
+        "registered": 86,
+        "pass": 86,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/AnthropicStructuredOutput": {
+        "registered": 49,
+        "pass": 49,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/AnthropicStructuredOutputRepresentation": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Chat": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/DecisionModel": {
+        "registered": 84,
+        "pass": 84,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/EmbeddingModel": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/LanguageModel": {
+        "registered": 55,
+        "pass": 55,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/LanguageModelRepresentation": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/LanguageModelTrackerLifecycle": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpSchema": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpServer/McpProtocol": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpServer/McpServer": {
+        "registered": 90,
+        "pass": 90,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpServer/ProtocolAdapters": {
+        "registered": 38,
+        "pass": 38,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpServer/v2024_11_05": {
+        "registered": 155,
+        "pass": 138,
+        "fail": 0,
+        "skip": 17
+      },
+      "ai/McpServer/v2025_03_26": {
+        "registered": 172,
+        "pass": 156,
+        "fail": 0,
+        "skip": 16
+      },
+      "ai/McpServer/v2025_06_18": {
+        "registered": 178,
+        "pass": 169,
+        "fail": 0,
+        "skip": 9
+      },
+      "ai/McpServer/v2025_11_25": {
+        "registered": 179,
+        "pass": 179,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/McpServer/v2026_07_28": {
+        "registered": 140,
+        "pass": 140,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Model": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/OpenAiStructuredOutput": {
+        "registered": 57,
+        "pass": 57,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/OpenAiStructuredOutputRepresentation": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Prompt": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Response": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/ResponseIdTracker": {
+        "registered": 24,
+        "pass": 24,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Tokenizer": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/Tool": {
+        "registered": 49,
+        "pass": 49,
+        "fail": 0,
+        "skip": 0
+      },
+      "ai/ToolRepresentation": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "arbitrary/Arbitrary": {
+        "registered": 178,
+        "pass": 178,
+        "fail": 0,
+        "skip": 0
+      },
+      "arbitrary/Arbitrary.array": {
+        "registered": 23,
+        "pass": 23,
+        "fail": 0,
+        "skip": 0
+      },
+      "arbitrary/Arbitrary.composition": {
+        "registered": 14,
+        "pass": 14,
+        "fail": 0,
+        "skip": 0
+      },
+      "arbitrary/Arbitrary.configuration": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Ansi": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Arguments": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Command": {
+        "registered": 110,
+        "pass": 110,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Errors": {
+        "registered": 29,
+        "pass": 29,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Help": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Lexer": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/LogLevel": {
+        "registered": 13,
+        "pass": 13,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Param": {
+        "registered": 32,
+        "pass": 32,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Primitive": {
+        "registered": 33,
+        "pass": 33,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/Prompt": {
+        "registered": 67,
+        "pass": 67,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/completions/completions": {
+        "registered": 70,
+        "pass": 70,
+        "fail": 0,
+        "skip": 0
+      },
+      "cli/completions/descriptor": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/ClusterWorkflowEngine": {
+        "registered": 47,
+        "pass": 47,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/Entity": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/EntityProxy": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/Envelope": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/K8sHttpClient": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/MessageStorage": {
+        "registered": 18,
+        "pass": 18,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/ResourceMap": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/ResourceRef": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/RunnerServer": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/RunnerStorage": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/Runners": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/Sharding": {
+        "registered": 66,
+        "pass": 66,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/ShardingConfig": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "cluster/interruptors": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "devtools/DevToolsClient": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Base64": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Base64Url": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/EncodingError": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Hex": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Ini": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Ndjson": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/SchemaBinary": {
+        "registered": 193,
+        "pass": 193,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Sse": {
+        "registered": 14,
+        "pass": 14,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Toml": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "encoding/Yaml": {
+        "registered": 99,
+        "pass": 99,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventJournal": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLog": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLogIdentityDerivation": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLogMessage": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLogRemote": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLogServerUnencrypted": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "eventlog/EventLogSessionAuth": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Cookies": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FetchHttpClient": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/case-insensitive": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/matching-order": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/methods": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/optional-params": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/params-collisions": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/path-params-match": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/querystring": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/FindMyWay/regex": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Headers": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpBody": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpClient": {
+        "registered": 42,
+        "pass": 42,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpClientRequest": {
+        "registered": 24,
+        "pass": 24,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpCompression": {
+        "registered": 35,
+        "pass": 35,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpEffect": {
+        "registered": 28,
+        "pass": 28,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpMiddleware": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpPlatform": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpRouter": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpServer": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpServerError": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpServerRequest": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpServerRespondable": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpServerResponse": {
+        "registered": 36,
+        "pass": 36,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpStaticServer": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/HttpStatus": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Mime": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Multipart": {
+        "registered": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/SchemaRepresentation": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Template": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/Url": {
+        "registered": 19,
+        "pass": 19,
+        "fail": 0,
+        "skip": 0
+      },
+      "http/UrlParams": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApi": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiBuilder": {
+        "registered": 54,
+        "pass": 54,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiClient": {
+        "registered": 47,
+        "pass": 47,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiDocumentation": {
+        "registered": 10,
+        "pass": 10,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiEndpoint": {
+        "registered": 32,
+        "pass": 32,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiSchema": {
+        "registered": 23,
+        "pass": 23,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/HttpApiSecurity": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/OpenApi": {
+        "registered": 37,
+        "pass": 37,
+        "fail": 0,
+        "skip": 0
+      },
+      "httpapi/OpenApiRepresentation": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "internal/Uuid": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "net/IpInterface": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "net/IpNetwork": {
+        "registered": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "net/NetAddress": {
+        "registered": 44,
+        "pass": 44,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpConfig": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpEnvHeaders": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpExporter": {
+        "registered": 22,
+        "pass": 22,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpMetrics": {
+        "registered": 13,
+        "pass": 13,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpResource": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/OtlpSerialization": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "observability/PrometheusMetrics": {
+        "registered": 25,
+        "pass": 25,
+        "fail": 0,
+        "skip": 0
+      },
+      "persistence/KeyValueStore": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "persistence/PersistedCache": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "persistence/PersistedQueue": {
+        "registered": 15,
+        "pass": 15,
+        "fail": 0,
+        "skip": 0
+      },
+      "persistence/RateLimiter": {
+        "registered": 50,
+        "pass": 50,
+        "fail": 0,
+        "skip": 0
+      },
+      "persistence/Redis": {
+        "registered": 9,
+        "pass": 9,
+        "fail": 0,
+        "skip": 0
+      },
+      "process/ChildProcess": {
+        "registered": 30,
+        "pass": 30,
+        "fail": 0,
+        "skip": 0
+      },
+      "reactivity/AsyncResult": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "reactivity/Atom": {
+        "registered": 125,
+        "pass": 125,
+        "fail": 0,
+        "skip": 0
+      },
+      "reactivity/AtomHttpApi": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "reactivity/AtomRpc": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "rpc/Rpc": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "rpc/RpcClient": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "rpc/RpcSerialization": {
+        "registered": 53,
+        "pass": 53,
+        "fail": 0,
+        "skip": 0
+      },
+      "rpc/RpcServer": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/CodePoints": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/Graph": {
+        "registered": 14,
+        "pass": 14,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/HMR": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/Schema": {
+        "registered": 607,
+        "pass": 607,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaAOTCompiler": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaAOTCompilerBuild": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaAST": {
+        "registered": 80,
+        "pass": 80,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerApi": {
+        "registered": 18,
+        "pass": 18,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerArray": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerConcurrency": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerConstruction": {
+        "registered": 25,
+        "pass": 25,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerRegression": {
+        "registered": 22,
+        "pass": 22,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaCompilerStartup": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaGetter": {
+        "registered": 41,
+        "pass": 41,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaIssue": {
+        "registered": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaJITCompiler": {
+        "registered": 41,
+        "pass": 41,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaJITCompilerCheckedSources": {
+        "registered": 129,
+        "pass": 129,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaJITCompilerExcessProperties": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaJITCompilerFallback": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaParser": {
+        "registered": 71,
+        "pass": 71,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/SchemaTransformation": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/TemplateLiteral": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/VariantSchema": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/jsonSchemaRoundTrip": {
+        "registered": 22,
+        "pass": 22,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/builtInRevivers": {
+        "registered": 100,
+        "pass": 100,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromJson": {
+        "registered": 35,
+        "pass": 35,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromJsonMultiDocument": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromJsonSchemaDocument": {
+        "registered": 210,
+        "pass": 210,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromJsonSchemaMultiDocument": {
+        "registered": 14,
+        "pass": 14,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromRepresentation": {
+        "registered": 48,
+        "pass": 48,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/fromRepresentations": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/makeCode": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/schemaToJsonSchemaDocument": {
+        "registered": 11,
+        "pass": 11,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/stringTreeRoundtrip": {
+        "registered": 3,
+        "pass": 3,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toCodeDocument": {
+        "registered": 116,
+        "pass": 116,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toCodeDocument.annotations": {
+        "registered": 29,
+        "pass": 29,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toJson": {
+        "registered": 29,
+        "pass": 29,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toJsonMultiDocument": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toJsonSchemaDocument": {
+        "registered": 79,
+        "pass": 79,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toJsonSchemaMultiDocument": {
+        "registered": 32,
+        "pass": 32,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toMultiDocument": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toRepresentation": {
+        "registered": 52,
+        "pass": 52,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/representation/toRepresentations": {
+        "registered": 42,
+        "pass": 42,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toCodec": {
+        "registered": 223,
+        "pass": 223,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toDifferJsonPatch": {
+        "registered": 10,
+        "pass": 10,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toEquivalence": {
+        "registered": 48,
+        "pass": 48,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toFormatter": {
+        "registered": 77,
+        "pass": 77,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toIso": {
+        "registered": 26,
+        "pass": 26,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toJsonSchemaDocument": {
+        "registered": 184,
+        "pass": 184,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toStandardJSONSchemaV1": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/toStandardSchemaV1": {
+        "registered": 22,
+        "pass": 22,
+        "fail": 0,
+        "skip": 0
+      },
+      "schema/v3-v4": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "socket/Socket": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "sql/SqlClient": {
+        "registered": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      },
+      "sql/SqlError": {
+        "registered": 21,
+        "pass": 21,
+        "fail": 0,
+        "skip": 0
+      },
+      "sql/SqlResolver": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "sql/SqlSchema": {
+        "registered": 12,
+        "pass": 12,
+        "fail": 0,
+        "skip": 0
+      },
+      "sql/Statement": {
+        "registered": 6,
+        "pass": 6,
+        "fail": 0,
+        "skip": 0
+      },
+      "testing/TestSchema": {
+        "registered": 46,
+        "pass": 46,
+        "fail": 0,
+        "skip": 0
+      },
+      "workers/Worker": {
+        "registered": 4,
+        "pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      "workers/WorkerError": {
+        "registered": 7,
+        "pass": 7,
+        "fail": 0,
+        "skip": 0
+      },
+      "workflow/DurableQueue": {
+        "registered": 2,
+        "pass": 2,
+        "fail": 0,
+        "skip": 0
+      },
+      "workflow/Workflow": {
+        "registered": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "workflow/WorkflowEngine": {
+        "registered": 18,
+        "pass": 18,
+        "fail": 0,
+        "skip": 0
       }
     }
   },
@@ -56796,74 +58728,6 @@
       "official_candidate_count": 0
     },
     {
-      "file": "Chunk",
-      "direct_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value",
-      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
-      "source_anchor": "should return the value",
-      "source_line_candidates": [
-        254,
-        273,
-        310,
-        319,
-        328,
-        337,
-        343
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Chunk",
-      "direct_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value",
-      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
-      "source_anchor": "should return the value",
-      "source_line_candidates": [
-        254,
-        273,
-        310,
-        319,
-        328,
-        337,
-        343
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Chunk",
-      "direct_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value [occurrence 2]",
-      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
-      "source_anchor": "should return the value",
-      "source_line_candidates": [
-        254,
-        273,
-        310,
-        319,
-        328,
-        337,
-        343
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Chunk",
-      "direct_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value [occurrence 2]",
-      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
-      "source_anchor": "should return the value",
-      "source_line_candidates": [
-        254,
-        273,
-        310,
-        319,
-        328,
-        337,
-        343
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
       "file": "DateTime",
       "direct_id": "DateTime > Disambiguation > should handle $description [case 0]",
       "source_sha256": "9942f687358e01c4ec2355ce1453ebe7f1abd1add76f1d8b449a96630a054cbc",
@@ -57326,58 +59190,6 @@
       "official_candidate_count": 0
     },
     {
-      "file": "Metric",
-      "direct_id": "Metric > track > updates on failure",
-      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
-      "source_anchor": "updates on failure",
-      "source_line_candidates": [
-        874,
-        913,
-        954
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Metric",
-      "direct_id": "Metric > track > updates on defect",
-      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
-      "source_anchor": "updates on defect",
-      "source_line_candidates": [
-        886,
-        927,
-        1003
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Metric",
-      "direct_id": "Metric > track > updates on failure [occurrence 2]",
-      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
-      "source_anchor": "updates on failure",
-      "source_line_candidates": [
-        874,
-        913,
-        954
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Metric",
-      "direct_id": "Metric > track > updates on defect [occurrence 2]",
-      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
-      "source_anchor": "updates on defect",
-      "source_line_candidates": [
-        886,
-        927,
-        1003
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
       "file": "Pool",
       "direct_id": "Pool > reservation cleanup does not revive removed items (shutdown: %s) [case 0]",
       "source_sha256": "a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8",
@@ -57705,126 +59517,6 @@
       "source_anchor": "rechunk preserves a large source chunk with target $size",
       "source_line_candidates": [
         1741
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - dropping > buffers a stream with a failure",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "buffers a stream with a failure",
-      "source_line_candidates": [
-        1913,
-        1998,
-        2085,
-        2175,
-        2285
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - dropping > fast producer progress independently",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "fast producer progress independently",
-      "source_line_candidates": [
-        1926,
-        2012,
-        2098,
-        2189,
-        2298
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - dropping > buffers a stream with a failure [occurrence 2]",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "buffers a stream with a failure",
-      "source_line_candidates": [
-        1913,
-        1998,
-        2085,
-        2175,
-        2285
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - dropping > fast producer progress independently [occurrence 2]",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "fast producer progress independently",
-      "source_line_candidates": [
-        1926,
-        2012,
-        2098,
-        2189,
-        2298
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - sliding > buffers a stream with a failure",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "buffers a stream with a failure",
-      "source_line_candidates": [
-        1913,
-        1998,
-        2085,
-        2175,
-        2285
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - sliding > fast producer progress independently",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "fast producer progress independently",
-      "source_line_candidates": [
-        1926,
-        2012,
-        2098,
-        2189,
-        2298
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - sliding > buffers a stream with a failure [occurrence 2]",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "buffers a stream with a failure",
-      "source_line_candidates": [
-        1913,
-        1998,
-        2085,
-        2175,
-        2285
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "Stream",
-      "direct_id": "Stream > bufferArray - sliding > fast producer progress independently [occurrence 2]",
-      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
-      "source_anchor": "fast producer progress independently",
-      "source_line_candidates": [
-        1926,
-        2012,
-        2098,
-        2189,
-        2298
       ],
       "reason": "no_exact_title_match",
       "official_candidate_count": 0
@@ -58943,30 +60635,6 @@
       "official_candidate_count": 0
     },
     {
-      "file": "http/FindMyWay/params-collisions",
-      "direct_id": "node with longer static suffix should have higher priority",
-      "source_sha256": "c19eb2bd389cc99eb1b90b1f7f4b18610d0871031c5878796f8a3433c68aa010",
-      "source_anchor": "node with longer static suffix should have higher priority",
-      "source_line_candidates": [
-        56,
-        66
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "http/FindMyWay/params-collisions",
-      "direct_id": "node with longer static suffix should have higher priority [occurrence 2]",
-      "source_sha256": "c19eb2bd389cc99eb1b90b1f7f4b18610d0871031c5878796f8a3433c68aa010",
-      "source_anchor": "node with longer static suffix should have higher priority",
-      "source_line_candidates": [
-        56,
-        66
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
       "file": "http/HttpBody",
       "direct_id": "fileFromInfo handles $name [case 0]",
       "source_sha256": "39d15715d7dd8bc130b5c42198a94bac2d1550954a21efc9d48ab161576d3da4",
@@ -59576,30 +61244,6 @@
     },
     {
       "file": "reactivity/Atom",
-      "direct_id": "Atom > runtime replacement",
-      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
-      "source_anchor": "runtime replacement",
-      "source_line_candidates": [
-        305,
-        315
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "reactivity/Atom",
-      "direct_id": "Atom > runtime replacement [occurrence 2]",
-      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
-      "source_anchor": "runtime replacement",
-      "source_line_candidates": [
-        305,
-        315
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "reactivity/Atom",
       "direct_id": "Atom > delivers a batched value to a late subscriber (existing listener: $existingListener) [case 0]",
       "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
       "source_anchor": "delivers a batched value to a late subscriber (existing listener: $existingListener)",
@@ -59616,50 +61260,6 @@
       "source_anchor": "delivers a batched value to a late subscriber (existing listener: $existingListener)",
       "source_line_candidates": [
         1243
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "reactivity/Atom",
-      "direct_id": "Atom > SubscriptionRef",
-      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
-      "source_anchor": "SubscriptionRef",
-      "source_line_candidates": [
-        15,
-        1587,
-        1589,
-        1593,
-        1597,
-        1599,
-        1610,
-        1611,
-        1621,
-        1622,
-        1632,
-        1641
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "reactivity/Atom",
-      "direct_id": "Atom > SubscriptionRef [occurrence 2]",
-      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
-      "source_anchor": "SubscriptionRef",
-      "source_line_candidates": [
-        15,
-        1587,
-        1589,
-        1593,
-        1597,
-        1599,
-        1610,
-        1611,
-        1621,
-        1622,
-        1632,
-        1641
       ],
       "reason": "no_exact_title_match",
       "official_candidate_count": 0
@@ -59846,38 +61446,6 @@
       "source_anchor": "treats suspended children as opaque (already evaluated: %s)",
       "source_line_candidates": [
         492
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "schema/representation/toCodeDocument",
-      "direct_id": "toCodeDocument > Declaration > URLSearchParams",
-      "source_sha256": "680059da74e25bbefacaaf259a349c752d093ba89661a5046e1b8e9b468bcb7a",
-      "source_anchor": "URLSearchParams",
-      "source_line_candidates": [
-        140,
-        141,
-        142,
-        158,
-        159,
-        160
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "schema/representation/toCodeDocument",
-      "direct_id": "toCodeDocument > Declaration > URLSearchParams [occurrence 2]",
-      "source_sha256": "680059da74e25bbefacaaf259a349c752d093ba89661a5046e1b8e9b468bcb7a",
-      "source_anchor": "URLSearchParams",
-      "source_line_candidates": [
-        140,
-        141,
-        142,
-        158,
-        159,
-        160
       ],
       "reason": "no_exact_title_match",
       "official_candidate_count": 0
@@ -60175,378 +61743,6 @@
       "source_anchor": "shares recursive references across contextual copies",
       "source_line_candidates": [
         191
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "schema/toCodec",
-      "direct_id": "Serializers > toCodecJson > schemas without encoding > Error",
-      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
-      "source_anchor": "Error",
-      "source_line_candidates": [
-        116,
-        119,
-        120,
-        125,
-        127,
-        129,
-        132,
-        141,
-        144,
-        148,
-        154,
-        156,
-        157,
-        161,
-        163,
-        165,
-        166,
-        168,
-        179,
-        183,
-        189,
-        1008,
-        1009,
-        1032,
-        1033,
-        1038,
-        1039,
-        1042,
-        1043,
-        1046,
-        1047,
-        1049,
-        1055,
-        1063,
-        1064,
-        1068,
-        1071,
-        1073,
-        1077,
-        1082,
-        1086,
-        1092,
-        1095,
-        1097,
-        1100,
-        1104,
-        1105,
-        1107,
-        1109,
-        1110,
-        1111,
-        1114,
-        1115,
-        1123,
-        1124,
-        1128,
-        1129,
-        1134,
-        1135,
-        1496,
-        1497,
-        1564,
-        1566,
-        1567,
-        1570,
-        1571,
-        1574,
-        1575,
-        1586,
-        1590,
-        1600,
-        1601,
-        2571,
-        2572,
-        2595,
-        2596,
-        2601,
-        2602,
-        2608,
-        2613,
-        2621,
-        2903,
-        3306
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "schema/toCodec",
-      "direct_id": "Serializers > toCodecJson > schemas without encoding > Error [occurrence 2]",
-      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
-      "source_anchor": "Error",
-      "source_line_candidates": [
-        116,
-        119,
-        120,
-        125,
-        127,
-        129,
-        132,
-        141,
-        144,
-        148,
-        154,
-        156,
-        157,
-        161,
-        163,
-        165,
-        166,
-        168,
-        179,
-        183,
-        189,
-        1008,
-        1009,
-        1032,
-        1033,
-        1038,
-        1039,
-        1042,
-        1043,
-        1046,
-        1047,
-        1049,
-        1055,
-        1063,
-        1064,
-        1068,
-        1071,
-        1073,
-        1077,
-        1082,
-        1086,
-        1092,
-        1095,
-        1097,
-        1100,
-        1104,
-        1105,
-        1107,
-        1109,
-        1110,
-        1111,
-        1114,
-        1115,
-        1123,
-        1124,
-        1128,
-        1129,
-        1134,
-        1135,
-        1496,
-        1497,
-        1564,
-        1566,
-        1567,
-        1570,
-        1571,
-        1574,
-        1575,
-        1586,
-        1590,
-        1600,
-        1601,
-        2571,
-        2572,
-        2595,
-        2596,
-        2601,
-        2602,
-        2608,
-        2613,
-        2621,
-        2903,
-        3306
-      ],
-      "reason": "no_exact_title_match",
-      "official_candidate_count": 0
-    },
-    {
-      "file": "schema/toCodec",
-      "direct_id": "Serializers > toCodecStringTree > schemas without encoding > Error",
-      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
-      "source_anchor": "Error",
-      "source_line_candidates": [
-        116,
-        119,
-        120,
-        125,
-        127,
-        129,
-        132,
-        141,
-        144,
-        148,
-        154,
-        156,
-        157,
-        161,
-        163,
-        165,
-        166,
-        168,
-        179,
-        183,
-        189,
-        1008,
-        1009,
-        1032,
-        1033,
-        1038,
-        1039,
-        1042,
-        1043,
-        1046,
-        1047,
-        1049,
-        1055,
-        1063,
-        1064,
-        1068,
-        1071,
-        1073,
-        1077,
-        1082,
-        1086,
-        1092,
-        1095,
-        1097,
-        1100,
-        1104,
-        1105,
-        1107,
-        1109,
-        1110,
-        1111,
-        1114,
-        1115,
-        1123,
-        1124,
-        1128,
-        1129,
-        1134,
-        1135,
-        1496,
-        1497,
-        1564,
-        1566,
-        1567,
-        1570,
-        1571,
-        1574,
-        1575,
-        1586,
-        1590,
-        1600,
-        1601,
-        2571,
-        2572,
-        2595,
-        2596,
-        2601,
-        2602,
-        2608,
-        2613,
-        2621,
-        2903,
-        3306
-      ],
-      "reason": "ambiguous_official_title",
-      "official_candidate_count": 2
-    },
-    {
-      "file": "schema/toCodec",
-      "direct_id": "Serializers > toCodecStringTree > schemas without encoding > Error [occurrence 2]",
-      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
-      "source_anchor": "Error",
-      "source_line_candidates": [
-        116,
-        119,
-        120,
-        125,
-        127,
-        129,
-        132,
-        141,
-        144,
-        148,
-        154,
-        156,
-        157,
-        161,
-        163,
-        165,
-        166,
-        168,
-        179,
-        183,
-        189,
-        1008,
-        1009,
-        1032,
-        1033,
-        1038,
-        1039,
-        1042,
-        1043,
-        1046,
-        1047,
-        1049,
-        1055,
-        1063,
-        1064,
-        1068,
-        1071,
-        1073,
-        1077,
-        1082,
-        1086,
-        1092,
-        1095,
-        1097,
-        1100,
-        1104,
-        1105,
-        1107,
-        1109,
-        1110,
-        1111,
-        1114,
-        1115,
-        1123,
-        1124,
-        1128,
-        1129,
-        1134,
-        1135,
-        1496,
-        1497,
-        1564,
-        1566,
-        1567,
-        1570,
-        1571,
-        1574,
-        1575,
-        1586,
-        1590,
-        1600,
-        1601,
-        2571,
-        2572,
-        2595,
-        2596,
-        2601,
-        2602,
-        2608,
-        2613,
-        2621,
-        2903,
-        3306
       ],
       "reason": "no_exact_title_match",
       "official_candidate_count": 0

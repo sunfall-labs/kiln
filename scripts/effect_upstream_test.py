@@ -96,6 +96,13 @@ class NodeVitestOracleTests(unittest.TestCase):
         runner.NODE_VITEST_MAPPINGS = {'mappings': []}
         runner.NODE_VITEST_GAPS = {'cases': []}
         try:
+            candidate.setdefault('complete', True)
+            candidate.setdefault('timed_out', False)
+            candidate.setdefault('matches_expected_exit', True)
+            candidate.setdefault('summary', {'discovered': len(candidate.get('inventory', [])),
+                                             'passed': sum(row.get('outcome') == 'pass' for row in candidate.get('cases', [])),
+                                             'failed': sum(row.get('outcome') == 'fail' for row in candidate.get('cases', [])),
+                                             'skipped': sum(row.get('outcome') == 'skip' for row in candidate.get('cases', []))})
             return runner.compare_node_vitest(candidate, 'X', 'source')
         finally:
             runner.NODE_VITEST_ORACLE = self.oracle
@@ -154,13 +161,14 @@ class NodeVitestOracleTests(unittest.TestCase):
             'evidence': 'same pinned parameter row at source line 12'}]}
         runner.NODE_VITEST_GAPS = {'cases': []}
         try:
-            result = runner.compare_node_vitest(
-                {'inventory': [{'id': 'adapter title', 'mode': 'run'}],
-                 'cases': [{'id': 'adapter title', 'outcome': 'pass'}]}, 'X', 'source')
+            candidate = {'inventory': [{'id': 'adapter title', 'mode': 'run'}],
+                         'cases': [{'id': 'adapter title', 'outcome': 'pass'}]}
+            candidate.update(complete=True, timed_out=False, matches_expected_exit=True,
+                             summary={'discovered': 1, 'passed': 1, 'failed': 0, 'skipped': 0})
+            result = runner.compare_node_vitest(candidate, 'X', 'source')
             runner.NODE_VITEST_MAPPINGS['mappings'][0]['source_sha256'] = 'stale'
             stale = runner.compare_node_vitest(
-                {'inventory': [{'id': 'adapter title', 'mode': 'run'}],
-                 'cases': [{'id': 'adapter title', 'outcome': 'pass'}]}, 'X', 'source')
+                candidate, 'X', 'source')
         finally:
             runner.NODE_VITEST_ORACLE = oracle
             runner.NODE_VITEST_MAPPINGS = mappings
@@ -188,10 +196,40 @@ class NodeVitestOracleTests(unittest.TestCase):
             {'id': 'runtime-failure', 'outcome': 'fail', 'error': 'TypeError: bad'}])
         self.assertEqual([row['id'] for row in rows], ['unavailable'])
 
+    def test_candidate_envelope_requires_complete_summary_and_selected_inventory(self):
+        candidate = {'inventory': [{'id': 'X > case', 'mode': 'run'}],
+                     'cases': [{'id': 'X > case', 'outcome': 'pass'}],
+                     'complete': False, 'timed_out': False, 'matches_expected_exit': True,
+                     'summary': {'discovered': 1, 'passed': 1, 'failed': 0, 'skipped': 0}}
+        result = self.compare_synthetic(candidate)
+        self.assertFalse(result['complete'])
+        self.assertIn('runtime_envelope_incomplete', result['envelope_errors'])
+
+    def test_stale_archive_summary_is_rejected_from_derived_case_totals(self):
+        oracle = runner.NODE_VITEST_ORACLE
+        runner.NODE_VITEST_ORACLE = copy.deepcopy(oracle)
+        runner.NODE_VITEST_ORACLE['summary']['pass'] += 1
+        try:
+            with self.assertRaisesRegex(ValueError, 'per-file totals|archive summary'):
+                runner.validate_node_vitest_policy()
+        finally:
+            runner.NODE_VITEST_ORACLE = oracle
+
+    def test_changed_archive_case_with_stale_totals_is_rejected(self):
+        oracle = runner.NODE_VITEST_ORACLE
+        runner.NODE_VITEST_ORACLE = copy.deepcopy(oracle)
+        first_file = next(iter(runner.NODE_VITEST_ORACLE['files'].values()))
+        first_file['cases'].pop()
+        try:
+            with self.assertRaisesRegex(ValueError, 'per-file totals|archive summary'):
+                runner.validate_node_vitest_policy()
+        finally:
+            runner.NODE_VITEST_ORACLE = oracle
+
     def test_comparison_verdicts_keep_bun_divergence_and_node_coverage_separate(self):
-        report = {'files': [{'file': 'X', 'engines': {
+        report = {'selected_files': ['X'], 'files': [{'file': 'X', 'engines': {
             'bun': {'bun_adapter_unsupported_cases': [{'id': 'adapter-gap'}]},
-            'native': {'node_vitest': {'complete': False, 'mapped_cases': 1,
+            'native': {'complete': True, 'node_vitest': {'complete': False, 'mapped_cases': 1,
                                        'unmapped_cases': [{'id': 'unmapped'}],
                                        'official_unmapped_cases': [{'id': 'official'}],
                                        'mode_mismatches': [], 'outcome_mismatches': []},
@@ -204,6 +242,38 @@ class NodeVitestOracleTests(unittest.TestCase):
         self.assertEqual(result['direct_bun_differential']['status'], 'diverged')
         self.assertEqual(result['direct_bun_differential']['mode_mismatches'], 1)
         self.assertEqual(result['bun_adapter_unsupported'][0]['id'], 'adapter-gap')
+
+    def test_partial_selected_file_report_is_not_native_conformance(self):
+        complete = {'complete': True, 'node_vitest': {'complete': True, 'mapped_cases': 1,
+                    'unmapped_cases': [], 'official_unmapped_cases': [], 'mode_mismatches': [],
+                    'outcome_mismatches': []}}
+        report = {'selected_files': ['A', 'B'],
+                  'files': [{'file': 'A', 'engines': {'native': complete}}]}
+        result = runner.comparison_verdicts(report, ['native'])
+        native = result['node_vitest_conformance']['native']
+        self.assertEqual(native['status'], 'incomplete')
+        self.assertIn('selected_files_missing_from_report', native['coverage_errors'])
+        self.assertEqual(native['runtime_incomplete_files'], [])
+
+    def test_selected_engine_with_no_runtime_records_is_incomplete(self):
+        report = {'selected_files': ['A'], 'files': []}
+        result = runner.comparison_verdicts(report, ['native'])
+        native = result['node_vitest_conformance']['native']
+        self.assertEqual(native['status'], 'incomplete')
+        self.assertEqual(native['coverage_errors'], ['runtime_records_missing'])
+
+    def test_node_conformance_pass_is_independent_of_bun_differential(self):
+        native = {'complete': True, 'matches_reference_inventory': True,
+                  'matches_reference_modes': False, 'matches_reference_outcomes': False,
+                  'node_vitest': {'complete': True, 'mapped_cases': 1, 'unmapped_cases': [],
+                                  'official_unmapped_cases': [], 'mode_mismatches': [],
+                                  'outcome_mismatches': []}}
+        bun = {'complete': True, 'matches_reference_inventory': True,
+               'matches_reference_modes': True, 'matches_reference_outcomes': True}
+        report = {'selected_files': ['A'], 'files': [{'file': 'A', 'engines': {'native': native, 'bun': bun}}]}
+        result = runner.comparison_verdicts(report, ['native', 'bun'])
+        self.assertEqual(result['node_vitest_conformance']['native']['status'], 'pass')
+        self.assertEqual(result['direct_bun_differential']['status'], 'diverged')
 
 
 if __name__ == '__main__':

@@ -1,5 +1,258 @@
 {
   "schema": 1,
-  "oracle_sha256": "f44c8b82d31d38f00e209475c02e2426d480bce17f92e5d4abc3e9bfedca6919",
-  "mappings": []
+  "oracle_sha256": "02864d002e7742d7a783ac337f21b4dc77a8196d441dd2525e922a7aa78c7f1f",
+  "mappings": [
+    {
+      "file": "Chunk",
+      "direct_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value",
+      "official_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value",
+      "official_occurrence": 0,
+      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
+      "source_line": 254,
+      "evidence": "Pinned source declares this repeated test title at line 254; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Chunk",
+      "direct_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value [occurrence 2]",
+      "official_id": "Chunk > getUnsafe > Given an appended Chunk and an index in bounds > should return the value",
+      "official_occurrence": 1,
+      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
+      "source_line": 310,
+      "evidence": "Pinned source declares this repeated test title at line 310; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Chunk",
+      "direct_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value",
+      "official_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value",
+      "official_occurrence": 0,
+      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
+      "source_line": 273,
+      "evidence": "Pinned source declares this repeated test title at line 273; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Chunk",
+      "direct_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value [occurrence 2]",
+      "official_id": "Chunk > getUnsafe > Given a prepended Chunk and an index in bounds > should return the value",
+      "official_occurrence": 1,
+      "source_sha256": "6805f292ffc41ab36db4bffccb9419d340db3b929cc37a817fd12e19f175c294",
+      "source_line": 319,
+      "evidence": "Pinned source declares this repeated test title at line 319; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Metric",
+      "direct_id": "Metric > track > updates on failure",
+      "official_id": "Metric > track > updates on failure",
+      "official_occurrence": 0,
+      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
+      "source_line": 874,
+      "evidence": "Pinned source declares this repeated test title at line 874; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Metric",
+      "direct_id": "Metric > track > updates on defect",
+      "official_id": "Metric > track > updates on defect",
+      "official_occurrence": 0,
+      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
+      "source_line": 886,
+      "evidence": "Pinned source declares this repeated test title at line 886; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Metric",
+      "direct_id": "Metric > track > updates on failure [occurrence 2]",
+      "official_id": "Metric > track > updates on failure",
+      "official_occurrence": 1,
+      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
+      "source_line": 913,
+      "evidence": "Pinned source declares this repeated test title at line 913; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Metric",
+      "direct_id": "Metric > track > updates on defect [occurrence 2]",
+      "official_id": "Metric > track > updates on defect",
+      "official_occurrence": 1,
+      "source_sha256": "b4877066ad7ef4e1a0b0b603bcf9c7543a4cff45007dab7398834b55c114c4e5",
+      "source_line": 927,
+      "evidence": "Pinned source declares this repeated test title at line 927; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - dropping > buffers a stream with a failure",
+      "official_id": "Stream > bufferArray - dropping > buffers a stream with a failure",
+      "official_occurrence": 0,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 1913,
+      "evidence": "Pinned source declares this repeated test title at line 1913; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - dropping > fast producer progress independently",
+      "official_id": "Stream > bufferArray - dropping > fast producer progress independently",
+      "official_occurrence": 0,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 1926,
+      "evidence": "Pinned source declares this repeated test title at line 1926; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - dropping > buffers a stream with a failure [occurrence 2]",
+      "official_id": "Stream > bufferArray - dropping > buffers a stream with a failure",
+      "official_occurrence": 1,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 1998,
+      "evidence": "Pinned source declares this repeated test title at line 1998; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - dropping > fast producer progress independently [occurrence 2]",
+      "official_id": "Stream > bufferArray - dropping > fast producer progress independently",
+      "official_occurrence": 1,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 2012,
+      "evidence": "Pinned source declares this repeated test title at line 2012; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - sliding > buffers a stream with a failure",
+      "official_id": "Stream > bufferArray - sliding > buffers a stream with a failure",
+      "official_occurrence": 0,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 2085,
+      "evidence": "Pinned source declares this repeated test title at line 2085; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - sliding > fast producer progress independently",
+      "official_id": "Stream > bufferArray - sliding > fast producer progress independently",
+      "official_occurrence": 0,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 2098,
+      "evidence": "Pinned source declares this repeated test title at line 2098; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - sliding > buffers a stream with a failure [occurrence 2]",
+      "official_id": "Stream > bufferArray - sliding > buffers a stream with a failure",
+      "official_occurrence": 1,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 2175,
+      "evidence": "Pinned source declares this repeated test title at line 2175; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "Stream",
+      "direct_id": "Stream > bufferArray - sliding > fast producer progress independently [occurrence 2]",
+      "official_id": "Stream > bufferArray - sliding > fast producer progress independently",
+      "official_occurrence": 1,
+      "source_sha256": "76db1a8c1761123696158e39ceb64a673d0949aacf03b008f4a9a7a95ebeda4d",
+      "source_line": 2189,
+      "evidence": "Pinned source declares this repeated test title at line 2189; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "http/FindMyWay/params-collisions",
+      "direct_id": "node with longer static suffix should have higher priority",
+      "official_id": "node with longer static suffix should have higher priority",
+      "official_occurrence": 0,
+      "source_sha256": "c19eb2bd389cc99eb1b90b1f7f4b18610d0871031c5878796f8a3433c68aa010",
+      "source_line": 56,
+      "evidence": "Pinned source declares this repeated test title at line 56; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "http/FindMyWay/params-collisions",
+      "direct_id": "node with longer static suffix should have higher priority [occurrence 2]",
+      "official_id": "node with longer static suffix should have higher priority",
+      "official_occurrence": 1,
+      "source_sha256": "c19eb2bd389cc99eb1b90b1f7f4b18610d0871031c5878796f8a3433c68aa010",
+      "source_line": 66,
+      "evidence": "Pinned source declares this repeated test title at line 66; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "reactivity/Atom",
+      "direct_id": "Atom > runtime replacement",
+      "official_id": "Atom > runtime replacement",
+      "official_occurrence": 0,
+      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
+      "source_line": 305,
+      "evidence": "Pinned source declares this repeated test title at line 305; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "reactivity/Atom",
+      "direct_id": "Atom > runtime replacement [occurrence 2]",
+      "official_id": "Atom > runtime replacement",
+      "official_occurrence": 1,
+      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
+      "source_line": 315,
+      "evidence": "Pinned source declares this repeated test title at line 315; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "reactivity/Atom",
+      "direct_id": "Atom > SubscriptionRef",
+      "official_id": "Atom > SubscriptionRef",
+      "official_occurrence": 0,
+      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
+      "source_line": 1587,
+      "evidence": "Pinned source declares this repeated test title at line 1587; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "reactivity/Atom",
+      "direct_id": "Atom > SubscriptionRef [occurrence 2]",
+      "official_id": "Atom > SubscriptionRef",
+      "official_occurrence": 1,
+      "source_sha256": "7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b",
+      "source_line": 1597,
+      "evidence": "Pinned source declares this repeated test title at line 1597; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/representation/toCodeDocument",
+      "direct_id": "toCodeDocument > Declaration > URLSearchParams",
+      "official_id": "toCodeDocument > Declaration > URLSearchParams",
+      "official_occurrence": 0,
+      "source_sha256": "680059da74e25bbefacaaf259a349c752d093ba89661a5046e1b8e9b468bcb7a",
+      "source_line": 140,
+      "evidence": "Pinned source declares this repeated test title at line 140; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/representation/toCodeDocument",
+      "direct_id": "toCodeDocument > Declaration > URLSearchParams [occurrence 2]",
+      "official_id": "toCodeDocument > Declaration > URLSearchParams",
+      "official_occurrence": 1,
+      "source_sha256": "680059da74e25bbefacaaf259a349c752d093ba89661a5046e1b8e9b468bcb7a",
+      "source_line": 158,
+      "evidence": "Pinned source declares this repeated test title at line 158; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/toCodec",
+      "direct_id": "Serializers > toCodecJson > schemas without encoding > Error",
+      "official_id": "Serializers > toCodecJson > schemas without encoding > Error",
+      "official_occurrence": 0,
+      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
+      "source_line": 1008,
+      "evidence": "Pinned source declares this repeated test title at line 1008; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/toCodec",
+      "direct_id": "Serializers > toCodecJson > schemas without encoding > Error [occurrence 2]",
+      "official_id": "Serializers > toCodecJson > schemas without encoding > Error",
+      "official_occurrence": 1,
+      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
+      "source_line": 1032,
+      "evidence": "Pinned source declares this repeated test title at line 1032; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/toCodec",
+      "direct_id": "Serializers > toCodecStringTree > schemas without encoding > Error",
+      "official_id": "Serializers > toCodecStringTree > schemas without encoding > Error",
+      "official_occurrence": 0,
+      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
+      "source_line": 2571,
+      "evidence": "Pinned source declares this repeated test title at line 2571; this is occurrence 1 in source order and maps to the same occurrence in the official Vitest result list."
+    },
+    {
+      "file": "schema/toCodec",
+      "direct_id": "Serializers > toCodecStringTree > schemas without encoding > Error [occurrence 2]",
+      "official_id": "Serializers > toCodecStringTree > schemas without encoding > Error",
+      "official_occurrence": 1,
+      "source_sha256": "f51b04740233cc8444841f36782943e2ed3375d4ad150b26d0ed31c21298467b",
+      "source_line": 2595,
+      "evidence": "Pinned source declares this repeated test title at line 2595; this is occurrence 2 in source order and maps to the same occurrence in the official Vitest result list."
+    }
+  ]
 }
