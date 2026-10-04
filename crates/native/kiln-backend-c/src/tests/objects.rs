@@ -7048,11 +7048,37 @@ int main(void) {
     if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_NUMBER, "isInteger", 9)) return 21;
     return 0;
 }
+
 "#;
     let run = run_with_main(&generated, wrapper, "narrow-builtin-guards");
     assert!(
         run.status.success(),
         "a speculation answering about built-ins it does not rely on ({:?}): {}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn surface_method_names_keep_first_alias_and_miss_unknown_codes() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty module emits for a runtime method-name probe");
+    let wrapper = r#"
+int main(void) {
+    const char *buffer_alloc = kiln_c99_method_name(KILN_C99_METHOD_BUFFER_ALLOC);
+    const char *array_values = kiln_c99_method_name(KILN_C99_METHOD_ARRAY_VALUES);
+    if (buffer_alloc == NULL || strcmp(buffer_alloc, "alloc") != 0) return 1;
+    if (array_values == NULL || strcmp(array_values, "values") != 0) return 2;
+    if (kiln_c99_method_name(0) != NULL) return 3;
+    if (kiln_c99_method_name(UINT64_MAX) != NULL) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "surface-method-name-index");
+    assert!(
+        run.status.success(),
+        "method-name indexing changed canonical aliases or missing-code behavior ({:?}): {}{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
