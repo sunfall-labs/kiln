@@ -919,9 +919,8 @@ impl NativeClock {
     }
 }
 
-/// A turn boundary for the realm's clock: a wall-clock realm reads the host now, so timers
-/// armed by the callbacks that follow measure from this instant, as Node's loop time does.
-/// A virtual realm's clock is not touched.
+/// Refresh the realm queue at a turn boundary or a timer call site. Wall-clock deadlines
+/// measure from this instant; a virtual realm's clock is not touched.
 fn tick_clock(realm: &NativeRealm) {
     if let Some(now) = realm.clock.get().reading()
         && let Ok(mut work) = realm.work.try_borrow_mut()
@@ -5517,6 +5516,11 @@ fn arm(
         let Some(realm) = active_realm() else {
             return INVALID_ARGUMENT;
         };
+        // Timers measure from their call site, including after synchronous work inside a turn.
+        // Immediates and I/O do not need a fresh deadline; virtual clocks remain unchanged.
+        if matches!(arm, Arm::Timeout(_) | Arm::Interval(_)) {
+            tick_clock(&realm);
+        }
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
@@ -5664,6 +5668,7 @@ pub extern "C" fn kiln_realm_refresh_timer(id: u64) -> i32 {
         let Some(realm) = active_realm() else {
             return INVALID_ARGUMENT;
         };
+        tick_clock(&realm);
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
@@ -5691,6 +5696,7 @@ pub unsafe extern "C" fn kiln_realm_rearm_timeout(
         let Some(realm) = active_realm() else {
             return INVALID_ARGUMENT;
         };
+        tick_clock(&realm);
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };

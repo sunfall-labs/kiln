@@ -3863,6 +3863,160 @@ unsafe extern "C" fn arms_short_timer(context: *mut c_void) -> i32 {
     unsafe { kiln_realm_set_timeout(30.0, Some(stamp), Some(no_drop), fired.cast(), &raw mut id) }
 }
 
+#[derive(Clone, Copy)]
+enum DelayedTimerOperation {
+    Timeout,
+    Interval,
+    Refresh,
+    Rearm,
+}
+
+fn wall_clock_delay_after_synchronous_work(operation: DelayedTimerOperation) {
+    struct Timing {
+        operation: DelayedTimerOperation,
+        id: u64,
+        rearmed: bool,
+        armed: Option<std::time::Instant>,
+        fired: Option<std::time::Instant>,
+    }
+    unsafe extern "C" fn no_drop(_: *mut c_void) {}
+    unsafe extern "C" fn fired(
+        context: *mut c_void,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the timing slot outlives both callbacks and the realm drive.
+        let timing = unsafe { &mut *context.cast::<Timing>() };
+        if matches!(timing.operation, DelayedTimerOperation::Rearm) && !timing.rearmed {
+            timing.rearmed = true;
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            timing.armed = Some(std::time::Instant::now());
+            // SAFETY: the same callbacks and timing slot remain live for the second timeout.
+            return unsafe {
+                kiln_realm_rearm_timeout(timing.id, 30.0, Some(fired), Some(no_drop), context)
+            };
+        }
+        timing.fired = Some(std::time::Instant::now());
+        if matches!(timing.operation, DelayedTimerOperation::Interval) {
+            return kiln_realm_clear_timer(timing.id);
+        }
+        0
+    }
+    unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+        // SAFETY: the test supplies a live, exclusive timing slot for this entry.
+        let timing = unsafe { &mut *context.cast::<Timing>() };
+        if matches!(
+            timing.operation,
+            DelayedTimerOperation::Refresh | DelayedTimerOperation::Rearm
+        ) {
+            // SAFETY: the callbacks and timing slot remain live through the drive.
+            let status = unsafe {
+                kiln_realm_set_timeout(
+                    30.0,
+                    Some(fired),
+                    Some(no_drop),
+                    context,
+                    &raw mut timing.id,
+                )
+            };
+            if status != 0 || matches!(timing.operation, DelayedTimerOperation::Rearm) {
+                return status;
+            }
+        }
+        // A callback may have done substantial work since the queue's last clock tick.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        timing.armed = Some(std::time::Instant::now());
+        match timing.operation {
+            DelayedTimerOperation::Refresh => {
+                if kiln_realm_refresh_timer(timing.id) == 1 {
+                    0
+                } else {
+                    RUNTIME_ERROR
+                }
+            }
+            DelayedTimerOperation::Interval => {
+                // SAFETY: callbacks and context stay live until the interval cancels itself.
+                unsafe {
+                    kiln_realm_set_interval(
+                        30.0,
+                        Some(fired),
+                        Some(no_drop),
+                        context,
+                        &raw mut timing.id,
+                    )
+                }
+            }
+            DelayedTimerOperation::Timeout => {
+                // SAFETY: callbacks and context stay live through the drive.
+                unsafe {
+                    kiln_realm_set_timeout(
+                        30.0,
+                        Some(fired),
+                        Some(no_drop),
+                        context,
+                        &raw mut timing.id,
+                    )
+                }
+            }
+            DelayedTimerOperation::Rearm => {
+                unreachable!("rearm is scheduled from the first callback")
+            }
+        }
+    }
+    let mut handle = 0;
+    let mut timing = Timing {
+        operation,
+        id: 0,
+        rearmed: false,
+        armed: None,
+        fired: None,
+    };
+    // SAFETY: each writable slot and callback context outlives the corresponding call/drive.
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    assert_eq!(kiln_realm_use_wall_clock(handle), 0);
+    // SAFETY: the entry receives the live Timing slot and callbacks retain it only until drive.
+    assert_eq!(
+        unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut timing).cast()) },
+        0
+    );
+    let mut host = 0_u8;
+    let mut thrown = 0_u8;
+    // SAFETY: host, thrown, and all callback contexts stay live through the synchronous drive.
+    assert_eq!(
+        unsafe { kiln_realm_drive(handle, (&raw mut host).cast(), (&raw mut thrown).cast()) },
+        0
+    );
+    assert_eq!(kiln_realm_destroy(handle), 0);
+    let elapsed = timing
+        .fired
+        .expect("timer fired")
+        .duration_since(timing.armed.expect("timer armed"));
+    assert!(
+        elapsed >= std::time::Duration::from_millis(30),
+        "30ms timer fired after {elapsed:?}"
+    );
+}
+
+#[test]
+fn wall_clock_timer_arming_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Timeout);
+}
+
+#[test]
+fn wall_clock_interval_arming_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Interval);
+}
+
+#[test]
+fn wall_clock_timer_refresh_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Refresh);
+}
+
+#[test]
+fn wall_clock_timer_rearm_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Rearm);
+}
+
 #[test]
 fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() -> Result<(), Box<dyn Error>> {
     let mut handle = 0;
