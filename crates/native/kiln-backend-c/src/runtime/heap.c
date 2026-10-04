@@ -5063,6 +5063,7 @@ typedef enum kiln_c99_graph_incoming_result {
  * image in TLS while the provider drive is active. Unregistered embedders retain the original
  * conservative full-stack scan. */
 #define KILN_C99_GRAPH_DRIVE_BOUNDARY_LIMIT 16
+extern _Thread_local kiln_js_frame *kiln_c99_js_frame_top;
 typedef struct kiln_c99_graph_drive_boundary {
     uintptr_t stack_low;
     jmp_buf registers;
@@ -5124,7 +5125,11 @@ __attribute__((visibility("hidden"))) void kiln_c99_graph_drive_boundary_pop(uin
 }
 
 static const kiln_c99_graph_drive_boundary *kiln_c99_graph_drive_boundary_current(void) {
-    if (kiln_c99_graph_drive_boundaries.suppressed != 0 ||
+    /* A reentrant embedding callback can run while the outer launcher TLS scope is still
+     * installed. Generated-language frames are independently registered and must never be
+     * hidden by the launcher boundary; in that case use the full conservative scan. */
+    if (kiln_c99_js_frame_top != NULL ||
+        kiln_c99_graph_drive_boundaries.suppressed != 0 ||
         kiln_c99_graph_drive_boundaries.depth == 0)
         return NULL;
     return &kiln_c99_graph_drive_boundaries.entries[

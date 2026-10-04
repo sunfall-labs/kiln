@@ -5920,6 +5920,21 @@ __attribute__((noinline)) static int actor_probe_managed_boundary(kiln_gc_heap *
     if (frame == NULL) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
     (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2), &registers,
                                                sizeof registers, &token);
+    /* A reentrant host callback while generated code is active cannot inherit this boundary. */
+    {
+        kiln_js_frame active_language_frame;
+        kiln_c99_js_frame_enter(&active_language_frame, NULL);
+        if (kiln_c99_graph_drive_boundary_current() != NULL) {
+            kiln_c99_js_frame_leave(&active_language_frame);
+            kiln_c99_graph_drive_boundary_pop(token);
+            return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+        }
+        kiln_c99_js_frame_leave(&active_language_frame);
+        if (kiln_c99_graph_drive_boundary_current() == NULL) {
+            kiln_c99_graph_drive_boundary_pop(token);
+            return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+        }
+    }
     result = kiln_c99_graph_incoming_request_probe(heap, request);
     kiln_c99_graph_drive_boundary_pop(token);
     return result;
