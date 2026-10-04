@@ -23,19 +23,13 @@ import sys
 import tempfile
 import time
 
-try:
-    import resource
-
-    HAVE_RESOURCE = True
-except ImportError:  # pragma: no cover
-    HAVE_RESOURCE = False
-
 PASSES = int(os.environ.get("PASSES", "3"))
 SERVER_REQUESTS = os.environ.get("SERVER_REQUESTS", "2000")
 KILN = os.environ.get("KILN_BIN", "target/release/kiln")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 from bench.checksum_validation import validate_repeated_checksums
+from bench.process_measurement import measure_process
 
 _TOOLCHAIN_BIN = os.path.join(
     ROOT, "bench", "realworld", ".toolchains", "node_modules", ".bin"
@@ -77,12 +71,6 @@ def run(argv, timeout=120):
     wall = (time.perf_counter() - started) * 1000.0
     err = done.stderr.decode("utf-8", errors="replace").strip().splitlines()
     return wall, done.stdout, done.returncode, "\n".join(err[-3:])
-
-
-def peak_rss_kb():
-    if not HAVE_RESOURCE:
-        return None
-    return resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 
 
 def artifact_bytes(path):
@@ -187,20 +175,21 @@ def measure_cli(name, src, needs_node, argv, work):
 
     measured, rss, checksums, divergences = {}, {}, {}, []
     for runtime, argv in commands.items():
-        samples, outputs, rss_before = [], [], peak_rss_kb()
+        samples, outputs, peaks = [], [], []
         for _ in range(PASSES):
-            wall, stdout, code, err = run(argv)
+            wall, stdout, code, err, peak = measure_process(argv)
             if wall is None or code != 0:
                 divergences.append(f"{name} {runtime}: exit {code} {err[:100]}")
                 samples = []
                 break
             samples.append(wall)
             outputs.append(stdout)
+            if peak is not None:
+                peaks.append(peak)
         if samples:
             measured[runtime] = statistics.median(samples)
-            after = peak_rss_kb()
-            if rss_before is not None and after is not None:
-                rss[runtime] = max(after - rss_before, 0) or after
+            if peaks:
+                rss[runtime] = max(peaks)
             checksums[runtime] = outputs
     excluded, checksum_diagnostics = validate_repeated_checksums(checksums, PASSES)
     divergences.extend(f"{name} {diagnostic}" for diagnostic in checksum_diagnostics)
@@ -211,6 +200,7 @@ def measure_cli(name, src, needs_node, argv, work):
             "program": name,
             "ms": measured,
             "peak_rss_kb": rss,
+            "peak_rss_scope": "maximum per-process peak across repetitions; excludes builds",
             "artifact_bytes": artifacts,
             "execution_modes": {
                 "node": "direct TypeScript",
