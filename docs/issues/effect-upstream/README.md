@@ -108,7 +108,14 @@ The six TLA failures now pass within 14 focused native tests. A separate product
 build failure in Cluster and Sharding came from a regex pattern in a generated C
 comment: C trigraph translation joined the next declaration into that comment.
 Generated regex comments now contain fixed text; a matching regression passes
-normal and allocation-stress parity. Cluster and Sharding are being rerun unchanged.
+normal and allocation-stress parity. The resulting production Cluster run records
+all 47 unchanged cases: 46 pass and one retains its original five-second timeout
+(parent suspended past the activity interrupt retry budget). Sharding is being rerun.
+Shared TypeScript URL state is now non-enumerable, and strict equality compares URL
+values by href plus enumerable user properties; three focused parity probes pass
+normally and four pass with allocation stress. The native parity runner now compares
+captured raw files, preserving NUL bytes and trailing newlines. Persistent controls
+exercise byte differences, equal binary output and exit-status-only differences.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
