@@ -112,7 +112,8 @@ sys.exit(8 if mismatch == 'status' else 7)
                           runtime_exit=0, node_exit=0, runtime_stdout="oracle\n", runtime_stderr="",
                           runtime_sleep=0, update=False, create_bundles=True,
                           profile="native-release", node_env=None, echo_profile_env=False,
-                          bundle_source=None):
+                          bundle_source=None, wait_for_release=None, wait_owner_pid=None,
+                          release_timeout=None):
         (root / "probes").mkdir(exist_ok=True)
         if create_bundles:
             for name in bundle_names:
@@ -160,6 +161,8 @@ sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
             FIXTURE_ECHO_PROFILE_ENV="1" if echo_profile_env else "0",
             FIXTURE_BUILD_ENV_LOG=str(root / "build-env.json"),
         )
+        if release_timeout is not None:
+            environment["KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS"] = str(release_timeout)
         environment.pop("NODE_ENV", None)
         if node_env is not None:
             environment["NODE_ENV"] = node_env
@@ -170,6 +173,10 @@ sys.exit(int(os.environ.get('FIXTURE_BINARY_EXIT', '0')))
         ]
         if update:
             command.append("--update")
+        if wait_for_release is not None:
+            command.extend(("--wait-for-release", str(wait_for_release)))
+        if wait_owner_pid is not None:
+            command.extend(("--wait-owner-pid", str(wait_owner_pid)))
         return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
 
     def test_each_engine_runs_once_and_nonzero_status_is_compared(self):
@@ -218,7 +225,7 @@ output.chmod(0o755)
                 [str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
                  "--bundles", "fixture", "--passes", "1", "--warmup", "0", "--update",
                  "--baseline-file", str(baseline_path),
-                 "--wait-for-release", str(marker)],
+                 "--wait-for-release", str(marker), "--wait-owner-pid", str(os.getpid())],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
             )
@@ -285,12 +292,64 @@ output.chmod(0o755)
             self.assertTrue(platform_record["provenance"]["rustc_version"])
             self.assertTrue(platform_record["provenance"]["clang_version"])
             self.assertEqual(
-                    platform_record["bundles"]["fixture"]["workload_sha256"],
-                    hashlib.sha256((root / "fixture.bundle.js").read_bytes()).hexdigest(),
+                platform_record["bundles"]["fixture"]["workload_sha256"],
+                hashlib.sha256((root / "fixture.bundle.js").read_bytes()).hexdigest(),
             )
             self.assertEqual(platform_record["bundles"]["fixture"]["measurement_provenance"]["profile"],
                              "native-release")
             self.assertEqual(platform_record["provenance"]["scope"], "latest_update")
+
+    def test_release_wait_handles_live_dead_and_aborted_gate_owners(self):
+        with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-owner-barrier-") as directory:
+            root = Path(directory)
+            baseline = root / "baseline.json"
+
+            live_marker = root / "live-release"
+            live_marker.write_text("measure\n")
+            live = self.benchmark_fixture(
+                root, ["fixture"], baseline, update=True,
+                wait_for_release=live_marker, wait_owner_pid=os.getpid(), release_timeout=2,
+            )
+            self.assertEqual(live.returncode, 0, live.stdout + live.stderr)
+            self.assertIn("gate barrier wait completed", live.stdout)
+
+            abort_marker = root / "abort-release"
+            abort_marker.write_text("abort\n")
+            aborted = self.benchmark_fixture(
+                root, ["fixture"], baseline, wait_for_release=abort_marker,
+                wait_owner_pid=os.getpid(), release_timeout=2,
+            )
+            self.assertNotEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            self.assertIn("gate aborted before releasing thirdparty timing", aborted.stderr)
+
+            missing_marker = root / "dead-release"
+            dead = self.benchmark_fixture(
+                root, ["fixture"], baseline, wait_for_release=missing_marker,
+                wait_owner_pid=2**30, release_timeout=3600,
+            )
+            self.assertNotEqual(dead.returncode, 0, dead.stdout + dead.stderr)
+            self.assertIn("gate owner pid", dead.stderr)
+            self.assertIn("exited before writing", dead.stderr)
+            self.assertLess(dead.stderr.count("timed out"), 1)
+
+            live_timeout_marker = root / "live-timeout-release"
+            live_timeout = self.benchmark_fixture(
+                root, ["fixture"], baseline, wait_for_release=live_timeout_marker,
+                wait_owner_pid=os.getpid(), release_timeout=1,
+            )
+            self.assertNotEqual(live_timeout.returncode, 0,
+                                live_timeout.stdout + live_timeout.stderr)
+            self.assertIn("remained alive", live_timeout.stderr)
+            self.assertIn("after 1s", live_timeout.stderr)
+
+            standalone_marker = root / "standalone-release"
+            standalone = self.benchmark_fixture(
+                root, ["fixture"], baseline, wait_for_release=standalone_marker,
+                release_timeout=1,
+            )
+            self.assertNotEqual(standalone.returncode, 0, standalone.stdout + standalone.stderr)
+            self.assertIn("timed out waiting for gate release marker", standalone.stderr)
+            self.assertNotIn("gate owner pid", standalone.stderr)
 
     def test_benchmark_rejects_baseline_from_another_platform_before_building(self):
         with tempfile.TemporaryDirectory(prefix="kiln-thirdparty-platform-") as directory:

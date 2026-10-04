@@ -90,6 +90,7 @@ WARMUP="${WARMUP:-3}"
 TARGET_BUNDLES=""
 INCLUDE_POSTCSS=0
 WAIT_FOR_RELEASE=""
+WAIT_OWNER_PID=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -138,6 +139,10 @@ while [[ $# -gt 0 ]]; do
 			WAIT_FOR_RELEASE="${2:?--wait-for-release requires a marker path}"
 			shift 2
 			;;
+		--wait-owner-pid)
+			WAIT_OWNER_PID="${2:?--wait-owner-pid requires a process id}"
+			shift 2
+			;;
 		-h | --help)
 			echo "Usage: scripts/thirdparty.sh [options]"
 			echo ""
@@ -153,6 +158,7 @@ while [[ $# -gt 0 ]]; do
 			echo "  --bundles <names>               Comma-separated list of bundle names to test"
 			echo "  --include-postcss               Include postcss in the otherwise routine benchmark selection"
 			echo "  --wait-for-release <path>       Wait for gate marker after compilation, before timing"
+			echo "  --wait-owner-pid <pid>          Fail promptly if the gate owning the marker exits"
 			exit 0
 			;;
 		*)
@@ -161,6 +167,11 @@ while [[ $# -gt 0 ]]; do
 			;;
 	esac
 done
+
+if [[ -n $WAIT_OWNER_PID && -z $WAIT_FOR_RELEASE ]]; then
+	echo "thirdparty.sh: --wait-owner-pid requires --wait-for-release" >&2
+	exit 2
+fi
 
 if [[ -n $WAIT_FOR_RELEASE && $BENCH -eq 0 ]]; then
 	echo "thirdparty.sh: --wait-for-release requires --bench" >&2
@@ -197,11 +208,11 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ $BENCH -eq 1 ]]; then
-python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" "$WAIT_FOR_RELEASE" <<'PY'
-import datetime, hashlib, json, os, platform, re, shlex, statistics, subprocess, sys, time
+python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" "$WAIT_FOR_RELEASE" "$WAIT_OWNER_PID" <<'PY'
+import datetime, errno, hashlib, json, os, platform, re, shlex, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str, wait_for_release = sys.argv[1:15]
+kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str, wait_for_release, wait_owner_pid_str = sys.argv[1:16]
 
 update = update_str == "1"
 threshold = float(threshold_str)
@@ -411,18 +422,46 @@ print(f"bundle build pool completed in {build_elapsed:.2f}s", flush=True)
 if wait_for_release:
     print(f"waiting for gate release marker: {wait_for_release}", flush=True)
     barrier_started = time.perf_counter()
-    # A cold native test build can legitimately outlast the normal barrier
-    # allowance. Keep the default bounded and let the gate caller name its cap.
+    # Standalone callers retain the short default. The gate supplies its own longer cap and
+    # owner PID, so a slow but live correctness phase is not confused with an abandoned gate.
     try:
         release_timeout = int(os.environ.get("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS", "900"))
     except ValueError:
         sys.exit("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS must be a positive integer")
     if release_timeout <= 0:
         sys.exit("KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS must be a positive integer")
+    if wait_owner_pid_str and not wait_owner_pid_str.isdecimal():
+        sys.exit("--wait-owner-pid must be a positive process id")
+    wait_owner_pid = int(wait_owner_pid_str) if wait_owner_pid_str else None
+    if wait_owner_pid is not None and wait_owner_pid <= 0:
+        sys.exit("--wait-owner-pid must be a positive process id")
+
+    def owner_is_alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return False
+            if exc.errno == errno.EPERM:
+                return True
+            raise
+        return True
+
     deadline = barrier_started + release_timeout
     while not os.path.exists(wait_for_release):
+        if wait_owner_pid is not None and not owner_is_alive(wait_owner_pid):
+            sys.exit(f"gate owner pid {wait_owner_pid} exited before writing the release marker")
         if time.perf_counter() >= deadline:
-            sys.exit("timed out waiting for gate release marker")
+            if wait_owner_pid is None:
+                sys.exit("timed out waiting for gate release marker")
+            sys.exit(
+                f"timed out after {release_timeout}s waiting for gate release marker "
+                f"while gate owner pid {wait_owner_pid} remained alive"
+            )
         time.sleep(0.1)
     try:
         with open(wait_for_release, encoding="utf-8") as marker:
@@ -431,6 +470,8 @@ if wait_for_release:
         sys.exit(f"cannot read gate release marker: {exc}")
     barrier_elapsed = time.perf_counter() - barrier_started
     print(f"gate barrier wait completed in {barrier_elapsed:.2f}s ({release_state or 'empty'})", flush=True)
+    if release_state == "abort":
+        sys.exit("gate aborted before releasing thirdparty timing")
     if release_state != "measure":
         sys.exit(f"gate did not release thirdparty timing (marker state: {release_state or 'empty'})")
 
