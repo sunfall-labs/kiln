@@ -25,6 +25,8 @@ CLI timings include program startup and exclude AOT builds. Memory is the maximu
 of each runtime's per-process peak RSS across repetitions, excluding compilers
 and earlier runs. A fresh measurement worker isolates the child resource counter;
 the worker's startup and result transport are outside the reported program time.
+The OS RSS counter covers the child's entire lifetime, including the inherited
+pre-exec worker image, which sets a memory floor for very small programs.
 
 ## Runtimes
 

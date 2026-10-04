@@ -13,6 +13,8 @@ def measure_process(argv, timeout=120):
     Worker startup and result transport are outside the reported program time.
     A fresh worker has exactly one child, making RUSAGE_CHILDREN's high-water
     mark attributable to this execution rather than the benchmark's compilers.
+    The OS counter covers the whole child lifetime, including its inherited
+    pre-exec image; very small programs can therefore show the worker's RSS floor.
     """
     worker = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), str(timeout), json.dumps(argv)],
