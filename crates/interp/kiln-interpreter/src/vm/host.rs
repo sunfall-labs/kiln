@@ -1037,6 +1037,23 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let _ = unsafe {
                 ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Abort)
             };
+            // Remove an aborted client socket from the keep-alive Agent synchronously. The
+            // transport's `Closed` event is delivered on a later job, but another fetch may
+            // start immediately after its redirect/cancel rejection is observed. Leaving the
+            // resource marked reusable for that interval can attach the new request to a
+            // socket that is already closing.
+            if let Some(next_id) =
+                unsafe { ActiveHttpRuntime::client_connection_closed(&mut *runtime, resource) }
+            {
+                let queued =
+                    self.http_client_request(next_id)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "HTTP Agent lost a queued ClientRequest after socket abort"
+                                .into(),
+                        })?;
+                self.start_http_client_connection(&queued, instruction)?;
+            }
             if let Some((write_callbacks, end_callbacks)) = destroyed_queued_callbacks.take() {
                 self.schedule_node_socket_queued_callbacks(write_callbacks, end_callbacks);
             }

@@ -1505,6 +1505,13 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
       if (typeof cancelNativeRequest === "function") cancelNativeRequest(clientReq);
       else if (typeof clientReq.destroy === "function") clientReq.destroy();
     };
+    let redirecting = false;
+    const cancelAndReject = (error: any) => {
+      redirecting = true;
+      // Record Fetch's own error before teardown can emit a transport error.
+      reject(error);
+      cancelTransport();
+    };
     let onAbort: any = null;
     let failResponse: any = null;
     const removeAbort = () => {
@@ -1515,21 +1522,21 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
     let finishResponse: any = removeAbort;
     try {
       clientReq = httpReqFn.call(httpModule, options, (res: any) => {
-          res.on("error", reject);
+          res.on("error", (error: any) => {
+            if (!redirecting) reject(error);
+          });
           const status = res.statusCode || 200;
           const location = res.headers?.location;
           const isRedirect = status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
           if (isRedirect && typeof location === "string" && req.redirect === "error") {
             removeAbort();
-            cancelTransport();
-            reject(new TypeError("fetch: redirect mode is 'error'"));
+            cancelAndReject(new TypeError("fetch: redirect mode is 'error'"));
             return;
           }
           if (isRedirect && typeof location === "string" && req.redirect === "follow") {
             removeAbort();
-            cancelTransport();
             if (redirectCount >= 20) {
-              reject(new TypeError("fetch: redirect limit exceeded"));
+              cancelAndReject(new TypeError("fetch: redirect limit exceeded"));
               return;
             }
             let target: string;
@@ -1563,6 +1570,10 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
               redirect: req.redirect,
             };
             if (!rewriteToGet && req._body !== null) nextInit.body = req._body;
+            // A followed redirect intentionally discards the old response. Ignore errors
+            // caused by that teardown; the nested fetch now owns this request's outcome.
+            redirecting = true;
+            cancelTransport();
             fetch(target, nextInit, redirectCount + 1, true).then(resolve, reject);
             return;
           }
@@ -1628,7 +1639,7 @@ function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirec
 
     if (clientReq && typeof clientReq.on === "function") {
       clientReq.on("error", (err: any) => {
-        reject(err);
+        if (!redirecting) reject(err);
       });
     }
 

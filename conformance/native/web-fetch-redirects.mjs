@@ -68,10 +68,12 @@ try {
 } catch (error) {
   console.log("error", error instanceof TypeError);
 }
+const afterRedirectError = await fetch(`${base}/final`);
+console.log("after-error", afterRedirectError.status, (await afterRedirectError.json()).method);
 try {
   await fetch(`${base}/loop`);
 } catch (error) {
-  console.log("limit", error instanceof TypeError);
+  console.log("limit", error.name, error instanceof TypeError);
 }
 if (typeof server.stop === "function") server.stop();
 else server.close();
