@@ -781,6 +781,7 @@ struct ModuleSuspension {
     stack: Vec<Value>,
     handlers: Vec<Handler>,
     instruction: usize,
+    module_generation: Option<module_map::ModuleGenerationHandle>,
 }
 
 impl PartialEq for ModuleSuspension {
@@ -822,6 +823,9 @@ pub struct Closure {
     pub module_path: Option<Rc<str>>,
     /// Dynamic import generation captured with the module context that created this closure.
     pub module_generation: u64,
+    /// Identity-bearing owner for the captured generation. Interior mutability lets the cycle
+    /// collector drop this edge after proving an otherwise unreachable closure/epoch cycle.
+    pub(crate) module_generation_owner: RefCell<Option<module_map::ModuleGenerationHandle>>,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.

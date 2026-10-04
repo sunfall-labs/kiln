@@ -123,6 +123,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack: self.stack.split_off(stack_base),
             handlers: self.handlers.split_off(handler_base),
             instruction: self.instruction,
+            module_generation: self.module_generation_owner.clone(),
         }));
         self.module_suspension = Some(Rc::clone(&state));
         self.suspended = false;
@@ -151,14 +152,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         let stack_base = self.stack.len();
         let handler_base = self.handlers.len();
-        let (saved_stack, saved_handlers, instruction) = {
+        let (saved_stack, saved_handlers, instruction, generation) = {
             let mut suspension = state.borrow_mut();
             (
                 std::mem::take(&mut suspension.stack),
                 std::mem::take(&mut suspension.handlers),
                 suspension.instruction,
+                suspension.module_generation.clone(),
             )
         };
+        self.module_generation_owner = generation;
         let completion = self
             .module_completion
             .clone()

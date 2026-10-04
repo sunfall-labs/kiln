@@ -958,17 +958,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
-                    let import_generation = self.module_map.borrow().import_generation_for(
-                        self.current_realm,
-                        self.module_path.as_deref(),
-                        self.module_generation,
-                    );
+                    let generation_owner = self
+                        .module_map
+                        .borrow_mut()
+                        .import_generation_handle_for_id(
+                            self.current_realm,
+                            self.module_path.as_deref(),
+                            self.module_generation,
+                        );
+                    let import_generation = generation_owner.borrow().id;
                     let scheduled = self.scheduled(Job::Import(
                         Rc::clone(&promise),
                         text,
                         _options,
                         self.module_path.clone(),
                         import_generation,
+                        generation_owner,
                     ));
                     self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
@@ -2220,6 +2225,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.strict = frame.strict;
                     self.module_path = frame.module_path;
                     self.module_generation = frame.module_generation;
+                    self.module_generation_owner = frame.module_generation_owner;
                     self.function = frame.function;
                     self.method_name = frame.method_name;
                     self.this_value = frame.this_value;
@@ -2362,6 +2368,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.strict = frame.strict;
                 self.module_path = frame.module_path;
                 self.module_generation = frame.module_generation;
+                self.module_generation_owner = frame.module_generation_owner;
                 self.function = frame.function;
                 self.method_name = frame.method_name;
                 self.this_value = frame.this_value;
@@ -2385,6 +2392,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.strict = frame.strict;
             self.module_path = frame.module_path;
             self.module_generation = frame.module_generation;
+            self.module_generation_owner = frame.module_generation_owner;
             self.function = frame.function;
             self.method_name = frame.method_name;
             self.this_value = frame.this_value;
@@ -2521,6 +2529,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             module_generation: std::mem::replace(
                 &mut self.module_generation,
                 closure.module_generation,
+            ),
+            module_generation_owner: std::mem::replace(
+                &mut self.module_generation_owner,
+                closure
+                    .module_generation_owner
+                    .borrow()
+                    .clone()
+                    .or_else(|| {
+                        self.module_map
+                            .borrow()
+                            .generation_handle(closure.realm, closure.module_generation)
+                    }),
             ),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
@@ -2962,6 +2982,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 &mut self.module_generation,
                 closure.module_generation,
             ),
+            module_generation_owner: std::mem::replace(
+                &mut self.module_generation_owner,
+                closure
+                    .module_generation_owner
+                    .borrow()
+                    .clone()
+                    .or_else(|| {
+                        self.module_map
+                            .borrow()
+                            .generation_handle(closure.realm, closure.module_generation)
+                    }),
+            ),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
@@ -3335,6 +3367,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.strict = frame.strict;
         self.module_path = frame.module_path;
         self.module_generation = frame.module_generation;
+        self.module_generation_owner = frame.module_generation_owner;
         self.function = frame.function;
         self.method_name = frame.method_name;
         self.this_value = frame.this_value;

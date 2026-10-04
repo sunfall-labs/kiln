@@ -525,6 +525,7 @@ mod weak_get_or_insert_tests {
             strictness: Rc::new(Strictness::default()),
             module_path: None,
             module_generation: 0,
+            module_generation_owner: RefCell::new(None),
             name: None,
             inferred_name: None,
             upvalues: vec![Rc::clone(&counter)],

@@ -1129,7 +1129,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(promise, specifier, options, module_path, generation) => {
+            Job::Import(
+                promise,
+                specifier,
+                options,
+                module_path,
+                generation,
+                _generation_owner,
+            ) => {
                 let previous = std::mem::replace(&mut self.module_path, module_path);
                 let imported =
                     self.import_module_in_generation(&specifier, options.as_ref(), generation);

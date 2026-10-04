@@ -68,6 +68,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
+        let module_generation_owner = self
+            .module_generation_owner
+            .clone()
+            .or_else(|| {
+                self.function
+                    .as_ref()
+                    .and_then(|function| function.module_generation_owner.borrow().clone())
+            })
+            .or_else(|| {
+                self.gc_module_map()
+                    .borrow()
+                    .generation_handle(self.current_realm, self.module_generation)
+            });
         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
         for descriptor in &proto.upvalues {
             let cell = match descriptor {
@@ -113,6 +126,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: Rc::clone(&self.strictness),
             module_path: self.module_path.clone(),
             module_generation: self.module_generation,
+            module_generation_owner: RefCell::new(module_generation_owner),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments,
             prototype: RefCell::new(None),

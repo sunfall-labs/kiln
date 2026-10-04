@@ -522,6 +522,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, true),
             module_path: self.module_path.clone(),
             module_generation: self.module_generation,
+            module_generation_owner: self.module_generation_owner.clone(),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             // A module body is always strict, so its `this` is `undefined` rather than the
@@ -540,6 +541,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         });
         self.module_path = module_path;
         self.module_generation = module_generation;
+        self.module_generation_owner = self
+            .module_map
+            .borrow()
+            .generation_handle(self.current_realm, module_generation);
         self.global_base = self.frames.len();
         self.instruction = 0;
         let outcome = self.run_frames(depth).map(|result| result.value);

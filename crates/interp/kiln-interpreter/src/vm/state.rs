@@ -325,6 +325,7 @@ pub(super) enum Job {
         Option<ImportAttributes>,
         Option<Rc<str>>,
         u64,
+        crate::module_map::ModuleGenerationHandle,
     ),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
@@ -405,6 +406,7 @@ pub(super) struct Frame {
     pub(super) module_path: Option<Rc<str>>,
     /// The dynamic import generation of this activation's module context.
     pub(super) module_generation: u64,
+    pub(super) module_generation_owner: Option<crate::module_map::ModuleGenerationHandle>,
     /// `new.target` in the caller, restored with the frame.
     pub(super) new_target: Value,
     /// The closure that was running, or `None` for the module body.

@@ -10,6 +10,7 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::rc::Weak;
 
 /// Where one module is in its evaluation.
 #[derive(Clone, Debug)]
@@ -28,24 +29,24 @@ pub enum ModuleStatus {
 /// One module's entry in the map.
 #[derive(Clone)]
 pub struct ModuleRecord {
-    status: ModuleStatus,
+    pub(super) status: ModuleStatus,
     /// Every name the module exports, as the binding the importer links to: a live cell where
     /// the binding is mutable, the value where it is not. Empty until the module is evaluated.
-    exports: Rc<HashMap<String, Value>>,
+    pub(super) exports: Rc<HashMap<String, Value>>,
     /// Stable cells for every published export. Even an immutable binding has a stable cell:
     /// the module loader can replace its value for an authorized test spy, and all linked
     /// imports and namespace views observe that replacement without changing namespace shape.
-    bindings: HashMap<String, Cell>,
+    pub(super) bindings: HashMap<String, Cell>,
     /// The module's namespace object, created on first demand and never replaced, so a static
     /// `import * as ns` and every `import()` of the module see the same object.
-    namespace: Option<Rc<RefCell<ObjectData>>>,
+    pub(super) namespace: Option<Rc<RefCell<ObjectData>>>,
     /// Cells handed out for names whose module has not finished: an import across a cycle, or a
     /// dynamic import that links to a module still evaluating. Each starts in its dead zone and
     /// is filled when the module publishes.
-    pending: Vec<(String, Cell)>,
+    pub(super) pending: Vec<(String, Cell)>,
     /// CommonJS body evaluation and its ESM namespace snapshot are separate operations.
-    commonjs_namespace_ready: bool,
-    commonjs_namespace_failure: Option<Value>,
+    pub(super) commonjs_namespace_ready: bool,
+    pub(super) commonjs_namespace_failure: Option<Value>,
 }
 
 impl ModuleRecord {
@@ -62,6 +63,28 @@ impl ModuleRecord {
     }
 }
 
+/// One source-module import generation. The realm keeps its current and static generations
+/// strongly and records every other generation weakly. Closures/namespaces/jobs retain an
+/// inactive generation only while the language or VM can still observe its records.
+pub struct ModuleGeneration {
+    pub(crate) realm: RealmId,
+    pub(crate) id: u64,
+    pub(super) records: HashMap<String, ModuleRecord>,
+}
+
+impl std::fmt::Debug for ModuleGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleGeneration")
+            .field("realm", &self.realm)
+            .field("id", &self.id)
+            .field("record_count", &self.records.len())
+            .finish()
+    }
+}
+
+pub type ModuleGenerationHandle = Rc<RefCell<ModuleGeneration>>;
+
 /// The realm session's module map, keyed by realm and canonical module key (the module's path).
 ///
 /// Keyed by realm as well as by module, because each realm has its own map: two realms
@@ -69,19 +92,25 @@ impl ModuleRecord {
 /// from sharing module state with the realm that made it.
 #[derive(Default)]
 pub struct ModuleMap {
-    records: HashMap<(RealmId, u64, String), ModuleRecord>,
+    /// The strong records are owned by their generation object. Keeping the generation handle
+    /// weak here is what lets an inactive epoch and all of its module records die together.
+    generations_by_id: HashMap<(RealmId, u64), Weak<RefCell<ModuleGeneration>>>,
+    generations_prune_at: usize,
     generations: HashMap<RealmId, u64>,
+    current_generations: HashMap<RealmId, ModuleGenerationHandle>,
+    /// Generation zero is also the static graph's initial module map. It remains rooted for the
+    /// realm lifetime; dynamic generations created by reset are independently reclaimable.
+    static_generations: HashMap<RealmId, ModuleGenerationHandle>,
     runner_candidates: HashMap<RealmId, std::collections::HashSet<String>>,
     runner_referrers: HashMap<RealmId, String>,
     spy_adapter_referrers: HashMap<RealmId, String>,
     /// Weak graph census shared by every VM in this realm session. Module execution allocates
-    /// closures and generators in distinct machines, while explicit collection can be requested
-    /// from any one of them; weak identities let that request see cross-module cycles.
+    /// closures in distinct machines, while explicit collection can be requested from any one
+    /// of them; keeping weak identities here lets that request see cross-module cycles.
     pub(super) gc_closures: Vec<Weak<Closure>>,
     pub(super) gc_closures_prune_at: usize,
-    /// Suspended generator frames can own Values that are otherwise outside the JS object graph.
-    /// Keep weak identities so cycle collection can account for those edges without rooting
-    /// generators merely because they were created.
+    /// Suspended generators retain locals outside ordinary object edges; census them weakly so
+    /// those references are accounted for without making abandoned generators roots.
     pub(super) gc_generators: Vec<Weak<GeneratorData>>,
     pub(super) gc_generators_prune_at: usize,
     pub(super) gc_weak_ref_objects: Vec<Weak<RefCell<ObjectData>>>,
@@ -134,13 +163,105 @@ impl ModuleMap {
         self.generations.get(&realm).copied().unwrap_or(0)
     }
 
+    pub(super) fn weak_generation_census(&self) -> Vec<Weak<RefCell<ModuleGeneration>>> {
+        self.generations_by_id.values().cloned().collect()
+    }
+
+    pub(super) fn prune_dead_generations(&mut self) {
+        self.generations_by_id
+            .retain(|_, generation| generation.strong_count() > 0);
+        self.generations_prune_at = self
+            .generations_by_id
+            .len()
+            .saturating_add(self.generations_by_id.len().max(1024));
+    }
+
+    fn track_generation(
+        &mut self,
+        realm: RealmId,
+        generation: u64,
+        handle: &ModuleGenerationHandle,
+    ) {
+        if self.generations_by_id.len() >= self.generations_prune_at {
+            self.generations_by_id
+                .retain(|_, generation| generation.strong_count() > 0);
+            self.generations_prune_at = self
+                .generations_by_id
+                .len()
+                .saturating_add(self.generations_by_id.len().max(1024));
+        }
+        self.generations_by_id
+            .insert((realm, generation), Rc::downgrade(handle));
+    }
+
+    pub(super) fn generation_handle(
+        &self,
+        realm: RealmId,
+        generation: u64,
+    ) -> Option<ModuleGenerationHandle> {
+        if let Some(current) = self.current_generations.get(&realm)
+            && current.borrow().id == generation
+        {
+            return Some(Rc::clone(current));
+        }
+        if let Some(static_generation) = self.static_generations.get(&realm)
+            && static_generation.borrow().id == generation
+        {
+            return Some(Rc::clone(static_generation));
+        }
+        self.generations_by_id
+            .get(&(realm, generation))
+            .and_then(Weak::upgrade)
+    }
+
+    fn ensure_generation_handle(
+        &mut self,
+        realm: RealmId,
+        generation: u64,
+    ) -> ModuleGenerationHandle {
+        if let Some(existing) = self.generation_handle(realm, generation) {
+            return existing;
+        }
+        let handle = Rc::new(RefCell::new(ModuleGeneration {
+            realm,
+            id: generation,
+            records: HashMap::new(),
+        }));
+        self.track_generation(realm, generation, &handle);
+        if generation == 0 {
+            self.static_generations
+                .entry(realm)
+                .or_insert_with(|| Rc::clone(&handle));
+        }
+        if self.generation(realm) == generation {
+            self.current_generations
+                .entry(realm)
+                .or_insert_with(|| Rc::clone(&handle));
+        }
+        handle
+    }
+
+    pub fn current_generation_handle(&mut self, realm: RealmId) -> ModuleGenerationHandle {
+        let generation = self.generation(realm);
+        self.ensure_generation_handle(realm, generation)
+    }
+
     /// Start a fresh dynamic module graph while retaining prior records for existing bindings.
     pub fn reset_generation(&mut self, realm: RealmId) -> u64 {
+        let previous = self.current_generation_handle(realm);
         let next = self
             .generation(realm)
             .checked_add(1)
             .expect("dynamic module generation counter exhausted");
         self.generations.insert(realm, next);
+        let current = Rc::new(RefCell::new(ModuleGeneration {
+            realm,
+            id: next,
+            records: HashMap::new(),
+        }));
+        self.track_generation(realm, next, &current);
+        self.current_generations.insert(realm, current);
+        drop(previous);
         next
     }
 
@@ -154,11 +275,10 @@ impl ModuleMap {
         to_generation: u64,
         key: &str,
     ) -> bool {
-        let Some(record) = self
-            .records
-            .get(&(realm, from_generation, key.to_owned()))
-            .cloned()
-        else {
+        let Some(source) = self.generation_handle(realm, from_generation) else {
+            return false;
+        };
+        let Some(record) = source.borrow().records.get(key).cloned() else {
             return false;
         };
         if !matches!(
@@ -167,68 +287,79 @@ impl ModuleMap {
         ) {
             return false;
         }
-        let old_generation_namespace = self
-            .records
-            .get(&(realm, to_generation, key.to_owned()))
-            .and_then(|existing| existing.namespace.clone());
-        let pending = self
-            .records
-            .get_mut(&(realm, to_generation, key.to_owned()))
-            .map(|existing| std::mem::take(&mut existing.pending))
-            .unwrap_or_default();
+        let destination = self.ensure_generation_handle(realm, to_generation);
+        let (old_generation_namespace, pending) = {
+            let mut destination = destination.borrow_mut();
+            destination
+                .records
+                .entry(key.to_owned())
+                .or_insert_with(ModuleRecord::new);
+            let existing = destination.records.get_mut(key).expect("record inserted");
+            (
+                existing.namespace.clone(),
+                std::mem::take(&mut existing.pending),
+            )
+        };
         let mut alias = record;
         // Namespace wrappers belong to the module registry generation. Keep a namespace that
         // was already requested in the destination generation, but never carry over the old
         // wrapper merely because the host exports are cached.
         alias.namespace = old_generation_namespace;
         alias.pending = pending;
-        self.records
-            .insert((realm, to_generation, key.to_owned()), alias);
-        if let Some(namespace) = self
-            .records
-            .get(&(realm, to_generation, key.to_owned()))
-            .and_then(|record| record.namespace.clone())
-            && let Value::Object(fresh) =
-                build_namespace(&self.records[&(realm, to_generation, key.to_owned())].bindings)
-        {
+        let pending = std::mem::take(&mut alias.pending);
+        let namespace = {
+            let mut destination = destination.borrow_mut();
+            destination.records.insert(key.to_owned(), alias);
+            destination.records.get(key).and_then(|record| {
+                record
+                    .namespace
+                    .as_ref()
+                    .map(|namespace| (Rc::clone(namespace), build_namespace(&record.bindings)))
+            })
+        };
+        if let Some((namespace, Value::Object(fresh))) = namespace {
             *namespace.borrow_mut() = std::mem::take(&mut *fresh.borrow_mut());
         }
-        let pending =
-            std::mem::take(&mut self.record_in_generation(realm, to_generation, key).pending);
         let mut waiting = Vec::new();
         for (name, cell) in pending {
             if name == kiln_ir::NAMESPACE_IMPORT {
                 let namespace = self.namespace_in_generation(realm, to_generation, key);
                 *cell.borrow_mut() = namespace;
-            } else if let Some(binding) = self
-                .record_in_generation(realm, to_generation, key)
-                .bindings
-                .get(&name)
-                .cloned()
+            } else if let Some(binding) = destination
+                .borrow()
+                .records
+                .get(key)
+                .and_then(|record| record.bindings.get(&name).cloned())
             {
                 *cell.borrow_mut() = Value::Cell(binding);
             } else {
                 waiting.push((name, cell));
             }
         }
-        self.record_in_generation(realm, to_generation, key).pending = waiting;
+        if let Some(record) = destination.borrow_mut().records.get_mut(key) {
+            record.pending = waiting;
+        }
         true
     }
 
-    fn record(&mut self, realm: RealmId, key: &str) -> &mut ModuleRecord {
+    fn record(&mut self, realm: RealmId, key: &str) -> ModuleGenerationHandle {
         let generation = self.generation(realm);
-        self.record_in_generation(realm, generation, key)
+        self.ensure_record_in_generation(realm, generation, key)
     }
 
-    fn record_in_generation(
+    fn ensure_record_in_generation(
         &mut self,
         realm: RealmId,
         generation: u64,
         key: &str,
-    ) -> &mut ModuleRecord {
-        self.records
-            .entry((realm, generation, key.to_owned()))
-            .or_insert_with(ModuleRecord::new)
+    ) -> ModuleGenerationHandle {
+        let handle = self.ensure_generation_handle(realm, generation);
+        handle
+            .borrow_mut()
+            .records
+            .entry(key.to_owned())
+            .or_insert_with(ModuleRecord::new);
+        handle
     }
 
     pub fn status_in_generation(
@@ -237,9 +368,14 @@ impl ModuleMap {
         generation: u64,
         key: &str,
     ) -> Option<ModuleStatus> {
-        self.records
-            .get(&(realm, generation, key.to_owned()))
-            .map(|record| record.status.clone())
+        self.generation_handle(realm, generation)
+            .and_then(|handle| {
+                handle
+                    .borrow()
+                    .records
+                    .get(key)
+                    .map(|record| record.status.clone())
+            })
     }
 
     /// Where `key` is in its evaluation, or `None` if nothing has asked for it.
@@ -271,26 +407,52 @@ impl ModuleMap {
         generation: u64,
         key: &str,
     ) -> Option<Rc<HashMap<String, Value>>> {
-        let record = self.records.get(&(realm, generation, key.to_owned()))?;
+        let handle = self.generation_handle(realm, generation)?;
+        let handle = handle.borrow();
+        let record = handle.records.get(key)?;
         matches!(record.status, ModuleStatus::Evaluated).then(|| Rc::clone(&record.exports))
     }
 
     /// Mark `key` as evaluating. The caller is the one evaluation it will ever have.
     pub fn begin(&mut self, realm: RealmId, key: &str) {
-        self.record(realm, key).status = ModuleStatus::Evaluating;
+        let record = self.record(realm, key);
+        record
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
+            .status = ModuleStatus::Evaluating;
     }
 
     pub fn begin_in_generation(&mut self, realm: RealmId, generation: u64, key: &str) {
-        self.record_in_generation(realm, generation, key).status = ModuleStatus::Evaluating;
+        let record = self.ensure_record_in_generation(realm, generation, key);
+        record
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
+            .status = ModuleStatus::Evaluating;
     }
 
     /// Record that evaluating `key` threw `error`.
     pub fn fail(&mut self, realm: RealmId, key: &str, error: Value) {
-        self.record(realm, key).status = ModuleStatus::Failed(error);
+        let record = self.record(realm, key);
+        record
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
+            .status = ModuleStatus::Failed(error);
     }
 
     pub fn fail_in_generation(&mut self, realm: RealmId, generation: u64, key: &str, error: Value) {
-        self.record_in_generation(realm, generation, key).status = ModuleStatus::Failed(error);
+        let record = self.ensure_record_in_generation(realm, generation, key);
+        record
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
+            .status = ModuleStatus::Failed(error);
     }
 
     /// Publish `key`'s exports and mark it evaluated. Every cell handed out for one of its names
@@ -317,16 +479,20 @@ impl ModuleMap {
                 (name.clone(), cell)
             })
             .collect();
-        let record = self.record_in_generation(realm, generation, key);
-        record.status = ModuleStatus::Evaluated;
-        record.exports = Rc::new(exports);
-        record.bindings = bindings;
-        if let Some(namespace) = &record.namespace {
-            if let Value::Object(fresh) = build_namespace(&record.bindings) {
+        let record = self.ensure_record_in_generation(realm, generation, key);
+        let pending = {
+            let mut generation = record.borrow_mut();
+            let record = generation.records.get_mut(key).expect("record inserted");
+            record.status = ModuleStatus::Evaluated;
+            record.exports = Rc::new(exports);
+            record.bindings = bindings;
+            if let Some(namespace) = &record.namespace
+                && let Value::Object(fresh) = build_namespace(&record.bindings)
+            {
                 *namespace.borrow_mut() = std::mem::take(&mut *fresh.borrow_mut());
             }
-        }
-        let pending = std::mem::take(&mut record.pending);
+            std::mem::take(&mut record.pending)
+        };
         let mut waiting = Vec::new();
         for (name, cell) in pending {
             if name == kiln_ir::NAMESPACE_IMPORT {
@@ -334,18 +500,27 @@ impl ModuleMap {
                 *cell.borrow_mut() = namespace;
                 continue;
             }
-            let record = self.record_in_generation(realm, generation, key);
-            match record.bindings.get(&name) {
+            let binding = record
+                .borrow()
+                .records
+                .get(key)
+                .and_then(|record| record.bindings.get(&name).cloned());
+            match binding {
                 Some(value) => {
                     /* Keep an import linked to the canonical export cell. Copying the current
                      * value breaks live-binding updates (including an authorized test spy) for
                      * modules that linked across a cycle before the exporter published. */
-                    *cell.borrow_mut() = Value::Cell(Rc::clone(value));
+                    *cell.borrow_mut() = Value::Cell(value);
                 }
                 None => waiting.push((name, cell)),
             }
         }
-        self.record_in_generation(realm, generation, key).pending = waiting;
+        record
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
+            .pending = waiting;
     }
 
     pub fn commonjs_namespace_ready_in_generation(
@@ -354,9 +529,15 @@ impl ModuleMap {
         generation: u64,
         key: &str,
     ) -> bool {
-        self.records
-            .get(&(realm, generation, key.to_owned()))
-            .is_some_and(|record| record.commonjs_namespace_ready)
+        self.generation_handle(realm, generation)
+            .and_then(|generation| {
+                generation
+                    .borrow()
+                    .records
+                    .get(key)
+                    .map(|record| record.commonjs_namespace_ready)
+            })
+            .unwrap_or(false)
     }
 
     pub fn commonjs_namespace_failure_in_generation(
@@ -365,9 +546,14 @@ impl ModuleMap {
         generation: u64,
         key: &str,
     ) -> Option<Value> {
-        self.records
-            .get(&(realm, generation, key.to_owned()))
-            .and_then(|record| record.commonjs_namespace_failure.clone())
+        self.generation_handle(realm, generation)
+            .and_then(|generation| {
+                generation
+                    .borrow()
+                    .records
+                    .get(key)
+                    .and_then(|record| record.commonjs_namespace_failure.clone())
+            })
     }
 
     pub fn fail_commonjs_namespace_in_generation(
@@ -377,7 +563,12 @@ impl ModuleMap {
         key: &str,
         failure: Value,
     ) {
-        self.record_in_generation(realm, generation, key)
+        let generation = self.ensure_record_in_generation(realm, generation, key);
+        generation
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
             .commonjs_namespace_failure = Some(failure);
     }
 
@@ -389,7 +580,12 @@ impl ModuleMap {
         exports: HashMap<String, Value>,
     ) {
         self.publish_in_generation(realm, generation, key, exports);
-        self.record_in_generation(realm, generation, key)
+        let generation = self.ensure_record_in_generation(realm, generation, key);
+        generation
+            .borrow_mut()
+            .records
+            .get_mut(key)
+            .expect("record inserted")
             .commonjs_namespace_ready = true;
     }
 
@@ -433,7 +629,9 @@ impl ModuleMap {
         key: &str,
         name: &str,
     ) -> Cell {
-        let record = self.record_in_generation(realm, generation, key);
+        let generation = self.ensure_record_in_generation(realm, generation, key);
+        let mut generation = generation.borrow_mut();
+        let record = generation.records.get_mut(key).expect("record inserted");
         if let Some((_, cell)) = record.pending.iter().find(|(held, _)| held == name) {
             return Rc::clone(cell);
         }
@@ -456,12 +654,20 @@ impl ModuleMap {
         key: &str,
         name: &str,
     ) -> Option<Value> {
-        if let Some(record) = self.records.get(&(realm, generation, key.to_owned())) {
-            if let Some(cell) = record.bindings.get(name) {
-                return Some(Value::Cell(Rc::clone(cell)));
-            }
-            if let Some(value) = lookup_export(&record.exports, name) {
-                return Some(value);
+        if let Some(handle) = self.generation_handle(realm, generation) {
+            let binding = {
+                let handle = handle.borrow();
+                handle.records.get(key).and_then(|record| {
+                    record
+                        .bindings
+                        .get(name)
+                        .cloned()
+                        .map(Value::Cell)
+                        .or_else(|| lookup_export(&record.exports, name))
+                })
+            };
+            if binding.is_some() {
+                return binding;
             }
         }
         Some(Value::Cell(
@@ -514,13 +720,38 @@ impl ModuleMap {
         }
     }
 
+    pub fn import_generation_handle_for(
+        &mut self,
+        realm: RealmId,
+        importer: Option<&str>,
+        captured: &ModuleGenerationHandle,
+    ) -> ModuleGenerationHandle {
+        let captured_id = captured.borrow().id;
+        let selected = self.import_generation_for(realm, importer, captured_id);
+        if selected == captured_id {
+            Rc::clone(captured)
+        } else {
+            self.ensure_generation_handle(realm, selected)
+        }
+    }
+
+    pub fn import_generation_handle_for_id(
+        &mut self,
+        realm: RealmId,
+        importer: Option<&str>,
+        captured: u64,
+    ) -> ModuleGenerationHandle {
+        let selected = self.import_generation_for(realm, importer, captured);
+        self.ensure_generation_handle(realm, selected)
+    }
+
     /// Register the one authorized spy adapter for this realm after its runner is known.
     pub fn register_spy_adapter(&mut self, realm: RealmId, key: &str) -> bool {
         if !self.runner_referrers.contains_key(&realm)
             || !self
-                .records
-                .keys()
-                .any(|(record_realm, _, record_key)| *record_realm == realm && record_key == key)
+                .live_generation_handles(realm)
+                .iter()
+                .any(|generation| generation.borrow().records.contains_key(key))
         {
             return false;
         }
@@ -544,20 +775,22 @@ impl ModuleMap {
         let Value::Object(namespace) = namespace else {
             return false;
         };
-        for ((record_realm, _, _), record) in &mut self.records {
-            if *record_realm != realm
-                || !record
+        for generation in self.live_generation_handles(realm) {
+            let generation = generation.borrow();
+            for record in generation.records.values() {
+                if !record
                     .namespace
                     .as_ref()
                     .is_some_and(|candidate| Rc::ptr_eq(candidate, namespace))
-            {
-                continue;
+                {
+                    continue;
+                }
+                let Some(cell) = record.bindings.get(name) else {
+                    return false;
+                };
+                *cell.borrow_mut() = value;
+                return true;
             }
-            let Some(cell) = record.bindings.get(name) else {
-                return false;
-            };
-            *cell.borrow_mut() = value;
-            return true;
         }
         false
     }
@@ -571,15 +804,47 @@ impl ModuleMap {
     }
 
     pub fn namespace_in_generation(&mut self, realm: RealmId, generation: u64, key: &str) -> Value {
-        let record = self.record_in_generation(realm, generation, key);
+        let owner = self.ensure_record_in_generation(realm, generation, key);
+        let mut owner_data = owner.borrow_mut();
+        let record = owner_data.records.get_mut(key).expect("record inserted");
         if let Some(namespace) = &record.namespace {
             return Value::Object(Rc::clone(namespace));
         }
         let built = build_namespace(&record.bindings);
         if let Value::Object(object) = &built {
+            object.borrow_mut().module_generation = Some(Rc::clone(&owner));
             record.namespace = Some(Rc::clone(object));
         }
         built
+    }
+
+    fn live_generation_handles(&self, realm: RealmId) -> Vec<ModuleGenerationHandle> {
+        let mut handles = Vec::new();
+        if let Some(current) = self.current_generations.get(&realm) {
+            handles.push(Rc::clone(current));
+        }
+        if let Some(static_generation) = self.static_generations.get(&realm)
+            && !handles
+                .iter()
+                .any(|existing| Rc::ptr_eq(existing, static_generation))
+        {
+            handles.push(Rc::clone(static_generation));
+        }
+        let inactive: Vec<_> = self
+            .generations_by_id
+            .iter()
+            .filter(|((record_realm, _), _)| *record_realm == realm)
+            .filter_map(|(_, generation)| generation.upgrade())
+            .collect();
+        for candidate in inactive {
+            if !handles
+                .iter()
+                .any(|existing| Rc::ptr_eq(existing, &candidate))
+            {
+                handles.push(candidate);
+            }
+        }
+        handles
     }
 }
 
@@ -686,6 +951,47 @@ mod tests {
     }
 
     #[test]
+    fn inactive_empty_generations_are_only_weakly_indexed() {
+        let realm = RealmId::PRIMARY;
+        let mut modules = ModuleMap::default();
+        let old_generation = modules.reset_generation(realm);
+        let owner = modules.current_generation_handle(realm);
+        let weak = Rc::downgrade(&owner);
+        assert!(modules.generation_handle(realm, old_generation).is_some());
+
+        assert_eq!(modules.reset_generation(realm), old_generation + 1);
+        drop(owner);
+        assert!(weak.upgrade().is_none());
+        assert!(modules.generation_handle(realm, old_generation).is_none());
+        modules.prune_dead_generations();
+        assert!(
+            !modules
+                .generations_by_id
+                .contains_key(&(realm, old_generation))
+        );
+    }
+
+    #[test]
+    fn captured_import_handle_stays_old_while_runner_selects_current_epoch() {
+        let realm = RealmId::PRIMARY;
+        let mut modules = ModuleMap::default();
+        modules.add_runner_candidate(realm, "/test.mjs");
+        assert!(modules.register_runner(realm, "/test.mjs"));
+        let old_generation = modules.current_generation_handle(realm);
+        let old_id = old_generation.borrow().id;
+        assert_eq!(modules.reset_generation(realm), old_id + 1);
+
+        let old_import =
+            modules.import_generation_handle_for(realm, Some("/ordinary.mjs"), &old_generation);
+        let runner_import =
+            modules.import_generation_handle_for(realm, Some("/test.mjs"), &old_generation);
+        assert!(Rc::ptr_eq(&old_import, &old_generation));
+        assert_eq!(old_import.borrow().id, old_id);
+        assert_eq!(runner_import.borrow().id, old_id + 1);
+        assert!(!Rc::ptr_eq(&runner_import, &old_generation));
+    }
+
+    #[test]
     fn host_generation_alias_keeps_export_cell_but_scopes_namespace_identity() {
         let realm = RealmId::PRIMARY;
         let mut modules = ModuleMap::default();
@@ -699,19 +1005,27 @@ mod tests {
         let old_binding = modules
             .binding_in_generation(realm, 0, "/host.cjs", "value")
             .unwrap();
+        let old_exports = modules
+            .exports_in_generation(realm, 0, "/host.cjs")
+            .expect("host exports are published");
 
+        assert_eq!(modules.reset_generation(realm), 1);
         assert!(modules.alias_generation(realm, 0, 1, "/host.cjs"));
         assert!(modules.commonjs_namespace_ready_in_generation(realm, 1, "/host.cjs"));
         let new_namespace = modules.namespace_in_generation(realm, 1, "/host.cjs");
         let new_binding = modules
             .binding_in_generation(realm, 1, "/host.cjs", "value")
             .unwrap();
+        let new_exports = modules
+            .exports_in_generation(realm, 1, "/host.cjs")
+            .expect("aliased host exports are published");
         let (Value::Object(old_namespace), Value::Object(new_namespace)) =
             (old_namespace, new_namespace)
         else {
             panic!("module namespace expected");
         };
         assert!(!Rc::ptr_eq(&old_namespace, &new_namespace));
+        assert!(Rc::ptr_eq(&old_exports, &new_exports));
         let (Value::Cell(old_cell), Value::Cell(new_cell)) = (old_binding, new_binding) else {
             panic!("host exports must remain linked cells");
         };
@@ -731,6 +1045,7 @@ mod tests {
         let failure = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
         modules.fail_commonjs_namespace_in_generation(realm, 0, "/host.cjs", failure.clone());
 
+        assert_eq!(modules.reset_generation(realm), 1);
         assert!(modules.alias_generation(realm, 0, 1, "/host.cjs"));
         assert!(matches!(
             modules.commonjs_namespace_failure_in_generation(realm, 1, "/host.cjs"),

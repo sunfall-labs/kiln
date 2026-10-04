@@ -340,6 +340,9 @@ pub struct ObjectData {
     /// itself, which is a wrong answer everywhere it appeared. The slots keep ordinary values
     /// and are caught up from these before a read.
     pub(super) namespace_cells: Vec<(String, Value)>,
+    /// Strong generation owner for namespace objects created from an inactive generation. This
+    /// edge keeps their source records available while the namespace is externally reachable.
+    pub(super) module_generation: Option<crate::module_map::ModuleGenerationHandle>,
     /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
     /// that exists only on the prototype creates an own property rather than mutating the shared
     /// one, which is what keeps two instances of a class independent.
@@ -445,6 +448,7 @@ impl Default for ObjectData {
             frozen: false,
             module_namespace: false,
             namespace_cells: Vec::new(),
+            module_generation: None,
             shadow_realm: None,
             prototype: None,
             primitive: None,

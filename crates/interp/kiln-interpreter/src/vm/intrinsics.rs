@@ -746,6 +746,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .module_map
                         .borrow_mut()
                         .reset_generation(self.current_realm);
+                    self.module_generation_owner = self
+                        .module_map
+                        .borrow()
+                        .generation_handle(self.current_realm, self.module_generation);
                     return Ok(Value::Undefined);
                 }
                 if action == "importActual" && arguments.len() == 4 {

@@ -82,6 +82,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             in_worker: kiln_runtime::workers::current().is_some(),
             module_path: None,
             module_generation: 0,
+            module_generation_owner: None,
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),

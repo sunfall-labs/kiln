@@ -1,7 +1,7 @@
 //! Conservative cycle collection for weakly seeded Rc graphs.
 //!
-//! The interpreter uses `Rc` rather than a tracing heap. Weak closure, generator, and
-//! WeakRef-target censuses shared by the realm's module map let collection discover object graphs across module VMs
+//! The interpreter uses `Rc` rather than a tracing heap. Weak closure and WeakRef-target censuses
+//! shared by the realm's module map let collection discover object graphs across module VMs
 //! without making the census itself a root. For each
 //! node, the collector subtracts all counted internal edges and its own census handle from the
 //! actual strong count. Any remainder is an external owner, so the node and everything it reaches
@@ -15,6 +15,8 @@ use std::collections::HashMap;
 enum Key {
     Object(usize),
     Closure(usize),
+    ModuleGeneration(usize),
+    ModuleExports(usize),
     Cell(usize),
     Array(usize),
     Promise(usize),
@@ -50,6 +52,8 @@ enum Key {
 enum Owner {
     Object(Rc<RefCell<ObjectData>>),
     Closure(Rc<Closure>),
+    ModuleGeneration(crate::module_map::ModuleGenerationHandle),
+    ModuleExports(Rc<HashMap<String, Value>>),
     Cell(Cell),
     Array(Rc<ArrayData>),
     Promise(Rc<PromiseData>),
@@ -87,6 +91,8 @@ impl Owner {
         match self {
             Self::Object(value) => Key::Object(Rc::as_ptr(value) as usize),
             Self::Closure(value) => Key::Closure(Rc::as_ptr(value) as usize),
+            Self::ModuleGeneration(value) => Key::ModuleGeneration(Rc::as_ptr(value) as usize),
+            Self::ModuleExports(value) => Key::ModuleExports(Rc::as_ptr(value) as usize),
             Self::Cell(value) => Key::Cell(Rc::as_ptr(value) as usize),
             Self::Array(value) => Key::Array(Rc::as_ptr(value) as usize),
             Self::Promise(value) => Key::Promise(Rc::as_ptr(value) as usize),
@@ -124,6 +130,8 @@ impl Owner {
         match self {
             Self::Object(value) => Rc::strong_count(value),
             Self::Closure(value) => Rc::strong_count(value),
+            Self::ModuleGeneration(value) => Rc::strong_count(value),
+            Self::ModuleExports(value) => Rc::strong_count(value),
             Self::Cell(value) => Rc::strong_count(value),
             Self::Array(value) => Rc::strong_count(value),
             Self::Promise(value) => Rc::strong_count(value),
@@ -165,7 +173,9 @@ impl Owner {
             Self::Closure(value) => {
                 value.prototype.replace(None);
                 value.properties.replace(ObjectData::default());
+                value.module_generation_owner.replace(None);
             }
+            Self::ModuleGeneration(value) => value.borrow_mut().records.clear(),
             Self::Cell(value) => {
                 value.replace(Value::Undefined);
             }
@@ -199,6 +209,7 @@ impl Owner {
                 let mut state = value.borrow_mut();
                 state.stack.clear();
                 state.handlers.clear();
+                state.module_generation = None;
             }
             Self::Capability(value) => {
                 value.resolve.replace(Value::Undefined);
@@ -234,6 +245,7 @@ impl Owner {
             Self::UniqueSymbol(_)
             | Self::Shared(_)
             | Self::Intl(_)
+            | Self::ModuleExports(_)
             | Self::Proxy(_)
             | Self::CommonJs(_)
             | Self::HttpIncoming(_)
@@ -294,13 +306,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut ephemerons = Vec::<(Key, Key, Key)>::new();
 
         let module_map = self.gc_module_map();
-        let (shared_closures, shared_generators, shared_weak_objects, shared_weak_collections) = {
+        let (
+            shared_closures,
+            shared_generators,
+            shared_weak_objects,
+            shared_weak_collections,
+            shared_generations,
+        ) = {
             let map = module_map.borrow();
             (
                 map.gc_closures.clone(),
                 map.gc_generators.clone(),
                 map.gc_weak_ref_objects.clone(),
                 map.gc_weak_collections.clone(),
+                map.weak_generation_census(),
             )
         };
         for weak in &shared_closures {
@@ -317,10 +336,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
 
-        // A suspended generator's locals and operand stack are strong Values but do not have
-        // to be reachable through a closure or ordinary object. Discover generators weakly so
-        // those physical edges participate in incoming-count accounting without making an
-        // otherwise dead iterator a root.
         for weak in &shared_generators {
             if let Some(generator) = weak.upgrade() {
                 let owner = Owner::Generator(generator);
@@ -353,6 +368,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         for weak in &shared_weak_collections {
             if let Some(object) = weak.upgrade() {
                 let owner = Owner::Object(object);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
+        for weak in &shared_generations {
+            if let Some(generation) = weak.upgrade() {
+                let owner = Owner::ModuleGeneration(generation);
                 let key = owner.key();
                 if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
                     entry.insert(Node {
@@ -563,6 +591,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .gc_weak_ref_objects
             .len()
             .saturating_add(map.gc_weak_ref_objects.len().max(1024));
+        map.prune_dead_generations();
     }
 
     /// Drop only physical locals proven dead at this suspended resume point. Captured cells
@@ -704,6 +733,23 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
             values.extend(value.prototype.borrow().iter().cloned());
             values.extend(object_children(&value.properties.borrow()));
         }
+        Owner::ModuleGeneration(value) => {
+            for record in value.borrow().records.values() {
+                if let ModuleStatus::Failed(failure) = &record.status {
+                    values.push(failure.clone());
+                }
+                values.extend(record.bindings.values().cloned().map(Value::Cell));
+                values.extend(record.namespace.iter().cloned().map(Value::Object));
+                values.extend(
+                    record
+                        .pending
+                        .iter()
+                        .map(|(_, cell)| Value::Cell(Rc::clone(cell))),
+                );
+                values.extend(record.commonjs_namespace_failure.iter().cloned());
+            }
+        }
+        Owner::ModuleExports(exports) => values.extend(exports.values().cloned()),
         Owner::Cell(value) => values.push(value.borrow().clone()),
         Owner::Array(value) => {
             values.extend(value.items.borrow().iter().cloned());
@@ -911,6 +957,9 @@ fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
     match owner {
         Owner::Object(object) => {
             let data = object.borrow();
+            if let Some(generation) = &data.module_generation {
+                owners.push(Owner::ModuleGeneration(Rc::clone(generation)));
+            }
             match data.node_object.as_ref() {
                 Some(NodeObject::NodeServer(state)) => {
                     owners.push(Owner::NodeServer(Rc::clone(state)));
@@ -944,6 +993,16 @@ fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
                     | NodeObject::AsyncLocalStorage(_),
                 )
                 | None => {}
+            }
+        }
+        Owner::Closure(closure) => {
+            if let Some(generation) = closure.module_generation_owner.borrow().as_ref() {
+                owners.push(Owner::ModuleGeneration(Rc::clone(generation)));
+            }
+        }
+        Owner::ModuleGeneration(generation) => {
+            for record in generation.borrow().records.values() {
+                owners.push(Owner::ModuleExports(Rc::clone(&record.exports)));
             }
         }
         Owner::NodeServer(state) => {
@@ -983,6 +1042,11 @@ fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
             }
         }
         Owner::Element(value) => owners.push(Owner::CombinatorWalk(Rc::clone(&value.walk))),
+        Owner::ModuleSuspension(value) => {
+            if let Some(generation) = &value.borrow().module_generation {
+                owners.push(Owner::ModuleGeneration(Rc::clone(generation)));
+            }
+        }
         _ => {}
     }
     owners
@@ -1045,6 +1109,31 @@ mod tests {
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,
+            functions: Vec::new(),
+        });
+        let vm = Vm::with_entropy_seed(
+            Rc::clone(&program),
+            Rc::new(Strictness::sloppy(&program)),
+            host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("test realm initializes");
+        (vm, program)
+    }
+
+    fn generator_program() -> Rc<Program> {
+        Rc::new(Program {
+            source: "function* g() {}".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
                 inferred_name: None,
                 span: kiln_ir::Span::default(),
@@ -1064,18 +1153,7 @@ mod tests {
                 upvalues: Vec::new(),
                 type_annotations: None,
             }],
-        });
-        let vm = Vm::with_entropy_seed(
-            Rc::clone(&program),
-            Rc::new(Strictness::sloppy(&program)),
-            host,
-            Vec::new(),
-            ExecutionLimits::default(),
-            &RealmCapabilities::default(),
-            ExecutionCapabilities::default(),
-        )
-        .expect("test realm initializes");
-        (vm, program)
+        })
     }
 
     fn closure_reaching_promise(program: &Rc<Program>, promise: &Rc<PromiseData>) -> Rc<Closure> {
@@ -1085,6 +1163,7 @@ mod tests {
             strictness: Rc::new(Strictness::sloppy(program)),
             module_path: None,
             module_generation: 0,
+            module_generation_owner: RefCell::new(None),
             name: None,
             inferred_name: None,
             upvalues: Vec::new(),
@@ -1095,6 +1174,220 @@ mod tests {
             prototype: RefCell::new(None),
             properties: RefCell::new(ObjectData::default()),
         })
+    }
+
+    fn inactive_generation_cycle(
+        vm: &mut Vm<'_, TestHost>,
+        program: &Rc<Program>,
+    ) -> (
+        std::rc::Weak<RefCell<crate::module_map::ModuleGeneration>>,
+        std::rc::Weak<RefCell<ObjectData>>,
+        Value,
+        Rc<Closure>,
+    ) {
+        let realm = RealmId::PRIMARY;
+        let generation_id = vm.module_map.borrow_mut().reset_generation(realm);
+        let generation = vm.module_map.borrow_mut().current_generation_handle(realm);
+        let closure = Rc::new(Closure {
+            program: Rc::clone(program),
+            function: 0,
+            strictness: Rc::new(Strictness::sloppy(program)),
+            module_path: Some(Rc::from("/inactive/closure.mjs")),
+            module_generation: generation_id,
+            module_generation_owner: RefCell::new(Some(Rc::clone(&generation))),
+            name: None,
+            inferred_name: None,
+            upvalues: Vec::new(),
+            realm,
+            captured_arguments: None,
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        });
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        vm.module_map.borrow_mut().publish_in_generation(
+            realm,
+            generation_id,
+            "/inactive/closure.mjs",
+            HashMap::from([("keep".to_owned(), Value::Function(Rc::clone(&closure)))]),
+        );
+        let namespace = vm.module_map.borrow_mut().namespace_in_generation(
+            realm,
+            generation_id,
+            "/inactive/closure.mjs",
+        );
+        let Value::Object(namespace_object) = &namespace else {
+            unreachable!();
+        };
+        let weak_generation = Rc::downgrade(&generation);
+        let weak_namespace = Rc::downgrade(namespace_object);
+        // The map no longer roots this epoch after a reset. Its record→namespace→generation
+        // and exports→closure→generation cycles are the only remaining strong edges.
+        vm.module_map.borrow_mut().reset_generation(realm);
+        drop(generation);
+        (weak_generation, weak_namespace, namespace, closure)
+    }
+
+    #[test]
+    fn inactive_module_generation_cycle_is_reclaimed() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let (generation, namespace, external, _closure) =
+            inactive_generation_cycle(&mut vm, &program);
+        drop(external);
+        drop(_closure);
+        assert!(generation.upgrade().is_some());
+        assert!(namespace.upgrade().is_some());
+        vm.collect_closure_cycles();
+        assert!(generation.upgrade().is_none());
+        assert!(namespace.upgrade().is_none());
+    }
+
+    #[test]
+    fn external_old_namespace_keeps_its_generation_until_released() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let (generation, namespace, external, _closure) =
+            inactive_generation_cycle(&mut vm, &program);
+        drop(_closure);
+        vm.collect_closure_cycles();
+        assert!(generation.upgrade().is_some());
+        assert!(namespace.upgrade().is_some());
+        let Value::Object(external_namespace) = &external else {
+            unreachable!();
+        };
+        let retained_generation = external_namespace
+            .borrow()
+            .module_generation
+            .as_ref()
+            .expect("old namespace owns its generation")
+            .borrow()
+            .id;
+        assert!(
+            vm.module_map
+                .borrow()
+                .status_in_generation(
+                    RealmId::PRIMARY,
+                    retained_generation,
+                    "/inactive/closure.mjs",
+                )
+                .is_some()
+        );
+        drop(external);
+        vm.collect_closure_cycles();
+        assert!(generation.upgrade().is_none());
+        assert!(namespace.upgrade().is_none());
+    }
+
+    #[test]
+    fn retained_old_module_closure_keeps_its_generation_until_released() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let (generation, namespace, external_namespace, external_closure) =
+            inactive_generation_cycle(&mut vm, &program);
+        drop(external_namespace);
+        vm.collect_closure_cycles();
+        assert!(generation.upgrade().is_some());
+        assert!(namespace.upgrade().is_some());
+        let captured = external_closure
+            .module_generation_owner
+            .borrow()
+            .clone()
+            .expect("retained closure owns its epoch");
+        let imported = vm.module_map.borrow_mut().import_generation_handle_for(
+            RealmId::PRIMARY,
+            external_closure.module_path.as_deref(),
+            &captured,
+        );
+        assert!(Rc::ptr_eq(&captured, &imported));
+        assert!(
+            vm.module_map
+                .borrow()
+                .status_in_generation(
+                    RealmId::PRIMARY,
+                    captured.borrow().id,
+                    "/inactive/closure.mjs",
+                )
+                .is_some()
+        );
+
+        drop(external_closure);
+        drop(imported);
+        drop(captured);
+        vm.collect_closure_cycles();
+        assert!(generation.upgrade().is_none());
+        assert!(namespace.upgrade().is_none());
+    }
+
+    #[test]
+    fn queued_old_generation_import_keeps_its_epoch_alive() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let realm = RealmId::PRIMARY;
+        let generation_id = vm.module_map.borrow_mut().reset_generation(realm);
+        let generation = vm.module_map.borrow_mut().current_generation_handle(realm);
+        let weak_generation = Rc::downgrade(&generation);
+        let promise = PromiseState::pending();
+        let job = vm.scheduled(Job::Import(
+            Rc::clone(&promise),
+            "./later.mjs".to_owned(),
+            None,
+            Some(Rc::from("/old/importer.mjs")),
+            generation_id,
+            Rc::clone(&generation),
+        ));
+        vm.with_realm_mut(|realm| realm.queue_microtask(job));
+
+        vm.module_map.borrow_mut().reset_generation(realm);
+        drop(generation);
+        vm.collect_closure_cycles();
+
+        assert!(weak_generation.upgrade().is_some());
+    }
+
+    #[test]
+    fn pending_module_await_keeps_its_generation_until_settled() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let realm = RealmId::PRIMARY;
+        let generation_id = vm.module_map.borrow_mut().reset_generation(realm);
+        let generation = vm.module_map.borrow_mut().current_generation_handle(realm);
+        assert_eq!(generation.borrow().id, generation_id);
+        let weak_generation = Rc::downgrade(&generation);
+        let state = Rc::new(RefCell::new(ModuleSuspension {
+            stack: Vec::new(),
+            handlers: Vec::new(),
+            instruction: 0,
+            module_generation: Some(Rc::clone(&generation)),
+        }));
+        let promise = PromiseState::pending();
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Undefined,
+            on_rejected: Value::Undefined,
+            sink: Sink::ModuleAwait(Rc::clone(&state)),
+            passthrough: false,
+            context: Rc::new(Vec::new()),
+        });
+        let closure = closure_reaching_promise(&program, &promise);
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+
+        vm.module_map.borrow_mut().reset_generation(realm);
+        drop(generation);
+        vm.collect_closure_cycles();
+        assert!(weak_generation.upgrade().is_some());
+
+        drop(closure);
+        drop(promise);
+        drop(state);
+        vm.collect_closure_cycles();
+        assert!(weak_generation.upgrade().is_none());
     }
 
     fn make_registered_suspended_generator(
@@ -1108,6 +1401,7 @@ mod tests {
             strictness: Rc::new(Strictness::sloppy(program)),
             module_path: None,
             module_generation: 0,
+            module_generation_owner: RefCell::new(None),
             name: None,
             inferred_name: None,
             upvalues: Vec::new(),
@@ -1118,8 +1412,6 @@ mod tests {
             prototype: RefCell::new(None),
             properties: RefCell::new(ObjectData::default()),
         });
-        // `build_generator` is the production allocation/registration seam. A synthetic
-        // suspended state isolates census discovery from frontend lowering.
         vm.stack.push(Value::Undefined);
         let Value::Generator(generator) = vm
             .build_generator(&closure, 0, 0, Value::Undefined, Value::Undefined)
@@ -1141,9 +1433,10 @@ mod tests {
     }
 
     #[test]
-    fn suspended_generator_census_accounts_local_edges_without_rooting_iterator() {
+    fn generator_census_reclaims_suspended_local_cycles_but_respects_live_iterator() {
         let mut host = TestHost;
-        let (mut vm, program) = test_vm(&mut host);
+        let (mut vm, _) = test_vm(&mut host);
+        let program = generator_program();
 
         let unreachable_target = Rc::new(RefCell::new(ObjectData::default()));
         let unreachable_weak = Rc::downgrade(&unreachable_target);
@@ -1295,6 +1588,7 @@ mod tests {
             stack: vec![target.clone()],
             handlers: Vec::new(),
             instruction: 0,
+            module_generation: None,
         }));
         let promise = PromiseState::pending();
         promise.state.borrow_mut().reactions.push(Reaction {
@@ -1779,6 +2073,7 @@ mod tests {
             strictness: Rc::new(Strictness::sloppy(&program)),
             module_path: None,
             module_generation: 0,
+            module_generation_owner: RefCell::new(None),
             name: None,
             inferred_name: None,
             upvalues: Vec::new(),

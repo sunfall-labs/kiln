@@ -293,6 +293,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) in_worker: bool,
     pub(super) module_path: Option<Rc<str>>,
     pub(super) module_generation: u64,
+    /// Strong identity for the module-generation context currently executing. The scalar id is
+    /// still used for lookups; this edge keeps its records alive across resetModules.
+    pub(super) module_generation_owner: Option<crate::module_map::ModuleGenerationHandle>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
