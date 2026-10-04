@@ -2311,6 +2311,98 @@ int main(void) {
 }
 
 #[test]
+fn requested_minor_collection_keeps_active_and_pending_candidate_provenance() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int keep_candidate_root(kiln_gc_heap *heap, kiln_value candidate) {
+    kiln_value registry;
+    if (kiln_c99_new_collection(&registry, 0, 0) != KILN_C99_OK) return 0;
+    heap->realm.isolated_graphs = registry;
+    return kiln_c99_collection_put(registry, candidate, candidate) == KILN_C99_OK;
+}
+
+static int candidate_minor_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value candidate = kiln_c99_undefined();
+    kiln_c99_candidate_group *group;
+    kiln_gc_block *object_block;
+    kiln_nursery_chunk *object_chunk;
+    uint64_t id;
+    uint64_t collections;
+    uint64_t audited_minors;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->force_pending = 0;
+    heap->minor_audit_enabled = 1;
+    heap->stress_every = 1; /* Force the active-candidate collection past its normal deferral. */
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&candidate) != KILN_C99_OK ||
+        !keep_candidate_root(heap, candidate)) return 2;
+    id = heap->actor_candidate_id;
+    group = heap->actor_candidate_group;
+    collections = heap->collections;
+    audited_minors = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    object_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)candidate.bits);
+    object_chunk = object_block != NULL && (object_block->kind & KILN_GC_FLAG_NURSERY) != 0
+        ? kiln_c99_nursery_chunk_of(heap, object_block) : NULL;
+    if (heap->collections != collections + 1 ||
+        heap->minor_audit_collections != audited_minors ||
+        heap->actor_candidate_id != id || heap->actor_candidate_group != group ||
+        heap->candidate_ledger_groups != 1 || object_chunk == NULL ||
+        object_chunk->candidate_id != id || object_chunk->candidate_state != 3 ||
+        !kiln_c99_candidate_group_contains(group, object_chunk) || object_block == NULL)
+        return 3;
+    if (!kiln_c99_actor_candidate_end(heap, 0)) return 4;
+
+    heap->stress_every = 0;
+    heap->realm.isolated_graphs = kiln_c99_undefined();
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&candidate) != KILN_C99_OK ||
+        !keep_candidate_root(heap, candidate) || !kiln_c99_actor_candidate_end(heap, 1)) return 5;
+    id = heap->actor_candidate_pending_id;
+    group = heap->actor_candidate_group;
+    collections = heap->collections;
+    audited_minors = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    object_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)candidate.bits);
+    object_chunk = object_block != NULL && (object_block->kind & KILN_GC_FLAG_NURSERY) != 0
+        ? kiln_c99_nursery_chunk_of(heap, object_block) : NULL;
+    if (heap->collections != collections + 1 ||
+        heap->minor_audit_collections != audited_minors ||
+        heap->actor_candidate_pending_id != id || heap->actor_candidate_group != group ||
+        heap->candidate_ledger_groups != 1 || object_chunk == NULL ||
+        object_chunk->candidate_id != id || object_chunk->candidate_state != 1 ||
+        !kiln_c99_candidate_group_contains(group, object_chunk) || object_block == NULL)
+        return 6;
+    kiln_c99_actor_candidate_finish(heap, 0);
+    heap->realm.isolated_graphs = kiln_c99_undefined();
+    return 0;
+}
+
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 7;
+    status = kiln_realm_enter(realm, candidate_minor_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 8;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-minor-eligibility");
+    assert!(
+        run.status.success(),
+        "a requested minor collection must fall back to full collection while candidate provenance is live ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_zero_argument_string_construction_uses_a_valid_header() {
     let generated =
         emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty wrapper fixture emits");
