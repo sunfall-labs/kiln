@@ -98,6 +98,7 @@ struct PrefixIo<T> {
     eof_deferral_started: bool,
     eof_deferral_complete: Option<Rc<Cell<bool>>>,
     node_fin_response_complete: Option<Rc<Cell<bool>>>,
+    peer_fin_pending: Option<Rc<Cell<bool>>>,
     node_fin_notified: bool,
     peer_fin: Option<Rc<Notify>>,
 }
@@ -113,6 +114,7 @@ impl<T> PrefixIo<T> {
             eof_deferral_started: false,
             eof_deferral_complete: None,
             node_fin_response_complete: None,
+            peer_fin_pending: None,
             node_fin_notified: false,
             peer_fin: None,
         }
@@ -127,8 +129,16 @@ impl<T> PrefixIo<T> {
         self.eof_seen = true;
     }
 
-    fn apply_node_fin_policy(&mut self, response_complete: Rc<Cell<bool>>) {
+    fn apply_node_fin_policy(
+        &mut self,
+        response_complete: Rc<Cell<bool>>,
+        peer_fin_pending: Rc<Cell<bool>>,
+    ) {
         self.node_fin_response_complete = Some(response_complete);
+        if self.eof_seen {
+            peer_fin_pending.set(true);
+        }
+        self.peer_fin_pending = Some(peer_fin_pending);
     }
 
     fn set_peer_fin_notify(&mut self, peer_fin: Rc<Notify>) {
@@ -216,6 +226,9 @@ impl<T: AsyncRead + Unpin> AsyncRead for PrefixIo<T> {
                 trace!("HTTP/1 transport observed EOF");
                 self.eof_seen = true;
                 if self.defer_eof_once {
+                    if let Some(pending) = &self.peer_fin_pending {
+                        pending.set(true);
+                    }
                     self.schedule_eof_deferral(cx);
                     Poll::Pending
                 } else {
@@ -728,6 +741,9 @@ pub(crate) struct ConnectionShared {
     shutdown: Notify,
     closing: Cell<bool>,
     node_fin_response_complete: Rc<Cell<bool>>,
+    /// A peer FIN has been observed but its request/connection close event has not yet
+    /// reached the language. Keep the host drive alive while the deferred EOF turn runs.
+    peer_fin_pending: Rc<Cell<bool>>,
     peer_fin: Rc<Notify>,
     /// An abort has been requested and its `Closed` has not been published yet. Counted as
     /// work in flight so a drive does not return before the language hears it.
@@ -1353,6 +1369,7 @@ impl HttpServerEngine {
             shutdown: Notify::new(),
             closing: Cell::new(false),
             node_fin_response_complete: Rc::new(Cell::new(false)),
+            peer_fin_pending: Rc::new(Cell::new(false)),
             peer_fin: Rc::new(Notify::new()),
             abort_pending: Cell::new(false),
             http3: self.http3,
@@ -1604,6 +1621,7 @@ impl HttpServerEngine {
             .map(|connection| {
                 connection.shared.requests.borrow().len()
                     + usize::from(connection.shared.abort_pending.get())
+                    + usize::from(connection.shared.peer_fin_pending.get())
             })
             .sum()
     }
@@ -1742,7 +1760,10 @@ async fn serve(
     // when half-close is disabled; later EOF still closes an unfinished response.
     if !is_http2 && !allow_half_close {
         io.defer_eof_once();
-        io.apply_node_fin_policy(Rc::clone(&shared.node_fin_response_complete));
+        io.apply_node_fin_policy(
+            Rc::clone(&shared.node_fin_response_complete),
+            Rc::clone(&shared.peer_fin_pending),
+        );
         io.set_peer_fin_notify(Rc::clone(&shared.peer_fin));
     }
     let service = server_service(Rc::clone(&shared));
@@ -1938,6 +1959,7 @@ async fn serve(
             .borrow_mut()
             .remove(&shared.upgrade_request_id.get());
     }
+    shared.peer_fin_pending.set(false);
     table.borrow_mut().remove(&shared.resource);
 }
 

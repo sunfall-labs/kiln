@@ -3544,6 +3544,7 @@ typedef struct kiln_node_response {
     uint16_t status;
     int started;
     int ended;
+    int disconnected;
     struct kiln_node_response *next;
     /* The response head the program is building, already in the private ABI's flattened form
      * (`name NUL value NUL`, UTF-8, names as the program spelt them): `setHeader`, `writeHead`

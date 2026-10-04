@@ -2565,6 +2565,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     if (event->kind == 10) {
         int status;
         kiln_value socket_error;
+        for (response = socket->responses; response != NULL; response = response->next)
+            response->disconnected = 1;
         status = kiln_c99_node_socket_destroy_error(&socket_error);
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_node_socket_discard_queued_writes(socket, socket_error);
@@ -6866,6 +6868,14 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             code == KILN_C99_METHOD_NODE_RESPONSE_END) {
             kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_c99_node_byte_span span;
+            if (response->disconnected) {
+                if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
+                    *result = receiver;
+                    return KILN_C99_OK;
+                }
+                *result = kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
             if (response->ended) {
                 if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
                     *result = receiver;
