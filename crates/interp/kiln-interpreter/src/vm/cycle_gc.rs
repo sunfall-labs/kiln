@@ -1013,13 +1013,18 @@ mod tests {
     fn active_node_socket_registry_is_a_strong_weakref_root_until_removed() {
         let mut host = TestHost;
         let (mut vm, _) = test_vm(&mut host);
+        let realm = ModuleRealmSession::default();
+        vm.module_realm = Some(Rc::clone(&realm.shared));
         let object = Rc::new(RefCell::new(ObjectData::default()));
         let weak_object = Rc::downgrade(&object);
         let weak_ref = vm
             .construct_weak_ref(&[Value::Object(Rc::clone(&object))], 0)
             .expect("object can be held weakly");
-        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
-        vm.active_node_socket_objects
+        vm.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
+        realm
+            .shared
+            .borrow_mut()
+            .active_node_socket_objects
             .insert(17, Value::Object(Rc::clone(&object)));
         drop(object);
 
@@ -1028,7 +1033,11 @@ mod tests {
             weak_object.upgrade().is_some(),
             "active registry roots socket"
         );
-        vm.active_node_socket_objects.remove(&17);
+        realm
+            .shared
+            .borrow_mut()
+            .active_node_socket_objects
+            .remove(&17);
         vm.collect_closure_cycles();
         assert!(weak_object.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
