@@ -190,6 +190,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let realm = self.current_realm;
         // A module the realm has already settled is answered from its record: the same
         // namespace object every time, or the same error (ECMA-262 16.2.1.5.3 step 4).
+        // A CommonJS require may have evaluated the body without materializing its ESM
+        // namespace. Host modules already settled by require still need the namespace seam.
+        for planned in &plan.modules {
+            if matches!(planned.body, PlannedBody::Host)
+                && self.module_map.borrow().is_evaluated(realm, &planned.key)
+                && let Err(value) = self.prepare_host_namespace(&planned.key)?
+            {
+                return Ok(Err(value));
+            }
+        }
         let settled = self.module_map.borrow().status(realm, &plan.key);
         match settled {
             Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
@@ -322,6 +332,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Evaluate a CommonJS or JSON module through the host's CommonJS loader, which publishes
     /// it into the map exactly as a `require` of it would have.
     fn evaluate_host_module(&mut self, key: &str) -> Result<Result<(), Value>, ExecutionError> {
+        self.host_module_operation(key, false)
+    }
+
+    fn prepare_host_namespace(&mut self, key: &str) -> Result<Result<(), Value>, ExecutionError> {
+        self.host_module_operation(key, true)
+    }
+
+    fn host_module_operation(
+        &mut self,
+        key: &str,
+        namespace_only: bool,
+    ) -> Result<Result<(), Value>, ExecutionError> {
         let instruction = self.instruction;
         let Some(loader) = self.commonjs_loader else {
             let error = self.construct_error(
@@ -334,7 +356,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(Err(error));
         };
         // SAFETY: the loader outlives every machine it is installed in; see `commonjs_loader`.
-        match unsafe { (&mut *loader).evaluate_module(key, instruction) } {
+        match unsafe {
+            if namespace_only {
+                (&mut *loader).prepare_module_namespace(key, instruction)
+            } else {
+                (&mut *loader).evaluate_module(key, instruction)
+            }
+        } {
             Ok(()) => Ok(Ok(())),
             Err(ExecutionError::Uncaught { message, .. }) => {
                 let value = unsafe { (&mut *loader).take_thrown_value() };

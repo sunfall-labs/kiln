@@ -887,6 +887,16 @@ pub trait CommonJsModuleLoader {
     /// the body queued, so the realm's module map can record the module as evaluated first.
     fn module_evaluated(&mut self, _module_path: &str, _exports: &[ModuleExportValue]) {}
 
+    /// Materialize an already evaluated CommonJS module's ESM namespace on demand.
+    /// A require-only execution must not invoke exported property getters.
+    fn prepare_module_namespace(
+        &mut self,
+        _key: &str,
+        _instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        Ok(())
+    }
+
     /// Evaluate the CommonJS or JSON module `key` into the realm's module map, as `import()`
     /// of it needs, through the same cache `require` uses. A loader that cannot answers with
     /// the refusal it has always given.

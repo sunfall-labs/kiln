@@ -452,3 +452,43 @@ fn a_loader_with_its_own_graph_links_to_the_static_record() {
         .expect("run");
     assert_eq!(host.lines, ["0,0 1 1 1"]);
 }
+
+#[test]
+fn commonjs_named_import_reads_accessor_export() {
+    let project = Project::new();
+    project.write(
+        "api.cjs",
+        "exports.ValueType = undefined;\n\
+         const value = { INT: 0, DOUBLE: 1 };\n\
+         Object.defineProperty(exports, 'ValueType', { enumerable: true, get() { return value; } });",
+    );
+    expect_lines(
+        &project,
+        "import { ValueType } from './api.cjs'; console.log(ValueType.INT, ValueType.DOUBLE);",
+        &["0 1"],
+    );
+}
+
+#[test]
+fn commonjs_namespace_getters_are_lazy_and_snapshotted_once() {
+    let project = Project::new();
+    project.write("api.cjs", "exports.value = undefined; globalThis.reads = 0; exports.marker = 7; Object.defineProperty(exports, 'value', { enumerable: true, get() { globalThis.reads++; return this.marker; } });");
+    project.write("loader.cjs", "exports.api = require('./api.cjs');");
+    expect_lines(
+        &project,
+        "import loader from './loader.cjs'; console.log(globalThis.reads); const ns = await import('./api.cjs'); const again = await import('./api.cjs'); console.log(ns.value, globalThis.reads, ns === again, loader.api === ns.default); loader.api.marker = 9; console.log(ns.value, loader.api.value, globalThis.reads);",
+        &["0", "7 1 true true", "7 9 2"],
+    );
+}
+
+#[test]
+fn commonjs_namespace_failure_is_cached_without_invalidating_require() {
+    let project = Project::new();
+    project.write("api.cjs", "exports.value = undefined; globalThis.reads = 0; globalThis.failure = {}; Object.defineProperty(exports, 'value', { enumerable: true, get() { globalThis.reads++; throw globalThis.failure; } });");
+    project.write("loader.cjs", "exports.load = () => require('./api.cjs');");
+    expect_lines(
+        &project,
+        "import loader from './loader.cjs'; const api = loader.load(); let first; try { await import('./api.cjs'); } catch (error) { first = error; } let second; try { await import('./api.cjs'); } catch (error) { second = error; } console.log(first === globalThis.failure, first === second, globalThis.reads, loader.load() === api);",
+        &["true true 1 true"],
+    );
+}

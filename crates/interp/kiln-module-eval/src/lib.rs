@@ -635,6 +635,30 @@ impl Records {
             .publish(Self::REALM, &module_key(path), exports);
     }
 
+    fn commonjs_namespace_ready(&self, path: &Path) -> bool {
+        self.0
+            .borrow()
+            .commonjs_namespace_ready(Self::REALM, &module_key(path))
+    }
+
+    fn commonjs_namespace_failure(&self, path: &Path) -> Option<Value> {
+        self.0
+            .borrow()
+            .commonjs_namespace_failure(Self::REALM, &module_key(path))
+    }
+
+    fn fail_commonjs_namespace(&self, path: &Path, value: Value) {
+        self.0
+            .borrow_mut()
+            .fail_commonjs_namespace(Self::REALM, &module_key(path), value);
+    }
+
+    fn publish_commonjs_namespace(&self, path: &Path, exports: HashMap<String, Value>) {
+        self.0
+            .borrow_mut()
+            .publish_commonjs_namespace(Self::REALM, &module_key(path), exports);
+    }
+
     fn pending_cell(&self, path: &Path, name: &str) -> Cell {
         self.0
             .borrow_mut()
@@ -1546,6 +1570,17 @@ impl GraphExecutor<'_> {
                             error,
                         })?;
                 }
+                if self
+                    .module(&dependency.target)
+                    .is_some_and(|node| node.source == ModuleSource::CommonJs)
+                {
+                    commonjs_loader
+                        .prepare_namespace(&dependency.target)
+                        .map_err(|error| ModuleEvaluationError::Execution {
+                            module: dependency.target.clone(),
+                            error,
+                        })?;
+                }
                 // A dependency with no value table has not run, and in an acyclic graph that
                 // cannot happen. So this is a back edge: the importer is an ancestor of the
                 // module it is importing from, and the binding it wants will not exist until
@@ -1919,6 +1954,169 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
         Ok(read_through_cell(&value))
     }
 
+    /// ESM linking snapshots CommonJS properties once, while require retains the original
+    /// object and does not invoke these getters. Read through ordinary bytecode in this realm
+    /// so receiver binding, closures, host calls and thrown values follow the usual VM path.
+    fn prepare_namespace(&mut self, path: &Path) -> Result<(), ExecutionError> {
+        if let Some(value) = self.records.commonjs_namespace_failure(path) {
+            self.record_thrown_value(value);
+            return Err(ExecutionError::Uncaught {
+                instruction: 0,
+                error_constructor: None,
+                message: "CommonJS namespace getter failed".into(),
+                trace: Vec::new(),
+            });
+        }
+        if self.records.commonjs_namespace_ready(path) {
+            return Ok(());
+        }
+        if !self
+            .graph
+            .module(path)
+            .is_some_and(|node| node.source == ModuleSource::CommonJs)
+        {
+            return Ok(());
+        }
+        self.execute_target(path, false)?;
+        let value = self
+            .commonjs_cache
+            .get(path)
+            .expect("CommonJS cache exists")
+            .borrow()
+            .clone();
+        let keys: Vec<String> = match &value {
+            Value::Object(object) => object
+                .borrow()
+                .keys()
+                .map(|key| key.to_lossy_string())
+                .filter(|key| key != "default")
+                .collect(),
+            Value::Function(function) => function
+                .properties
+                .borrow()
+                .keys()
+                .map(|key| key.to_lossy_string())
+                .filter(|key| key != "default")
+                .collect(),
+            _ => Vec::new(),
+        };
+        // Most CommonJS modules expose only data. Snapshot those without constructing a VM;
+        // if any accessor exists, read every key in order because a getter can mutate later keys.
+        let data = match &value {
+            Value::Object(object) => {
+                let object = object.borrow();
+                keys.iter()
+                    .map(|key| match object.get_own_property(key) {
+                        Some(Property::Value(value)) => Some((key.clone(), value.clone())),
+                        _ => None,
+                    })
+                    .collect::<Option<HashMap<_, _>>>()
+            }
+            Value::Function(function) => {
+                let object = function.properties.borrow();
+                keys.iter()
+                    .map(|key| match object.get_own_property(key) {
+                        Some(Property::Value(value)) => Some((key.clone(), value.clone())),
+                        _ => None,
+                    })
+                    .collect::<Option<HashMap<_, _>>>()
+            }
+            _ => Some(HashMap::new()),
+        };
+        if let Some(mut exports) = data {
+            exports.insert("default".into(), value);
+            self.records.publish_commonjs_namespace(path, exports);
+            return Ok(());
+        }
+        let mut module = kiln_ir::ModuleProgram::default();
+        module.program.local_count = 1 + keys.len() as u32;
+        module.imports.push(kiln_ir::ImportBinding {
+            source: String::new(),
+            imported: "default".into(),
+            local: "exports".into(),
+            local_slot: 0,
+        });
+        for (index, key) in keys.iter().enumerate() {
+            module
+                .program
+                .constants
+                .push(kiln_ir::Constant::String(key.as_str().into()));
+            module.program.code.extend([
+                Instruction::LoadCell(0),
+                Instruction::GetProperty(index as u32),
+                Instruction::StoreLocal(1 + index as u32),
+            ]);
+            module.exports.push(kiln_ir::ExportBinding {
+                exported: key.clone(),
+                local_slot: 1 + index as u32,
+            });
+        }
+        module.program.constants.push(kiln_ir::Constant::Undefined);
+        module
+            .program
+            .code
+            .extend([Instruction::Const(keys.len() as u32), Instruction::Return]);
+        let total_steps = unsafe { *self.total_steps };
+        let limits = ExecutionLimits {
+            max_steps: self.limits.max_steps.saturating_sub(total_steps),
+            ..self.limits
+        };
+        let result = unsafe {
+            if self.node {
+                execute_node_module_in_session_with_loader(
+                    &module,
+                    &[value.clone()],
+                    &[],
+                    &mut *self.host,
+                    limits,
+                    &mut *self.runtime,
+                    (&mut *self.node_session).as_mut().expect("Node session"),
+                    self.capabilities.clone(),
+                    false,
+                    self,
+                    false,
+                    Some(path.to_string_lossy().as_ref()),
+                )
+            } else {
+                execute_module_in_runtime_with_loader(
+                    &module,
+                    &[value.clone()],
+                    &[],
+                    &mut *self.host,
+                    limits,
+                    &mut *self.runtime,
+                    self.capabilities.clone(),
+                    self,
+                    false,
+                    Some(path.to_string_lossy().as_ref()),
+                )
+            }
+        }
+        .map_err(|error| {
+            if let Some(value) = &self.pending_thrown {
+                self.records.fail_commonjs_namespace(path, value.clone());
+            }
+            error
+        })?;
+        unsafe {
+            *self.total_steps = (*self.total_steps)
+                .checked_add(result.execution.steps)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction: 0,
+                    message: "CommonJS namespace step count overflow".into(),
+                })?;
+        }
+        let mut exports = HashMap::from([("default".to_owned(), value)]);
+        exports.extend(
+            result
+                .exports
+                .into_iter()
+                .map(|entry| (entry.name, entry.value)),
+        );
+        self.records.publish_commonjs_namespace(path, exports);
+        Ok(())
+    }
+
     fn execute_target(&mut self, path: &Path, enter_runtime: bool) -> Result<(), ExecutionError> {
         if self.records.is_started(path) {
             return Ok(());
@@ -2150,12 +2348,20 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
     fn evaluate_module(&mut self, key: &str, instruction: usize) -> Result<(), ExecutionError> {
         let path = PathBuf::from(key);
         match self.graph.module(&path).map(|node| &node.source) {
-            Some(ModuleSource::CommonJs) => self.execute_target(&path, false),
+            Some(ModuleSource::CommonJs) => self.prepare_namespace(&path),
             Some(ModuleSource::Json) => self.ensure_target_value(&path, instruction).map(|_| ()),
             _ => Err(ExecutionError::DynamicImportUnsupported {
                 message: format!("`{key}` is not a CommonJS or JSON module of this graph"),
             }),
         }
+    }
+
+    fn prepare_module_namespace(
+        &mut self,
+        key: &str,
+        _instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        self.prepare_namespace(Path::new(key))
     }
 
     fn record_thrown_value(&mut self, value: Value) {

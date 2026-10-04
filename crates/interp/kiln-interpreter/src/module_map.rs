@@ -42,6 +42,9 @@ pub struct ModuleRecord {
     /// dynamic import that links to a module still evaluating. Each starts in its dead zone and
     /// is filled when the module publishes.
     pending: Vec<(String, Cell)>,
+    /// CommonJS body evaluation and its ESM namespace snapshot are separate operations.
+    commonjs_namespace_ready: bool,
+    commonjs_namespace_failure: Option<Value>,
 }
 
 impl ModuleRecord {
@@ -52,6 +55,8 @@ impl ModuleRecord {
             bindings: HashMap::new(),
             namespace: None,
             pending: Vec::new(),
+            commonjs_namespace_ready: false,
+            commonjs_namespace_failure: None,
         }
     }
 }
@@ -199,6 +204,35 @@ impl ModuleMap {
             }
         }
         self.record(realm, key).pending = waiting;
+    }
+
+    /// Whether a CommonJS module has snapshotted its ESM namespace already.
+    pub fn commonjs_namespace_ready(&self, realm: RealmId, key: &str) -> bool {
+        self.records
+            .get(&(realm, key.to_owned()))
+            .is_some_and(|record| record.commonjs_namespace_ready)
+    }
+
+    /// An ESM namespace getter failure does not invalidate the require cache.
+    pub fn commonjs_namespace_failure(&self, realm: RealmId, key: &str) -> Option<Value> {
+        self.records
+            .get(&(realm, key.to_owned()))
+            .and_then(|record| record.commonjs_namespace_failure.clone())
+    }
+
+    pub fn fail_commonjs_namespace(&mut self, realm: RealmId, key: &str, failure: Value) {
+        self.record(realm, key).commonjs_namespace_failure = Some(failure);
+    }
+
+    /// Publish the namespace snapshot independently of the lazy require cache.
+    pub fn publish_commonjs_namespace(
+        &mut self,
+        realm: RealmId,
+        key: &str,
+        exports: HashMap<String, Value>,
+    ) {
+        self.publish(realm, key, exports);
+        self.record(realm, key).commonjs_namespace_ready = true;
     }
 
     /// A dead-zone cell for `name` of `key`, filled when `key` publishes. One cell per name, so
