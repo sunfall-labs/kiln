@@ -21,6 +21,11 @@ gate, not a failure). Kiln's native column builds all four programs as
 the filesystem or HTTP adapter. The Bun column runs the `.ts` source directly.
 `inputs/users.json` is committed; regenerate it with `node inputs/gen-users.mjs`.
 
+CLI timings include program startup and exclude AOT builds. Memory is the maximum
+of each runtime's per-process peak RSS across repetitions, excluding compilers
+and earlier runs. A fresh measurement worker isolates the child resource counter;
+the worker's startup and result transport are outside the reported program time.
+
 ## Runtimes
 
 `node`, `bun`, `kiln` (interpreter), `kiln-native`, plus, when their
