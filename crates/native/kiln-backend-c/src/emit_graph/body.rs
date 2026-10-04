@@ -1243,6 +1243,18 @@ fn emit_block_sequence(
     spec: &Speculation,
     argument_length_values: &HashSet<ValueId>,
 ) {
+    let prepared_method_properties: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|block| block.operations.iter())
+        .filter_map(|(_, operation)| match operation {
+            GraphOp::CallMethod {
+                prepared_callee: Some(callee),
+                ..
+            } => Some(*callee),
+            _ => None,
+        })
+        .collect();
     let suspended_locals =
         if matches!(site, Site::Function { .. }) && (proto.generator || proto.asynchronous) {
             suspended_local_liveness(graph, proto, program)
@@ -1598,6 +1610,7 @@ fn emit_block_sequence(
                 boxed.as_ref(),
                 await_resolve_arg,
                 &used,
+                &prepared_method_properties,
                 &argument_length_values,
             );
             if kind.restarts() {

@@ -143,6 +143,25 @@ const numericCall = {
 };
 console.log("typed", numericCall.sum(20, 22));
 
+// A numeric intrinsic is authorized by the saved method ID, even if an argument replaces the
+// live property after the call has already fetched its callee.
+const builtinImul = Math.imul;
+function replaceImulDuringArgument() {
+  Math.imul = function () { return -1; };
+  return 6;
+}
+console.log("saved intrinsic", Math.imul(7, replaceImulDuringArgument()));
+Math.imul = builtinImul;
+Math.imul = function () { return "overridden"; };
+console.log("overridden intrinsic", Math.imul(2, 3) + 1);
+Math.imul = builtinImul;
+
+const punctuationKey = "quote\" slash\\ newline\n";
+const punctuationMethods = {
+  "quote\" slash\\ newline\n"() { return "punctuation method"; },
+};
+console.log("punctuation method", punctuationMethods[punctuationKey]());
+
 let noncallableArgumentRan = false;
 try {
   ({ run: 1 }).run((noncallableArgumentRan = true));

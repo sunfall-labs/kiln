@@ -4406,7 +4406,13 @@ fn emit_call_prepared_method(
         if position != 0 {
             arguments.push_str(", ");
         }
-        arguments.push_str(&format!("v{}", arg.0));
+        if ctx.live_numbers.contains(arg) {
+            arguments.push_str(&format!("kiln_c99_val_from_double(d{})", arg.0));
+        } else if ctx.live_ints.contains(arg) {
+            arguments.push_str(&format!("kiln_c99_val_from_double((double)i{})", arg.0));
+        } else {
+            arguments.push_str(&format!("v{}", arg.0));
+        }
     }
     if argc == 0 {
         arguments.push_str(" KILN_VAL_UNDEFINED");

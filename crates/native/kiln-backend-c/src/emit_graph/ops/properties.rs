@@ -5,6 +5,10 @@ use crate::graph::{GraphOp, ValueId, resolve_const_string};
 use kiln_ir::Constant;
 use std::fmt::Write;
 
+fn prepared_method_property(vid: ValueId, ctx: &OpContext) -> bool {
+    ctx.prepared_method_properties.contains(&vid)
+}
+
 /// `GraphOp::GetProperty { object, name, .. }`, moved out of `emit_graph_op`'s match verbatim.
 pub(super) fn emit_get_property(
     output: &mut String,
@@ -29,6 +33,23 @@ pub(super) fn emit_get_property(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if prepared_method_property(vid, ctx) {
+        let key_str = match program.constants.get(*name as usize) {
+            Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let operation = crate::string::c_string(&format!("GetProperty({key_str})"));
+        let operation = &operation[1..operation.len() - 1];
+        let check = status_check(diagnostic_site, pc, operation, unwind);
+        let source = crate::diagnostic_source(diagnostic_site);
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            o = object.0,
+        )
+        .unwrap();
+        return;
+    }
     if let Some(&root) = graph.scalar_alias_map.get(object)
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
     {

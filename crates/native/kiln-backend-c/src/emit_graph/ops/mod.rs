@@ -64,6 +64,7 @@ pub(super) struct OpContext<'a> {
     /// suspension path; its generated runtime guard retains the generic fallback for other values.
     pub await_resolve_arg: Option<ValueId>,
     pub used: &'a HashSet<ValueId>,
+    pub prepared_method_properties: &'a HashSet<ValueId>,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -236,6 +237,7 @@ pub(super) fn emit_graph_op(
     boxed: Option<&HashSet<ValueId>>,
     await_resolve_arg: Option<ValueId>,
     used: &HashSet<ValueId>,
+    prepared_method_properties: &HashSet<ValueId>,
     argument_length_values: &HashSet<ValueId>,
 ) {
     let v = vid.0;
@@ -279,6 +281,7 @@ pub(super) fn emit_graph_op(
         boxed,
         await_resolve_arg,
         used,
+        prepared_method_properties,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {

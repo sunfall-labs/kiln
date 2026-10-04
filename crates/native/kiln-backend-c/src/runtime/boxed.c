@@ -2332,18 +2332,14 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
     return status;
 }
 
-/* A method call on machine values, end to end. The property is read once through the site's
- * inline cache on `kiln_val`; a plain strict or arrow closure that publishes no frame is entered
- * directly with the machine arguments; only a built-in method or an exotic callee crosses to the
- * boundary representation, and then only its arguments. This is the seam the shape and slot
- * migration left in front of every method call: the stack-shaped op below converts the whole
- * frame both ways and re-reads nothing, but it does convert. */
-static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
-                                         size_t argc, const kiln_string *key,
-                                         const kiln_string *canonical, int depth,
-                                         kiln_value *thrown, kiln_c99_site *site,
-                                         const char *inst_site, size_t inst_idx,
-                                         const char *inst_op, kiln_val *out) {
+/* Resolve and cache a method without invoking it. Prepared method calls use this at the
+ * original property-read point, before evaluating arguments; the resulting callee remains the
+ * authority at invocation time. */
+int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
+                                     const kiln_string *key, const kiln_string *canonical,
+                                     int depth, kiln_value *thrown, kiln_c99_site *site,
+                                     const char *inst_site, size_t inst_idx,
+                                     const char *inst_op, kiln_val *out) {
     kiln_val method = 0;
     int from_cache = 0;
     if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver, key))) {
@@ -2426,6 +2422,32 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
             }
         }
     }
+
+    *out = method;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_val_prepare_method_key(kiln_host *host, kiln_val receiver,
+                                    const kiln_string *key, int depth, kiln_value *thrown,
+                                    kiln_c99_site *site, const char *inst_site,
+                                    size_t inst_idx, const char *inst_op, kiln_val *out) {
+    key = kiln_c99_compiler_named_key(key);
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
+    return kiln_c99_val_prepare_method_view(host, receiver, key, key, depth, thrown, site,
+                                            inst_site, inst_idx, inst_op, out);
+}
+
+/* Invoke a method using the callee resolved by the shared method-site lookup above. */
+static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                         size_t argc, const kiln_string *key,
+                                         const kiln_string *canonical, int depth,
+                                         kiln_value *thrown, kiln_c99_site *site,
+                                         const char *inst_site, size_t inst_idx,
+                                         const char *inst_op, kiln_val *out) {
+    kiln_val method = KILN_VAL_UNDEFINED;
+    int status = kiln_c99_val_prepare_method_view(host, receiver, key, canonical, depth, thrown,
+                                                  site, inst_site, inst_idx, inst_op, &method);
+    if (status != KILN_C99_OK) return status;
 
     if (KILN_VAL_IS_CLOSURE(method)) {
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method);
