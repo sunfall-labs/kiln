@@ -97,8 +97,9 @@ pub(crate) const RESERVED_KEY_PREFIX: &str = "@@";
 ///
 /// `every_internal_slot_is_reserved` in `tests.rs` scans this crate for `"@@..."` literals and
 /// fails if one is missing from here, so a new slot cannot quietly start enumerating.
-const INTERNAL_SLOTS: [&str; 39] = [
+const INTERNAL_SLOTS: [&str; 40] = [
     "@@abort-listeners",
+    "@@abort-dispatch",
     "@@asyncDisposeDone",
     "@@asyncDisposeEntries",
     "@@call-site-name",
