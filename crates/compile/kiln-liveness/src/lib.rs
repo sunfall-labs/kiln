@@ -504,6 +504,21 @@ pub fn select_executable_modules<'a>(
             queue.push_back(path.to_path_buf());
         }
     };
+    // A newly escaping namespace widens the provider's demand even when that provider
+    // was already visited for a static subset. Requeue on either state transition.
+    let mark_namespace_live = |path: &Path,
+                               live: &mut BTreeSet<PathBuf>,
+                               namespace_demands: &mut BTreeSet<PathBuf>,
+                               queue: &mut VecDeque<PathBuf>| {
+        if options.excluded.contains(path) {
+            return;
+        }
+        let newly_live = live.insert(path.to_path_buf());
+        let newly_demanded = namespace_demands.insert(path.to_path_buf());
+        if newly_live || newly_demanded {
+            queue.push_back(path.to_path_buf());
+        }
+    };
     mark_live(graph.entry(), &mut live, &mut queue);
     // Declared includes are potential runtime entries (for example a worker's target supplied
     // in workerData). They are linked and retained, but entry evaluation still starts only from
@@ -591,10 +606,14 @@ pub fn select_executable_modules<'a>(
             if dependency.resolve_only {
                 continue;
             }
-            mark_live(&dependency.target, &mut live, &mut queue);
             // A lazy require returns the target's complete runtime value. Preserve its CommonJS
             // module.exports slot or, for ESM, demand the full namespace before reduction.
-            namespace_demands.insert(dependency.target.clone());
+            mark_namespace_live(
+                &dependency.target,
+                &mut live,
+                &mut namespace_demands,
+                &mut queue,
+            );
         }
 
         for (import_index, import) in node.program.imports.iter().enumerate() {
@@ -641,8 +660,12 @@ pub fn select_executable_modules<'a>(
                         &mut queue,
                     )?;
                 } else {
-                    namespace_demands.insert(dependency.target.clone());
-                    mark_live(&dependency.target, &mut live, &mut queue);
+                    mark_namespace_live(
+                        &dependency.target,
+                        &mut live,
+                        &mut namespace_demands,
+                        &mut queue,
+                    );
                 }
                 continue;
             }
@@ -736,8 +759,7 @@ pub fn select_executable_modules<'a>(
                             &mut queue,
                         )?;
                     } else {
-                        namespace_demands.insert(module.clone());
-                        mark_live(module, &mut live, &mut queue);
+                        mark_namespace_live(module, &mut live, &mut namespace_demands, &mut queue);
                     }
                 }
                 Some(ResolvedExport::Ambiguous) | None => {
@@ -1250,6 +1272,87 @@ exports.annotations = function (ast, values) { return values; };
             matches!(&failed, Some(ModuleGraphError::MissingExport { name, .. }) if name == "missing"),
             "named import of an absent export must fail to link, got {failed:?}"
         );
+    }
+
+    #[test]
+    fn escaping_namespace_requeues_an_already_live_partial_provider() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-namespace-promote-{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let _cleanup = TempProject(root.clone());
+        fs::write(
+            root.join("package.json"),
+            r#"{"type":"module","sideEffects":false}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("provider.mjs"),
+            "export const a = 1; export const b = 2;",
+        )
+        .unwrap();
+        fs::write(
+            root.join("barrel.mjs"),
+            "export * as ns from './provider.mjs';",
+        )
+        .unwrap();
+        let provider = root.join("provider.mjs");
+        for dynamic_through_barrel in [false, true] {
+            let dynamic_import = if dynamic_through_barrel {
+                "import { ns } from './barrel.mjs';"
+            } else {
+                "import * as ns from './provider.mjs';"
+            };
+            fs::write(
+                root.join("consumer.mjs"),
+                format!("{dynamic_import} export function pick(key) {{ return ns[key]; }}"),
+            )
+            .unwrap();
+            for through_barrel in [false, true] {
+                let partial = if through_barrel {
+                    "import { ns } from './barrel.mjs';"
+                } else {
+                    "import * as ns from './provider.mjs';"
+                };
+                for partial_first in [true, false] {
+                    let dynamic = "import { pick } from './consumer.mjs';";
+                    let imports = if partial_first {
+                        format!("{partial}\n{dynamic}")
+                    } else {
+                        format!("{dynamic}\n{partial}")
+                    };
+                    let entry = root.join("entry.mjs");
+                    fs::write(&entry, format!("{imports}\nconsole.log(ns.a, pick('b'));")).unwrap();
+                    let resolver = kiln_module_resolver::NodeRuntimeResolver::new(&root).unwrap();
+                    let graph = kiln_module_graph::ModuleGraph::build_node(
+                        &entry,
+                        resolver,
+                        |path: &Path| fs::read_to_string(path),
+                        OxcFrontend,
+                    )
+                    .unwrap();
+                    let selected =
+                        select_executable_modules(&graph, &SelectionOptions::development())
+                            .unwrap();
+                    let b = match graph.resolved_export(&provider, "b") {
+                        Some(ResolvedExport::Local { local_slot, .. }) => *local_slot,
+                        other => panic!("missing b: {other:?}"),
+                    };
+                    assert!(
+                        selected
+                            .live_export_slots
+                            .get(&provider)
+                            .is_some_and(|slots| slots.contains(&b)),
+                        "full namespace lost b: through_barrel={through_barrel}, dynamic_through_barrel={dynamic_through_barrel}, partial_first={partial_first}"
+                    );
+                    assert!(!selected.partial_namespace_members.contains_key(&provider));
+                }
+            }
+        }
     }
 
     #[test]
