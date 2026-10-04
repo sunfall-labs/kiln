@@ -1,3 +1,8 @@
+/* These shared initializers live in the later runtime parts. Keep the parallel-arena literals
+ * on the same complete layout contract as ordinary allocations. */
+static void kiln_c99_object_init(kiln_object *object, size_t tail_slots);
+static void kiln_c99_array_init(kiln_array *array, int is_numeric);
+
 /* Makes room for `needed` slots, exactly as the generic per-key path grows: doubling from the
  * inline slots or from whatever heap array is there, new slots undefined. */
 static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
@@ -1676,34 +1681,8 @@ static int kiln_c99_par_key_plain(const kiln_string *ikey) {
 
 static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
     kiln_object *object = (kiln_object *)kiln_c99_par_alloc(arena, KILN_GC_OBJECT, sizeof *object);
-    size_t slot;
     if (object == NULL) return 0;
-    kiln_c99_heap_store_pointer(object, &object->properties, NULL);
-    object->count = 0;
-    object->capacity = 0;
-    kiln_c99_heap_store_value(object, &object->prototype, kiln_c99_undefined());
-    object->frozen = 0;
-    object->not_extensible = 0;
-    object->module_namespace = 0;
-    object->arguments_brand = 0;
-    object->error_brand = 0;
-    object->layout_token = 0;
-    object->sealed = NULL;
-    object->candidate_properties = 0;
-    object->candidate_slots = 0;
-    object->candidate_elements = 0;
-    object->primitive_wrapper_kind = KILN_C99_WRAPPER_NONE;
-    object->dictionary_index = NULL;
-    kiln_c99_heap_store_value(object, &object->boxed_primitive, kiln_c99_undefined());
-    object->accessor_count = 0;
-    object->read_only_seen = 0;
-    object->shape = kiln_c99_shape_root();
-    kiln_c99_heap_store_pointer(object, &object->slots, object->inline_slots);
-    object->slot_capacity = KILN_C99_INLINE_SLOTS;
-    for (slot = 0; slot < KILN_C99_INLINE_SLOTS; ++slot) kiln_c99_heap_store_val(object, &object->inline_slots[slot], KILN_VAL_UNDEFINED);
-    kiln_c99_heap_store_pointer(object, &object->elements, NULL);
-    object->element_count = 0;
-    object->element_capacity = 0;
+    kiln_c99_object_init(object, 0);
     *out = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
     return 1;
 }
@@ -1823,17 +1802,7 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
         numeric &= KILN_VAL_IS_NUMBER(elements[index]) ? 1 : 0;
     }
     if (elements == NULL) numeric = 0;
-    kiln_c99_heap_store_pointer(array, &array->elements, NULL);
-    array->count = 0;
-    array->capacity = 0;
-    kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
-    array->frozen = 0;
-    array->not_extensible = 0;
-    array->match_index = -1;
-    kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
-    kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
-    array->is_numeric = numeric;
-    array->candidate_elements = 0;
+    kiln_c99_array_init(array, numeric);
     if (in_block > 0) {
         kiln_c99_heap_store_pointer(array, &array->elements, (kiln_val *)(array + 1));
         array->capacity = in_block;

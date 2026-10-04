@@ -51,6 +51,60 @@ int main(void) {
 }
 
 #[test]
+fn parallel_arena_initializers_clear_runtime_metadata() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_c99_par_env env = {0};
+    kiln_c99_par_arena *arena;
+    kiln_val object_value = KILN_VAL_UNDEFINED;
+    kiln_val array_value = KILN_VAL_UNDEFINED;
+    kiln_object *object;
+    kiln_array *array;
+    int result = 0;
+    env.heap = kiln_c99_gc_heap();
+    if (!kiln_c99_par_arenas_open(&env, 1)) return 1;
+    arena = kiln_c99_par_arena_claim(&env);
+    if (arena == NULL || !kiln_c99_par_arena_refill(arena)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 2;
+    }
+    memset(arena->bump + sizeof(kiln_gc_block), 0xa5, sizeof(kiln_object));
+    if (!kiln_c99_par_object(arena, &object_value)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 3;
+    }
+    object = (kiln_object *)KILN_VAL_PTR(object_value);
+    if (object->external_owner != NULL || object->raw_json_brand != 0 ||
+        object->error_stack_frames.tag != KILN_VALUE_UNDEFINED ||
+        object->prototype.tag != KILN_VALUE_UNDEFINED || object->properties != NULL ||
+        object->shape == NULL || object->slots == NULL) result = 4;
+
+    memset(arena->bump + sizeof(kiln_gc_block), 0xa5, sizeof(kiln_array));
+    if (!kiln_c99_par_array(arena, NULL, 0, &array_value)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 5;
+    }
+    array = (kiln_array *)KILN_VAL_PTR(array_value);
+    if (array->has_index_descriptors != 0 || array->properties.tag != KILN_VALUE_UNDEFINED ||
+        array->match_index != -1 || array->match_input.tag != KILN_VALUE_UNDEFINED ||
+        array->match_groups.tag != KILN_VALUE_UNDEFINED || array->elements != NULL ||
+        array->count != 0 || array->capacity != 0) result = 6;
+    (void)kiln_c99_par_arenas_join(&env, 0);
+    return result;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "parallel-arena-initializer-poison");
+    assert!(
+        run.status.success(),
+        "parallel arena initializer retained poisoned metadata ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     let module = ModuleProgram {
         program: Program {
