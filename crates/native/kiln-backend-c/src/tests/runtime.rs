@@ -105,6 +105,87 @@ int main(void) {
 }
 
 #[test]
+fn poisoned_parallel_chunk_child_survives_minor_collection() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int poisoned_chunk_minor_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_par_arena arena = {0};
+    kiln_value parent = kiln_c99_undefined();
+    kiln_value registry = kiln_c99_undefined();
+    kiln_val child = KILN_VAL_UNDEFINED;
+    kiln_val child_element = KILN_VAL_TRUE;
+    kiln_array *parent_array;
+    kiln_array *child_array;
+    kiln_gc_block *child_block;
+    kiln_nursery_chunk *chunk;
+    char *region;
+    size_t capacity;
+    size_t minor_before;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->enabled = 1;
+    heap->fallback = 0;
+    heap->stress = 0;
+    heap->force_pending = 0;
+    heap->floor = SIZE_MAX;
+    heap->since_collection = 0;
+    heap->minor_audit_enabled = 1;
+    if (kiln_c99_new_array_with_capacity(&parent, 1, 0) != KILN_C99_OK ||
+        kiln_c99_new_collection(&registry, 1, 0) != KILN_C99_OK) return 2;
+    heap->realm.isolated_graphs = registry;
+    if (kiln_c99_collection_put(registry, parent, parent) != KILN_C99_OK) return 3;
+
+    capacity = heap->nursery.capacity;
+    region = (char *)kiln_c99_gc_aligned_alloc(capacity, capacity);
+    if (region == NULL) return 4;
+    memset(region, 0xa5, capacity);
+    chunk = kiln_c99_chunk_lay_out(region, heap->nursery.bitmap_words);
+    arena.heap = heap;
+    arena.current = chunk;
+    arena.bump = chunk->base;
+    arena.limit = region + capacity;
+    arena.budget = capacity;
+    arena.taken = capacity;
+    if (!kiln_c99_par_array(&arena, &child_element, 1, &child)) {
+        kiln_c99_gc_aligned_free(region);
+        return 5;
+    }
+    kiln_c99_par_arena_seal(&arena);
+    if (!kiln_c99_heap_adopt_chunks(heap, arena.filled)) return 6;
+    parent_array = (kiln_array *)(uintptr_t)parent.bits;
+    kiln_c99_heap_store_val(parent_array, &parent_array->elements[0], child);
+    parent_array->count = 1;
+    minor_before = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+
+    child_block = kiln_c99_gc_lookup(heap, KILN_VAL_PTR(child));
+    if (heap->minor_audit_collections != minor_before + 1 || child_block == NULL) return 7;
+    child_array = (kiln_array *)(uintptr_t)KILN_VAL_PTR(child);
+    if (child_array->count != 1 || child_array->elements[0] != KILN_VAL_TRUE) return 8;
+    return 0;
+}
+
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    status = kiln_realm_enter(realm, poisoned_chunk_minor_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 10;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "poisoned-parallel-chunk-minor");
+    assert!(
+        run.status.success(),
+        "rooted child in poisoned parallel chunk did not survive minor collection ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     let module = ModuleProgram {
         program: Program {

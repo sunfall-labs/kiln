@@ -883,6 +883,10 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     kiln_nursery_chunk *chunk;
     size_t bitmap_bytes;
     chunk = (kiln_nursery_chunk *)region;
+    /* Worker arenas call this shared layout routine directly, without nursery_use's generation
+     * reset. Clear the full header so each new chunk starts young and no metadata inherits bytes
+     * from the allocator's previous occupant. */
+    memset(chunk, 0, sizeof *chunk);
     chunk->bitmap_words = bitmap_words;
     bitmap_bytes = (chunk->bitmap_words * sizeof(uint64_t) + 15) & ~(size_t)15;
     chunk->bitmap = (uint64_t *)(region + KILN_NURSERY_HEADER);
@@ -891,21 +895,6 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     memset(chunk->bitmap, 0, 3 * bitmap_bytes);
     chunk->base = region + KILN_NURSERY_HEADER + 3 * bitmap_bytes;
     chunk->limit = chunk->base;
-    chunk->live_count = 0;
-    chunk->alloc_count = 0;
-    chunk->alloc_bytes = 0;
-    chunk->marked_count = 0;
-    chunk->marked_bytes = 0;
-    chunk->mark_epoch = 0;
-    chunk->candidate_epoch = 0;
-    chunk->candidate_id = 0;
-    chunk->candidate_state = 0;
-    chunk->in_full = 0;
-    chunk->full_prev = NULL;
-    chunk->next = NULL;
-    chunk->candidate_group = NULL;
-    chunk->candidate_prev = NULL;
-    chunk->candidate_next = NULL;
     return chunk;
 }
 
