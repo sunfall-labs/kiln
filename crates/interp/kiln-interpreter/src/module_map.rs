@@ -67,6 +67,25 @@ pub struct ModuleMap {
     runner_candidates: HashMap<RealmId, std::collections::HashSet<String>>,
     runner_referrers: HashMap<RealmId, String>,
     spy_adapter_referrers: HashMap<RealmId, String>,
+    /// Weak graph census shared by every VM in this realm session. Module execution allocates
+    /// closures in distinct machines, while explicit collection can be requested from any one
+    /// of them; keeping weak identities here lets that request see cross-module cycles.
+    pub(super) gc_closures: Vec<Weak<Closure>>,
+    pub(super) gc_closures_prune_at: usize,
+    pub(super) gc_weak_ref_objects: Vec<Weak<RefCell<ObjectData>>>,
+    pub(super) gc_weak_ref_objects_prune_at: usize,
+    /// Strong targets kept alive through the current ECMAScript job. The job can resume in a
+    /// different VM, so its keepalive set belongs to the realm session rather than one machine.
+    pub(super) weak_ref_keepalive: Vec<Value>,
+    /// Cached resume-point local liveness, keyed by the owning program allocation and function.
+    /// The weak program edge keeps cached analyses from extending a dead module's lifetime.
+    pub(super) gc_suspended_locals: HashMap<(usize, u32), SuspendedLocalCache>,
+    pub(super) gc_suspended_locals_prune_at: usize,
+}
+
+pub(super) struct SuspendedLocalCache {
+    pub(super) program: Weak<Program>,
+    pub(super) by_yield_pc: HashMap<usize, std::collections::HashSet<u32>>,
 }
 
 /// The map as the session shares it between every machine that runs one of its modules.

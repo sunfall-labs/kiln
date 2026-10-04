@@ -39,6 +39,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut data = ObjectData::default();
         if let Value::Object(object) = &target {
             data.weak_ref_object_target = Some(Rc::downgrade(object));
+            let module_map = self.gc_module_map();
+            let mut module_map = module_map.borrow_mut();
+            if module_map.gc_weak_ref_objects.len() >= module_map.gc_weak_ref_objects_prune_at {
+                module_map
+                    .gc_weak_ref_objects
+                    .retain(|entry| entry.strong_count() > 0);
+                module_map.gc_weak_ref_objects_prune_at = module_map
+                    .gc_weak_ref_objects
+                    .len()
+                    .saturating_add(module_map.gc_weak_ref_objects.len().max(1024));
+            }
+            module_map.gc_weak_ref_objects.push(Rc::downgrade(object));
             data.set_non_enumerable(WEAK_REF_TARGET, Value::Undefined);
         } else if let Value::Shared(facade) = &target {
             data.weak_shared_target = Some(Rc::downgrade(&facade));
@@ -46,11 +58,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             data.set_non_enumerable(WEAK_REF_TARGET, target.clone());
         }
-        // A SharedFacade owns the graph lease. Keeping the facade alive through this VM's
+        // A SharedFacade owns the graph lease. Keeping the facade alive through this realm's
         // job would therefore make a WeakRef extend the lifetime of an otherwise dead graph.
         // The graph is immutable and its weak target can be upgraded directly at deref time.
         if !matches!(target, Value::Shared(_)) {
-            self.weak_ref_keepalive.push(target);
+            self.gc_module_map()
+                .borrow_mut()
+                .weak_ref_keepalive
+                .push(target);
         }
         data.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::WeakRef),
@@ -114,7 +129,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if let Some(target) = &data.weak_ref_object_target {
                 if let Some(target) = target.upgrade() {
                     let value = Value::Object(target);
-                    self.weak_ref_keepalive.push(value.clone());
+                    self.gc_module_map()
+                        .borrow_mut()
+                        .weak_ref_keepalive
+                        .push(value.clone());
                     return Ok(value);
                 }
                 return Ok(Value::Undefined);
@@ -127,7 +145,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(Value::Undefined);
             }
         }
-        self.weak_ref_keepalive.push(stored.clone());
+        self.gc_module_map()
+            .borrow_mut()
+            .weak_ref_keepalive
+            .push(stored.clone());
         Ok(stored)
     }
 

@@ -41,7 +41,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             current_realm: RealmId::PRIMARY,
             shared_facades: Rc::new(RefCell::new(SharedCache::default())),
             isolated_graphs: Rc::new(RefCell::new(Vec::new())),
-            weak_ref_keepalive: Vec::new(),
             actor_realm_id: kiln_runtime::workers::actor_request_id(),
             actor_graph_requests: Rc::new(RefCell::new(std::collections::HashMap::new())),
             async_context: AsyncContext::default(),
@@ -114,6 +113,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             },
             entropy,
             closures: Vec::new(),
+            closures_prune_at: 0,
             module_map: SharedModuleMap::default(),
             limits,
         })
@@ -208,6 +208,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// not `Drop` and why [`execute_reclaiming`] is its only caller: `execute_module` hands live
     /// functions to the next module in the graph, and clearing those would hollow out an export.
     pub(super) fn release_cycles(&mut self) {
+        self.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
         for weak in self.closures.drain(..) {
             let Some(closure) = weak.upgrade() else {
                 continue;

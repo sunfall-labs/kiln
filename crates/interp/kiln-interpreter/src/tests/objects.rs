@@ -1774,8 +1774,205 @@ fn weak_ref_object_target_lives_only_through_the_current_job() {
         vm.weak_ref_deref(&reference, 0),
         Ok(Value::Object(_))
     ));
-    vm.weak_ref_keepalive.clear();
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
     assert_eq!(vm.weak_ref_deref(&reference, 0), Ok(Value::Undefined));
+}
+
+#[test]
+fn weak_ref_collection_reclaims_unreachable_object_cycles() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let first = Rc::new(RefCell::new(ObjectData::default()));
+    let second = Rc::new(RefCell::new(ObjectData::default()));
+    first
+        .borrow_mut()
+        .set("next", Value::Object(Rc::clone(&second)));
+    second
+        .borrow_mut()
+        .set("next", Value::Object(Rc::clone(&first)));
+    let weak_target = Rc::downgrade(&first);
+    let weak_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&first))], 0)
+        .unwrap();
+    // A collection request inside the same job must respect WeakRef's keepalive guarantee.
+    vm.collect_closure_cycles();
+    assert!(weak_target.upgrade().is_some());
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(first);
+    drop(second);
+
+    vm.collect_closure_cycles();
+
+    assert!(weak_target.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+}
+
+#[test]
+fn weak_ref_keepalive_and_collection_are_shared_across_module_machines() {
+    let program = no_program();
+    let mut first_host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut second_host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut creator = test_vm(&program, &mut first_host);
+    let mut collector = test_vm(&program, &mut second_host);
+    let session = ModuleRealmSession::without_adapter();
+    let realm_map = session.module_map();
+    creator.module_realm = Some(Rc::clone(&session.shared));
+    creator.module_map = Rc::clone(&realm_map);
+    collector.module_realm = Some(Rc::clone(&session.shared));
+    // A new VM's local default must not hide the authoritative session census.
+    collector.module_map = SharedModuleMap::default();
+
+    let target = Rc::new(RefCell::new(ObjectData::default()));
+    let weak_target = Rc::downgrade(&target);
+    let weak_ref = creator
+        .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+        .unwrap();
+    drop(target);
+
+    collector.collect_closure_cycles();
+    assert!(
+        weak_target.upgrade().is_some(),
+        "same-job keepalive is realm-wide"
+    );
+
+    realm_map.borrow_mut().weak_ref_keepalive.clear();
+    collector.collect_closure_cycles();
+
+    assert!(weak_target.upgrade().is_none());
+    assert_eq!(collector.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+}
+
+#[test]
+fn weak_ref_collection_reclaims_unreachable_closure_object_cycles() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let object = Rc::new(RefCell::new(ObjectData::default()));
+    let closure = Rc::new(Closure {
+        program: Rc::clone(&program),
+        function: 0,
+        strictness: Rc::new(Strictness::sloppy(&program)),
+        module_path: None,
+        name: None,
+        inferred_name: None,
+        upvalues: Vec::new(),
+        realm: RealmId::PRIMARY,
+        captured_arguments: None,
+        captured_new_target: None,
+        captured_this: None,
+        prototype: RefCell::new(Some(Value::Object(Rc::clone(&object)))),
+        properties: RefCell::new(ObjectData::default()),
+    });
+    object
+        .borrow_mut()
+        .set("callback", Value::Function(Rc::clone(&closure)));
+    // A closure created by another module VM is present only in the realm-shared census.
+    vm.module_map
+        .borrow_mut()
+        .gc_closures
+        .push(Rc::downgrade(&closure));
+    let weak_target = Rc::downgrade(&object);
+    let weak_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&object))], 0)
+        .unwrap();
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(object);
+    drop(closure);
+
+    vm.collect_closure_cycles();
+
+    assert!(weak_target.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+}
+
+#[test]
+fn weak_ref_collection_keeps_rooted_cycles_and_does_not_keep_incoming_dead_nodes() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    let rooted = Rc::new(RefCell::new(ObjectData::default()));
+    let rooted_peer = Rc::new(RefCell::new(ObjectData::default()));
+    rooted
+        .borrow_mut()
+        .set("peer", Value::Object(Rc::clone(&rooted_peer)));
+    rooted_peer
+        .borrow_mut()
+        .set("peer", Value::Object(Rc::clone(&rooted)));
+    let rooted_weak = Rc::downgrade(&rooted);
+    let rooted_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&rooted))], 0)
+        .unwrap();
+
+    let dead = Rc::new(RefCell::new(ObjectData::default()));
+    let dead_peer = Rc::new(RefCell::new(ObjectData::default()));
+    let live = Rc::new(RefCell::new(ObjectData::default()));
+    dead.borrow_mut()
+        .set("peer", Value::Object(Rc::clone(&dead_peer)));
+    dead.borrow_mut()
+        .set("live", Value::Object(Rc::clone(&live)));
+    dead_peer
+        .borrow_mut()
+        .set("peer", Value::Object(Rc::clone(&dead)));
+    let dead_weak = Rc::downgrade(&dead);
+    let live_weak = Rc::downgrade(&live);
+    let dead_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&dead))], 0)
+        .unwrap();
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(dead);
+    drop(dead_peer);
+
+    vm.collect_closure_cycles();
+
+    assert!(
+        rooted_weak.upgrade().is_some(),
+        "an outside owner keeps its graph live"
+    );
+    assert!(
+        dead_weak.upgrade().is_none(),
+        "a live descendant must not retain incoming dead nodes"
+    );
+    assert!(
+        live_weak.upgrade().is_some(),
+        "the outside owner remains intact"
+    );
+    assert!(matches!(
+        vm.weak_ref_deref(&rooted_ref, 0),
+        Ok(Value::Object(_))
+    ));
+    assert_eq!(vm.weak_ref_deref(&dead_ref, 0), Ok(Value::Undefined));
 }
 
 #[test]

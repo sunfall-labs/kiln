@@ -136,7 +136,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Registered before it is handed out, so a closure that ends up in a cycle is still
         // something `release_cycles` can reach.
+        if self.closures.len() >= self.closures_prune_at {
+            self.closures.retain(|entry| entry.strong_count() > 0);
+            self.closures_prune_at = self
+                .closures
+                .len()
+                .saturating_add(self.closures.len().max(1024));
+        }
         self.closures.push(Rc::downgrade(&closure));
+        let module_map = self.gc_module_map();
+        let mut module_map = module_map.borrow_mut();
+        if module_map.gc_closures.len() >= module_map.gc_closures_prune_at {
+            module_map
+                .gc_closures
+                .retain(|entry| entry.strong_count() > 0);
+            module_map.gc_closures_prune_at = module_map
+                .gc_closures
+                .len()
+                .saturating_add(module_map.gc_closures.len().max(1024));
+        }
+        module_map.gc_closures.push(Rc::downgrade(&closure));
         Ok(closure)
     }
 }

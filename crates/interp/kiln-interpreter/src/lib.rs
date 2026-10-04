@@ -2223,6 +2223,8 @@ mod vm_constructors;
 mod vm_control;
 #[path = "vm/conversions.rs"]
 mod vm_conversions;
+#[path = "vm/cycle_gc.rs"]
+mod vm_cycle_gc;
 #[path = "vm/data_view.rs"]
 mod vm_data_view;
 #[path = "vm/date_ops.rs"]

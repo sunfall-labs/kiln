@@ -6327,7 +6327,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             self.drain_microtasks(runtime)?;
             // WeakRef targets are kept alive through the preceding job and its microtask
             // checkpoint, then released before the next host turn starts.
-            self.weak_ref_keepalive.clear();
+            self.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
             self.checkpoint_runtime_http(runtime)?;
             // An entry-module rejection must reach its caller even if an actor, server or
             // timer remains referenced. Successful entries still drain their live resources;

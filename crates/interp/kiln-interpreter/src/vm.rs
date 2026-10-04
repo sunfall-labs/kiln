@@ -200,8 +200,6 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Private actor graph roots. Weak handle identities stay in the engine; JavaScript holds
     /// only opaque handles and transfer tickets, never the graph in a module WeakMap.
     pub(super) isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
-    /// Values reached by WeakRef construction/deref stay alive through the current job only.
-    pub(super) weak_ref_keepalive: Vec<Value>,
     pub(super) actor_realm_id: u64,
     pub(super) actor_graph_requests: Rc<RefCell<std::collections::HashMap<u64, u8>>>,
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
@@ -411,9 +409,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// function a program evaluates stays allocated until the process exits. A program that runs
     /// once never notices; a harness that runs the whole of Test262 in one process grows by the
     /// size of every function it has ever seen and is killed well before the end. Weak, so the
-    /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
-    /// the closures again and cut the links.
+    /// registry itself keeps nothing alive -- it exists only so cycle collection can discover
+    /// candidates without treating the census as a root.
     pub(super) closures: Vec<Weak<Closure>>,
+    pub(super) closures_prune_at: usize,
     /// The realm's module map (see [`ModuleMap`]): what each module has come to, by realm and
     /// canonical key. Shared with every other machine in this realm session, and with the static
     /// graph executor, so a module is evaluated once however it is reached. A machine running

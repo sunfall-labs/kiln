@@ -5,6 +5,7 @@ pub mod demanded;
 mod dominators;
 pub mod graph;
 pub mod summary;
+mod suspended_liveness;
 pub mod validation;
 pub mod verifier;
 
@@ -20,6 +21,7 @@ pub use demanded::{
 pub use graph::*;
 pub use kiln_db::summaries_digest;
 pub use summary::{summarize_function, summarize_graph, summarize_program};
+pub use suspended_liveness::suspended_local_liveness;
 pub use validation::{StackEffectError, stack_effect};
 pub use verifier::{VerifierError, verify_function_graph};
 

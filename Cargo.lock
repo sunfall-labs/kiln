@@ -2515,6 +2515,7 @@ dependencies = [
  "kiln-compression",
  "kiln-date-core",
  "kiln-encoding",
+ "kiln-graph",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",
