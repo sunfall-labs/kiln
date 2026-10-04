@@ -491,16 +491,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.stack.push(result);
                     }
                 }
-                Instruction::CallComputed { argc } => {
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let name = self.string_constant_units(*name, current)?;
                     let arguments = self.take_call_arguments(*argc, current)?;
-                    let key = self.pop(current)?;
+                    let method = self.pop(current)?;
                     let receiver = self.pop(current)?;
-                    // Reading the method is an ordinary read: `o["m"]()` where `m` is a getter
-                    // has to call it, exactly as `o.m()` does.
-                    let read = self.read_computed(&receiver, &key, current);
-                    let Some(method) = self.catchable(read, current)? else {
+                    if !is_callable(&method) {
+                        let shown = name.to_lossy_string();
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("{}.{shown} is not a function", receiver.type_name()),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let invoked = self.invoke(method, receiver, arguments, current, Some(name));
+                    let Some(result) = self.catchable(invoked, current)? else {
                         continue;
                     };
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
+                }
+                Instruction::CallComputed { argc } => {
+                    let arguments = self.take_call_arguments(*argc, current)?;
+                    let method = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let receiver = self.pop(current)?;
                     let method_name = match &key {
                         Value::String(name) => Some(name.clone()),
                         _ => None,

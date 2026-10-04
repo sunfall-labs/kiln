@@ -336,6 +336,8 @@ impl super::Compiler {
         // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
         // pattern reads what the value yields, not what its indices hold.
         self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+        self.code.push(Instruction::Dup2);
+        self.code.push(Instruction::GetComputed);
         self.code.push(Instruction::CallComputed { argc: 0 });
         self.declare_hidden(&iterator, span);
         // The rest of the iterator record. `GetIteratorFromMethod` reads `next` once, before any
@@ -1687,14 +1689,22 @@ impl super::Compiler {
     pub(super) fn emit_iterator_close(&mut self, binding: &str) {
         let name = self.constant_index(Constant::String("return".to_owned().into()));
         self.load_hidden(binding);
+        self.code.push(Instruction::Dup);
         self.code.push(Instruction::GetProperty(name));
+        // GetMethod observes the `return` property once. Preserve the fetched value through the
+        // truthiness test, then call that saved value with the iterator as `this`.
+        self.code.push(Instruction::Dup);
         let skip = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.load_hidden(binding);
-        self.code.push(Instruction::CallMethod { name, argc: 0 });
+        self.code
+            .push(Instruction::CallMethodPrepared { name, argc: 0 });
         // The specification ignores the result unless it is not an object; nothing observes it
         // here, so it is discarded.
         self.code.push(Instruction::Pop);
+        let done = self.emit_jump(Instruction::Jump(0));
         self.patch_jump(skip);
+        self.code.push(Instruction::Pop);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(done);
     }
 
     /// Run every cleanup between here and `depth`, innermost first.
@@ -1908,6 +1918,8 @@ impl super::Compiler {
 
             self.load_hidden(&subject);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(false));
             let chosen = self.emit_jump(Instruction::Jump(0));
@@ -1927,6 +1939,8 @@ impl super::Compiler {
             // only an array.
             self.expression(iterable);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
@@ -2099,6 +2113,8 @@ impl super::Compiler {
             // it does that the async protocol does not.
             self.load_hidden(&subject_binding);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(true));
             let chosen = self.emit_jump(Instruction::Jump(0));
@@ -2115,6 +2131,8 @@ impl super::Compiler {
             self.declare_hidden(&iterator_binding, span);
         } else {
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }

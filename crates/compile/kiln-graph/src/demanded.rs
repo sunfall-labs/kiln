@@ -70,7 +70,8 @@ pub fn analyze_demanded_members(
                             demanded.globals.insert(name);
                         }
                     }
-                    Instruction::CallMethod { name, .. } => {
+                    Instruction::CallMethod { name, .. }
+                    | Instruction::CallMethodPrepared { name, .. } => {
                         if let Some(name) = name_at(*name) {
                             demanded.names.insert(name);
                         }

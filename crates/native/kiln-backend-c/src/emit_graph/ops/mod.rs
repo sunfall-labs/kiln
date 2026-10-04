@@ -1301,10 +1301,21 @@ pub(super) fn emit_graph_op(
             object,
             name,
             args,
+            prepared_callee,
             line,
             column,
             ..
-        } => call_method::emit_call_method(output, vid, object, name, args, *line, *column, &ctx),
+        } => call_method::emit_call_method(
+            output,
+            vid,
+            object,
+            name,
+            args,
+            *line,
+            *column,
+            *prepared_callee,
+            &ctx,
+        ),
         GraphOp::New {
             callee,
             args,

@@ -172,6 +172,11 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 32);
                 word(&mut hash, u64::from(*argc));
             }
+            Instruction::CallMethodPrepared { name, argc } => {
+                byte(&mut hash, 199);
+                word(&mut hash, u64::from(*name));
+                word(&mut hash, u64::from(*argc));
+            }
             Instruction::SuperForward => byte(&mut hash, 36),
             Instruction::SetPrototype => byte(&mut hash, 34),
             Instruction::LoadPrototype => byte(&mut hash, 71),

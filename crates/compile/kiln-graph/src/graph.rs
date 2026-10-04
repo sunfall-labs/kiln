@@ -192,6 +192,9 @@ pub enum GraphOp {
         object: ValueId,
         name: u32,
         args: Vec<ValueId>,
+        /// A property value fetched before the call arguments. When present, call emission must
+        /// invoke this value and must not look up `name` again.
+        prepared_callee: Option<ValueId>,
         site: SiteId,
         line: u32,
         column: u32,
@@ -270,7 +273,13 @@ impl GraphOp {
                     .chain(args.iter().copied())
                     .collect()
             }
-            Self::CallMethod { object, args, .. } => std::iter::once(*object)
+            Self::CallMethod {
+                object,
+                args,
+                prepared_callee,
+                ..
+            } => std::iter::once(*object)
+                .chain(prepared_callee.iter().copied())
                 .chain(args.iter().copied())
                 .collect(),
             Self::NewArray { elements, .. } => elements.clone(),
@@ -337,8 +346,14 @@ impl GraphOp {
                 apply(callee);
                 args.iter_mut().for_each(&mut apply);
             }
-            Self::CallMethod { object, args, .. } => {
+            Self::CallMethod {
+                object,
+                args,
+                prepared_callee,
+                ..
+            } => {
                 apply(object);
+                prepared_callee.iter_mut().for_each(&mut apply);
                 args.iter_mut().for_each(&mut apply);
             }
             Self::NewArray { elements, .. } => elements.iter_mut().for_each(&mut apply),
@@ -1706,6 +1721,7 @@ pub fn build_function_graph(
                             object,
                             name: *name,
                             args,
+                            prepared_callee: None,
                             site,
                             line: program
                                 .debug_call_site(debug_function_span, pc)
@@ -1713,6 +1729,31 @@ pub fn build_function_graph(
                             column: program
                                 .debug_call_site(debug_function_span, pc)
                                 .map_or(0, |entry| entry.column),
+                        },
+                    ));
+                    frame.stack.push(result);
+                }
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let mut args = Vec::with_capacity(*argc as usize);
+                    for _ in 0..*argc {
+                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
+                    }
+                    args.reverse();
+                    let prepared_callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    let call_site = program.debug_call_site(debug_function_span, pc);
+                    operations.push((
+                        result,
+                        GraphOp::CallMethod {
+                            object,
+                            name: *name,
+                            args,
+                            prepared_callee: Some(prepared_callee),
+                            site,
+                            line: call_site.map_or(0, |entry| entry.line),
+                            column: call_site.map_or(0, |entry| entry.column),
                         },
                     ));
                     frame.stack.push(result);

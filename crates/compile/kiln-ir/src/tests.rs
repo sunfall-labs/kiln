@@ -2181,6 +2181,66 @@ fn a_call_without_a_spread_keeps_its_arity_in_the_bytecode() {
 }
 
 #[test]
+fn a_named_method_call_resolves_its_callee_before_argument_evaluation() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(Expression {
+                    kind: ExpressionKind::StaticMember {
+                        object: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("receiver".into()),
+                            span: Span::default(),
+                        }),
+                        property: "run".into(),
+                        optional: false,
+                    },
+                    span: Span::default(),
+                }),
+                arguments: vec![kiln_hir::ListElement::Item(Expression {
+                    kind: ExpressionKind::Identifier("argument".into()),
+                    span: Span::default(),
+                })],
+                optional: false,
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("compiles");
+
+    let lookup = program
+        .code
+        .windows(2)
+        .find_map(|window| match window {
+            [Instruction::Dup, Instruction::GetProperty(name)] => Some(*name),
+            _ => None,
+        })
+        .expect("receiver is duplicated for GetProperty before argument evaluation");
+    let call = program
+        .code
+        .iter()
+        .position(|instruction| {
+            matches!(instruction, Instruction::CallMethodPrepared { name, argc: 1 } if *name == lookup)
+        })
+        .expect("prepared call consumes the saved method");
+    assert!(
+        program
+            .code
+            .iter()
+            .position(|instruction| matches!(
+                instruction,
+                Instruction::GetProperty(name) if *name == lookup
+            ))
+            .is_some_and(|get| get < call)
+    );
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallMethod { .. }))
+    );
+}
+
+#[test]
 fn a_call_with_a_spread_builds_its_arguments_at_runtime() {
     // A spread's length is not known until it runs, so the arity leaves the bytecode and
     // becomes the length of an array the program computes.

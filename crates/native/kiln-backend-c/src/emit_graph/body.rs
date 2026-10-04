@@ -1338,7 +1338,11 @@ fn await_resolve_fusion_arg(
         return None;
     }
     let GraphOp::CallMethod {
-        object, name, args, ..
+        object,
+        name,
+        args,
+        prepared_callee: None,
+        ..
     } = op
     else {
         return None;
@@ -2837,7 +2841,11 @@ fn boxed_uses(
                     used.insert(*value);
                 }
                 GraphOp::CallMethod {
-                    object, name, args, ..
+                    object,
+                    name,
+                    args,
+                    prepared_callee: None,
+                    ..
                 } => {
                     let builtin = match defs.get(object) {
                         Some(GraphOp::LoadBuiltin(b)) => Some(*b),

@@ -128,6 +128,7 @@ pub(crate) fn validate_code(
             | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::GetProperty(name)
             | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. }
                 if matches!(
                     program.constants.get(*name as usize),
                     Some(Constant::String(text))
@@ -163,7 +164,8 @@ pub(crate) fn validate_code(
             | Instruction::RequireGlobalBinding(name)
             | Instruction::LoadGlobalBindingOrUndefined(name)
             | Instruction::DeclareGlobalBinding { name, .. }
-            | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
+            | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
                 Some(_) => {
                     return Err(invalid(
@@ -443,6 +445,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetComputedStrict { .. }
         | Instruction::DefineOwnComputed
         | Instruction::CallMethod { .. }
+        | Instruction::CallMethodPrepared { .. }
         | Instruction::LoadThis
         | Instruction::PushHandler(_)
         | Instruction::PopHandler

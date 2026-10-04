@@ -84,14 +84,13 @@ pub(crate) fn emit_tail_instruction(
             }
         }
         Instruction::CallComputed { argc } => {
-            // Not a `GetComputed` followed by a `Call`: that would discard the receiver, and
-            // `obj[name]()` has to run the method against `obj`. The same reason `CallMethod`
-            // is one instruction rather than two.
+            // The receiver, original key and Get result stay together under the arguments. This
+            // preserves both `this` and the language's Get-before-arguments evaluation order.
             let argc = usize::from(*argc);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = kiln_val_to_boundary(stack[sp - {argc} - 1]); kiln_value self_value = kiln_val_to_boundary(stack[sp - {argc} - 2]); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; const kiln_string *method_name = key.tag == KILN_VALUE_STRING ? (const kiln_string *)key.ptr : NULL; if (method_name != NULL && method.tag == KILN_VALUE_FUNCTION) kiln_c99_js_frame_set_method_name(method_name); status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(call_result); }}",
-                argc + 2
+                "    {{ kiln_value call_result = kiln_c99_undefined(); int status; kiln_value method = kiln_val_to_boundary(stack[sp - {argc} - 1]); kiln_value self_value = kiln_val_to_boundary(stack[sp - {argc} - 3]); kiln_value key = kiln_val_to_boundary(stack[sp - {argc} - 2]); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; const kiln_string *method_name = key.tag == KILN_VALUE_STRING ? (const kiln_string *)key.ptr : NULL; if (method_name != NULL && method.tag == KILN_VALUE_FUNCTION) kiln_c99_js_frame_set_method_name(method_name); status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(call_result); }}",
+                argc + 3,
             )
             .unwrap();
         }

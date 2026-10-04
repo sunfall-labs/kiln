@@ -1,0 +1,154 @@
+// A computed method call site's cache is keyed by both receiver shape and property key.
+const left = Symbol("left");
+const right = Symbol("right");
+const verifyReceiver = Symbol("verifyReceiver");
+const receiver = {
+  label: "receiver",
+  [left]() { return `left:${this.label}`; },
+  [right]() { return `right:${this.label}`; },
+  [verifyReceiver]() { return this === proxied; },
+};
+let selected = left;
+console.log(receiver[selected]());
+selected = right;
+console.log(receiver[selected]());
+selected = left;
+console.log(receiver[selected]());
+const firstName = "first";
+const secondName = "second";
+const alternatingStrings = {
+  [firstName]() { return `first:${this.label}`; },
+  [secondName]() { return `second:${this.label}`; },
+};
+let stringName = firstName;
+console.log(alternatingStrings[stringName]());
+stringName = secondName;
+console.log(alternatingStrings[stringName]());
+stringName = firstName;
+console.log(alternatingStrings[stringName]());
+const keyNameCollision = {
+  "@@iterator"() { return "string key"; },
+  [Symbol.iterator]() { return "symbol key"; },
+};
+console.log(keyNameCollision["@@iterator"](), keyNameCollision[Symbol.iterator]());
+
+// A mutation on the prototype must invalidate the remembered inherited callee.
+const proto = {
+  run() { return `old:${this.label}`; },
+};
+const child = Object.create(proto);
+child.label = "child";
+const run = "run";
+console.log(child[run]());
+proto.run = function () { return `new:${this.label}`; };
+console.log(child[run]());
+
+// Accessors and proxies keep their observable lookup and receiver behavior.
+let getterReads = 0;
+const accessor = {
+  label: "accessor",
+  get [left]() {
+    getterReads += 1;
+    const owner = this;
+    return function () { return `${owner.label}:${getterReads}`; };
+  },
+};
+console.log(accessor[left](), accessor[left](), getterReads);
+let proxyReads = 0;
+const proxied = new Proxy(receiver, {
+  get(target, key, receiverValue) {
+    proxyReads += 1;
+    return Reflect.get(target, key, receiverValue);
+  },
+});
+console.log(proxied[left](), proxied[verifyReceiver](), proxyReads);
+
+// Non-primitive keys still run ToPropertyKey exactly once before the call.
+let conversions = 0;
+const keyObject = {
+  [Symbol.toPrimitive](hint) {
+    conversions += 1;
+    return hint === "string" ? "call" : "wrong";
+  },
+};
+const coercible = { label: "coercible", call() { return this.label; } };
+console.log(coercible[keyObject](), conversions);
+
+const capturedMethod = Symbol("capturedMethod");
+const capturesCallee = {
+  [capturedMethod]() { return "original"; },
+};
+function replaceDuringArgument() {
+  capturesCallee[capturedMethod] = function () { return "replacement"; };
+  return "argument";
+}
+console.log(capturesCallee[capturedMethod](replaceDuringArgument()));
+
+// IteratorClose also uses a prepared named call: `return` is read once, tested, and then
+// invoked with the iterator as its receiver.
+let closeReads = 0;
+let closeCalls = 0;
+const closeIterator = {
+  [Symbol.iterator]() { return this; },
+  next() { return { value: 1, done: false }; },
+  get return() {
+    closeReads += 1;
+    return function () {
+      closeCalls += 1;
+      return {};
+    };
+  },
+};
+for (const _ of closeIterator) break;
+console.log(closeReads, closeCalls);
+
+const orderKey = Symbol("order");
+const order = [];
+const orderedCall = {
+  version: 1,
+  get [orderKey]() {
+    order.push("get");
+    const version = this.version;
+    return function (argument) { return `${version}:${argument}`; };
+  },
+};
+function orderedArgument() {
+  order.push("argument");
+  orderedCall.version = 2;
+  return "value";
+}
+console.log(orderedCall[orderKey](orderedArgument()), order.join(","));
+
+// Named and computed calls both capture the callee before their arguments run.
+const namedOrder = [];
+const namedCall = {
+  get run() {
+    namedOrder.push("get");
+    return function (argument) { return `captured:${argument}`; };
+  },
+};
+function namedArgument() {
+  namedOrder.push("argument");
+  Object.defineProperty(namedCall, "run", {
+    value() { return "replacement"; }, configurable: true,
+  });
+  return "value";
+}
+console.log(namedCall.run(namedArgument()), namedOrder.join(","));
+
+let noncallableArgumentRan = false;
+try {
+  ({ run: 1 }).run((noncallableArgumentRan = true));
+} catch (error) {
+  console.log(error instanceof TypeError, noncallableArgumentRan);
+}
+
+const failingKey = Symbol("failing");
+const failingReceiver = {
+  [failingKey]() { throw new Error("computed symbol failure"); },
+};
+try {
+  failingReceiver[failingKey]();
+} catch (error) {
+  console.log(error.name, error.message, error.stack.includes("computed-method-call-pic.js"));
+}

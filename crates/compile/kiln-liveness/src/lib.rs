@@ -1524,7 +1524,8 @@ pub fn program_provider_capabilities(
             | Instruction::LoadGlobalBindingOrUndefined(name)
             | Instruction::RequireGlobalBinding(name)
             | Instruction::GetProperty(name)
-            | Instruction::CallMethod { name, .. } => *name,
+            | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. } => *name,
             _ => return,
         };
         let Some(Constant::String(name)) = program.constants.get(index as usize) else {

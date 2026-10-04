@@ -263,7 +263,13 @@ pub(crate) fn collect_typed_call_sites(
     let mut sites = Vec::new();
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
-            if let GraphOp::CallMethod { name, args, .. } = op {
+            if let GraphOp::CallMethod {
+                name,
+                args,
+                prepared_callee: None,
+                ..
+            } = op
+            {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s,
                     _ => continue,

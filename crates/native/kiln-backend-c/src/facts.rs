@@ -837,6 +837,27 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     }
                     eval_stack.push(None);
                 }
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let argc = *argc as usize;
+                    let receiver = if eval_stack.len() >= argc + 2 {
+                        eval_stack[eval_stack.len() - argc - 2]
+                    } else {
+                        None
+                    };
+                    if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
+                        if receiver == Some(0) {
+                            req_members_read.insert(prop.to_scalar_string().unwrap_or_default());
+                        } else if receiver == Some(1) {
+                            res_members_read.insert(prop.to_scalar_string().unwrap_or_default());
+                        }
+                    }
+                    if eval_stack.len() >= argc + 2 {
+                        eval_stack.truncate(eval_stack.len() - argc - 2);
+                    } else {
+                        eval_stack.clear();
+                    }
+                    eval_stack.push(None);
+                }
                 Instruction::SetProperty(name)
                 | Instruction::SetPropertyStrict { name, .. }
                 | Instruction::DefineOwnProperty(name) => {

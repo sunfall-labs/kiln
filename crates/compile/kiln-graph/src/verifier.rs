@@ -314,8 +314,16 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                         check_operand(*arg)?;
                     }
                 }
-                GraphOp::CallMethod { object, args, .. } => {
+                GraphOp::CallMethod {
+                    object,
+                    args,
+                    prepared_callee,
+                    ..
+                } => {
                     check_operand(*object)?;
+                    if let Some(callee) = prepared_callee {
+                        check_operand(*callee)?;
+                    }
                     for arg in args {
                         check_operand(*arg)?;
                     }

@@ -3704,7 +3704,8 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::SetSuperPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
-            | Instruction::CallMethod { name, .. } => Some(*name),
+            | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. } => Some(*name),
             _ => None,
         }
     }

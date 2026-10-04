@@ -35,6 +35,7 @@ pub fn instruction_diagnostic(
         .to_owned();
     let named = match instruction {
         kiln_ir::Instruction::CallMethod { name, .. }
+        | kiln_ir::Instruction::CallMethodPrepared { name, .. }
         | kiln_ir::Instruction::GetProperty(name)
         | kiln_ir::Instruction::SetProperty(name)
         | kiln_ir::Instruction::DefineOwnProperty(name)

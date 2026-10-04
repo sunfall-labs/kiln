@@ -384,7 +384,12 @@ impl DirectPlan {
             .chain(std::iter::once((entry, &known.entry)))
         {
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod { name, args, .. } = op
+                if let GraphOp::CallMethod {
+                    name,
+                    args,
+                    prepared_callee: None,
+                    ..
+                } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                     && let Some(method) = key
                         .to_scalar_string()
@@ -615,7 +620,12 @@ impl DirectPlan {
                 return targets;
             }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod { name, args, .. } = op
+                if let GraphOp::CallMethod {
+                    name,
+                    args,
+                    prepared_callee: None,
+                    ..
+                } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                     && args.iter().all(|a| plan.numbers.contains(a))
                 {
@@ -645,7 +655,12 @@ impl DirectPlan {
                 return targets;
             }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod { name, args, .. } = op
+                if let GraphOp::CallMethod {
+                    name,
+                    args,
+                    prepared_callee: None,
+                    ..
+                } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
                     // A family site (parallel issues 10 and 15) calls the typed entries of its
@@ -824,7 +839,12 @@ impl DirectPlan {
                 .iter()
                 .flat_map(|b| b.operations.iter())
                 .flat_map(|(_, op)| match op {
-                    GraphOp::CallMethod { name, args, .. } => parallel_method(*name)
+                    GraphOp::CallMethod {
+                        name,
+                        args,
+                        prepared_callee: None,
+                        ..
+                    } => parallel_method(*name)
                         .map(|method| {
                             method
                                 .callbacks(args.len())
@@ -1342,7 +1362,11 @@ pub(crate) fn intrinsic_results(
         .flat_map(|b| b.operations.iter())
         .filter_map(|(v, op)| match op {
             GraphOp::CallMethod {
-                object, name, args, ..
+                object,
+                name,
+                args,
+                prepared_callee: None,
+                ..
             } if math.contains(object) => {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
@@ -1361,7 +1385,12 @@ pub(crate) fn intrinsic_results(
                     None
                 }
             }
-            GraphOp::CallMethod { object, name, .. } if number.contains(object) => {
+            GraphOp::CallMethod {
+                object,
+                name,
+                prepared_callee: None,
+                ..
+            } if number.contains(object) => {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
@@ -1372,14 +1401,23 @@ pub(crate) fn intrinsic_results(
                 )
                 .then_some((*v, Proven::Boolean))
             }
-            GraphOp::CallMethod { object, name, .. } if array.contains(object) => {
+            GraphOp::CallMethod {
+                object,
+                name,
+                prepared_callee: None,
+                ..
+            } if array.contains(object) => {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
                 };
                 (key == "isArray").then_some((*v, Proven::Boolean))
             }
-            GraphOp::CallMethod { name, .. } => {
+            GraphOp::CallMethod {
+                name,
+                prepared_callee: None,
+                ..
+            } => {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
@@ -1412,21 +1450,22 @@ pub(crate) fn intrinsic_results(
                         op: UnaryOp::TypeOf,
                         ..
                     }) => true,
-                    Some(GraphOp::CallMethod { name, .. }) => {
-                        match program.constants.get(*name as usize) {
-                            Some(Constant::String(s)) => match s.to_scalar_string().ok().as_deref()
-                            {
-                                Some(
-                                    "map" | "filter" | "slice" | "concat" | "split" | "flat"
-                                    | "flatMap" | "substring" | "substr" | "trim" | "trimStart"
-                                    | "trimEnd" | "toLowerCase" | "toUpperCase" | "join"
-                                    | "replace" | "replaceAll",
-                                ) => true,
-                                _ => false,
-                            },
+                    Some(GraphOp::CallMethod {
+                        name,
+                        prepared_callee: None,
+                        ..
+                    }) => match program.constants.get(*name as usize) {
+                        Some(Constant::String(s)) => match s.to_scalar_string().ok().as_deref() {
+                            Some(
+                                "map" | "filter" | "slice" | "concat" | "split" | "flat"
+                                | "flatMap" | "substring" | "substr" | "trim" | "trimStart"
+                                | "trimEnd" | "toLowerCase" | "toUpperCase" | "join" | "replace"
+                                | "replaceAll",
+                            ) => true,
                             _ => false,
-                        }
-                    }
+                        },
+                        _ => false,
+                    },
                     _ => false,
                 };
                 if is_definite_array_or_string {

@@ -2176,9 +2176,15 @@ impl super::Compiler {
                     self.note_call_site(span);
                     self.code.push(Instruction::Apply);
                 } else {
+                    // Resolve the method before arguments while preserving the specialized named
+                    // call path in native code. `CallMethodPrepared` consumes receiver, saved
+                    // callee and arguments without reading this property a second time.
+                    self.code.push(Instruction::Dup);
+                    self.code.push(Instruction::GetProperty(name));
                     let argc = self.emit_arguments(arguments);
                     self.note_call_site(span);
-                    self.code.push(Instruction::CallMethod { name, argc });
+                    self.code
+                        .push(Instruction::CallMethodPrepared { name, argc });
                 }
                 return;
             }
@@ -2198,6 +2204,11 @@ impl super::Compiler {
                     self.code.push(Instruction::Apply);
                 } else {
                     self.expression(property);
+                    // Resolve the reference before evaluating arguments. A getter may replace
+                    // the method or an argument may mutate the property; JavaScript calls the
+                    // value obtained by Get before it evaluates the argument list.
+                    self.code.push(Instruction::Dup2);
+                    self.code.push(Instruction::GetComputed);
                     let argc = self.emit_arguments(arguments);
                     self.note_call_site(span);
                     self.code.push(Instruction::CallComputed { argc });

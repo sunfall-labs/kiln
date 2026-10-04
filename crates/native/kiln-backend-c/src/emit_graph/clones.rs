@@ -31,7 +31,12 @@ fn restartable(
         // A method call is restartable only as an intrinsic on pure static built-in methods:
         // user functions must not run twice, but built-in pure math and type predicates have no
         // observable side effects on their fast paths.
-        GraphOp::CallMethod { object, name, .. } => {
+        GraphOp::CallMethod {
+            object,
+            name,
+            prepared_callee: None,
+            ..
+        } => {
             let builtin = graph
                 .blocks
                 .iter()

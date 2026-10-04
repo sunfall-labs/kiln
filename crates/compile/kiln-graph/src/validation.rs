@@ -266,6 +266,15 @@ pub fn stack_effect(
                 Ok((height - needed + 1, false))
             }
         }
+        // The resolved method is saved beside its receiver before argument evaluation.
+        Instruction::CallMethodPrepared { argc, .. } => {
+            let needed = usize::from(*argc) + 2;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
         // The callee sits under its arguments, and the result replaces both.
         Instruction::Call { argc } => {
             let needed = usize::from(*argc) + 1;
@@ -366,9 +375,9 @@ pub fn stack_effect(
                 Ok((height + 2, false))
             }
         }
-        // The receiver, the key and the arguments are all consumed and the result replaces them.
+        // The receiver, key, resolved method and arguments are consumed; result replaces them.
         Instruction::CallComputed { argc } => {
-            let needed = usize::from(*argc).saturating_add(2);
+            let needed = usize::from(*argc).saturating_add(3);
             if height < needed {
                 Err(underflow(needed))
             } else {

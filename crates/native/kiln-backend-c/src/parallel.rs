@@ -971,6 +971,13 @@ impl Proof<'_> {
                         Some(Refusal::with(Reason::Allocates, "a cell"))
                     }
                     GraphOp::CallMethod {
+                        prepared_callee: Some(_),
+                        ..
+                    } => Some(Refusal::with(
+                        Reason::CallsImpure,
+                        "a method whose callee is saved before arguments",
+                    )),
+                    GraphOp::CallMethod {
                         object, name, args, ..
                     } => {
                         let key = constant_name(program, *name).unwrap_or_default();

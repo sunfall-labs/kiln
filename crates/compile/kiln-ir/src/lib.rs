@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 15;
+pub const BYTECODE_VERSION: u16 = 16;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -182,7 +182,13 @@ pub enum Instruction {
         name: u32,
         argc: u16,
     },
-    /// `object[key](...)`, the computed form of `CallMethod`.
+    /// Call a named property value already fetched from its receiver before argument evaluation.
+    CallMethodPrepared {
+        name: u32,
+        argc: u16,
+    },
+    /// Call a computed property whose receiver, original key and resolved method are already on
+    /// the stack, followed by its arguments. The compiler performs Get before evaluating args.
     CallComputed {
         argc: u16,
     },

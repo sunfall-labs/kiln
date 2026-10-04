@@ -1534,7 +1534,12 @@ fn is_proven_array(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod { object, name, .. }) => {
+            Some(GraphOp::CallMethod {
+                object,
+                name,
+                prepared_callee: None,
+                ..
+            }) => {
                 let method = program.constants.get(*name as usize).and_then(|c| match c {
                     Constant::String(s) => s.to_scalar_string().ok(),
                     _ => None,
@@ -1576,7 +1581,11 @@ fn is_proven_string(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod { name, .. }) => {
+            Some(GraphOp::CallMethod {
+                name,
+                prepared_callee: None,
+                ..
+            }) => {
                 let is_str_method = program
                     .constants
                     .get(*name as usize)
@@ -1617,8 +1626,13 @@ pub(super) fn emit_call_method(
     args: &[ValueId],
     line: u32,
     column: u32,
+    prepared_callee: Option<ValueId>,
     ctx: &OpContext,
 ) {
+    if let Some(callee) = prepared_callee {
+        emit_call_prepared_method(output, vid, object, name, &callee, args, line, column, ctx);
+        return;
+    }
     let v = vid.0;
     let program = ctx.program;
     let symbol = ctx.symbol;
@@ -4225,4 +4239,119 @@ pub(super) fn emit_call_method(
                 o = object.0,
             )
             .unwrap();
+}
+
+/// Emit a named call with its property value already resolved before argument evaluation.
+/// Static candidates still enter their generated body directly, but the saved value is always
+/// the authority: arguments may have replaced the property's current value by this point.
+fn emit_call_prepared_method(
+    output: &mut String,
+    vid: ValueId,
+    object: &ValueId,
+    name: &u32,
+    callee: &ValueId,
+    args: &[ValueId],
+    line: u32,
+    column: u32,
+    ctx: &OpContext,
+) {
+    let v = vid.0;
+    let method = callee.0;
+    let receiver = object.0;
+    let argc = args.len();
+    let program = ctx.program;
+    let symbol = ctx.symbol;
+    let diagnostic_site = ctx.diagnostic_site;
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
+        .map(|origin| (origin.pc, origin.label.as_str()))
+        .unwrap_or((0, "CallMethodPrepared"));
+    let mut candidates = program
+        .constants
+        .get(*name as usize)
+        .and_then(|constant| match constant {
+            Constant::String(key) => {
+                Some(method_candidates(program, key, &ctx.plan.publishes_frame))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&index| {
+            ctx.plan
+                .available
+                .get(index as usize)
+                .copied()
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+
+    let mut direct = String::new();
+    if candidates.len() <= 32 {
+        for index in candidates {
+            // The selected body is proven by pointer identity, but typed entries also need
+            // their argument and builtin guards. Use the ordinary generated entry here; it
+            // still avoids the host boundary without treating a same-name function as proof
+            // that the saved closure has typed arguments.
+            let entry = format!("{symbol}_fn_{index}");
+            let keyword = if direct.is_empty() { "if" } else { "else if" };
+            direct.push_str(&format!(
+                "{keyword} (plain->body == (kiln_body_fn){symbol}_fn_{index}) {{ status = {entry}(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc}); }} "
+            ));
+        }
+    }
+    if direct.is_empty() {
+        direct = format!(
+            "status = plain->body(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc});"
+        );
+    } else {
+        direct.push_str(&format!(
+            "else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc}); }}"
+        ));
+    }
+
+    let mut arguments = format!("kiln_val call_args[{}] = {{", argc.max(1));
+    for (position, arg) in args.iter().enumerate() {
+        if position != 0 {
+            arguments.push_str(", ");
+        }
+        arguments.push_str(&format!("v{}", arg.0));
+    }
+    if argc == 0 {
+        arguments.push_str(" KILN_VAL_UNDEFINED");
+    }
+    arguments.push_str("};");
+    let args_ptr = if argc == 0 {
+        "NULL".to_string()
+    } else {
+        "call_args".to_string()
+    };
+    let method_key = format!("{symbol}_key_{name}");
+    let diagnostic_source = diagnostic_source(diagnostic_site);
+    let check = status_check(diagnostic_site, pc, label, ctx.unwind);
+    let sync = if ctx.live_numbers.contains(&vid) {
+        format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+    } else {
+        String::new()
+    };
+    let sync_int = if ctx.live_ints.contains(&vid) {
+        if ctx.live_numbers.contains(&vid) {
+            format!(" i{v} = (int64_t)d{v};")
+        } else {
+            format!(
+                " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+            )
+        }
+    } else {
+        String::new()
+    };
+    writeln!(
+        output,
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; if (KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; kiln_c99_normalize_closure_receiver(&receiver_for_call, plain); kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); kiln_c99_js_frame_set_method_name({method_key}); {direct} kiln_c99_js_frame_leave(&js_frame); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = call_result; }} else {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
+        argcap = argc.max(1),
+        boundary_args = if argc == 0 { "NULL" } else { "bargs" },
+    )
+    .unwrap();
 }
