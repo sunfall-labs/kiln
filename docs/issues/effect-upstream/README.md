@@ -128,7 +128,14 @@ and the Node/server/regression corpora and 31-target facts baseline passed.
 Pre-push HTTP and native-provider contracts and core crate tests also passed.
 This milestone is on main at `e872e3a0`; `gate-green-reference.json` retains the
 frozen source/binary/report digests. Complete production Effect selection and
-remaining Cluster/Sharding timeouts remain outstanding.
+remaining Cluster/Sharding timeouts remain outstanding. A subsequent quiet Sharding replay
+using the identical production binary passes 60/66 cases: six original five-second
+timeouts remain, while the max-resident-entities case passes without competing builds.
+
+The [complete 22-row microbenchmark comparison](../../performance/microbench-2026-10-04.md)
+reports no checksum divergences. Native beats Bun on six rows and is within 10% on eight;
+object allocation and Buffer concatenation remain major performance debts. These JavaScript
+microbenchmarks are separate from the direct-TypeScript Effect inventory.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
