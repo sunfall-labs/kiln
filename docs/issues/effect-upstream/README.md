@@ -6,13 +6,15 @@ Node/Vitest runner checks runner fidelity separately.
 
 ## Current checkpoint, 2026-10-04
 
-The latest integrated module-generation reclamation candidate passes 254 interpreter tests
-(one ignored), 21 module-evaluation tests and all 195 unchanged cases in `Config`,
+The latest integrated module-generation and top-level-await candidate passes 255 interpreter tests
+(one ignored), 29 module-evaluation tests and all 195 unchanged cases in `Config`,
 `EffectKeepAlive`, `StackTraceLimit`, `rpc/RpcClient` and `schema/HMR`.
-[The validation report and raw logs](../interpreter-module-generation-reclamation/evidence/)
+[The validation report and raw logs](interpreter-module-generations/evidence/reset-tla/)
 bind the source, frozen CLI, pinned test sources and official oracle. This is targeted
-interpreter evidence; a new regression for resetting during an externally suspended
-top-level await exposed a separate resumption/settlement defect under investigation.
+interpreter evidence. The resumption fix preserves a suspended module's activation and
+generation, waits for its evaluated namespace, and retries dependency scheduling when any
+pending dependency settles. Regression checks cover reset during an externally suspended
+await, dependency wake ordering and private engine bindings across suspension and rejection.
 
 The [latest complete gate attempt](milestone-gate-full-20261004/) passed 2,615 crate tests,
 third-party correctness and all 13 unchanged third-party performance baselines, including
@@ -21,7 +23,11 @@ three parallel-allocation probes and aborted one full-Test262 batch at its 1 GiB
 cap. The [gate memory-floor repair](../gate-test262-memory-floor/evidence/) reruns that
 exact batch at 4 GiB without an allocation abort; it does not replace a fresh full gate.
 Native allocation diagnostics identified omitted metadata in duplicated parallel object
-and array initializers. Their shared-initializer repair is undergoing focused validation.
+and array initializers. Their shared-initializer repair passes the poisoned-memory fixture,
+the two original object/budget probes and the small allocation-stress companion. The third
+probe still diverges on nested parallel flatMap results during later allocations. Logging
+changes conservative root visibility and hides that failure, so its causal trace must use
+the uninstrumented failing program. These checks do not replace final-candidate native stress.
 
 The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
 final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
