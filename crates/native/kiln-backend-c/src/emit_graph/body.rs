@@ -1183,12 +1183,24 @@ fn await_resolve_fusion_arg(
         object,
         name,
         args,
-        prepared_callee: None,
+        prepared_callee,
         ..
     } = op
     else {
         return None;
     };
+    if prepared_callee.is_some_and(|callee| {
+        !matches!(
+            defs.get(&callee),
+            Some(GraphOp::GetProperty {
+                object: getter_receiver,
+                name: getter_name,
+                ..
+            }) if getter_receiver == object && getter_name == name
+        )
+    }) {
+        return None;
+    }
     let Some(Constant::String(key)) = program.constants.get(*name as usize) else {
         return None;
     };

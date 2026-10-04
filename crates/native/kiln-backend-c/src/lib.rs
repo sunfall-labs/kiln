@@ -1994,7 +1994,10 @@ fn render_functions(
                     || names(body, "thrown"),
                 upvalues: names(body, "upvalues"),
                 receiver: names(body, "receiver"),
-                row: names(body, "recv_row"),
+                // The typed receiver-row prologue is emitted before block 0 and can consume
+                // `recv_row_in` even when the body itself never calls another typed entry.
+                // Include that prologue use in the signature fixed point.
+                row: names(&scratch, "recv_row_in") || names(body, "recv_row"),
             };
             let merged = direct::TypedNeeds {
                 runtime: needs[index].runtime || found.runtime,

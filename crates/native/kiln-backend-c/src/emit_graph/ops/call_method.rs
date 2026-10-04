@@ -4263,6 +4263,14 @@ fn emit_call_prepared_method(
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
     let plan = ctx.plan;
+    let key_str = program
+        .constants
+        .get(*name as usize)
+        .and_then(|constant| match constant {
+            Constant::String(key) => key.to_scalar_string().ok(),
+            _ => None,
+        })
+        .unwrap_or_default();
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -4333,7 +4341,7 @@ fn emit_call_prepared_method(
         let guard = typed_entry_guard(plan, index);
         let row_ready = if needs.row {
             format!(
-                "const uint32_t *row_{index} = {symbol}_fn_{index}_t_row(receiver_for_call); if (row_{index} != NULL && kiln_typed_ok{guard}) {{"
+                "const uint32_t *row_{index} = KILN_VAL_IS_OBJECT(receiver_for_call) ? {symbol}_fn_{index}_t_row((const kiln_object *)KILN_VAL_PTR(receiver_for_call)) : NULL; if (row_{index} != NULL && kiln_typed_ok{guard}) {{"
             )
         } else {
             format!("if (kiln_typed_ok{guard}) {{")
@@ -4363,7 +4371,7 @@ fn emit_call_prepared_method(
             )
         };
         typed_direct.push_str(&format!(
-            "if (!handled && plain->body == (kiln_body_fn){symbol}_fn_{index} && plain->parameter_count == {argc} && !plain->arrow && !plain->generator && !plain->publishes_frame) {{ {row_ready} {typed_result} }} }} "
+            "if (!handled && plain->body == (kiln_body_fn){symbol}_fn_{index} && !plain->arrow && !plain->generator && !plain->publishes_frame) {{ {row_ready} {typed_result} }} }} "
         ));
     }
 
@@ -4426,6 +4434,41 @@ fn emit_call_prepared_method(
     let method_key = format!("{symbol}_key_{name}");
     let diagnostic_source = diagnostic_source(diagnostic_site);
     let check = status_check(diagnostic_site, pc, label, ctx.unwind);
+    let mut prepared_intrinsics = String::new();
+    if key_str == "resolve" && argc == 1 && ctx.await_resolve_arg == args.first().copied() {
+        let argument = args[0].0;
+        let guard =
+            static_member_guard(&[("PROMISE", "resolve"), ("PROMISE_PROTOTYPE", "constructor")]);
+        let store = if ctx.live_numbers.contains(&vid) && ctx.live_numbers.contains(&args[0]) {
+            format!("v{v} = v{argument}; d{v} = d{argument}; kiln_twin = 1;")
+        } else if ctx.live_numbers.contains(&vid) && ctx.live_ints.contains(&args[0]) {
+            format!(
+                "v{v} = kiln_c99_val_from_double((double)i{argument}); d{v} = (double)i{argument}; kiln_twin = 1;"
+            )
+        } else {
+            format!("v{v} = v{argument};")
+        };
+        prepared_intrinsics.push_str(&format!(
+            "if (KILN_LIKELY({guard} && KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_PROMISE_RESOLVE && KILN_VAL_IS_NUMBER(v{argument}))) {{ {store} handled = 1; }} "
+        ));
+    }
+    if key_str == "sqrt" && argc == 1 {
+        let argument = args[0].0;
+        let guard = static_member_guard(&[("MATH", "sqrt")]);
+        let store = if ctx.live_numbers.contains(&vid) {
+            let box_value = ctx
+                .boxed
+                .map_or(true, |boxed| boxed.contains(&vid))
+                .then(|| format!(" v{v} = kiln_c99_val_from_double(d{v});"))
+                .unwrap_or_default();
+            format!("d{v} = sqrt(prepared_arg_{v});{box_value} kiln_twin = 1;")
+        } else {
+            format!("v{v} = kiln_c99_val_from_double(sqrt(prepared_arg_{v}));")
+        };
+        prepared_intrinsics.push_str(&format!(
+            "{TYPED_RELIES_MARK} if (KILN_LIKELY({guard})) {{ if (KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_MATH && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_MATH_SQRT && KILN_VAL_IS_NUMBER(v{argument})) {{ double prepared_arg_{v}; memcpy(&prepared_arg_{v}, &v{argument}, sizeof(prepared_arg_{v})); {store} handled = 1; }} }} "
+        ));
+    }
     let sync = if ctx.live_numbers.contains(&vid) {
         if ctx.spec.exits && ctx.spec.calls.contains(&vid) {
             let invariant = lookup_speculation_invariant("method_call_number");
@@ -4454,10 +4497,11 @@ fn emit_call_prepared_method(
     };
     writeln!(
         output,
-        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; int kiln_twin = 0; if (KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; kiln_c99_normalize_closure_receiver(&receiver_for_call, plain); int handled = 0; int kiln_typed_ok = !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; {typed_direct} if (!handled) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_set_method_name({method_key}); kiln_c99_js_frame_enter(&js_frame, plain); {direct} kiln_c99_js_frame_leave(&js_frame); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = call_result; }} }} else {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; int kiln_twin = 0; int handled = 0; {prepared_intrinsics} if (!handled && KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; kiln_c99_normalize_closure_receiver(&receiver_for_call, plain); int kiln_typed_ok = !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; {typed_direct} if (!handled) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_set_method_name({method_key}); kiln_c99_js_frame_enter(&js_frame, plain); {direct} kiln_c99_js_frame_leave(&js_frame); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = call_result; }} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (!handled && KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
         argcap = argc.max(1),
         boundary_args = if argc == 0 { "NULL" } else { "bargs" },
         typed_direct = typed_direct,
+        prepared_intrinsics = prepared_intrinsics,
     )
     .unwrap();
 }

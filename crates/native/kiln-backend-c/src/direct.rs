@@ -620,12 +620,7 @@ impl DirectPlan {
                 return targets;
             }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod {
-                    name,
-                    args,
-                    prepared_callee: None,
-                    ..
-                } = op
+                if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                     && args.iter().all(|a| plan.numbers.contains(a))
                 {
@@ -1365,13 +1360,31 @@ pub(crate) fn intrinsic_results(
                 object,
                 name,
                 args,
-                prepared_callee: None,
+                prepared_callee,
                 ..
-            } if math.contains(object) => {
+            } if math.contains(object)
+                && prepared_callee.is_none_or(|callee| {
+                    matches!(
+                        defs.get(&callee),
+                        Some(GraphOp::GetProperty {
+                            object: getter_receiver,
+                            name: getter_name,
+                            ..
+                        }) if getter_receiver == object && getter_name == name
+                    )
+                }) =>
+            {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
                 };
+                // A prepared Math member is only typed when it is the exact `Math.sqrt` read
+                // the prepared-call emitter can guard by method identity. Other prepared calls
+                // keep their dynamic result type until their intrinsic fast paths become
+                // prepared-aware too.
+                if prepared_callee.is_some() && (key != "sqrt" || args.len() != 1) {
+                    return None;
+                }
                 if matches!(key.as_str(), "clz32" if args.len() == 1)
                     || matches!(key.as_str(), "imul" if args.len() == 2)
                 {

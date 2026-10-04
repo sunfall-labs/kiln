@@ -2096,8 +2096,16 @@ export async function microtasks() {
         .source
         .find("kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, \"constructor\") && KILN_VAL_IS_BUILTIN")
         .expect("Promise.resolve await guard emitted");
-    let guard = &emitted.source[guard_start..guard_start + 300];
+    let handled_end = emitted.source[guard_start..]
+        .find("handled = 1;")
+        .map(|offset| guard_start + offset + "handled = 1;".len())
+        .expect("guarded await path handles its result");
+    let guard = &emitted.source[guard_start..handled_end];
     assert!(guard.contains("KILN_VAL_IS_NUMBER(v"), "{guard}");
+    assert!(
+        guard.contains("KILN_C99_METHOD_PROMISE_RESOLVE"),
+        "prepared await fusion checks the saved callee's identity: {guard}"
+    );
     assert!(guard.contains("handled = 1;"), "{guard}");
 }
 
@@ -2210,6 +2218,52 @@ run();
         return;
     };
     assert_eq!(output, "7\n");
+}
+
+#[test]
+fn native_prepared_calls_keep_the_callee_read_before_argument_effects() {
+    let Some(output) = run_native_release_fixture(
+        "native-prepared-call-callee-before-arguments",
+        r#"
+let replacementResolveCalls = 0;
+let resolveArgumentCalls = 0;
+function replaceResolve() {
+  resolveArgumentCalls++;
+  Promise.resolve = function () { replacementResolveCalls += 1; return "replacement"; };
+  return 41;
+}
+async function awaitValue() {
+  return await Promise.resolve(replaceResolve());
+}
+
+const originalSqrt = Math.sqrt;
+let replacementSqrtCalls = 0;
+let sqrtArgumentCoercions = 0;
+function replaceSqrtAndReturnNumber() {
+  sqrtArgumentCoercions++;
+  Math.sqrt = function () { replacementSqrtCalls += 1; return -1; };
+  return 3;
+}
+class Point {
+  constructor(value) { this.value = value; }
+  distance() { return Math.sqrt(this.value); }
+}
+const points = [];
+for (let i = 0; i < 1000; i++) points.push(new Point(i));
+for (let i = 0; i < points.length; i++) points[i].distance();
+// Coercion changes the public property after the method read. This call must still invoke the
+// previously captured callee.
+points[0].value = { valueOf: replaceSqrtAndReturnNumber };
+
+Promise.resolve(awaitValue()).then(value => {
+  const distance = points[0].distance();
+  console.log(`${value}|${distance}|${resolveArgumentCalls}|${replacementResolveCalls}|${sqrtArgumentCoercions}|${replacementSqrtCalls}|${Math.sqrt === originalSqrt}`);
+});
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "41|1.7320508075688772|1|0|1|0|false\n");
 }
 
 #[test]
