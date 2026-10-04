@@ -93,6 +93,13 @@ struct PrefixIo<T> {
     inner: T,
     prefix: Vec<u8>,
     offset: usize,
+    defer_eof_once: bool,
+    eof_seen: bool,
+    eof_deferral_started: bool,
+    eof_deferral_complete: Option<Rc<Cell<bool>>>,
+    node_fin_response_complete: Option<Rc<Cell<bool>>>,
+    node_fin_notified: bool,
+    peer_fin: Option<Rc<Notify>>,
 }
 
 impl<T> PrefixIo<T> {
@@ -101,7 +108,74 @@ impl<T> PrefixIo<T> {
             inner,
             prefix,
             offset: 0,
+            defer_eof_once: false,
+            eof_seen: false,
+            eof_deferral_started: false,
+            eof_deferral_complete: None,
+            node_fin_response_complete: None,
+            node_fin_notified: false,
+            peer_fin: None,
         }
+    }
+
+    fn defer_eof_once(&mut self) {
+        self.defer_eof_once = true;
+        self.eof_deferral_complete = Some(Rc::new(Cell::new(false)));
+    }
+
+    fn note_eof(&mut self) {
+        self.eof_seen = true;
+    }
+
+    fn apply_node_fin_policy(&mut self, response_complete: Rc<Cell<bool>>) {
+        self.node_fin_response_complete = Some(response_complete);
+    }
+
+    fn set_peer_fin_notify(&mut self, peer_fin: Rc<Notify>) {
+        self.peer_fin = Some(peer_fin);
+    }
+
+    fn poll_after_eof_yield(&mut self) -> Poll<std::io::Result<()>> {
+        if self
+            .node_fin_response_complete
+            .as_ref()
+            .is_some_and(|complete| complete.get())
+        {
+            trace!("HTTP/1 peer FIN after completed response");
+            if !self.node_fin_notified {
+                self.node_fin_notified = true;
+                if let Some(peer_fin) = &self.peer_fin {
+                    peer_fin.notify_one();
+                }
+            }
+            // Keep Hyper from treating a request FIN as an incomplete response while the
+            // connection driver performs a graceful close after the already-finished reply.
+            Poll::Pending
+        } else {
+            trace!("HTTP/1 peer FIN aborted unfinished response");
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer ended the request before the response completed",
+            )))
+        }
+    }
+
+    fn schedule_eof_deferral(&mut self, cx: &Context<'_>) {
+        if self.eof_deferral_started {
+            return;
+        }
+        self.eof_deferral_started = true;
+        let complete = Rc::clone(
+            self.eof_deferral_complete
+                .as_ref()
+                .expect("EOF deferral state is installed with the policy"),
+        );
+        let waker = cx.waker().clone();
+        tokio::task::spawn_local(async move {
+            tokio::task::yield_now().await;
+            complete.set(true);
+            waker.wake();
+        });
     }
 
     fn into_parts(self) -> (T, Vec<u8>) {
@@ -122,7 +196,34 @@ impl<T: AsyncRead + Unpin> AsyncRead for PrefixIo<T> {
             self.offset = end;
             return Poll::Ready(Ok(()));
         }
-        Pin::new(&mut self.inner).poll_read(cx, buffer)
+        if self.defer_eof_once && self.eof_seen {
+            self.schedule_eof_deferral(cx);
+            if !self
+                .eof_deferral_complete
+                .as_ref()
+                .is_some_and(|complete| complete.get())
+            {
+                return Poll::Pending;
+            }
+            return self.poll_after_eof_yield();
+        }
+        if buffer.remaining() == 0 {
+            return Pin::new(&mut self.inner).poll_read(cx, buffer);
+        }
+        let filled_before = buffer.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buffer) {
+            Poll::Ready(Ok(())) if buffer.filled().len() == filled_before => {
+                trace!("HTTP/1 transport observed EOF");
+                self.eof_seen = true;
+                if self.defer_eof_once {
+                    self.schedule_eof_deferral(cx);
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            result => result,
+        }
     }
 }
 
@@ -149,6 +250,7 @@ async fn detect_server_protocol(
 ) -> std::io::Result<(bool, PrefixIo<Box<dyn HostIo>>)> {
     let mut prefix = Vec::with_capacity(HTTP2_PREFACE.len());
     let mut is_http2 = true;
+    let mut saw_eof = false;
     while prefix.len() < HTTP2_PREFACE.len() {
         let before = prefix.len();
         let mut bytes = [0u8; 24];
@@ -156,6 +258,7 @@ async fn detect_server_protocol(
         let length = io.read(&mut bytes[..capacity]).await?;
         if length == 0 {
             is_http2 = false;
+            saw_eof = true;
             break;
         }
         prefix.extend_from_slice(&bytes[..length]);
@@ -164,7 +267,11 @@ async fn detect_server_protocol(
             break;
         }
     }
-    Ok((is_http2, PrefixIo::new(io, prefix)))
+    let mut replay = PrefixIo::new(io, prefix);
+    if saw_eof {
+        replay.note_eof();
+    }
+    Ok((is_http2, replay))
 }
 
 /// A byte stream Hyper released after an HTTP/1 protocol upgrade. `head` contains bytes Hyper
@@ -620,6 +727,8 @@ pub(crate) struct ConnectionShared {
     url_scratch: RefCell<Vec<u8>>,
     shutdown: Notify,
     closing: Cell<bool>,
+    node_fin_response_complete: Rc<Cell<bool>>,
+    peer_fin: Rc<Notify>,
     /// An abort has been requested and its `Closed` has not been published yet. Counted as
     /// work in flight so a drive does not return before the language hears it.
     abort_pending: Cell<bool>,
@@ -1072,7 +1181,7 @@ impl ResponseSlot {
     fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: Bytes) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
         let head_request = inner.head_request;
-        match &mut inner.state {
+        let result = match &mut inner.state {
             SlotState::Parked {
                 status, headers, ..
             } => {
@@ -1135,7 +1244,11 @@ impl ResponseSlot {
                 ..
             }
             | SlotState::Finished => None,
+        };
+        if result.is_some() {
+            shared.node_fin_response_complete.set(true);
         }
+        result
     }
 }
 
@@ -1239,6 +1352,8 @@ impl HttpServerEngine {
             url_scratch: RefCell::new(Vec::with_capacity(128)),
             shutdown: Notify::new(),
             closing: Cell::new(false),
+            node_fin_response_complete: Rc::new(Cell::new(false)),
+            peer_fin: Rc::new(Notify::new()),
             abort_pending: Cell::new(false),
             http3: self.http3,
             upgrade_accepted: Cell::new(false),
@@ -1598,7 +1713,7 @@ async fn serve(
     let sniff = detect_server_protocol(transport.0);
     tokio::pin!(sniff);
     let mut pump_done = false;
-    let (is_http2, io) = loop {
+    let (is_http2, mut io) = loop {
         tokio::select! {
             result = &mut sniff => match result {
                 Ok(protocol) => break protocol,
@@ -1621,6 +1736,15 @@ async fn serve(
             }
         }
     };
+    // Node dispatches a complete request from the socket's data event before processing the
+    // subsequent end event. Hyper can observe EOF in the same poll that parsed the request,
+    // before it polls the lazy service future. Give that future one ordinary poll turn first
+    // when half-close is disabled; later EOF still closes an unfinished response.
+    if !is_http2 && !allow_half_close {
+        io.defer_eof_once();
+        io.apply_node_fin_policy(Rc::clone(&shared.node_fin_response_complete));
+        io.set_peer_fin_notify(Rc::clone(&shared.peer_fin));
+    }
     let service = server_service(Rc::clone(&shared));
     let mut transferred = false;
     let result = if is_http2 {
@@ -1644,14 +1768,16 @@ async fn serve(
         // HTTP, and into_parts discards the unflushed HTTP output. Keep ordinary flushing
         // so every response is on the wire before handing the transport to the upgrade.
         builder.pipeline_flush(false);
-        // Honor the connection's half-close policy. Keeping every connection half-open
-        // leaves an unfinished streaming response alive after its client disconnects.
+        // The transport enforces Node's default FIN policy after giving an already-parsed
+        // request one scheduler turn. Keep Hyper's half-close behavior configurable so a
+        // completed synchronous response can flush before the driver closes gracefully.
         builder.half_close(allow_half_close);
         let mut connection = builder.serve_connection(TokioIo::new(io), service);
         enum H1Progress {
             Complete(Result<(), hyper::Error>),
             Pump,
             Shutdown,
+            PeerFin,
         }
         let mut graceful = false;
         let result = loop {
@@ -1659,6 +1785,7 @@ async fn serve(
                 biased;
                 result = std::future::poll_fn(|cx| connection.poll_without_shutdown(cx)) => H1Progress::Complete(result),
                 _ = shared.dispatcher.pump(), if !pump_done => H1Progress::Pump,
+                _ = shared.peer_fin.notified(), if !graceful => H1Progress::PeerFin,
                 _ = shared.shutdown.notified(), if !graceful => H1Progress::Shutdown,
             };
             match progress {
@@ -1667,6 +1794,10 @@ async fn serve(
                     pump_done = true;
                 }
                 H1Progress::Shutdown => {
+                    Pin::new(&mut connection).graceful_shutdown();
+                    graceful = true;
+                }
+                H1Progress::PeerFin => {
                     Pin::new(&mut connection).graceful_shutdown();
                     graceful = true;
                 }
@@ -1903,6 +2034,7 @@ async fn handle(
     // A language that takes requests whole gets the body with the head, so the body is read
     // before anything is dispatched. A request that declares no body (every GET) costs nothing.
     let whole = shared.dispatcher.whole_requests() && !is_upgrade;
+    shared.node_fin_response_complete.set(false);
     let whole_body = if whole && !body.is_end_stream() {
         match (&mut body).collect().await {
             Ok(collected) => collected.to_bytes(),

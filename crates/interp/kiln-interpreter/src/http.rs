@@ -37,6 +37,7 @@ pub(crate) struct HttpResponseState {
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) streaming: bool,
     pub(crate) ended: bool,
+    pub(crate) disconnected: bool,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
 }
 

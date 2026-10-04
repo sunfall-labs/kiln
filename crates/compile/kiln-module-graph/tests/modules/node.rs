@@ -4331,7 +4331,7 @@ fn node_http_create_server_accepts_options_before_the_listener() {
             "import { createServer } from 'node:http';",
             "let server;",
             "server = createServer({ keepAlive: false }, (request, response) => {",
-            "  response.end('options ' + request.url);",
+            "  response.end('options ' + request.url + 'x'.repeat(131072));",
             "  server.close();",
             "});",
             "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
@@ -4401,7 +4401,113 @@ fn node_http_create_server_accepts_options_before_the_listener() {
         .expect("serve options-form request");
     let response = client.join().expect("client thread");
     assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
-    assert_eq!(http_body(&response), b"options /configured");
+    let body = http_body(&response);
+    assert_eq!(&body[..19], b"options /configured");
+    assert_eq!(body.len(), 19 + 131072);
+    assert!(body[19..].iter().all(|byte| *byte == b'x'));
+}
+
+#[test]
+fn node_http_keep_alive_request_then_fin_flushes_the_final_response() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn read_response(reader: &mut BufReader<TcpStream>) -> String {
+        let mut response = String::new();
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read response status");
+        response.push_str(&line);
+        let mut content_length = 0;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).expect("read response header");
+            response.push_str(&line);
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().expect("valid content length");
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).expect("read response body");
+        response.push_str(std::str::from_utf8(&body).expect("UTF-8 test response"));
+        response
+    }
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  response.end(request.url);",
+            "  if (request.url === '/second') server.close();",
+            "});",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build keep-alive HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut stream = BufReader::new(stream);
+        stream
+            .get_mut()
+            .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write first request");
+        let first = read_response(&mut stream);
+        stream
+            .get_mut()
+            .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write final request");
+        stream
+            .get_mut()
+            .shutdown(Shutdown::Write)
+            .expect("finish final request");
+        let second = read_response(&mut stream);
+        (first, second)
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve keep-alive requests");
+    let (first, second) = client.join().expect("client completes");
+    assert_eq!(http_status(&first), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&first), b"/first");
+    assert_eq!(http_status(&second), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&second), b"/second");
 }
 
 #[test]
@@ -4469,6 +4575,138 @@ fn node_http_request_and_response_share_the_accepted_socket_identity() {
     let response = client.join().expect("client completes");
     assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
     assert_eq!(http_body(&response), b"identity");
+}
+
+#[test]
+fn node_http_default_half_close_does_not_send_a_late_response() {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  setTimeout(() => { response.end('late'); server.close(); }, 20);",
+            "});",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build delayed HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve delayed response");
+    let response = client.join().expect("client completes");
+    assert!(response.is_empty(), "late default response: {response:?}");
+}
+
+#[test]
+fn node_http_allow_half_open_preserves_a_late_response() {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  setTimeout(() => { response.end('late'); server.close(); }, 20);",
+            "});",
+            "server.httpAllowHalfOpen = true;",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build half-open HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve half-open delayed response");
+    let response = client.join().expect("client completes");
+    assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&response), b"late");
 }
 
 #[test]

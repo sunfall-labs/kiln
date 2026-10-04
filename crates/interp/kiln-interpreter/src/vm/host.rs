@@ -3536,13 +3536,24 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // The engine's last word: the transport is gone and the connection has
                     // left its table. Nothing remains to close; the realm's record goes
                     // unless a request or response object is still reachable from JavaScript.
-                    let (socket, socket_object) = server
+                    let (socket, socket_object, responses) = server
                         .borrow()
                         .streams
                         .iter()
                         .find(|stream| stream.resource() == resource)
-                        .map(|stream| (stream.socket.clone(), stream.socket_object.clone()))
-                        .unwrap_or((None, None));
+                        .map(|stream| {
+                            (
+                                stream.socket.clone(),
+                                stream.socket_object.clone(),
+                                stream.http_responses.clone(),
+                            )
+                        })
+                        .unwrap_or((None, None, Vec::new()));
+                    for (_, response) in responses {
+                        if let Ok(response_state) = node_http_response(&response) {
+                            response_state.borrow_mut().disconnected = true;
+                        }
+                    }
                     let emit_socket_close = if let Some(socket) = &socket {
                         let (write_callbacks, end_callbacks, emit_close) = {
                             let mut state = socket.borrow_mut();
@@ -4388,6 +4399,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             headers: Vec::new(),
             streaming: false,
             ended: false,
+            disconnected: false,
             object: None,
         }));
         let mut response = ObjectData {
@@ -4632,6 +4644,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let bytes = node_body_bytes(arguments.first())?;
                 let (resource, request_id, status, headers, start) = {
                     let mut state = state.borrow_mut();
+                    if state.disconnected {
+                        return Ok(Value::Boolean(false));
+                    }
                     if state.ended {
                         return Ok(Value::Boolean(false));
                     }
@@ -4691,6 +4706,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let (bytes, callback) = crate::http::node_response_end_arguments(arguments)?;
                 let (resource, request_id, status, headers, start) = {
                     let mut state = state.borrow_mut();
+                    if state.disconnected {
+                        state.ended = true;
+                        return Ok(receiver.clone());
+                    }
                     if state.ended {
                         return Ok(receiver.clone());
                     }

@@ -790,6 +790,7 @@ fn node_response_write_head_reads_headers_after_optional_status_text() {
         headers: Vec::new(),
         streaming: false,
         ended: false,
+        disconnected: false,
         object: None,
     }));
     let response = Value::Object(Rc::new(RefCell::new(ObjectData {
