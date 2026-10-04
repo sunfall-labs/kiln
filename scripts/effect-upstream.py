@@ -248,6 +248,8 @@ def main():
     parser.add_argument('--kiln', type=Path, default=REPO / 'target/release/kiln')
     parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
     parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
+    parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
+                        help='native compilation profile (recorded in the report; case timeouts are unchanged)')
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--kiln-memory-mb', type=int, default=8192, help='hard address-space limit per kiln process (children inherit)')
     args = parser.parse_args()
@@ -298,6 +300,7 @@ def main():
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
                   'clock_policy': {e: 'wall' for e in engines},
+                  'native_profile': args.native_profile if 'native' in engines else None,
                   'kiln_binary_sha256': kiln_sha,
                   'kiln_binary_source': str(kiln_source) if kiln_sha else None,
                   'kiln_binary_snapshot': str(kiln) if kiln_sha else None,
@@ -325,7 +328,7 @@ def main():
                     binary = directory / 'native.bin'
                     binary.unlink(missing_ok=True)
                     build_cmd = [*limiter, str(kiln), '--one-shot', 'build', str(entries[name]),
-                                 '--node', '--profile', 'native-dev', '--output', str(binary)]
+                                 '--node', '--profile', args.native_profile, '--output', str(binary)]
                     for specifier in RUNTIME_TARGETS.get('include', {}).get(name, []):
                         if specifier.startswith('.'):
                             specifier = str((source / PIN['directory'] / (name + '.test.ts')).parent.joinpath(specifier).resolve())

@@ -72,8 +72,10 @@ These subsets are not an updated whole-suite score.
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
 `vitest.setup.ts`, retains per-file logs and case IDs, and records timeouts,
 missing inventories and missing summaries as incomplete runs. Bun and kiln use
-the same source graph, setup and adapter. No bundler participates. Native uses
-`native-dev`; this correctness run is not a steady-state performance benchmark.
+the same source graph, setup and adapter. No bundler participates. Native defaults
+to `native-dev`; `--native-profile native-release` selects production optimization.
+The report records the selected profile, and upstream case timeouts remain unchanged.
+Neither correctness run is a steady-state performance benchmark.
 
 The adapter uses actual Vitest assertion/spy libraries, but does not yet implement
 all Vitest loader capabilities. `HARNESS_UNSUPPORTED` is unresolved work, never a
