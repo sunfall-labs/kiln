@@ -154,6 +154,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         specifier: &str,
         options: Option<&ImportAttributes>,
     ) -> Result<Result<Value, Value>, ExecutionError> {
+        let generation = self.module_map.borrow().generation(self.current_realm);
+        self.import_module_in_generation(specifier, options, generation)
+    }
+
+    pub(super) fn import_module_in_generation(
+        &mut self,
+        specifier: &str,
+        options: Option<&ImportAttributes>,
+        generation: u64,
+    ) -> Result<Result<Value, Value>, ExecutionError> {
         let Some(loader) = self.module_loader.as_ref() else {
             let message = if options.is_some() {
                 "no option-aware module loader is installed"
@@ -188,29 +198,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         let realm = self.current_realm;
-        // A module the realm has already settled is answered from its record: the same
-        // namespace object every time, or the same error (ECMA-262 16.2.1.5.3 step 4).
-        // A CommonJS require may have evaluated the body without materializing its ESM
-        // namespace. Host modules already settled by require still need the namespace seam.
+        // A prior `require()` may have evaluated a host module without constructing its ESM
+        // namespace. Namespace preparation is idempotent and must precede returning an already
+        // settled host record, regardless of the dynamic import generation.
         for planned in &plan.modules {
             if matches!(planned.body, PlannedBody::Host)
-                && self.module_map.borrow().is_evaluated(realm, &planned.key)
+                && self
+                    .module_map
+                    .borrow()
+                    .status_in_generation(realm, generation, &planned.key)
+                    .is_some_and(|status| matches!(status, ModuleStatus::Evaluated))
                 && let Err(value) = self.prepare_host_namespace(&planned.key)?
             {
                 return Ok(Err(value));
             }
         }
-        let settled = self.module_map.borrow().status(realm, &plan.key);
+        // A module the realm has already settled is answered from its record: the same
+        // namespace object every time, or the same error (ECMA-262 16.2.1.5.3 step 4).
+        let settled = self
+            .module_map
+            .borrow()
+            .status_in_generation(realm, generation, &plan.key);
         match settled {
             Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
             Some(ModuleStatus::Evaluated) => {
-                return Ok(Ok(self.module_map.borrow_mut().namespace(realm, &plan.key)));
+                return Ok(Ok(self
+                    .module_map
+                    .borrow_mut()
+                    .namespace_in_generation(realm, generation, &plan.key)));
             }
             _ => {}
         }
 
         for planned in &plan.modules {
-            match self.module_map.borrow().status(realm, &planned.key) {
+            match self
+                .module_map
+                .borrow()
+                .status_in_generation(realm, generation, &planned.key)
+            {
                 // Evaluated by whoever reached it first -- the static graph, or another
                 // `import()` -- or still evaluating further up this realm's stack (a module
                 // that imports itself, or one suspended at a top-level `await`). Either way it
@@ -219,12 +244,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
                 Some(ModuleStatus::Linked) | None => {}
             }
-            if let Err(rejection) = self.evaluate_planned(planned, realm)? {
+            if let Err(rejection) = self.evaluate_planned(planned, realm, generation)? {
                 return Ok(Err(rejection));
             }
         }
 
-        Ok(Ok(self.module_map.borrow_mut().namespace(realm, &plan.key)))
+        Ok(Ok(self
+            .module_map
+            .borrow_mut()
+            .namespace_in_generation(realm, generation, &plan.key)))
     }
 
     /// Evaluate one planned module into the realm's module map.
@@ -235,16 +263,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         planned: &PlannedModule,
         realm: RealmId,
+        generation: u64,
     ) -> Result<Result<(), Value>, ExecutionError> {
         let (program, names, engine_private) = match &planned.body {
             PlannedBody::Exports(entries) => {
                 let exports = entries.iter().cloned().collect();
-                self.module_map
-                    .borrow_mut()
-                    .publish(realm, &planned.key, exports);
+                self.module_map.borrow_mut().publish_in_generation(
+                    realm,
+                    generation,
+                    &planned.key,
+                    exports,
+                );
                 return Ok(Ok(()));
             }
-            PlannedBody::Host => return self.evaluate_host_module(&planned.key),
+            PlannedBody::Host => {
+                let mut result = self.evaluate_host_module(&planned.key)?;
+                if matches!(&result, Ok(())) {
+                    result = self.prepare_host_namespace(&planned.key)?;
+                }
+                // CommonJS and builtin modules keep the host cache's identity across runner
+                // resets. Their generation-specific records reuse canonical export cells and
+                // cached namespace-read results; each generation creates its own namespace view.
+                self.module_map
+                    .borrow_mut()
+                    .alias_generation(realm, 0, generation, &planned.key);
+                return Ok(result);
+            }
             PlannedBody::Source {
                 program,
                 exports,
@@ -253,7 +297,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let mut locals = vec![Value::Undefined; program.local_count as usize];
         for (slot, binding) in &planned.bindings {
-            let value = match self.module_binding(binding, realm) {
+            let value = match self.module_binding_in_generation(binding, realm, generation) {
                 Some(value) => value,
                 None => return Ok(Err(self.missing_binding(planned, binding))),
             };
@@ -282,8 +326,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             None
         };
-        self.module_map.borrow_mut().begin(realm, &planned.key);
-        let module_result = self.drive_module(Rc::clone(program), locals, Some(module_path));
+        self.module_map
+            .borrow_mut()
+            .begin_in_generation(realm, generation, &planned.key);
+        let module_result =
+            self.drive_module(Rc::clone(program), locals, Some(module_path), generation);
         if let Some(window) = private_window
             && let Value::Object(global) = self.global_object_in(realm)
         {
@@ -292,9 +339,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let returned = match module_result? {
             Ok(returned) => returned,
             Err(thrown) => {
-                self.module_map
-                    .borrow_mut()
-                    .fail(realm, &planned.key, thrown.clone());
+                self.module_map.borrow_mut().fail_in_generation(
+                    realm,
+                    generation,
+                    &planned.key,
+                    thrown.clone(),
+                );
                 return Ok(Err(thrown));
             }
         };
@@ -305,9 +355,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     format!("module `{}` did not hand back its exports", planned.key).into(),
                 )],
             );
-            self.module_map
-                .borrow_mut()
-                .fail(realm, &planned.key, error.clone());
+            self.module_map.borrow_mut().fail_in_generation(
+                realm,
+                generation,
+                &planned.key,
+                error.clone(),
+            );
             return Ok(Err(error));
         };
         let mut exports: std::collections::HashMap<String, Value> = names
@@ -319,13 +372,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if exports.contains_key(name) {
                 continue;
             }
-            if let Some(value) = self.module_binding(binding, realm) {
+            if let Some(value) = self.module_binding_in_generation(binding, realm, generation) {
                 exports.insert(name.clone(), value);
             }
         }
-        self.module_map
-            .borrow_mut()
-            .publish(realm, &planned.key, exports);
+        self.module_map.borrow_mut().publish_in_generation(
+            realm,
+            generation,
+            &planned.key,
+            exports,
+        );
         Ok(Ok(()))
     }
 
@@ -407,19 +463,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A module that has finished hands over its binding; one that has not (a cycle, or a
     /// module still evaluating further up the stack) hands over a dead-zone cell its
     /// publication fills.
-    pub(super) fn module_binding(
+    fn module_binding_in_generation(
         &mut self,
         binding: &ModuleBinding,
         realm: RealmId,
+        generation: u64,
     ) -> Option<Value> {
         match binding {
             ModuleBinding::Ready(value) => Some(value.clone()),
-            ModuleBinding::Export { module, name } => {
-                self.module_map.borrow_mut().binding(realm, module, name)
-            }
-            ModuleBinding::Namespace { module } => {
-                Some(self.module_map.borrow_mut().namespace(realm, module))
-            }
+            ModuleBinding::Export { module, name } => self
+                .module_map
+                .borrow_mut()
+                .binding_in_generation(realm, generation, module, name),
+            ModuleBinding::Namespace { module } => Some(
+                self.module_map
+                    .borrow_mut()
+                    .namespace_in_generation(realm, generation, module),
+            ),
         }
     }
 
@@ -433,6 +493,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         program: Rc<Program>,
         locals: Vec<Value>,
         module_path: Option<Rc<str>>,
+        module_generation: u64,
     ) -> Result<Result<Value, Value>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -460,6 +521,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, strictness),
             strict: std::mem::replace(&mut self.strict, true),
             module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             // A module body is always strict, so its `this` is `undefined` rather than the
@@ -477,6 +539,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_base: self.stack.len(),
         });
         self.module_path = module_path;
+        self.module_generation = module_generation;
         self.global_base = self.frames.len();
         self.instruction = 0;
         let outcome = self.run_frames(depth).map(|result| result.value);

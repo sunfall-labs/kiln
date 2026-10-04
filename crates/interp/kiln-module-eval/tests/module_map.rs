@@ -326,6 +326,81 @@ fn import_and_require_of_commonjs_share_module_exports() {
 }
 
 #[test]
+fn reset_keeps_commonjs_value_but_scopes_dynamic_import_namespace_per_generation() {
+    let project = Project::new();
+    project.write(
+        "c.cjs",
+        "globalThis.cRuns = (globalThis.cRuns || 0) + 1; globalThis.cReads = 0; module.exports = { a: 1 }; Object.defineProperty(module.exports, 'value', { enumerable: true, get() { globalThis.cReads++; return 7; } });",
+    );
+    expect_lines(
+        &project,
+        "import { createRequire } from 'node:module';\n\
+         const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+         if (!loader('registerRunner', import.meta.url)) throw new Error('runner registration failed');\n\
+         const require = createRequire(import.meta.url);\
+         const required = require('./c.cjs');\
+         const oldImport = () => import('./c.cjs');\
+         const old = await oldImport();\
+         loader('reset');\
+         await (async () => { const nested = async () => { await Promise.resolve(); }; await nested(); })();\
+         const actual = await loader('importActual', './c.cjs', import.meta.url, new URL('./c.cjs', import.meta.url).href);\
+         const again = await import('./c.cjs');\
+         console.log(actual.default === required, actual === again, old === actual, actual.a, actual.value, globalThis.cRuns, globalThis.cReads);",
+        &["true true false 1 7 1 1"],
+    );
+}
+
+#[test]
+fn runner_import_uses_current_generation_after_nested_reset_but_old_closure_keeps_its_generation() {
+    let project = Project::new();
+    project.write(
+        "leaf.mjs",
+        "globalThis.leafRuns = (globalThis.leafRuns || 0) + 1; export const run = globalThis.leafRuns;",
+    );
+    project.write(
+        "helper.mjs",
+        "export const reset = (loader) => loader('reset');",
+    );
+    project.write("old.mjs", "export const load = () => import('./leaf.mjs');");
+    expect_lines(
+        &project,
+        "const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+         if (!loader('registerRunner', import.meta.url)) throw new Error('runner registration failed');\n\
+         import { reset } from './helper.mjs';\n\
+         const old = await import('./old.mjs'); const oldLeaf = await old.load();\n\
+         reset(loader);\n\
+         const runnerLeaf = await import('./leaf.mjs'); const retainedLeaf = await old.load();\n\
+         console.log(oldLeaf.run, runnerLeaf.run, oldLeaf !== runnerLeaf, retainedLeaf === oldLeaf, globalThis.leafRuns);",
+        &["1 2 true true 2"],
+    );
+}
+
+#[test]
+fn reset_recreates_dynamic_cycle_and_keeps_old_generation_namespace_alive() {
+    let project = Project::new();
+    project.write(
+        "a.mjs",
+        "globalThis.aRuns = (globalThis.aRuns || 0) + 1; import { b } from './b.mjs'; export const a = () => 'a' + b();",
+    );
+    project.write(
+        "b.mjs",
+        "globalThis.bRuns = (globalThis.bRuns || 0) + 1; import { a } from './a.mjs'; export const b = () => 'b'; export const readA = () => a();",
+    );
+    expect_lines(
+        &project,
+        "const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+         if (!loader('registerRunner', import.meta.url)) throw new Error('runner registration failed');\n\
+         const old = await import('./a.mjs');\n\
+         const oldValue = old.a();\n\
+         loader('reset');\n\
+         await (async () => { const nested = async () => { await Promise.resolve(); }; await nested(); })();\n\
+         const fresh = await loader('importActual', './a.mjs', import.meta.url, new URL('./a.mjs', import.meta.url).href);\n\
+         console.log(oldValue, fresh.a(), old !== fresh, globalThis.aRuns, globalThis.bRuns);",
+        &["ab ab true 2 2"],
+    );
+}
+
+#[test]
 fn dynamic_esm_default_import_of_commonjs_uses_the_published_default() {
     let project = Project::new();
     project.write("value.cjs", "module.exports = (value) => value + 1;");

@@ -292,6 +292,7 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Whether this machine runs in a worker, whose parent may stop it at any checkpoint.
     pub(super) in_worker: bool,
     pub(super) module_path: Option<Rc<str>>,
+    pub(super) module_generation: u64,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.

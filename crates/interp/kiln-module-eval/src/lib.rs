@@ -604,71 +604,105 @@ impl ModuleLoaderService for GraphModuleLoader {
 /// modules run in. The map itself is the session's, so dynamic `import()` in any of the graph's
 /// module bodies reads and writes the same records.
 #[derive(Clone)]
-struct Records(SharedModuleMap);
+struct Records {
+    map: SharedModuleMap,
+    /// The static graph's epoch does not change when resetModules advances the dynamic-import
+    /// epoch. Existing graph bindings and namespace cells remain tied to this generation.
+    generation: u64,
+}
 
 impl Records {
     const REALM: RealmId = RealmId::PRIMARY;
 
     fn status(&self, path: &Path) -> Option<ModuleStatus> {
-        self.0.borrow().status(Self::REALM, &module_key(path))
+        self.map
+            .borrow()
+            .status_in_generation(Self::REALM, self.generation, &module_key(path))
     }
 
     fn is_evaluated(&self, path: &Path) -> bool {
-        self.0.borrow().is_evaluated(Self::REALM, &module_key(path))
+        matches!(self.status(path), Some(ModuleStatus::Evaluated))
     }
 
     fn is_started(&self, path: &Path) -> bool {
-        self.0.borrow().is_started(Self::REALM, &module_key(path))
+        matches!(
+            self.status(path),
+            Some(ModuleStatus::Evaluating | ModuleStatus::Evaluated | ModuleStatus::Failed(_))
+        )
     }
 
     fn exports(&self, path: &Path) -> Option<std::rc::Rc<HashMap<String, Value>>> {
-        self.0.borrow().exports(Self::REALM, &module_key(path))
+        self.map
+            .borrow()
+            .exports_in_generation(Self::REALM, self.generation, &module_key(path))
     }
 
     fn begin(&self, path: &Path) {
-        self.0.borrow_mut().begin(Self::REALM, &module_key(path));
+        self.map
+            .borrow_mut()
+            .begin_in_generation(Self::REALM, self.generation, &module_key(path));
     }
 
     fn publish(&self, path: &Path, exports: HashMap<String, Value>) {
-        self.0
-            .borrow_mut()
-            .publish(Self::REALM, &module_key(path), exports);
+        self.map.borrow_mut().publish_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+            exports,
+        );
     }
 
     fn commonjs_namespace_ready(&self, path: &Path) -> bool {
-        self.0
-            .borrow()
-            .commonjs_namespace_ready(Self::REALM, &module_key(path))
+        self.map.borrow().commonjs_namespace_ready_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+        )
     }
 
     fn commonjs_namespace_failure(&self, path: &Path) -> Option<Value> {
-        self.0
-            .borrow()
-            .commonjs_namespace_failure(Self::REALM, &module_key(path))
+        self.map.borrow().commonjs_namespace_failure_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+        )
     }
 
     fn fail_commonjs_namespace(&self, path: &Path, value: Value) {
-        self.0
-            .borrow_mut()
-            .fail_commonjs_namespace(Self::REALM, &module_key(path), value);
+        self.map.borrow_mut().fail_commonjs_namespace_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+            value,
+        );
     }
 
     fn publish_commonjs_namespace(&self, path: &Path, exports: HashMap<String, Value>) {
-        self.0
+        self.map
             .borrow_mut()
-            .publish_commonjs_namespace(Self::REALM, &module_key(path), exports);
+            .publish_commonjs_namespace_in_generation(
+                Self::REALM,
+                self.generation,
+                &module_key(path),
+                exports,
+            );
     }
 
     fn pending_cell(&self, path: &Path, name: &str) -> Cell {
-        self.0
-            .borrow_mut()
-            .pending_cell(Self::REALM, &module_key(path), name)
+        self.map.borrow_mut().pending_cell_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+            name,
+        )
     }
 
     fn namespace(&self, path: &Path) -> Value {
-        self.0
-            .borrow_mut()
-            .namespace(Self::REALM, &module_key(path))
+        self.map.borrow_mut().namespace_in_generation(
+            Self::REALM,
+            self.generation,
+            &module_key(path),
+        )
     }
 
     /// What an importer of `imported` from the finished module `path` links to: its namespace
@@ -1391,12 +1425,13 @@ impl GraphExecutor<'_> {
         // somebody to hold before its module has run is a dead-zone cell in that module's
         // record, keyed by the *origin* of the name, because a re-export chain can cross a cycle
         // several times and every crossing has to land on the same cell.
-        let records = Records(
-            node_session
+        let records = Records {
+            map: node_session
                 .as_ref()
                 .expect("the graph owns a session")
                 .module_map(),
-        );
+            generation: 0,
+        };
         let cache_targets = commonjs_cache
             .iter()
             .map(|(path, cell)| (std::rc::Rc::as_ptr(cell), path.clone()))

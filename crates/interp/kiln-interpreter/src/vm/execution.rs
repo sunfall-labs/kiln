@@ -958,11 +958,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
+                    let import_generation = self.module_map.borrow().import_generation_for(
+                        self.current_realm,
+                        self.module_path.as_deref(),
+                        self.module_generation,
+                    );
                     let scheduled = self.scheduled(Job::Import(
                         Rc::clone(&promise),
                         text,
                         _options,
                         self.module_path.clone(),
+                        import_generation,
                     ));
                     self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
@@ -2213,6 +2219,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.current_realm = frame.realm;
                     self.strict = frame.strict;
                     self.module_path = frame.module_path;
+                    self.module_generation = frame.module_generation;
                     self.function = frame.function;
                     self.method_name = frame.method_name;
                     self.this_value = frame.this_value;
@@ -2354,6 +2361,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.current_realm = frame.realm;
                 self.strict = frame.strict;
                 self.module_path = frame.module_path;
+                self.module_generation = frame.module_generation;
                 self.function = frame.function;
                 self.method_name = frame.method_name;
                 self.this_value = frame.this_value;
@@ -2376,6 +2384,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.current_realm = frame.realm;
             self.strict = frame.strict;
             self.module_path = frame.module_path;
+            self.module_generation = frame.module_generation;
             self.function = frame.function;
             self.method_name = frame.method_name;
             self.this_value = frame.this_value;
@@ -2496,6 +2505,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
@@ -2932,6 +2945,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
@@ -3304,6 +3321,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.current_realm = frame.realm;
         self.strict = frame.strict;
         self.module_path = frame.module_path;
+        self.module_generation = frame.module_generation;
         self.function = frame.function;
         self.method_name = frame.method_name;
         self.this_value = frame.this_value;

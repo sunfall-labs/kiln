@@ -820,6 +820,8 @@ pub struct Closure {
     pub strictness: Rc<Strictness>,
     /// The module whose lexical code created this closure, used to resolve later import().
     pub module_path: Option<Rc<str>>,
+    /// Dynamic import generation captured with the module context that created this closure.
+    pub module_generation: u64,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
@@ -908,8 +910,8 @@ pub trait CommonJsModuleLoader {
     /// the body queued, so the realm's module map can record the module as evaluated first.
     fn module_evaluated(&mut self, _module_path: &str, _exports: &[ModuleExportValue]) {}
 
-    /// Materialize an already evaluated CommonJS module's ESM namespace on demand.
-    /// A require-only execution must not invoke exported property getters.
+    /// Materialize an already evaluated CommonJS module's ESM namespace only when ESM linking
+    /// needs it. A require-only execution must not invoke exported property getters.
     fn prepare_module_namespace(
         &mut self,
         _key: &str,

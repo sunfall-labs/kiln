@@ -524,6 +524,7 @@ mod weak_get_or_insert_tests {
             function: 0,
             strictness: Rc::new(Strictness::default()),
             module_path: None,
+            module_generation: 0,
             name: None,
             inferred_name: None,
             upvalues: vec![Rc::clone(&counter)],

@@ -112,6 +112,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: Rc::clone(&self.program),
             strictness: Rc::clone(&self.strictness),
             module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments,
             prototype: RefCell::new(None),

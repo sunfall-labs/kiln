@@ -324,6 +324,7 @@ pub(super) enum Job {
         String,
         Option<ImportAttributes>,
         Option<Rc<str>>,
+        u64,
     ),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
@@ -402,6 +403,8 @@ pub(super) struct Frame {
     pub(super) strict: bool,
     /// The module whose lexical code is running, restored with the caller frame.
     pub(super) module_path: Option<Rc<str>>,
+    /// The dynamic import generation of this activation's module context.
+    pub(super) module_generation: u64,
     /// `new.target` in the caller, restored with the frame.
     pub(super) new_target: Value,
     /// The closure that was running, or `None` for the module body.

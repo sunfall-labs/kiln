@@ -731,6 +731,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     Some(value)
                 };
+                if action == "reset" && arguments.len() == 1 {
+                    if !self
+                        .module_map
+                        .borrow()
+                        .has_registered_runner(self.current_realm)
+                    {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "module reset is only available to the registered test runner"
+                                .to_owned(),
+                        });
+                    }
+                    self.module_generation = self
+                        .module_map
+                        .borrow_mut()
+                        .reset_generation(self.current_realm);
+                    return Ok(Value::Undefined);
+                }
+                if action == "importActual" && arguments.len() == 4 {
+                    if !self
+                        .module_map
+                        .borrow()
+                        .has_registered_runner(self.current_realm)
+                    {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module import is only available to the registered test runner".to_owned(),
+                        });
+                    }
+                    let Some(referrer) = module_key(&arguments[2]) else {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module referrer must be a string path or file URL"
+                                .to_owned(),
+                        });
+                    };
+                    let Some(Value::String(target_url)) = arguments.get(3) else {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module target must be a string path or file URL"
+                                .to_owned(),
+                        });
+                    };
+                    let target = target_url.to_lossy_string();
+                    if module_key(&Value::String(target.clone().into())).is_none() {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module target must be a valid path or file URL"
+                                .to_owned(),
+                        });
+                    }
+                    let previous_path = self.module_path.replace(Rc::from(referrer));
+                    let imported = self.import_module(&target, None);
+                    self.module_path = previous_path;
+                    match imported? {
+                        Ok(namespace) => return Ok(namespace),
+                        Err(thrown) => {
+                            self.caught = Some(thrown);
+                            return Err(ExecutionError::ThrownAcrossNative);
+                        }
+                    }
+                }
                 let bool_result = match action.as_str() {
                     "registerRunner" if arguments.len() == 2 => {
                         let Some(key) = module_key(&arguments[1]) else {

@@ -161,6 +161,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, method_name),
             this_value: std::mem::replace(&mut self.this_value, entering),
@@ -358,6 +362,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
             strict: std::mem::replace(&mut self.strict, program_is_strict),
             module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
             function: self.function.take(),
             method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
