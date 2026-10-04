@@ -226,6 +226,28 @@ class NodeVitestOracleTests(unittest.TestCase):
         finally:
             runner.NODE_VITEST_ORACLE = oracle
 
+    def test_parameterized_mapping_requires_argument_value_and_source_row(self):
+        mappings = runner.NODE_VITEST_MAPPINGS
+        runner.NODE_VITEST_MAPPINGS = copy.deepcopy(mappings)
+        try:
+            row = next(x for x in runner.NODE_VITEST_MAPPINGS['mappings']
+                       if x.get('parameter_index') is not None)
+            del row['parameter_value']
+            with self.assertRaisesRegex(ValueError, 'parameterized mapping lacks exact source argument'):
+                runner.validate_node_vitest_policy()
+        finally:
+            runner.NODE_VITEST_MAPPINGS = mappings
+
+    def test_date_time_parameter_values_map_one_to_one_to_official_titles(self):
+        rows = [x for x in self.mappings['mappings'] if x['file'] == 'DateTime']
+        source_sha = self.oracle['files']['DateTime']['source_sha256']
+        mapped = runner.node_vitest_case_map(
+            'DateTime', [{'id': row['direct_id'], 'mode': 'run'} for row in rows], source_sha)
+        self.assertEqual(len(rows), 39)
+        self.assertEqual(len(mapped['mapped']), 39)
+        self.assertEqual(mapped['mapping_errors'], [])
+        self.assertEqual(len({row['official_index'] for row in mapped['mapped']}), 39)
+
     def test_comparison_verdicts_keep_bun_divergence_and_node_coverage_separate(self):
         report = {'selected_files': ['X'], 'files': [{'file': 'X', 'engines': {
             'bun': {'bun_adapter_unsupported_cases': [{'id': 'adapter-gap'}]},

@@ -707,7 +707,10 @@ def validate_node_vitest_policy():
         raise ValueError('Node/Vitest unmapped-case total is inconsistent')
     unique_official_ids = sum(count == 1 for file in NODE_VITEST_ORACLE['files'].values()
                               for count in Counter(c['id'] for c in file['cases']).values())
-    auto = unique_official_ids - category_counts['parameterized_title_label']['cases']
+    parameterized_mappings = sum('[case ' in row.get('direct_id', '')
+                                 for row in NODE_VITEST_MAPPINGS['mappings'])
+    auto = unique_official_ids - (category_counts['parameterized_title_label']['cases'] +
+                                  parameterized_mappings)
     if auto != summary.get('automatic_exact_unique_mappings'):
         raise ValueError('Node/Vitest automatic mapping total is inconsistent')
     seen = set()
@@ -725,8 +728,17 @@ def validate_node_vitest_policy():
         candidates = [case for case in oracle_file.get('cases', [])
                       if case.get('id') == row.get('official_id')]
         occurrence = row.get('official_occurrence')
-        if len(candidates) < 2 or not isinstance(occurrence, int) or occurrence < 0 or occurrence >= len(candidates):
-            raise ValueError('explicit Node/Vitest mapping has no valid duplicate official occurrence: ' + repr(key))
+        parameterized = '[case ' in row.get('direct_id', '')
+        if parameterized:
+            indices = re.findall(r'\[case (\d+)\]', row['direct_id'])
+            if (not indices or not isinstance(row.get('parameter_index'), int) or
+                    row['parameter_index'] != int(indices[-1]) or
+                    not isinstance(row.get('parameter_source_line'), int) or row['parameter_source_line'] < 1 or
+                    not isinstance(row.get('parameter_value'), str) or not row['parameter_value']):
+                raise ValueError('parameterized mapping lacks exact source argument evidence: ' + repr(key))
+        if (not candidates or not isinstance(occurrence, int) or
+                occurrence < 0 or occurrence >= len(candidates)):
+            raise ValueError('explicit Node/Vitest mapping has no valid official occurrence: ' + repr(key))
         target = (row['file'], row['official_id'], occurrence)
         if target in seen_targets:
             raise ValueError('explicit Node/Vitest mappings reuse an official occurrence: ' + repr(target))
