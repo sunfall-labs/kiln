@@ -1273,6 +1273,21 @@ undefined
 """
 
 [[test]]
+id = "regress/r11-method-name-survives-nested-calls"
+group = "regress"
+source = "regress/r11-method-name-survives-nested-calls.js"
+status = "runnable"
+features = ["error-stack", "callsite-method-name", "frame-unwind"]
+catches = """
+A nested call can overwrite the caller's method name unless frame restoration restores it
+alongside the other activation state. This checks both normal return and caught exception
+paths with anonymous functions so the stack must use the computed callsite alias.\
+"""
+expected_stdout = """
+nested callsite aliases restored
+"""
+
+[[test]]
 id = "regress/r12-method-prototype"
 group = "regress"
 source = "regress/r12-method-prototype.js"
