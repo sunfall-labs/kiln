@@ -28,6 +28,15 @@ the official Node run. `bun-reference.json` records the case IDs, pin, adapter
 digests and full report digest. These are correctness counts, not performance
 measurements. Runtime-specific skip modes are preserved and compared explicitly.
 
+The runner keeps Bun as the direct-source reference for ordinary cross-engine comparisons,
+but runtime-conditional cases use exact per-engine expectations in
+`conformance/effect-upstream/engine-mode-policy.json`. The Cache WeakRef test above is one
+such case: its upstream `skipIf` checks `process.versions.bun`, so Bun skips it while Node,
+the interpreter and native run it. The policy records Bun's skip and the pass observed in
+official Node/Vitest; only that exact case is exempt from Bun-versus-kiln mode comparison.
+An unexpected mode or outcome remains a mismatch, and the report records each accepted
+conditional difference.
+
 `Formatter > format > function` remains a genuine direct-source failure. Its assertion expects
 tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The
 test source contains ten-space indentation and no semicolon; Node 26.8.1 with

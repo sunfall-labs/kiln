@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / 'conformance/effect-upstream'
 PIN = json.loads((HARNESS / 'corpus.json').read_text())
 RUNTIME_TARGETS = json.loads((HARNESS / 'runtime-targets.json').read_text())
+ENGINE_MODE_POLICY = json.loads((HARNESS / 'engine-mode-policy.json').read_text())
 PREFIX = 'KILN_EFFECT '
 
 
@@ -300,10 +301,84 @@ def aggregate(report, engines):
             'reference_inventory_mismatches': sum(row['matches_reference_inventory'] is False for row in rows),
             'reference_mode_mismatches': sum(row['matches_reference_modes'] is False for row in rows),
             'reference_outcome_mismatches': sum(row['matches_reference_outcomes'] is False for row in rows),
+            'engine_conditional_mode_cases': sum(len(row.get('engine_conditional_mode_cases', [])) for row in rows),
         }
     return {'reported_files': len(report['files']),
             'pending_files': report['selected'] - len(report['files']),
             'deferred_files': report['deferred'], 'engines': totals}
+
+
+def compare_reference(reference, candidate, engine, file_name):
+    """Compare common cases to Bun, honoring only explicitly declared engine modes."""
+    reference_inventory = reference.get('inventory') if reference else None
+    candidate_inventory = candidate.get('inventory')
+    reference_cases = reference.get('cases') if reference else None
+    candidate_cases = candidate.get('cases')
+    if (reference_inventory is None or candidate_inventory is None or
+            reference_cases is None or candidate_cases is None):
+        return {'inventory': None, 'modes': None, 'outcomes': None, 'conditional_modes': []}
+    inventory_matches = [case['id'] for case in candidate_inventory] == [case['id'] for case in reference_inventory]
+    if not inventory_matches:
+        return {'inventory': False, 'modes': False, 'outcomes': False, 'conditional_modes': []}
+    reference_ids = [case['id'] for case in reference_inventory]
+    candidate_ids = [case['id'] for case in candidate_inventory]
+    if ([case['id'] for case in reference_cases] != reference_ids or
+            [case['id'] for case in candidate_cases] != candidate_ids):
+        return {'inventory': True, 'modes': False, 'outcomes': False, 'conditional_modes': [],
+                'mode_mismatches': [], 'outcome_mismatches': [{'id': 'case-record-order'}]}
+
+    policies = {case['id']: case for case in ENGINE_MODE_POLICY['cases'] if case['file'] == file_name}
+    mode_mismatches = []
+    outcome_mismatches = []
+    conditional_modes = []
+    for reference_mode, candidate_mode, reference_case, candidate_case in zip(
+            reference_inventory, candidate_inventory, reference_cases, candidate_cases):
+        policy = policies.get(candidate_mode['id'])
+        if policy is not None:
+            expected_reference_mode = policy['modes'].get('bun')
+            expected_candidate_mode = policy['modes'].get(engine)
+            expected_reference_outcome = policy['outcomes'].get('bun')
+            expected_candidate_outcome = policy['outcomes'].get(engine)
+            if (reference_mode['mode'] != expected_reference_mode or
+                    reference_case['outcome'] != expected_reference_outcome):
+                mode_mismatches.append({'id': candidate_mode['id'], 'reference': reference_mode['mode'],
+                                        'expected_reference': expected_reference_mode})
+                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
+                                           'expected_reference': expected_reference_outcome})
+                continue
+            if (candidate_mode['mode'] != expected_candidate_mode or
+                    candidate_case['outcome'] != expected_candidate_outcome):
+                mode_mismatches.append({'id': candidate_mode['id'], 'actual': candidate_mode['mode'],
+                                        'expected_actual': expected_candidate_mode})
+                outcome_mismatches.append({'id': candidate_mode['id'], 'actual': candidate_case['outcome'],
+                                           'expected_actual': expected_candidate_outcome})
+                continue
+        if reference_mode['mode'] == candidate_mode['mode']:
+            if reference_case['outcome'] != candidate_case['outcome']:
+                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
+                                           'actual': candidate_case['outcome']})
+            continue
+        expected_reference_mode = policy['modes'].get('bun') if policy else None
+        expected_candidate_mode = policy['modes'].get(engine) if policy else None
+        expected_reference_outcome = policy['outcomes'].get('bun') if policy else None
+        expected_candidate_outcome = policy['outcomes'].get(engine) if policy else None
+        if (policy is None or reference_mode['mode'] != expected_reference_mode or
+                candidate_mode['mode'] != expected_candidate_mode or
+                reference_case['outcome'] != expected_reference_outcome or
+                candidate_case['outcome'] != expected_candidate_outcome):
+            mode_mismatches.append({'id': candidate_mode['id'], 'reference': reference_mode['mode'],
+                                    'actual': candidate_mode['mode']})
+            if candidate_case['outcome'] != reference_case['outcome']:
+                outcome_mismatches.append({'id': candidate_mode['id'], 'reference': reference_case['outcome'],
+                                           'actual': candidate_case['outcome']})
+            continue
+        conditional_modes.append({'id': candidate_mode['id'], 'bun_mode': reference_mode['mode'],
+                                  'engine': engine, 'engine_mode': candidate_mode['mode'],
+                                  'expected_outcome': expected_candidate_outcome,
+                                  'reason': policy['reason']})
+    return {'inventory': True, 'modes': not mode_mismatches, 'outcomes': not outcome_mismatches,
+            'mode_mismatches': mode_mismatches, 'outcome_mismatches': outcome_mismatches,
+            'conditional_modes': conditional_modes}
 
 
 def main():
@@ -369,6 +444,9 @@ def main():
             versions[engine] = subprocess.check_output(cmd, text=True).strip()
         report = {'schema': 1, 'pin': PIN['commit'], 'input_mode': 'direct-typescript',
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
+                  'engine_mode_policy': {'file': 'conformance/effect-upstream/engine-mode-policy.json',
+                                         'sha256': digest(HARNESS / 'engine-mode-policy.json'),
+                                         'cases': ENGINE_MODE_POLICY['cases']},
                   'clock_policy': {e: 'wall' for e in engines},
                   'native_profile': args.native_profile if 'native' in engines else None,
                   'native_provider': provider,
@@ -429,9 +507,15 @@ def main():
                 write_json(directory / (engine + '.json'), envelope)
             reference = row['engines'].get('bun')
             for engine, envelope in row['engines'].items():
-                envelope['matches_reference_inventory'] = ([c['id'] for c in envelope['inventory']] == [c['id'] for c in reference['inventory']]) if reference and envelope['inventory'] is not None and reference['inventory'] is not None else None
-                envelope['matches_reference_modes'] = (envelope['inventory'] == reference['inventory']) if reference else None
-                envelope['matches_reference_outcomes'] = ([{k: c[k] for k in ('id', 'outcome')} for c in envelope['cases']] == [{k: c[k] for k in ('id', 'outcome')} for c in reference['cases']]) if reference else None
+                comparison = compare_reference(reference, envelope, engine, name) if reference else {
+                    'inventory': None, 'modes': None, 'outcomes': None, 'conditional_modes': []}
+                envelope['matches_reference_inventory'] = comparison['inventory']
+                envelope['matches_reference_modes'] = comparison['modes']
+                envelope['matches_reference_outcomes'] = comparison['outcomes']
+                envelope['reference_mode_mismatches'] = comparison.get('mode_mismatches', [])
+                envelope['reference_outcome_mismatches'] = comparison.get('outcome_mismatches', [])
+                envelope['engine_conditional_mode_cases'] = comparison['conditional_modes']
+                write_json(out / name / (engine + '.json'), envelope)
             return row
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {pool.submit(run, name): name for name in selected}
@@ -444,6 +528,8 @@ def main():
                 print(row['file'], {e: r['summary'] if r['complete'] else 'INCOMPLETE' for e, r in row['engines'].items()}, flush=True)
         clean = all(r['complete'] and r['exit_code'] == 0 and r['summary']['failed'] == 0
                     and r['matches_reference_inventory'] is not False
+                    and r['matches_reference_modes'] is not False
+                    and r['matches_reference_outcomes'] is not False
                     for row in report['files'] for r in row['engines'].values())
         report['passed'] = clean
         write_json(out / 'report.json', report)

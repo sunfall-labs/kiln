@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "file": "Cache",
+      "id": "Cache > does not retain prior equal object keys on cache hits",
+      "modes": {
+        "bun": "skip",
+        "interpreter": "run",
+        "native": "run"
+      },
+      "outcomes": {
+        "bun": "skip",
+        "interpreter": "pass",
+        "native": "pass"
+      },
+      "reason": "The pinned source skips this WeakRef/finalization case when process.versions.bun is defined. Bun 1.4.2 sets that version; Node 26.8.1 and both kiln engines run it. The official Node/Vitest report records a pass."
+    }
+  ]
+}
