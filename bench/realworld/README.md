@@ -44,3 +44,8 @@ printed, never failed.
 `mise run realworld` is the front door. The `.toolchains/` directory is
 gitignored; the Hermes checkout lives in `~/.cache/kiln` beside the Test262
 corpus, never under `/tmp`.
+
+When measuring a frozen compiler from another checkout, set `KILN_SOURCE_REV` to
+its build source revision. Reports retain that declaration separately from the
+harness checkout revision and record the actual compiler binary SHA-256. An
+unknown compiler source revision stays unspecified.
