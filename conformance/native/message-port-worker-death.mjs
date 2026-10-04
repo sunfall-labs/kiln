@@ -4,6 +4,11 @@
 // closes every port a worker holds when its realm ends; a port in transit is held by no realm.
 import { Worker, MessageChannel, isMainThread, workerData } from "node:worker_threads";
 
+// Stress collects on every allocation, including the worker's builtin initialization. The
+// ordinary deadline stays unchanged; stress checks delivery/rooting with an explicit longer
+// guard so collector overhead does not masquerade as an event that was never delivered.
+const guardMs = process.env.KILN_GC_STRESS ? 30000 : 5000;
+
 // The parent's loop runs in an async function, not top-level `await`, so this probe asks only
 // about realm death (top-level await has its own probes).
 async function main() {
@@ -14,7 +19,7 @@ async function main() {
       const worker = new Worker(new URL(import.meta.url), { workerData: { port: port2, how }, transferList: [port2] });
       worker.on("error", () => {});
       const closed = await new Promise((resolve) => {
-        const timer = setTimeout(() => { port1.close(); resolve(false); }, 5000);
+        const timer = setTimeout(() => { port1.close(); resolve(false); }, guardMs);
         if (!listenFirst) port1.on("message", () => {});
         port1.on("close", () => { clearTimeout(timer); resolve(true); });
         if (how === "terminate") setTimeout(() => worker.terminate(), 50);

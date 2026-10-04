@@ -7,10 +7,15 @@
 // first and every line below read "timeout".
 import { Worker, MessageChannel, isMainThread, parentPort, workerData } from "node:worker_threads";
 
+// Stress collects on every allocation, including the worker's builtin initialization. The
+// ordinary deadline stays unchanged; stress checks delivery/rooting with an explicit longer
+// guard so collector overhead does not masquerade as an event that was never delivered.
+const guardMs = process.env.KILN_GC_STRESS ? 30000 : 3000;
+
 // Resolve with `label` when `event` fires, or with "timeout" when the guard timer does.
 const first = (target, event, label) =>
   new Promise((resolve) => {
-    const guard = setTimeout(() => resolve(event + " timeout"), 3000);
+    const guard = setTimeout(() => resolve(event + " timeout"), guardMs);
     target.once(event, (value) => {
       clearTimeout(guard);
       resolve(label(value));
