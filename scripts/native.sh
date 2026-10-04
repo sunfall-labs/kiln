@@ -167,20 +167,21 @@ run_probe() {
 	fi
 
 	local interpreted_marker="$WORK_DIR/$name.interpreter-timeout"
-	local interpreted interpreted_status=0
-	interpreted="$(run_invocation "$interpreted_marker" \
+	local interpreted_output="$WORK_DIR/$name.interpreter.out"
+	local interpreted_status=0
+	run_invocation "$interpreted_marker" \
 		env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
-		${adapter:+"$adapter"} "${clock_policy[@]}" run "$probe" 2>&1)" || interpreted_status=$?
+		${adapter:+"$adapter"} "${clock_policy[@]}" run "$probe" >"$interpreted_output" 2>&1 || interpreted_status=$?
 	if [[ -f "$interpreted_marker.interrupted" ]]; then
-		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.interrupted"
+		cp -- "$interpreted_output" "$WORK_DIR/$name.interrupted"
 		return 0
 	fi
-	if [[ -f $interpreted_marker ]]; then
-		printf 'interpreter invocation:\n%s\n' "$interpreted" > "$WORK_DIR/$name.timedout"
+	if [[ -f "$interpreted_marker" ]]; then
+		{ printf 'interpreter invocation timed out; captured output follows:\n'; cat -- "$interpreted_output"; } > "$WORK_DIR/$name.timedout"
 		return 0
 	fi
 	if ((interpreted_status != 0)); then
-		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
+		cp -- "$interpreted_output" "$WORK_DIR/$name.failed"
 		return 0
 	fi
 	# Zero by construction: a nonzero interpreter took the branch above and is already a failure.
@@ -223,7 +224,7 @@ run_probe() {
 		fi
 	fi
 
-	local native native_status=0 threads
+	local native_output native_status=0 threads
 	for threads in $parallelism; do
 		native_status=0
 		local -a run_env=(${probe_env[@]+"${probe_env[@]}"})
@@ -236,24 +237,24 @@ run_probe() {
 			run_env+=("KILN_GC_STRESS=$STRESS")
 		fi
 		local native_timeout_marker="$WORK_DIR/$name.native-$threads.timeout"
-		native="$(run_invocation "$native_timeout_marker" \
+		native_output="$WORK_DIR/$name.native-$threads.out"
+		run_invocation "$native_timeout_marker" \
 			env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot \
-			${adapter:+"$adapter"} "${clock_policy[@]}" run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+			${adapter:+"$adapter"} "${clock_policy[@]}" run --native ${profile:+--profile "$profile"} "$probe" >"$native_output" 2>&1 || native_status=$?
 		if [[ -f "$native_timeout_marker.interrupted" ]]; then
-			printf '%s\n' "$native" > "$WORK_DIR/$name.interrupted"
+			cp -- "$native_output" "$WORK_DIR/$name.interrupted"
 			return 0
 		fi
 		if [[ -f $native_timeout_marker ]]; then
-			printf 'native invocation (parallelism=%s):\n%s\n' "$threads" "$native" > "$WORK_DIR/$name.timedout"
+			{ printf 'native invocation (parallelism=%s) timed out; captured output follows:\n' "$threads"; cat -- "$native_output"; } > "$WORK_DIR/$name.timedout"
 			return 0
 		fi
-		if [[ $native != "$interpreted" ]] || ((native_status != interpreted_status)); then
-			[[ $threads != default ]] && native="$native [KILN_PARALLELISM=$threads]"
+		if ! cmp -s -- "$native_output" "$interpreted_output" || ((native_status != interpreted_status)); then
 			break
 		fi
 	done
 
-	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then
+	if cmp -s -- "$native_output" "$interpreted_output" && ((native_status == interpreted_status)); then
 		touch "$WORK_DIR/$name.matched"
 		return 0
 	fi
@@ -267,9 +268,9 @@ run_probe() {
 	# runs of the same tree without anything saying a word: every one of those refusals was a
 	# build that did not happen.
 	local broken
-	broken="$(printf '%s\n' "$native" | grep -m1 -E '^kiln: native (toolchain|number provider) failed' || true)"
+	broken="$(grep -a -m1 -E '^kiln: native (toolchain|number provider) failed' "$native_output" || true)"
 	if [[ -n $broken ]]; then
-		printf '%s\n' "$native" > "$WORK_DIR/$name.broken"
+		cp -- "$native_output" "$WORK_DIR/$name.broken"
 		return 0
 	fi
 
@@ -277,24 +278,29 @@ run_probe() {
 	# yet. Both spellings are listed rather than prefix-matched, so a new `kiln: native ...`
 	# message has to be classified by somebody instead of quietly joining the backlog.
 	local refusal
-	refusal="$(printf '%s\n' "$native" |
-		grep -m1 -E '^kiln: native (backend refusal:|emission failed: unsupported native emission:)' ||
-		true)"
+	refusal="$(grep -a -m1 -E '^kiln: native (backend refusal:|emission failed: unsupported native emission:)' "$native_output" || true)"
 	if [[ -n $refusal ]]; then
 		local reason
 		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
-		if [[ $native != kiln:* ]]; then
-			reason="$reason (after $(printf '%s\n' "$native" | grep -c -v '^kiln: native ') line(s) of output)"
+		if [[ $(head -c 5 -- "$native_output") != kiln: ]]; then
+			reason="$reason (after $(grep -a -c -v '^kiln: native ' "$native_output" || true) line(s) of output)"
 		fi
 		printf '%s\n' "$reason" > "$WORK_DIR/$name.refused"
 		return 0
 	fi
 
 	{
-		printf '%s\n' "  interpreter: $interpreted [exit $interpreted_status]"
-		printf '%s\n' "  native:      $native [exit $native_status]"
-		if [[ $native == "$interpreted" ]]; then
-			printf '%s\n' "  the bytes agree; only the exit status differs"
+		printf '  interpreter: exit %s, %s output bytes\n' "$interpreted_status" "$(wc -c <"$interpreted_output" | tr -d '[:space:]')"
+		printf '  native:      exit %s, %s output bytes\n' "$native_status" "$(wc -c <"$native_output" | tr -d '[:space:]')"
+		if cmp -s -- "$native_output" "$interpreted_output"; then
+			printf '  the bytes agree; only the exit status differs\n'
+		else
+			printf '  outputs differ; exact captured bytes (hex):\n'
+			printf '  interpreter: '
+			od -An -v -tx1 "$interpreted_output" | tr '\n' ' '
+			printf '\n  native:      '
+			od -An -v -tx1 "$native_output" | tr '\n' ' '
+			printf '\n'
 		fi
 	} > "$WORK_DIR/$name.diverged"
 }
@@ -323,21 +329,21 @@ for probe in "${PROBES[@]}"; do
 	name="${name%.*}"
 	if [[ -f "$WORK_DIR/$name.interrupted" ]]; then
 		kiln_say "FAILED: invocation interrupted while running $name:"
-		kiln_say "$(<"$WORK_DIR/$name.interrupted")"
+		cat -- "$WORK_DIR/$name.interrupted" | kiln_block
 		interruptions=$((interruptions + 1))
 		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.timedout" ]]; then
 		kiln_say "FAILED: deadline expired while running $name (KILN_NATIVE_TIMEOUT_SECONDS=$NATIVE_TIMEOUT_SECONDS):"
-		kiln_say "$(<"$WORK_DIR/$name.timedout")"
+		cat -- "$WORK_DIR/$name.timedout" | kiln_block
 		timeouts=$((timeouts + 1))
 		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
-		kiln_say "$(<"$WORK_DIR/$name.failed")"
+		cat -- "$WORK_DIR/$name.failed" | kiln_block
 		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.broken" ]]; then
 		kiln_say "FAILED: the native build of $name did not complete, so there is nothing to compare:"
-		kiln_say "$(<"$WORK_DIR/$name.broken")"
+		cat -- "$WORK_DIR/$name.broken" | kiln_block
 		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.stress-skipped" ]]; then
 		stress_skipped=$((stress_skipped + 1))
