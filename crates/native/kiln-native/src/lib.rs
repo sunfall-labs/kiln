@@ -48,6 +48,7 @@ use kiln_native_runtime::{
 };
 use kiln_native_toolchain::{
     CompileOptions, CompilerKind, LinkOptions, ToolIdentity, Toolchain, ToolchainError,
+    native_release_keep_symbols,
 };
 use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
 use rayon::prelude::*;
@@ -907,11 +908,25 @@ fn pgo_options_fingerprint(options: &NativeBuildOptions) -> String {
 }
 
 fn executable_link_options_digest(profile: NativeProfile, options: &NativeBuildOptions) -> Digest {
+    executable_link_options_digest_with_symbols(profile, options, native_release_keep_symbols())
+}
+
+fn executable_link_options_digest_with_symbols(
+    profile: NativeProfile,
+    options: &NativeBuildOptions,
+    keep_symbols: bool,
+) -> Digest {
     let static_opt = if options.static_link { "\0static" } else { "" };
     let pgo_opt = pgo_options_fingerprint(options);
+    let symbols_opt =
+        if keep_symbols && matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
+            "\0keep-symbols"
+        } else {
+            ""
+        };
     Digest::hash(
         format!(
-            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}",
+            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}",
             profile.as_str()
         )
         .as_bytes(),

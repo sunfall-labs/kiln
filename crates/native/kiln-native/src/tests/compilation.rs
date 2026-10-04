@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn diagnostic_symbol_retention_changes_only_the_release_link_identity() {
+    let options = NativeBuildOptions::default();
+    assert_ne!(
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, false),
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, true),
+        "release links with and without local symbols must never share a cache artifact"
+    );
+    assert_ne!(
+        executable_link_options_digest_with_symbols(NativeProfile::ReleaseSize, &options, false),
+        executable_link_options_digest_with_symbols(NativeProfile::ReleaseSize, &options, true),
+        "size-release links also omit stripping only when explicitly requested"
+    );
+    assert_eq!(
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, false),
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, true),
+        "non-release profiles never strip this symbol table"
+    );
+    assert_eq!(
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, false),
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, true),
+        "the gprof profile already retains symbols"
+    );
+}
+
+#[test]
 fn native_http_facade_demand_accounts_for_dynamic_global_access() {
     let mut members = kiln_graph::DemandedMembers::default();
     members.globals.insert("console".into());

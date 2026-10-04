@@ -498,11 +498,13 @@ fn release_debug_strip_flag(
     profile: BuildProfile,
     platform: TargetPlatform,
     compiler: CompilerKind,
+    keep_symbols: bool,
 ) -> Option<&'static str> {
     if !matches!(
         profile,
         BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
     ) || compiler == CompilerKind::Zig
+        || keep_symbols
     {
         return None;
     }
@@ -514,6 +516,14 @@ fn release_debug_strip_flag(
         TargetPlatform::Macos => Some("-Wl,-S,-x"),
         TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
     }
+}
+
+/// Whether release links should retain their local symbol table for diagnostic profiling.
+///
+/// This affects only final link stripping; generated C, compiler flags, and release optimization
+/// policy stay unchanged. The native build cache fingerprints this choice separately.
+pub fn native_release_keep_symbols() -> bool {
+    std::env::var("KILN_NATIVE_KEEP_SYMBOLS").as_deref() == Ok("1")
 }
 
 /// Options for compiling one emitted C translation unit.
@@ -1345,6 +1355,7 @@ impl Toolchain {
             options.profile,
             self.identity.target_platform(),
             self.identity.kind,
+            native_release_keep_symbols(),
         ) {
             args.push(OsString::from(flag));
         }
@@ -2647,9 +2658,20 @@ mod tests {
                 release_debug_strip_flag(
                     BuildProfile::NativeRelease,
                     platform,
-                    CompilerKind::Clang
+                    CompilerKind::Clang,
+                    false,
                 ),
                 debug_flag
+            );
+            assert_eq!(
+                release_debug_strip_flag(
+                    BuildProfile::NativeRelease,
+                    platform,
+                    CompilerKind::Clang,
+                    true,
+                ),
+                None,
+                "diagnostic symbol preservation omits only the debug-strip option"
             );
             let sections = release_section_flags(BuildProfile::NativeRelease, platform);
             if link_flag.is_some() {
@@ -2661,7 +2683,7 @@ mod tests {
                 assert!(release_section_flags(profile, platform).is_empty());
                 assert_eq!(release_dead_strip_flag(profile, platform), None);
                 assert_eq!(
-                    release_debug_strip_flag(profile, platform, CompilerKind::Clang),
+                    release_debug_strip_flag(profile, platform, CompilerKind::Clang, false),
                     None
                 );
             }
@@ -2671,6 +2693,7 @@ mod tests {
                 BuildProfile::NativeRelease,
                 TargetPlatform::Macos,
                 CompilerKind::Zig,
+                false,
             ),
             None
         );
