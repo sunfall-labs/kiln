@@ -38,6 +38,13 @@ enum Key {
     UniqueSymbol(usize),
     Shared(usize),
     Intl(usize),
+    NodeServer(usize),
+    NetSocket(usize),
+    HttpIncoming(usize),
+    HttpClientRequest(usize),
+    Readable(usize),
+    Writable(usize),
+    Zlib(usize),
 }
 
 enum Owner {
@@ -66,6 +73,13 @@ enum Owner {
     UniqueSymbol(Rc<UniqueSymbol>),
     Shared(Rc<SharedFacade>),
     Intl(Rc<intl::IntlValue>),
+    NodeServer(Rc<RefCell<NodeServerState>>),
+    NetSocket(Rc<RefCell<NetSocketState>>),
+    HttpIncoming(Rc<RefCell<HttpIncomingState>>),
+    HttpClientRequest(Rc<RefCell<HttpClientRequestState>>),
+    Readable(Rc<RefCell<ReadableState>>),
+    Writable(Rc<RefCell<WritableState>>),
+    Zlib(Rc<zlib::ZlibState>),
 }
 
 impl Owner {
@@ -96,6 +110,13 @@ impl Owner {
             Self::UniqueSymbol(value) => Key::UniqueSymbol(Rc::as_ptr(value) as usize),
             Self::Shared(value) => Key::Shared(Rc::as_ptr(value) as usize),
             Self::Intl(value) => Key::Intl(Rc::as_ptr(value) as usize),
+            Self::NodeServer(value) => Key::NodeServer(Rc::as_ptr(value) as usize),
+            Self::NetSocket(value) => Key::NetSocket(Rc::as_ptr(value) as usize),
+            Self::HttpIncoming(value) => Key::HttpIncoming(Rc::as_ptr(value) as usize),
+            Self::HttpClientRequest(value) => Key::HttpClientRequest(Rc::as_ptr(value) as usize),
+            Self::Readable(value) => Key::Readable(Rc::as_ptr(value) as usize),
+            Self::Writable(value) => Key::Writable(Rc::as_ptr(value) as usize),
+            Self::Zlib(value) => Key::Zlib(Rc::as_ptr(value) as usize),
         }
     }
 
@@ -126,6 +147,13 @@ impl Owner {
             Self::UniqueSymbol(value) => Rc::strong_count(value),
             Self::Shared(value) => Rc::strong_count(value),
             Self::Intl(value) => Rc::strong_count(value),
+            Self::NodeServer(value) => Rc::strong_count(value),
+            Self::NetSocket(value) => Rc::strong_count(value),
+            Self::HttpIncoming(value) => Rc::strong_count(value),
+            Self::HttpClientRequest(value) => Rc::strong_count(value),
+            Self::Readable(value) => Rc::strong_count(value),
+            Self::Writable(value) => Rc::strong_count(value),
+            Self::Zlib(value) => Rc::strong_count(value),
         }
     }
 
@@ -207,7 +235,36 @@ impl Owner {
             | Self::Shared(_)
             | Self::Intl(_)
             | Self::Proxy(_)
-            | Self::CommonJs(_) => {}
+            | Self::CommonJs(_)
+            | Self::HttpIncoming(_)
+            | Self::Zlib(_) => {}
+            Self::NodeServer(value) => {
+                let mut state = value.borrow_mut();
+                state.handler = Value::Undefined;
+                state.streams.clear();
+            }
+            Self::NetSocket(value) => {
+                let mut state = value.borrow_mut();
+                state.corked_callbacks.clear();
+                state.queued_write_callbacks.clear();
+                state.end_callbacks.clear();
+                state.deferred_destroy_callbacks = None;
+                state.cancelled_active_write_error = None;
+                state.upgrade_write_callbacks.clear();
+            }
+            Self::HttpClientRequest(value) => {
+                let mut state = value.borrow_mut();
+                state.socket = None;
+                state.object = None;
+            }
+            Self::Readable(value) => {
+                let mut state = value.borrow_mut();
+                state.buffer.clear();
+                state.pipes.clear();
+            }
+            Self::Writable(value) => {
+                value.borrow_mut().write = None;
+            }
         }
     }
 }
@@ -764,6 +821,58 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
                     .map(|(_, _, cell)| Value::Cell(Rc::clone(cell))),
             );
         }
+        Owner::NodeServer(value) => {
+            let state = value.borrow();
+            values.push(state.handler.clone());
+            for stream in &state.streams {
+                values.extend(stream.socket_object.iter().cloned());
+                values.extend(stream.request.iter().cloned());
+                values.extend(stream.response.iter().cloned());
+                values.extend(stream.client_requests.values().cloned());
+                values.extend(stream.client_responses.values().cloned());
+                values.extend(
+                    stream
+                        .http_responses
+                        .iter()
+                        .map(|(_, response)| response.clone()),
+                );
+            }
+        }
+        Owner::NetSocket(value) => {
+            let state = value.borrow();
+            values.extend(state.corked_callbacks.iter().cloned());
+            values.extend(
+                state
+                    .queued_write_callbacks
+                    .iter()
+                    .flat_map(|callbacks| callbacks.iter().cloned()),
+            );
+            values.extend(state.end_callbacks.iter().cloned());
+            if let Some((write, end)) = &state.deferred_destroy_callbacks {
+                values.extend(write.iter().chain(end).cloned());
+            }
+            values.extend(state.cancelled_active_write_error.iter().cloned());
+            values.extend(
+                state
+                    .upgrade_write_callbacks
+                    .values()
+                    .flat_map(|callbacks| callbacks.iter().cloned()),
+            );
+        }
+        Owner::HttpIncoming(_) => {}
+        Owner::HttpClientRequest(value) => {
+            if let Some(object) = &value.borrow().object {
+                values.push(Value::Object(Rc::clone(object)));
+            }
+        }
+        Owner::Readable(value) => {
+            let state = value.borrow();
+            values.extend(state.buffer.iter().cloned());
+            values.extend(state.pipes.iter().cloned());
+            values.push(Value::Object(Rc::clone(&state.public)));
+        }
+        Owner::Writable(value) => values.extend(value.borrow().write.iter().cloned()),
+        Owner::Zlib(_) => {}
         Owner::UniqueSymbol(_) | Owner::Shared(_) | Owner::Intl(_) => {}
     }
     values
@@ -775,6 +884,65 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
 fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
     let mut owners = Vec::new();
     match owner {
+        Owner::Object(object) => {
+            let data = object.borrow();
+            match data.node_object.as_ref() {
+                Some(NodeObject::NodeServer(state)) => {
+                    owners.push(Owner::NodeServer(Rc::clone(state)));
+                }
+                Some(NodeObject::NetSocket(state)) => {
+                    owners.push(Owner::NetSocket(Rc::clone(state)));
+                }
+                Some(NodeObject::HttpIncoming(state)) => {
+                    owners.push(Owner::HttpIncoming(Rc::clone(state)));
+                }
+                Some(NodeObject::HttpClientRequest(state)) => {
+                    owners.push(Owner::HttpClientRequest(Rc::clone(state)));
+                }
+                Some(NodeObject::Readable(state)) => {
+                    owners.push(Owner::Readable(Rc::clone(state)));
+                }
+                Some(NodeObject::Writable(state)) => {
+                    owners.push(Owner::Writable(Rc::clone(state)));
+                }
+                Some(NodeObject::Zlib(state)) => owners.push(Owner::Zlib(Rc::clone(state))),
+                Some(NodeObject::TimerHandle(timer)) => {
+                    owners.push(Owner::AsyncContext(Rc::clone(&timer.context)));
+                }
+                Some(
+                    NodeObject::HttpResponse(_)
+                    | NodeObject::Url(_)
+                    | NodeObject::UrlSearchParams(_)
+                    | NodeObject::Hash(_)
+                    | NodeObject::CryptoKey(_)
+                    | NodeObject::StringDecoder(_)
+                    | NodeObject::AsyncLocalStorage(_),
+                )
+                | None => {}
+            }
+        }
+        Owner::NodeServer(state) => {
+            for stream in &state.borrow().streams {
+                if let Some(socket) = &stream.socket {
+                    owners.push(Owner::NetSocket(Rc::clone(socket)));
+                }
+            }
+        }
+        Owner::NetSocket(state) => {
+            owners.push(Owner::Readable(Rc::clone(&state.borrow().readable)));
+        }
+        Owner::HttpIncoming(state) => {
+            owners.push(Owner::Readable(Rc::clone(&state.borrow().readable)));
+        }
+        Owner::HttpClientRequest(state) => {
+            if let Some(socket) = &state.borrow().socket {
+                owners.push(Owner::NetSocket(Rc::clone(socket)));
+            }
+        }
+        Owner::Zlib(state) => {
+            owners.push(Owner::Readable(Rc::clone(&state.readable)));
+            owners.push(Owner::Writable(Rc::clone(&state.writable)));
+        }
         Owner::Promise(value) => {
             for reaction in &value.state.borrow().reactions {
                 owners.push(Owner::AsyncContext(Rc::clone(&reaction.context)));
@@ -807,6 +975,10 @@ fn object_children(data: &ObjectData) -> Vec<Value> {
     values.extend(data.prototype.iter().cloned());
     values.extend(data.primitive.iter().cloned());
     values.extend(data.error_stack_frames.iter().cloned());
+    if let Some(NodeObject::TimerHandle(timer)) = &data.node_object {
+        values.push(timer.callback.clone());
+        values.extend(timer.arguments.iter().cloned());
+    }
     values.extend(data.node_events.iter().flatten().flat_map(|bucket| {
         bucket
             .listeners
@@ -1087,6 +1259,99 @@ mod tests {
         vm.collect_closure_cycles();
         assert!(weak_object.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn node_object_http_client_sidecar_cycle_respects_external_owners() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let object = Rc::new(RefCell::new(ObjectData::default()));
+        let state = Rc::new(RefCell::new(HttpClientRequestState {
+            host: "localhost".into(),
+            port: 80,
+            method: "GET".into(),
+            path: "/".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            socket: None,
+            object: Some(Rc::clone(&object)),
+            ended: false,
+            started: false,
+            end_sent: false,
+            cancelled: false,
+            request_id: 1,
+        }));
+        object.borrow_mut().node_object = Some(NodeObject::HttpClientRequest(Rc::clone(&state)));
+        let weak_object = Rc::downgrade(&object);
+        let keeper = Rc::clone(&object);
+        let weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&object))], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(object);
+        drop(state);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_object.upgrade().is_some(),
+            "external owner keeps it alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_object.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn shared_readable_sidecar_is_counted_once_for_two_wrappers() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let target = Rc::new(RefCell::new(ObjectData::default()));
+        let weak_target = Rc::downgrade(&target);
+        let state = new_readable_state(16, None);
+        state
+            .borrow_mut()
+            .buffer
+            .push(Value::Object(Rc::clone(&target)));
+        let first = Rc::new(RefCell::new(ObjectData {
+            node_object: Some(NodeObject::Readable(Rc::clone(&state))),
+            ..Default::default()
+        }));
+        let second = Rc::new(RefCell::new(ObjectData {
+            node_object: Some(NodeObject::Readable(Rc::clone(&state))),
+            ..Default::default()
+        }));
+        let weak_first = Rc::downgrade(&first);
+        let weak_second = Rc::downgrade(&second);
+        let first_weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&first))], 0)
+            .expect("first wrapper can be held weakly");
+        let second_weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&second))], 0)
+            .expect("second wrapper can be held weakly");
+        let target_weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .expect("buffered target can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        let keeper = Rc::clone(&first);
+        drop(first);
+        drop(second);
+        drop(target);
+        drop(state);
+
+        vm.collect_closure_cycles();
+        assert!(weak_first.upgrade().is_some());
+        assert!(weak_second.upgrade().is_none());
+        assert!(
+            weak_target.upgrade().is_some(),
+            "live wrapper keeps shared state live"
+        );
+        assert_eq!(vm.weak_ref_deref(&second_weak_ref, 0), Ok(Value::Undefined));
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&first_weak_ref, 0), Ok(Value::Undefined));
+        assert_eq!(vm.weak_ref_deref(&target_weak_ref, 0), Ok(Value::Undefined));
     }
 
     #[test]
