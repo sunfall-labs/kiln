@@ -625,6 +625,12 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
         Owner::Cell(value) => values.push(value.borrow().clone()),
         Owner::Array(value) => {
             values.extend(value.items.borrow().iter().cloned());
+            // Large Map/Set backing arrays keep a duplicate key in this lookup cache. It is a
+            // real strong Value edge even though the canonical collection entry is also in
+            // `items`; account for both owners so the cache does not look like an external root.
+            if let Some(index) = value.collection_index.borrow().as_ref() {
+                values.extend(index.keys().map(|key| key.0.clone()));
+            }
             for element in value.elements.borrow().iter() {
                 match &element.property {
                     Property::Value(value) => values.push(value.clone()),
@@ -922,6 +928,46 @@ mod tests {
         drop(keeper);
         vm.collect_closure_cycles();
         assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn array_collection_lookup_cache_is_counted_as_a_strong_edge() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let target = Rc::new(RefCell::new(ObjectData::default()));
+        let weak_target = Rc::downgrade(&target);
+        let keeper = Rc::clone(&target);
+        let mut entries = vec![Value::Object(Rc::clone(&target))];
+        entries.extend((0..15).map(|index| Value::Number(index as f64)));
+        let backing = ArrayData::new(entries);
+        target
+            .borrow_mut()
+            .set("backing", Value::Array(Rc::clone(&backing)));
+        assert_eq!(
+            find_collection_entry(&backing, &Value::Object(Rc::clone(&target)), false),
+            Some(0)
+        );
+        let weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(backing);
+
+        vm.collect_closure_cycles();
+
+        assert!(
+            weak_target.upgrade().is_some(),
+            "the cached key remains live while an external owner holds it"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+
+        assert!(
+            weak_target.upgrade().is_none(),
+            "an unreachable array/index cycle must not be mistaken for an external owner"
+        );
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
     }
 
