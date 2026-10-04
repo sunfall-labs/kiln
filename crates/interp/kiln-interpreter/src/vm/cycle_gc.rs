@@ -1107,6 +1107,7 @@ mod tests {
             function: 0,
             strictness: Rc::new(Strictness::sloppy(program)),
             module_path: None,
+            module_generation: 0,
             name: None,
             inferred_name: None,
             upvalues: Vec::new(),
