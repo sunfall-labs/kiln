@@ -24,9 +24,17 @@ Validation on 2026-10-04:
   probes skipped.
 - Direct native output includes `argumentMutationResult:[4096,3,4098]`,
   `argumentEffects:1`, `argumentReplacementCalls:0`, and `mutatedResult:[2,3,4]`.
-- The CLI used for the source-only fixture validation has SHA-256
-  `e27a77ff2fb28a7509a9f1da8c99c92b5a6addecf3ff62bc0199c5f29b441269`; it was already built
-  from the planner/emitter change at `f5ac37ec0111b18f5f9d42b9161af0c29e093746`.
+- The fixture requests `native-release`, so the probe exercises native parallel lowering. The
+  planner reports the original pure call and the comma-expression argument-mutation call as
+  `parallel`; the reassigned-capture site is sequential with `CapturesReassigned`. The f5 CLI at
+  `target/debug/kiln` had SHA-256
+  `5b977019a9b47ff4593cbc3a53471d42a99c031d0aa5014b418276bb2c6095f6` (mtime
+  2026-10-04 11:56:20 -0600). The release executable built for the fixture had SHA-256
+  `6bb5af4cecace178b8584cdbd063d1bd67a5e024dfad9a351b81ac1623e8d55d` (mtime
+  2026-10-04 11:58:45 -0600). Fixture source SHA-256 was
+  `8a6225511c92e4f457197f8cff9321a1e1ee79cd7d5abd16ac9abcf6fd591cfb`.
+- The earlier map-only CLI (`e27a77ff2fb28a7509a9f1da8c99c92b5a6addecf3ff62bc0199c5f29b441269`)
+  was not used as evidence for the prepared pool guard.
 - The planner test passed with
   `MBX_GC_AUTO=false KILN_JOBS=1 RAYON_NUM_THREADS=1 mise exec -- mbx test -p kiln-native parallel_sites_without_compiling_are_the_builds_own -- --nocapture`.
 

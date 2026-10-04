@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 // A prepared member call evaluates its property before evaluating callback arguments.  The
 // parallel lowering may bypass the installed wrapper only when that saved value is still the
 // builtin extension; otherwise it must invoke the saved value (including an inherited getter).
