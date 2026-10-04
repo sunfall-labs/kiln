@@ -381,6 +381,7 @@ def main():
     if not (os.path.exists(KILN) and os.access(KILN, os.X_OK)):
         print(f"realworld/compare: no kiln binary at {KILN}", file=sys.stderr)
         sys.exit(1)
+    provenance = repo_provenance()
     work = tempfile.mkdtemp(prefix="kiln-realworld.")
     rows, unsupported_all, divergences = [], {}, []
     server_notes = {}
@@ -440,7 +441,7 @@ def main():
             json.dump(
                 {"passes": PASSES, "rows": rows, "unsupported": unsupported_all,
                  "server_notes": server_notes, "divergences": divergences,
-                 "provenance": repo_provenance()},
+                 "provenance": provenance},
                 handle, indent=2,
             )
             handle.write("\n")
