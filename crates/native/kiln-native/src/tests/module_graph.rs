@@ -1343,12 +1343,11 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert!(!launcher.contains("kiln_imports_1[0] ="));
     assert_eq!(launcher.matches("kiln_realm_create(&realm)").count(), 1);
     assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
-    assert_eq!(
-        launcher
-            .matches("kiln_realm_enter(realm, kiln_graph_enter, graph)")
-            .count(),
-        1
-    );
+    // Native async launching can enter the same graph callback from either the initial body
+    // step or a child-selected startup branch. The callback wiring is the contract here; its
+    // number of generated call sites is an implementation detail. The executable star-export
+    // check below verifies that the selected export still reaches its origin at runtime.
+    assert!(launcher.contains("run->status = kiln_realm_enter(realm, kiln_graph_enter, graph);"));
     assert!(!launcher.contains("kiln_graph_enter_module"));
     let (bootstrap, _, _, _) = native_builtin_bootstrap_module(
         &root.cache(),
