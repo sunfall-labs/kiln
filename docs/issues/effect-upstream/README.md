@@ -153,6 +153,14 @@ missing inventories and missing summaries as incomplete runs. Bun and kiln use
 the same source graph, setup and adapter. No bundler participates. Native defaults
 to `native-dev`; `--native-profile native-release` selects production optimization.
 The report records the selected profile, and upstream case timeouts remain unchanged.
+Native runs now snapshot the provider manifest and archive as well as the compiler, verify
+the archive digest, and pass that snapshot to builds and child launches. `--provider-manifest`
+selects a package explicitly; otherwise the runner uses an installed package or builds one
+from this repository through mise. Reports include source/archive/manifest digests, ABI,
+Rust identity and target. The previous production batch did not capture the provider this way
+and remains diagnostic evidence. Ten snapshot controls and three actual upstream files
+pass on native (28 cases); Bun passes 27 and fails its AOT integration case while lazily
+initializing stream primordials after the fixture replaces Function.
 Neither correctness run is a steady-state performance benchmark.
 
 The adapter uses actual Vitest assertion/spy libraries, but does not yet implement

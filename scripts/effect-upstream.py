@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 REPO = Path(__file__).resolve().parent.parent
@@ -30,6 +31,72 @@ def write_json(path, value):
     temporary.write_text(json.dumps(value, indent=2) + '\n')
     temporary.replace(path)
 
+
+
+def snapshot_provider(manifest_path, toolchain):
+    """Own both provider inputs; never link from regenerable or mutable source outputs."""
+    original = manifest_path.resolve()
+    manifest_bytes = original.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    archive_name = manifest.get('archive')
+    if (not isinstance(archive_name, str) or not archive_name
+            or archive_name in ('.', '..') or Path(archive_name).name != archive_name
+            or '/' in archive_name or '\\' in archive_name):
+        raise RuntimeError('provider archive must be one file name')
+    archive = original.parent / archive_name
+    archive_sha = digest(archive)
+    if archive_sha != manifest.get('archive_sha256'):
+        raise RuntimeError('provider archive digest does not match manifest')
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    destination = toolchain / ('provider-' + manifest_sha)
+    if not destination.exists():
+        temporary = Path(tempfile.mkdtemp(prefix='.provider-', dir=toolchain))
+        try:
+            shutil.copy2(archive, temporary / archive_name)
+            if digest(temporary / archive_name) != archive_sha:
+                raise RuntimeError('provider archive changed while taking the snapshot')
+            (temporary / 'kiln-native-provider.json').write_bytes(manifest_bytes)
+            try:
+                temporary.rename(destination)
+            except FileExistsError:
+                pass
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+    snapshot = destination / 'kiln-native-provider.json'
+    if digest(snapshot) != manifest_sha or digest(destination / archive_name) != archive_sha:
+        raise RuntimeError('corrupt provider snapshot: ' + str(destination))
+    return {'manifest': str(snapshot), 'manifest_sha256': manifest_sha,
+            'archive_sha256': archive_sha, 'source_sha256': manifest.get('source_sha256'),
+            'provider_abi': manifest.get('provider_abi'), 'rustc_identity': manifest.get('rustc_identity'),
+            'rust_target': manifest.get('rust_target')}
+
+
+def prepare_provider(explicit, kiln_source, out, timeout, runtime_jobs, memory_mb):
+    candidates = [explicit, os.environ.get('KILN_NATIVE_PROVIDER_MANIFEST'),
+                  os.environ.get('KILN_NATIVE_NUMBER_PROVIDER_MANIFEST')]
+    supplied = next((Path(p) for p in candidates if p is not None), None)
+    if supplied is None:
+        supplied = next((p for p in (kiln_source.parent / 'kiln-native-provider.json',
+                                    kiln_source.parent.parent / 'lib/kiln/kiln-native-provider.json')
+                         if p.is_file()), None)
+    preparation = None
+    if supplied is None:
+        package = out / 'provider-package'
+        # Source fallback is assembled once before the run, under the pinned toolchain.
+        # Every child then consumes the owned archive, regardless of later source edits.
+        command = [sys.executable, str(Path(__file__).resolve()), '--limited-child', str(memory_mb),
+                   'mise', 'exec', '--', str(REPO / 'scripts/package-native-number-provider.sh'),
+                   str(package)]
+        preparation = execute(command, REPO, out / 'provider-preparation.log',
+                              max(300, timeout), runtime_jobs)
+        if preparation['exit_code'] != 0:
+            raise RuntimeError('provider preparation failed; see ' + preparation['log'])
+        supplied = package / 'kiln-native-provider.json'
+    snapshot = snapshot_provider(supplied, out / 'toolchain')
+    snapshot['original_manifest'] = str(supplied.resolve())
+    snapshot['preparation'] = preparation
+    return snapshot
 
 def command(args, cwd):
     subprocess.run(args, cwd=cwd, check=True)
@@ -170,11 +237,11 @@ def entry_for(workspace, source, name):
     return entry
 
 
-def execute(args, cwd, log, timeout, runtime_jobs):
+def execute(args, cwd, log, timeout, runtime_jobs, extra_env=None):
     started = time.monotonic()
     timed_out = False
     with log.open('wb') as output:
-        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(runtime_jobs), 'RAYON_NUM_THREADS': str(runtime_jobs)},
+        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(runtime_jobs), 'RAYON_NUM_THREADS': str(runtime_jobs), **(extra_env or {})},
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=timeout)
@@ -246,6 +313,7 @@ def main():
     parser.add_argument('--engine', action='append', choices=['bun', 'interpreter', 'native'])
     parser.add_argument('--path', action='append', default=[], help='test stem or directory prefix (repeatable)')
     parser.add_argument('--kiln', type=Path, default=REPO / 'target/release/kiln')
+    parser.add_argument('--provider-manifest', type=Path, help='native provider to snapshot; defaults to an installed package or one built from this repository')
     parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
     parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
     parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
@@ -289,6 +357,8 @@ def main():
                 temporary.unlink(missing_ok=True)
         if digest(kiln) != kiln_sha:
             raise RuntimeError('corrupt kiln executable snapshot: ' + str(kiln))
+    provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, args.runtime_jobs, args.kiln_memory_mb) if 'native' in engines else None
+    native_env = {'KILN_NATIVE_PROVIDER_MANIFEST': provider['manifest']} if provider else {}
     with (workspace / '.runner.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         source = prepare(workspace)
@@ -301,6 +371,7 @@ def main():
                   'reference': 'bun', 'versions': versions, 'selected': len(selected),
                   'clock_policy': {e: 'wall' for e in engines},
                   'native_profile': args.native_profile if 'native' in engines else None,
+                  'native_provider': provider,
                   'kiln_binary_sha256': kiln_sha,
                   'kiln_binary_source': str(kiln_source) if kiln_sha else None,
                   'kiln_binary_snapshot': str(kiln) if kiln_sha else None,
@@ -333,7 +404,7 @@ def main():
                         if specifier.startswith('.'):
                             specifier = str((source / PIN['directory'] / (name + '.test.ts')).parent.joinpath(specifier).resolve())
                         build_cmd.extend(['--include', specifier])
-                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs)
+                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs, native_env)
                     if build['exit_code'] != 0 or not binary.is_file():
                         envelope = {**build, 'build': build, 'inventory': None, 'cases': [],
                                     'summary': None, 'errors': [{'kind': 'runner_error', 'error': 'native build failed'}], 'complete': False}
@@ -342,7 +413,8 @@ def main():
                         continue
                     cmd = [*limiter, str(binary)]
                 log = directory / (engine + '.log')
-                envelope = execute(cmd, workspace, log, args.timeout, args.runtime_jobs)
+                envelope = execute(cmd, workspace, log, args.timeout, args.runtime_jobs,
+                                   native_env if engine != 'bun' else None)
                 if build is not None:
                     envelope['build'] = build
                     envelope['binary_sha256'] = digest(binary)
