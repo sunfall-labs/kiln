@@ -384,12 +384,7 @@ impl DirectPlan {
             .chain(std::iter::once((entry, &known.entry)))
         {
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod {
-                    name,
-                    args,
-                    prepared_callee: None,
-                    ..
-                } = op
+                if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                     && let Some(method) = key
                         .to_scalar_string()
@@ -650,12 +645,7 @@ impl DirectPlan {
                 return targets;
             }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-                if let GraphOp::CallMethod {
-                    name,
-                    args,
-                    prepared_callee: None,
-                    ..
-                } = op
+                if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
                     // A family site (parallel issues 10 and 15) calls the typed entries of its
@@ -834,12 +824,7 @@ impl DirectPlan {
                 .iter()
                 .flat_map(|b| b.operations.iter())
                 .flat_map(|(_, op)| match op {
-                    GraphOp::CallMethod {
-                        name,
-                        args,
-                        prepared_callee: None,
-                        ..
-                    } => parallel_method(*name)
+                    GraphOp::CallMethod { name, args, .. } => parallel_method(*name)
                         .map(|method| {
                             method
                                 .callbacks(args.len())
