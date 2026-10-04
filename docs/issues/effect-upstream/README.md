@@ -350,3 +350,11 @@ compiler, provider, source and adapter identities plus all case records. This
 uses frozen compiler `57424396`, not the later unlanded prepared-call compiler,
 and does not add focused successes to an older whole-suite score. The
 interpreter retention failures described above remain unresolved.
+
+## Allocator milestone recovery
+
+The frozen combined compiler `f1c8f22d` completed full Test262 coverage (102,638 selected variants, no deferred variants, no chunk regressions), but its full gate failed after the disk filled. All seven reported native divergences were infrastructure failures. The four GUI build failures separately required a provider carrying GUI capability.
+
+The reviewed prelude snapshot update passes its focused test. A full-GUI package was built and verified, and all 14 affected native probes now match. A quiet five-bundle performance recheck passes the unchanged thresholds, including the three rows flagged by the failed gate. [Recovery evidence](allocator-gate-recovery-20261004/README.md) retains the exact logs, provider receipt and latest Pool result: interpreter 44 passed / 3 failed / 0 skipped out of 47.
+
+Full native GC-stress validation is running in an isolated worktree from `3d41ebb2`, using that frozen compiler and the complete 650-file native probe inventory. This is not yet a passing stress milestone or a replacement full gate. The entire 322-file upstream candidate replay, final quiet Bun comparisons, remaining retention and timeout failures, and main integration remain outstanding.
