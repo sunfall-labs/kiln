@@ -164,8 +164,15 @@ the private native cancellation hook had no interpreter equivalent. The added in
 passes the original live-response cancellation fixture and its graph regression, including abort,
 reader cancellation and cancellation before connection assignment. Native FIN and cancellation now match Node in two focused native probes under ordinary
 and allocation-stressed execution. Nine module-graph HTTP tests and 317 backend-C tests
-pass (one backend test ignored). The final integrated routine gate and the upstream
-HttpClient replay remain required before pushing.
+pass (one backend test ignored). The [final integrated HttpClient replay](http-client-fin-reference.json)
+passes all eight unchanged upstream cases under native-release with the frozen compiler/provider.
+The integration gate retained 2,574 passing crate tests and found no routine Test262 chunk
+regressions across 102,522 selected variants. It failed three ownership/snapshot checks
+(now corrected), one interpreter redirect-error divergence, four GUI probes from an incorrectly
+pinned headless provider, and the RxJS performance baseline. All four GUI probes pass with
+the source-matched full-gui provider. Redirect and performance investigation remain open;
+this gate is not a passing milestone. A fresh complete 322-file native-release/Bun replay
+is running on the frozen integration compiler/provider as diagnostic evidence.
 
 The object initializer now explicitly clears `external_owner`, including reused arena storage;
 a poisoned-memory fixture reproduces the previous uninitialized field. The inline-object
