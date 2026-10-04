@@ -1654,7 +1654,20 @@ pub(super) fn emit_graph_op(
             if argument_length_values.contains(object)
                 && matches!(program.constants.get(*name as usize), Some(kiln_ir::Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length")) =>
         {
-            writeln!(output, "    v{v} = kiln_c99_val_from_double((double)argc);").unwrap();
+            // This operation can execute in either clone of a versioned function. Keep every
+            // representation the graph assigned to its result in sync: the fast clone may read
+            // the numeric twin without consulting `v{v}`, just as it does for a numeric
+            // constant or call result.
+            let need_box = ctx.boxed.map_or(true, |boxed| boxed.contains(&vid));
+            if need_box {
+                writeln!(output, "    v{v} = kiln_c99_val_from_double((double)argc);").unwrap();
+            }
+            if live_typed {
+                writeln!(output, "    d{v} = (double)argc;").unwrap();
+            }
+            if live_typed_int {
+                writeln!(output, "    i{v} = (int64_t)argc;").unwrap();
+            }
         }
         GraphOp::GetProperty { object, name, .. } => {
             properties::emit_get_property(output, vid, object, name, &ctx)

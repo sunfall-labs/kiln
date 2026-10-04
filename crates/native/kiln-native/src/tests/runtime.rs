@@ -188,6 +188,47 @@ scheduleFactory(41);
 }
 
 #[test]
+fn native_release_date_setters_preserve_actual_optional_arguments() {
+    let source = r#"
+const omitted = new Date(Date.UTC(2024, 6, 15));
+omitted.setUTCFullYear(2025);
+const present = new Date(Date.UTC(2024, 6, 15));
+present.setUTCFullYear(2025, 11, 25);
+const explicitUndefined = new Date(Date.UTC(2024, 6, 15));
+explicitUndefined.setUTCFullYear(2025, undefined, 25);
+const called = new Date(Date.UTC(2024, 6, 15));
+Date.prototype.setUTCFullYear.call(called, 2025, 11, 25);
+const reflected = new Date(Date.UTC(2024, 6, 15));
+Reflect.apply(Date.prototype.setUTCFullYear, reflected, [2025, 11, 25]);
+const hours = new Date(Date.UTC(2024, 2, 15, 23));
+hours.setUTCHours(23, 59, 59, 999);
+console.log([
+  omitted.toISOString(),
+  present.toISOString(),
+  Number.isNaN(explicitUndefined.getTime()),
+  called.toISOString(),
+  reflected.toISOString(),
+  hours.toISOString(),
+].join("\n"));
+"#;
+    let Some(output) = run_native_release_fixture("native-release-date-setter-arguments", source)
+    else {
+        return;
+    };
+    assert_eq!(
+        output,
+        concat!(
+            "2025-07-15T00:00:00.000Z\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "true\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "2024-03-15T23:59:59.999Z\n",
+        )
+    );
+}
+
+#[test]
 fn native_non_callable_diagnostic_keeps_call_site_and_callee_context() {
     let Some(stderr) = run_native_failure_fixture(
         "kiln-native-non-callable-diagnostic",
