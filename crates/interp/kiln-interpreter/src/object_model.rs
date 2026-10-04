@@ -190,6 +190,106 @@ pub(super) struct FinalizationCell {
     pub(super) token: Option<WeakCellValue>,
 }
 
+/// A weak collection entry has a genuinely weak key. Values are conditionally retained by the
+/// collector only when the key is independently reachable (ECMAScript ephemeron semantics).
+#[derive(Clone, Debug)]
+pub(super) enum WeakCollectionKey {
+    Object(Weak<RefCell<ObjectData>>),
+    Closure(Weak<Closure>),
+    Array(Weak<ArrayData>),
+    Promise(Weak<PromiseData>),
+    Generator(Weak<GeneratorData>),
+    Shared(Weak<SharedFacade>),
+    RegExp(Weak<RegExpData>),
+    Date(Weak<DateData>),
+    Temporal(Weak<TemporalData>),
+    Intl(Weak<intl::IntlValue>),
+    TypedArray(Weak<TypedArrayData>),
+    ArrayBuffer(Weak<BufferData>),
+    DataView(Weak<DataViewData>),
+    Proxy(Weak<ProxyData>),
+    Bound(Weak<BoundFunction>),
+    Wrapped(Weak<WrappedFunction>),
+    CommonJs(Weak<CommonJsRequire>),
+    CommonJsResolve(Weak<CommonJsRequire>),
+    Settler(Weak<PromiseData>, bool),
+    Capability(Weak<CapabilityRecord>),
+    Element(Weak<ElementFunction>),
+    UniqueSymbol(Weak<UniqueSymbol>),
+    WellKnownSymbol(WellKnown),
+    Native(Native, RealmId),
+    Callback(CallbackMethod, RealmId),
+}
+
+impl WeakCollectionKey {
+    pub(super) fn new(value: &Value) -> Option<Self> {
+        Some(match value {
+            Value::Object(value) => Self::Object(Rc::downgrade(value)),
+            Value::Function(value) => Self::Closure(Rc::downgrade(value)),
+            Value::Array(value) => Self::Array(Rc::downgrade(value)),
+            Value::Promise(value) => Self::Promise(Rc::downgrade(value)),
+            Value::Generator(value) => Self::Generator(Rc::downgrade(value)),
+            Value::Shared(value) => Self::Shared(Rc::downgrade(value)),
+            Value::RegExp(value) => Self::RegExp(Rc::downgrade(value)),
+            Value::Date(value) => Self::Date(Rc::downgrade(value)),
+            Value::Temporal(value) => Self::Temporal(Rc::downgrade(value)),
+            Value::Intl(value) => Self::Intl(Rc::downgrade(value)),
+            Value::TypedArray(value) => Self::TypedArray(Rc::downgrade(value)),
+            Value::ArrayBuffer(value) => Self::ArrayBuffer(Rc::downgrade(value)),
+            Value::DataView(value) => Self::DataView(Rc::downgrade(value)),
+            Value::Proxy(value) => Self::Proxy(Rc::downgrade(value)),
+            Value::Bound(value) => Self::Bound(Rc::downgrade(value)),
+            Value::Wrapped(value) => Self::Wrapped(Rc::downgrade(value)),
+            Value::CommonJsRequire(value) => Self::CommonJs(Rc::downgrade(value)),
+            Value::CommonJsResolve(value) => Self::CommonJsResolve(Rc::downgrade(value)),
+            Value::Settler(value, rejects) => Self::Settler(Rc::downgrade(value), *rejects),
+            Value::Capability(value) => Self::Capability(Rc::downgrade(value)),
+            Value::Element(value) => Self::Element(Rc::downgrade(value)),
+            Value::Native(native, realm) => Self::Native(*native, *realm),
+            Value::Callback(callback, realm) => Self::Callback(*callback, *realm),
+            Value::Symbol(Symbol::Unique(value)) => Self::UniqueSymbol(Rc::downgrade(value)),
+            Value::Symbol(Symbol::WellKnown(value)) => Self::WellKnownSymbol(*value),
+            _ => return None,
+        })
+    }
+
+    pub(super) fn upgrade(&self) -> Option<Value> {
+        Some(match self {
+            Self::Object(value) => Value::Object(value.upgrade()?),
+            Self::Closure(value) => Value::Function(value.upgrade()?),
+            Self::Array(value) => Value::Array(value.upgrade()?),
+            Self::Promise(value) => Value::Promise(value.upgrade()?),
+            Self::Generator(value) => Value::Generator(value.upgrade()?),
+            Self::Shared(value) => Value::Shared(value.upgrade()?),
+            Self::RegExp(value) => Value::RegExp(value.upgrade()?),
+            Self::Date(value) => Value::Date(value.upgrade()?),
+            Self::Temporal(value) => Value::Temporal(value.upgrade()?),
+            Self::Intl(value) => Value::Intl(value.upgrade()?),
+            Self::TypedArray(value) => Value::TypedArray(value.upgrade()?),
+            Self::ArrayBuffer(value) => Value::ArrayBuffer(value.upgrade()?),
+            Self::DataView(value) => Value::DataView(value.upgrade()?),
+            Self::Proxy(value) => Value::Proxy(value.upgrade()?),
+            Self::Bound(value) => Value::Bound(value.upgrade()?),
+            Self::Wrapped(value) => Value::Wrapped(value.upgrade()?),
+            Self::CommonJs(value) => Value::CommonJsRequire(value.upgrade()?),
+            Self::CommonJsResolve(value) => Value::CommonJsResolve(value.upgrade()?),
+            Self::Settler(value, rejects) => Value::Settler(value.upgrade()?, *rejects),
+            Self::Capability(value) => Value::Capability(value.upgrade()?),
+            Self::Element(value) => Value::Element(value.upgrade()?),
+            Self::UniqueSymbol(value) => Value::Symbol(Symbol::Unique(value.upgrade()?)),
+            Self::WellKnownSymbol(value) => Value::Symbol(Symbol::WellKnown(*value)),
+            Self::Native(native, realm) => Value::Native(*native, *realm),
+            Self::Callback(callback, realm) => Value::Callback(*callback, *realm),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct WeakCollectionEntry {
+    pub(super) key: WeakCollectionKey,
+    pub(super) value: Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct ObjectData {
     pub(super) properties: Vec<Slot>,
@@ -201,6 +301,9 @@ pub struct ObjectData {
     /// reserved property representation until their Rc identities gain weak handle variants.
     pub(super) weak_ref_object_target: Option<Weak<RefCell<ObjectData>>>,
     pub(super) finalization_cells: Vec<FinalizationCell>,
+    /// WeakMap and WeakSet entries are not ordinary child edges. The cycle collector treats
+    /// WeakMap values as conditional ephemeron edges and never traces either weak key directly.
+    pub(super) weak_collection_entries: Option<Vec<WeakCollectionEntry>>,
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     pub(super) error_brand: bool,
@@ -331,6 +434,7 @@ impl Default for ObjectData {
             weak_shared_target: None,
             weak_ref_object_target: None,
             finalization_cells: Vec::new(),
+            weak_collection_entries: None,
             error_brand: false,
             raw_json_text: None,
             error_stack_frames: None,

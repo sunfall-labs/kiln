@@ -378,6 +378,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let native = Native::CollectionGetOrInsert { weak, computed };
+        if weak {
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            if !self.can_be_held_weakly(&key) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Invalid value used as weak map key".to_owned(),
+                });
+            }
+            let key_slot =
+                WeakCollectionKey::new(&key).ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Invalid value used as weak map key".to_owned(),
+                })?;
+            let supplied = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            if computed && !is_callable(&supplied) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "getOrInsertComputed: callbackfn must be a function".to_owned(),
+                });
+            }
+            if let Some(value) = weak_map_value(receiver, &key) {
+                return Ok(value);
+            }
+            let value = if computed {
+                self.call_value(&supplied, Value::Undefined, vec![key.clone()], instruction)?
+            } else {
+                supplied
+            };
+            set_weak_map_value(receiver, &key, &key_slot, value.clone())?;
+            return Ok(value);
+        }
         let (entries, is_map) = require_collection(receiver, native)?;
         let key = canonical_key(arguments.first().cloned().unwrap_or(Value::Undefined));
         if weak && !self.can_be_held_weakly(&key) {
@@ -432,4 +460,58 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => None,
         }
     }
+}
+
+fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
+    let Value::Object(object) = receiver else {
+        return None;
+    };
+    let object = object.borrow();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true)))
+        || object.weak_collection_entries.is_none()
+    {
+        return None;
+    }
+    object
+        .weak_collection_entries
+        .as_ref()?
+        .iter()
+        .find(|entry| entry.key.upgrade().as_ref() == Some(key))
+        .map(|entry| entry.value.clone())
+}
+
+fn set_weak_map_value(
+    receiver: &Value,
+    key: &Value,
+    weak_key: &WeakCollectionKey,
+    value: Value,
+) -> Result<(), ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    let mut object = object.borrow_mut();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true))) {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    }
+    let Some(entries) = object.weak_collection_entries.as_mut() else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry.key.upgrade().as_ref() == Some(key))
+    {
+        entry.value = value;
+    } else {
+        entries.push(WeakCollectionEntry {
+            key: weak_key.clone(),
+            value,
+        });
+    }
+    Ok(())
 }

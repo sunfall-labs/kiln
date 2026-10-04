@@ -74,6 +74,10 @@ pub struct ModuleMap {
     pub(super) gc_closures_prune_at: usize,
     pub(super) gc_weak_ref_objects: Vec<Weak<RefCell<ObjectData>>>,
     pub(super) gc_weak_ref_objects_prune_at: usize,
+    /// Weak collections are census seeds so their conditional values can be traced even when a
+    /// map has no WeakRef target pointing at the map itself.
+    pub(super) gc_weak_collections: Vec<Weak<RefCell<ObjectData>>>,
+    pub(super) gc_weak_collections_prune_at: usize,
     /// Strong targets kept alive through the current ECMAScript job. The job can resume in a
     /// different VM, so its keepalive set belongs to the realm session rather than one machine.
     pub(super) weak_ref_keepalive: Vec<Value>,

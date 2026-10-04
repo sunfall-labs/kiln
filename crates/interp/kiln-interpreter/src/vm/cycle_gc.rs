@@ -25,6 +25,19 @@ enum Key {
     Capability(usize),
     Element(usize),
     CombinatorWalk(usize),
+    RegExp(usize),
+    Date(usize),
+    Temporal(usize),
+    TypedArray(usize),
+    ArrayBuffer(usize),
+    DataView(usize),
+    Proxy(usize),
+    Bound(usize),
+    Wrapped(usize),
+    CommonJs(usize),
+    UniqueSymbol(usize),
+    Shared(usize),
+    Intl(usize),
 }
 
 enum Owner {
@@ -40,6 +53,19 @@ enum Owner {
     Capability(Rc<CapabilityRecord>),
     Element(Rc<ElementFunction>),
     CombinatorWalk(Rc<CombinatorWalk>),
+    RegExp(Rc<RegExpData>),
+    Date(Rc<DateData>),
+    Temporal(Rc<TemporalData>),
+    TypedArray(Rc<TypedArrayData>),
+    ArrayBuffer(Rc<BufferData>),
+    DataView(Rc<DataViewData>),
+    Proxy(Rc<ProxyData>),
+    Bound(Rc<BoundFunction>),
+    Wrapped(Rc<WrappedFunction>),
+    CommonJs(Rc<CommonJsRequire>),
+    UniqueSymbol(Rc<UniqueSymbol>),
+    Shared(Rc<SharedFacade>),
+    Intl(Rc<intl::IntlValue>),
 }
 
 impl Owner {
@@ -57,6 +83,19 @@ impl Owner {
             Self::Capability(value) => Key::Capability(Rc::as_ptr(value) as usize),
             Self::Element(value) => Key::Element(Rc::as_ptr(value) as usize),
             Self::CombinatorWalk(value) => Key::CombinatorWalk(Rc::as_ptr(value) as usize),
+            Self::RegExp(value) => Key::RegExp(Rc::as_ptr(value) as usize),
+            Self::Date(value) => Key::Date(Rc::as_ptr(value) as usize),
+            Self::Temporal(value) => Key::Temporal(Rc::as_ptr(value) as usize),
+            Self::TypedArray(value) => Key::TypedArray(Rc::as_ptr(value) as usize),
+            Self::ArrayBuffer(value) => Key::ArrayBuffer(Rc::as_ptr(value) as usize),
+            Self::DataView(value) => Key::DataView(Rc::as_ptr(value) as usize),
+            Self::Proxy(value) => Key::Proxy(Rc::as_ptr(value) as usize),
+            Self::Bound(value) => Key::Bound(Rc::as_ptr(value) as usize),
+            Self::Wrapped(value) => Key::Wrapped(Rc::as_ptr(value) as usize),
+            Self::CommonJs(value) => Key::CommonJs(Rc::as_ptr(value) as usize),
+            Self::UniqueSymbol(value) => Key::UniqueSymbol(Rc::as_ptr(value) as usize),
+            Self::Shared(value) => Key::Shared(Rc::as_ptr(value) as usize),
+            Self::Intl(value) => Key::Intl(Rc::as_ptr(value) as usize),
         }
     }
 
@@ -74,6 +113,19 @@ impl Owner {
             Self::Capability(value) => Rc::strong_count(value),
             Self::Element(value) => Rc::strong_count(value),
             Self::CombinatorWalk(value) => Rc::strong_count(value),
+            Self::RegExp(value) => Rc::strong_count(value),
+            Self::Date(value) => Rc::strong_count(value),
+            Self::Temporal(value) => Rc::strong_count(value),
+            Self::TypedArray(value) => Rc::strong_count(value),
+            Self::ArrayBuffer(value) => Rc::strong_count(value),
+            Self::DataView(value) => Rc::strong_count(value),
+            Self::Proxy(value) => Rc::strong_count(value),
+            Self::Bound(value) => Rc::strong_count(value),
+            Self::Wrapped(value) => Rc::strong_count(value),
+            Self::CommonJs(value) => Rc::strong_count(value),
+            Self::UniqueSymbol(value) => Rc::strong_count(value),
+            Self::Shared(value) => Rc::strong_count(value),
+            Self::Intl(value) => Rc::strong_count(value),
         }
     }
 
@@ -124,9 +176,38 @@ impl Owner {
                 value.resolve.replace(Value::Undefined);
                 value.reject.replace(Value::Undefined);
             }
+            Self::RegExp(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::Date(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::Temporal(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::TypedArray(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::ArrayBuffer(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::DataView(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::Bound(value) => {
+                value.properties.replace(ObjectData::default());
+            }
+            Self::Wrapped(value) => {
+                value.properties.replace(ObjectData::default());
+            }
             // Contexts and element functions are immutable sidecars. Their parent edges are
             // cleared when the owning reaction/promise or element is cleared.
             Self::AsyncContext(_) | Self::Element(_) | Self::CombinatorWalk(_) => {}
+            Self::UniqueSymbol(_)
+            | Self::Shared(_)
+            | Self::Intl(_)
+            | Self::Proxy(_)
+            | Self::CommonJs(_) => {}
         }
     }
 }
@@ -151,11 +232,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn collect_closure_cycles(&mut self) {
         let mut nodes: HashMap<Key, Node> = HashMap::new();
         let mut work = Vec::new();
+        // WeakMap values own their Rc payloads, but only conditionally keep them reachable.
+        // Store identities here; the value itself remains owned only by its weak-map entry.
+        let mut ephemerons = Vec::<(Key, Key, Key)>::new();
 
         let module_map = self.gc_module_map();
-        let (shared_closures, shared_weak_objects) = {
+        let (shared_closures, shared_weak_objects, shared_weak_collections) = {
             let map = module_map.borrow();
-            (map.gc_closures.clone(), map.gc_weak_ref_objects.clone())
+            (
+                map.gc_closures.clone(),
+                map.gc_weak_ref_objects.clone(),
+                map.gc_weak_collections.clone(),
+            )
         };
         for weak in &shared_closures {
             if let Some(closure) = weak.upgrade() {
@@ -186,6 +274,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
         }
+        for weak in &shared_weak_collections {
+            if let Some(object) = weak.upgrade() {
+                let owner = Owner::Object(object);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
 
         while let Some(parent) = work.pop() {
             if let Some(Node {
@@ -194,6 +295,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }) = nodes.get(&parent)
             {
                 self.prune_suspended_generator_locals(generator);
+            }
+            let weak_entries = nodes
+                .get(&parent)
+                .and_then(|node| match node.owner.as_ref() {
+                    Some(Owner::Object(object)) => object.borrow().weak_collection_entries.clone(),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            for entry in weak_entries {
+                let Some(key_value) = entry.key.upgrade() else {
+                    continue;
+                };
+                let Some(key_owner) = owner_for_value(&key_value) else {
+                    // Unknown exotic identities are conservatively kept live until their
+                    // representation has an owner-graph node of its own.
+                    continue;
+                };
+                let key = key_owner.key();
+                if let std::collections::hash_map::Entry::Vacant(slot) = nodes.entry(key) {
+                    slot.insert(Node {
+                        owner: Some(key_owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+                if let Some(value_owner) = owner_for_value(&entry.value) {
+                    let value = value_owner.key();
+                    if let std::collections::hash_map::Entry::Vacant(slot) = nodes.entry(value) {
+                        slot.insert(Node {
+                            owner: Some(value_owner),
+                            edges: Vec::new(),
+                        });
+                        work.push(value);
+                    }
+                    ephemerons.push((parent, key, value));
+                }
             }
             let owner = nodes
                 .get(&parent)
@@ -240,6 +377,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 *incoming.entry(*edge).or_default() += 1;
             }
         }
+        // Count the real Rc owner in every weak-map value even before its ephemeron activates.
+        // This is ownership accounting only; it does not make the value reachable.
+        for (_, _, value) in &ephemerons {
+            *incoming.entry(*value).or_default() += 1;
+        }
 
         // Nodes whose counts exceed the collector's one owner plus all incoming edges have an
         // owner outside this discovered graph. Unknown or unaccounted owners are always live.
@@ -264,6 +406,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
         }
+        // Ephemerons can form chains: a live key can make a value live, and that value can be a
+        // key in another map. Iterate to a fixed point while propagating ordinary strong edges.
+        loop {
+            let mut activated = false;
+            for (map, key, value) in &ephemerons {
+                if live.contains(map) && live.contains(key) && live.insert(*value) {
+                    mark.push(*value);
+                    activated = true;
+                }
+            }
+            while let Some(key) = mark.pop() {
+                if let Some(node) = nodes.get(&key) {
+                    for edge in &node.edges {
+                        if live.insert(*edge) {
+                            mark.push(*edge);
+                        }
+                    }
+                }
+            }
+            if !activated {
+                break;
+            }
+        }
 
         // Break only proven-unreachable nodes. WeakRef target upgrades happen after this method
         // returns, so a reclaimed target is absent on the same explicit collection request.
@@ -272,6 +437,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 && let Some(owner) = node.owner.as_ref()
             {
                 owner.clear_mutable_edges();
+            }
+        }
+        // Drop entries whose weak key is dead. This releases their conditional values without
+        // affecting entries in a map that is itself unreachable (which is cleared above).
+        for (key, node) in &nodes {
+            if live.contains(key)
+                && let Some(Owner::Object(object)) = node.owner.as_ref()
+            {
+                let mut data = object.borrow_mut();
+                if let Some(entries) = data.weak_collection_entries.as_mut() {
+                    entries.retain(|entry| {
+                        entry.key.upgrade().is_some_and(|value| {
+                            owner_for_value(&value).is_none_or(|owner| live.contains(&owner.key()))
+                        })
+                    });
+                }
             }
         }
         // Drop the collector's temporary strong owners before checking which weak census entries
@@ -286,6 +467,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         map.gc_closures.retain(|closure| closure.strong_count() > 0);
         map.gc_weak_ref_objects
             .retain(|object| object.strong_count() > 0);
+        map.gc_weak_collections
+            .retain(|collection| collection.strong_count() > 0);
+        map.gc_weak_collections_prune_at = map
+            .gc_weak_collections
+            .len()
+            .saturating_add(map.gc_weak_collections.len().max(1024));
         map.gc_closures_prune_at = map
             .gc_closures
             .len()
@@ -402,6 +589,21 @@ fn owner_for_value(value: &Value) -> Option<Owner> {
         Value::Settler(value, _) => Owner::Promise(Rc::clone(value)),
         Value::Capability(value) => Owner::Capability(Rc::clone(value)),
         Value::Element(value) => Owner::Element(Rc::clone(value)),
+        Value::Shared(value) => Owner::Shared(Rc::clone(value)),
+        Value::RegExp(value) => Owner::RegExp(Rc::clone(value)),
+        Value::Date(value) => Owner::Date(Rc::clone(value)),
+        Value::Temporal(value) => Owner::Temporal(Rc::clone(value)),
+        Value::Intl(value) => Owner::Intl(Rc::clone(value)),
+        Value::TypedArray(value) => Owner::TypedArray(Rc::clone(value)),
+        Value::ArrayBuffer(value) => Owner::ArrayBuffer(Rc::clone(value)),
+        Value::DataView(value) => Owner::DataView(Rc::clone(value)),
+        Value::Proxy(value) => Owner::Proxy(Rc::clone(value)),
+        Value::Bound(value) => Owner::Bound(Rc::clone(value)),
+        Value::Wrapped(value) => Owner::Wrapped(Rc::clone(value)),
+        Value::CommonJsRequire(value) | Value::CommonJsResolve(value) => {
+            Owner::CommonJs(Rc::clone(value))
+        }
+        Value::Symbol(Symbol::Unique(value)) => Owner::UniqueSymbol(Rc::clone(value)),
         _ => return None,
     })
 }
@@ -522,6 +724,41 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
             values.push(value.resolve.clone());
             values.push(value.reject.clone());
         }
+        Owner::RegExp(value) => values.extend(object_children(&value.properties.borrow())),
+        Owner::Date(value) => values.extend(object_children(&value.properties.borrow())),
+        Owner::Temporal(value) => values.extend(object_children(&value.properties.borrow())),
+        Owner::TypedArray(value) => {
+            values.push(Value::ArrayBuffer(Rc::clone(&value.buffer)));
+            values.extend(object_children(&value.properties.borrow()));
+        }
+        Owner::ArrayBuffer(value) => values.extend(object_children(&value.properties.borrow())),
+        Owner::DataView(value) => {
+            values.push(Value::ArrayBuffer(Rc::clone(&value.buffer)));
+            values.extend(object_children(&value.properties.borrow()));
+        }
+        Owner::Proxy(value) => {
+            values.push(value.target.clone());
+            values.push(value.handler.clone());
+        }
+        Owner::Bound(value) => {
+            values.push(value.target.clone());
+            values.push(value.this_value.clone());
+            values.extend(value.arguments.iter().cloned());
+            values.extend(object_children(&value.properties.borrow()));
+        }
+        Owner::Wrapped(value) => {
+            values.push(value.target.clone());
+            values.extend(object_children(&value.properties.borrow()));
+        }
+        Owner::CommonJs(value) => {
+            values.extend(
+                value
+                    .targets
+                    .iter()
+                    .map(|(_, _, cell)| Value::Cell(Rc::clone(cell))),
+            );
+        }
+        Owner::UniqueSymbol(_) | Owner::Shared(_) | Owner::Intl(_) => {}
     }
     values
 }
@@ -728,6 +965,282 @@ mod tests {
         vm.collect_closure_cycles();
         assert!(weak_target.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn weak_map_ephemerons_collect_value_to_key_cycles_but_follow_live_keys() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let map = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().set("@@map", Value::Boolean(true));
+        vm.module_map
+            .borrow_mut()
+            .gc_weak_collections
+            .push(Rc::downgrade(&map));
+        let key = Rc::new(RefCell::new(ObjectData::default()));
+        let value = Rc::new(RefCell::new(ObjectData::default()));
+        value
+            .borrow_mut()
+            .set("key", Value::Object(Rc::clone(&key)));
+        map.borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
+                value: Value::Object(Rc::clone(&value)),
+            });
+        let weak_map = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&map))], 0)
+            .unwrap();
+        let weak_key = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&key))], 0)
+            .unwrap();
+        let weak_value = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&value))], 0)
+            .unwrap();
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(key);
+        drop(value);
+
+        vm.collect_closure_cycles();
+        assert!(matches!(
+            vm.weak_ref_deref(&weak_map, 0),
+            Ok(Value::Object(_))
+        ));
+        assert_eq!(vm.weak_ref_deref(&weak_key, 0), Ok(Value::Undefined));
+        assert_eq!(vm.weak_ref_deref(&weak_value, 0), Ok(Value::Undefined));
+        assert!(
+            map.borrow()
+                .weak_collection_entries
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn weak_map_value_does_not_keep_its_key_if_value_is_externally_held() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let map = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().set("@@map", Value::Boolean(true));
+        vm.module_map
+            .borrow_mut()
+            .gc_weak_collections
+            .push(Rc::downgrade(&map));
+        let key = Rc::new(RefCell::new(ObjectData::default()));
+        let value = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
+                value: Value::Object(Rc::clone(&value)),
+            });
+        let weak_key = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&key))], 0)
+            .unwrap();
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        let keeper = Rc::clone(&value);
+        drop(key);
+        drop(value);
+
+        vm.collect_closure_cycles();
+        assert_eq!(vm.weak_ref_deref(&weak_key, 0), Ok(Value::Undefined));
+        assert!(
+            map.borrow()
+                .weak_collection_entries
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(Rc::strong_count(&keeper) >= 1);
+    }
+
+    #[test]
+    fn weak_map_keeps_value_when_key_is_independently_reachable() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let map = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().set("@@map", Value::Boolean(true));
+        vm.module_map
+            .borrow_mut()
+            .gc_weak_collections
+            .push(Rc::downgrade(&map));
+        let key = Rc::new(RefCell::new(ObjectData::default()));
+        let value = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
+                value: Value::Object(Rc::clone(&value)),
+            });
+        let weak_value = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&value))], 0)
+            .unwrap();
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        let keeper = Rc::clone(&key);
+        drop(key);
+        drop(value);
+
+        vm.collect_closure_cycles();
+        assert!(matches!(
+            vm.weak_ref_deref(&weak_value, 0),
+            Ok(Value::Object(_))
+        ));
+        assert_eq!(
+            map.borrow().weak_collection_entries.as_ref().unwrap().len(),
+            1
+        );
+        drop(keeper);
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        vm.collect_closure_cycles();
+        assert_eq!(vm.weak_ref_deref(&weak_value, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn overlapping_weak_maps_activate_ephemeron_chains() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let first = Rc::new(RefCell::new(ObjectData::default()));
+        let second = Rc::new(RefCell::new(ObjectData::default()));
+        for map in [&first, &second] {
+            map.borrow_mut().weak_collection_entries = Some(Vec::new());
+            map.borrow_mut().set("@@map", Value::Boolean(true));
+            vm.module_map
+                .borrow_mut()
+                .gc_weak_collections
+                .push(Rc::downgrade(map));
+        }
+        let root_key = Rc::new(RefCell::new(ObjectData::default()));
+        let chained_key = Rc::new(RefCell::new(ObjectData::default()));
+        let final_value = Rc::new(RefCell::new(ObjectData::default()));
+        first
+            .borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Object(Rc::downgrade(&root_key)),
+                value: Value::Object(Rc::clone(&chained_key)),
+            });
+        second
+            .borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Object(Rc::downgrade(&chained_key)),
+                value: Value::Object(Rc::clone(&final_value)),
+            });
+        let weak_final = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&final_value))], 0)
+            .unwrap();
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        let key_keeper = Rc::clone(&root_key);
+        drop(root_key);
+        drop(chained_key);
+        drop(final_value);
+
+        vm.collect_closure_cycles();
+        assert!(matches!(
+            vm.weak_ref_deref(&weak_final, 0),
+            Ok(Value::Object(_))
+        ));
+        drop(key_keeper);
+    }
+
+    #[test]
+    fn weak_map_methods_support_closure_keys_and_live_key_operations() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let map = vm
+            .construct_collection(Native::WeakMapConstructor, &[], 0)
+            .unwrap();
+        let key = Value::Function(closure_reaching_promise(&program, &PromiseState::pending()));
+        let value = Value::String("held".into());
+        let call = |vm: &Vm<'_, TestHost>, method, args: &[Value]| {
+            crate::intrinsics::call_native(&vm.intrinsics, method, &map, args)
+        };
+        assert_eq!(
+            call(&vm, Native::WeakMapSet, &[key.clone(), value.clone()]),
+            Ok(map.clone())
+        );
+        assert_eq!(
+            call(&vm, Native::WeakMapHas, &[key.clone()]),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(call(&vm, Native::WeakMapGet, &[key.clone()]), Ok(value));
+        assert_eq!(
+            call(&vm, Native::WeakMapDelete, &[key.clone()]),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            call(&vm, Native::WeakMapHas, &[key]),
+            Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn weak_map_closure_key_and_value_cycle_is_collectible() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let map = Rc::new(RefCell::new(ObjectData::default()));
+        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().set("@@map", Value::Boolean(true));
+        vm.module_map
+            .borrow_mut()
+            .gc_weak_collections
+            .push(Rc::downgrade(&map));
+        let value = Rc::new(RefCell::new(ObjectData::default()));
+        let closure = Rc::new(Closure {
+            program: Rc::clone(&program),
+            function: 0,
+            strictness: Rc::new(Strictness::sloppy(&program)),
+            module_path: None,
+            name: None,
+            inferred_name: None,
+            upvalues: Vec::new(),
+            realm: RealmId::PRIMARY,
+            captured_arguments: Some(Value::Object(Rc::clone(&value))),
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        });
+        value
+            .borrow_mut()
+            .set("closure", Value::Function(Rc::clone(&closure)));
+        map.borrow_mut()
+            .weak_collection_entries
+            .as_mut()
+            .unwrap()
+            .push(WeakCollectionEntry {
+                key: WeakCollectionKey::Closure(Rc::downgrade(&closure)),
+                value: Value::Object(Rc::clone(&value)),
+            });
+        let weak_closure = Rc::downgrade(&closure);
+        let weak_value = Rc::downgrade(&value);
+        drop(closure);
+        drop(value);
+
+        vm.collect_closure_cycles();
+        assert!(weak_closure.upgrade().is_none());
+        assert!(weak_value.upgrade().is_none());
+        assert!(
+            map.borrow()
+                .weak_collection_entries
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

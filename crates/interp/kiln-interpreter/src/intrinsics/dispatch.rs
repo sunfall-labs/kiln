@@ -2520,7 +2520,78 @@ pub(crate) fn call_native(
             arguments.first(),
             Some(Value::Object(object)) if object.borrow().error_brand
         )),
-        Native::SetAdd | Native::MapSet | Native::WeakSetAdd | Native::WeakMapSet => {
+        Native::WeakSetAdd | Native::WeakMapSet => {
+            let is_map = native == Native::WeakMapSet;
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            let Value::Object(object) = receiver else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            let mut object = object.borrow_mut();
+            let actual_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+            let Some(entries) = object.weak_collection_entries.as_mut() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            if actual_map != is_map {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            }
+            let weak_key = WeakCollectionKey::new(&key).ok_or_else(|| {
+                ExecutionError::TypeErrorMessage {
+                    message: "value cannot be held weakly".to_owned(),
+                }
+            })?;
+            if let Some(entry) = entries.iter_mut().find(|entry| {
+                entry.key.upgrade().as_ref() == Some(&key)
+            }) {
+                if is_map {
+                    entry.value = value;
+                }
+            } else {
+                entries.push(WeakCollectionEntry {
+                    key: weak_key,
+                    value: if is_map { value } else { Value::Undefined },
+                });
+            }
+            receiver.clone()
+        }
+        Native::WeakSetHas | Native::WeakMapHas | Native::WeakMapGet | Native::WeakSetDelete | Native::WeakMapDelete => {
+            let is_map = matches!(native, Native::WeakMapHas | Native::WeakMapGet | Native::WeakMapDelete);
+            let deleting = matches!(native, Native::WeakSetDelete | Native::WeakMapDelete);
+            let getting = native == Native::WeakMapGet;
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let Value::Object(object) = receiver else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            let mut object = object.borrow_mut();
+            let actual_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+            let Some(entries) = object.weak_collection_entries.as_mut() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            if actual_map != is_map {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            }
+            let index = entries.iter().position(|entry| entry.key.upgrade().as_ref() == Some(&key));
+            if deleting {
+                Value::Boolean(index.is_some_and(|index| { entries.remove(index); true }))
+            } else if getting {
+                index.map_or(Value::Undefined, |index| entries[index].value.clone())
+            } else {
+                Value::Boolean(index.is_some())
+            }
+        }
+        Native::SetAdd | Native::MapSet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2547,13 +2618,13 @@ pub(crate) fn call_native(
             }
             receiver.clone()
         }
-        Native::SetHas | Native::MapHas | Native::WeakSetHas | Native::WeakMapHas => {
+        Native::SetHas | Native::MapHas => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let found = find_collection_entry(&entries, &key, is_map).is_some();
             Value::Boolean(found)
         }
-        Native::MapGet | Native::WeakMapGet => {
+        Native::MapGet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             match find_collection_entry(&entries, &key, is_map) {
@@ -2579,7 +2650,7 @@ pub(crate) fn call_native(
             set_size(receiver, 0.0);
             Value::Undefined
         }
-        Native::SetDelete | Native::MapDelete | Native::WeakSetDelete | Native::WeakMapDelete => {
+        Native::SetDelete | Native::MapDelete => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let index = find_collection_entry(&entries, &key, is_map);
