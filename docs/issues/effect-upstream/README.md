@@ -162,8 +162,10 @@ cancellation of an unfinished response, and explicitly enabled half-open behavio
 interpreter defect made fetch cancellation reject the reader without closing its client socket:
 the private native cancellation hook had no interpreter equivalent. The added interpreter hook
 passes the original live-response cancellation fixture and its graph regression, including abort,
-reader cancellation and cancellation before connection assignment. Native FIN cancellation is
-still being checked before the next routine gate and push.
+reader cancellation and cancellation before connection assignment. Native FIN and cancellation now match Node in two focused native probes under ordinary
+and allocation-stressed execution. Nine module-graph HTTP tests and 317 backend-C tests
+pass (one backend test ignored). The final integrated routine gate and the upstream
+HttpClient replay remain required before pushing.
 
 The object initializer now explicitly clears `external_owner`, including reused arena storage;
 a poisoned-memory fixture reproduces the previous uninitialized field. The inline-object
