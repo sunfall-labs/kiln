@@ -21,6 +21,10 @@ enum Key {
     Generator(usize),
     AsyncDisposal(usize),
     ModuleSuspension(usize),
+    AsyncContext(usize),
+    Capability(usize),
+    Element(usize),
+    CombinatorWalk(usize),
 }
 
 enum Owner {
@@ -32,6 +36,10 @@ enum Owner {
     Generator(Rc<GeneratorData>),
     AsyncDisposal(Rc<AsyncDisposal>),
     ModuleSuspension(Rc<RefCell<ModuleSuspension>>),
+    AsyncContext(AsyncContext),
+    Capability(Rc<CapabilityRecord>),
+    Element(Rc<ElementFunction>),
+    CombinatorWalk(Rc<CombinatorWalk>),
 }
 
 impl Owner {
@@ -45,6 +53,10 @@ impl Owner {
             Self::Generator(value) => Key::Generator(Rc::as_ptr(value) as usize),
             Self::AsyncDisposal(value) => Key::AsyncDisposal(Rc::as_ptr(value) as usize),
             Self::ModuleSuspension(value) => Key::ModuleSuspension(Rc::as_ptr(value) as usize),
+            Self::AsyncContext(value) => Key::AsyncContext(Rc::as_ptr(value) as usize),
+            Self::Capability(value) => Key::Capability(Rc::as_ptr(value) as usize),
+            Self::Element(value) => Key::Element(Rc::as_ptr(value) as usize),
+            Self::CombinatorWalk(value) => Key::CombinatorWalk(Rc::as_ptr(value) as usize),
         }
     }
 
@@ -58,6 +70,10 @@ impl Owner {
             Self::Generator(value) => Rc::strong_count(value),
             Self::AsyncDisposal(value) => Rc::strong_count(value),
             Self::ModuleSuspension(value) => Rc::strong_count(value),
+            Self::AsyncContext(value) => Rc::strong_count(value),
+            Self::Capability(value) => Rc::strong_count(value),
+            Self::Element(value) => Rc::strong_count(value),
+            Self::CombinatorWalk(value) => Rc::strong_count(value),
         }
     }
 
@@ -104,6 +120,13 @@ impl Owner {
                 state.stack.clear();
                 state.handlers.clear();
             }
+            Self::Capability(value) => {
+                value.resolve.replace(Value::Undefined);
+                value.reject.replace(Value::Undefined);
+            }
+            // Contexts and element functions are immutable sidecars. Their parent edges are
+            // cleared when the owning reaction/promise or element is cleared.
+            Self::AsyncContext(_) | Self::Element(_) | Self::CombinatorWalk(_) => {}
         }
     }
 }
@@ -377,6 +400,8 @@ fn owner_for_value(value: &Value) -> Option<Owner> {
         Value::Promise(value) => Owner::Promise(Rc::clone(value)),
         Value::Generator(value) => Owner::Generator(Rc::clone(value)),
         Value::Settler(value, _) => Owner::Promise(Rc::clone(value)),
+        Value::Capability(value) => Owner::Capability(Rc::clone(value)),
+        Value::Element(value) => Owner::Element(Rc::clone(value)),
         _ => return None,
     })
 }
@@ -482,6 +507,21 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
         Owner::ModuleSuspension(value) => {
             values.extend(value.borrow().stack.iter().cloned());
         }
+        Owner::AsyncContext(value) => {
+            values.extend(value.iter().map(|(_, store)| store.clone()));
+        }
+        Owner::Capability(value) => {
+            values.push(value.resolve.borrow().clone());
+            values.push(value.reject.borrow().clone());
+        }
+        Owner::Element(value) => {
+            let _ = value;
+        }
+        Owner::CombinatorWalk(value) => {
+            values.extend(value.values.borrow().iter().cloned());
+            values.push(value.resolve.clone());
+            values.push(value.reject.clone());
+        }
     }
     values
 }
@@ -491,18 +531,23 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
 /// conservatively pin otherwise-unreachable WeakRef targets.
 fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
     let mut owners = Vec::new();
-    if let Owner::Promise(value) = owner {
-        for reaction in &value.state.borrow().reactions {
-            match &reaction.sink {
-                Sink::AsyncDisposal(state) => {
-                    owners.push(Owner::AsyncDisposal(Rc::clone(state)));
+    match owner {
+        Owner::Promise(value) => {
+            for reaction in &value.state.borrow().reactions {
+                owners.push(Owner::AsyncContext(Rc::clone(&reaction.context)));
+                match &reaction.sink {
+                    Sink::AsyncDisposal(state) => {
+                        owners.push(Owner::AsyncDisposal(Rc::clone(state)));
+                    }
+                    Sink::ModuleAwait(state) => {
+                        owners.push(Owner::ModuleSuspension(Rc::clone(state)));
+                    }
+                    _ => {}
                 }
-                Sink::ModuleAwait(state) => {
-                    owners.push(Owner::ModuleSuspension(Rc::clone(state)));
-                }
-                _ => {}
             }
         }
+        Owner::Element(value) => owners.push(Owner::CombinatorWalk(Rc::clone(&value.walk))),
+        _ => {}
     }
     owners
 }
@@ -673,6 +718,158 @@ mod tests {
         drop(promise);
         drop(state);
         drop(closure);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external owner keeps target alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn promise_reaction_context_is_a_counted_owner_edge() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let Value::Object(target_object) = &target else {
+            unreachable!();
+        };
+        let weak_target = Rc::downgrade(target_object);
+        let keeper = Rc::clone(target_object);
+        let context: AsyncContext = Rc::new(vec![(
+            Rc::new(crate::async_hooks::AsyncStorage {
+                disabled: std::cell::Cell::new(false),
+            }),
+            target.clone(),
+        )]);
+        let promise = PromiseState::pending();
+        let closure = closure_reaching_promise(&program, &promise);
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Function(Rc::clone(&closure)),
+            on_rejected: Value::Undefined,
+            sink: Sink::Promise(PromiseState::pending()),
+            passthrough: false,
+            context: Rc::clone(&context),
+        });
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        let weak_ref = vm
+            .construct_weak_ref(&[target.clone()], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(promise);
+        drop(closure);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external context keeps target alive"
+        );
+        drop(keeper);
+        drop(context);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn combinator_walk_edges_reclaim_dead_target_and_preserve_external_owner() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let Value::Object(target_object) = &target else {
+            unreachable!();
+        };
+        let weak_target = Rc::downgrade(target_object);
+        let keeper = Rc::clone(target_object);
+        let walk = Rc::new(CombinatorWalk {
+            native: Native::PromiseAll,
+            values: RefCell::new(vec![target.clone()]),
+            remaining: std::cell::Cell::new(1),
+            resolve: Value::Undefined,
+            reject: Value::Undefined,
+        });
+        let element = Rc::new(ElementFunction {
+            walk,
+            index: 0,
+            rejects: false,
+            already_called: Rc::new(std::cell::Cell::new(false)),
+        });
+        let promise = PromiseState::pending();
+        let closure = closure_reaching_promise(&program, &promise);
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Element(Rc::clone(&element)),
+            on_rejected: Value::Undefined,
+            sink: Sink::Promise(PromiseState::pending()),
+            passthrough: false,
+            context: Rc::new(Vec::new()),
+        });
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        let weak_ref = vm
+            .construct_weak_ref(&[target.clone()], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(promise);
+        drop(closure);
+        drop(element);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_some(),
+            "external owner keeps target alive"
+        );
+        drop(keeper);
+        vm.collect_closure_cycles();
+        assert!(weak_target.upgrade().is_none());
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn capability_record_edges_reclaim_dead_target_and_preserve_external_owner() {
+        let mut host = TestHost;
+        let (mut vm, program) = test_vm(&mut host);
+        let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let Value::Object(target_object) = &target else {
+            unreachable!();
+        };
+        let weak_target = Rc::downgrade(target_object);
+        let keeper = Rc::clone(target_object);
+        let capability = Rc::new(CapabilityRecord {
+            resolve: RefCell::new(target.clone()),
+            reject: RefCell::new(Value::Undefined),
+        });
+        let promise = PromiseState::pending();
+        let closure = closure_reaching_promise(&program, &promise);
+        promise.state.borrow_mut().reactions.push(Reaction {
+            on_fulfilled: Value::Capability(Rc::clone(&capability)),
+            on_rejected: Value::Undefined,
+            sink: Sink::Promise(PromiseState::pending()),
+            passthrough: false,
+            context: Rc::new(Vec::new()),
+        });
+        vm.module_map
+            .borrow_mut()
+            .gc_closures
+            .push(Rc::downgrade(&closure));
+        let weak_ref = vm
+            .construct_weak_ref(&[target.clone()], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(promise);
+        drop(closure);
+        drop(capability);
 
         vm.collect_closure_cycles();
         assert!(
