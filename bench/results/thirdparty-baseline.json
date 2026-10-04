@@ -280,20 +280,20 @@
         "rxjs": {
           "measurement_provenance": {
             "clang_version": "clang version 22.1.8",
-            "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+            "kiln_binary_sha256": "d4dbd9512aba9b3ae05ae347ab9daec7d7a1f94f80dac06a6aabf271b280796a",
             "min_delta_ms": 3.0,
-            "passes": 21,
+            "passes": 63,
             "profile": "native-release",
-            "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+            "recorded_at_utc": "2026-10-04T09:55:49.643123+00:00",
             "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
-            "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+            "source_commit": "14160373342cd9190ad98229a1d0e2ed03d3be0d",
             "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "threshold_pct": 25.0,
             "warmup": 3,
-            "working_tree_dirty": true
+            "working_tree_dirty": false
           },
-          "median_ms": 18.68,
-          "min_ms": 17.88,
+          "median_ms": 24.35,
+          "min_ms": 22.73,
           "workload_sha256": "08e318d8db0e2c3747637f0c711feaf173b654d53ef318d3d1389a5e5709caf6"
         },
         "semver": {
@@ -363,33 +363,21 @@
       "profile": "native-release",
       "provenance": {
         "clang_version": "clang version 22.1.8",
-        "kiln_binary_sha256": "3b762f20d4a8552ece22c87292e4f704979d07ee862661a45300f5def68656e9",
+        "kiln_binary_sha256": "d4dbd9512aba9b3ae05ae347ab9daec7d7a1f94f80dac06a6aabf271b280796a",
         "min_delta_ms": 3.0,
-        "passes": 21,
+        "passes": 63,
         "profile": "native-release",
-        "recorded_at_utc": "2026-10-02T10:51:37.141860+00:00",
+        "recorded_at_utc": "2026-10-04T09:55:49.643123+00:00",
         "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
         "scope": "latest_update",
-        "source_commit": "926188b5b4f774665402a30255773b90dc4f4ce7",
+        "source_commit": "14160373342cd9190ad98229a1d0e2ed03d3be0d",
         "source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "threshold_pct": 25.0,
         "updated_bundles": [
-          "acorn",
-          "chalk",
-          "datefns",
-          "dayjs",
-          "immer",
-          "marked",
-          "ms",
-          "mustache",
-          "postcss",
-          "rxjs",
-          "semver",
-          "uuid",
-          "vue-reactivity"
+          "rxjs"
         ],
         "warmup": 3,
-        "working_tree_dirty": true
+        "working_tree_dirty": false
       }
     }
   },
