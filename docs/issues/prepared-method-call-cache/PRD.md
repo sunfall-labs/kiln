@@ -23,9 +23,10 @@ The regression fixture covers saved intrinsic identity when an argument replaces
 overridden intrinsic result, non-callable argument evaluation, and quoted/backslashed property
 names. The final source candidate passed native parity (1/1), GC-stress parity (1/1), native realms
 at N=1, 2, and 16 (1/1), and stressed realms at N=1 and 2 (1/1). The backend C library tests passed
-316 tests, with 0 failures and 1 ignored. The emitted-C integration snapshot target
-(`mbx test -p kiln-backend-c --test emitted_c`) is separate and still requires its own run; the
-library-test result does not cover it.
+316 tests, with 0 failures and 1 ignored. The separate emitted-C integration target
+(`mbx test -p kiln-backend-c --test emitted_c`) passed all 37 tests after reviewing the snapshot
+changes: generated module identifiers, bytecode version 17, and prepared-method helper metadata.
+The shared view helper has internal linkage; only the generated-code key helper is exported.
 
 ## Performance evidence
 

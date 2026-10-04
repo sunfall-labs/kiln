@@ -2335,7 +2335,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
 /* Resolve and cache a method without invoking it. Prepared method calls use this at the
  * original property-read point, before evaluating arguments; the resulting callee remains the
  * authority at invocation time. */
-int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
+static int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
                                      const kiln_string *key, const kiln_string *canonical,
                                      int depth, kiln_value *thrown, kiln_c99_site *site,
                                      const char *inst_site, size_t inst_idx,

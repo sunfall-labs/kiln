@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 821
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -4481,6 +4482,8 @@ static __attribute__((noinline)) int kiln_c99_val_write_symbol_miss(kiln_host *h
 static int kiln_c99_val_read_symbol(kiln_host *host, kiln_val target, kiln_val key, int depth,
 static int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
+static int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
+int kiln_c99_val_prepare_method_key(kiln_host *host, kiln_val receiver,
 static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
 done:
 static int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, const kiln_val *args,
