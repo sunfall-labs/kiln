@@ -2123,6 +2123,7 @@ struct ModuleRealmShared {
     /// from NodeServerState so ObjectData -> state does not form an Rc cycle; dropping the shared
     /// realm also releases every active root on abort/teardown.
     active_node_server_objects: std::collections::HashMap<usize, Value>,
+    active_node_socket_objects: std::collections::HashMap<usize, Value>,
     http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
     symbol_serial: u64,
@@ -2154,6 +2155,7 @@ impl Default for ModuleRealmSession {
                 rejections: Rejections::default(),
                 node_servers: Vec::new(),
                 active_node_server_objects: std::collections::HashMap::new(),
+                active_node_socket_objects: std::collections::HashMap::new(),
                 http_client_requests: std::collections::BTreeMap::new(),
                 next_http_client_request_id: 1,
                 symbol_serial: 0,

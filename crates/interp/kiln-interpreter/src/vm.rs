@@ -305,6 +305,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// registry avoids a cycle through `ObjectData::node_object` and is released with the VM or
     /// its shared module realm on abort/teardown.
     pub(super) active_node_server_objects: std::collections::HashMap<usize, Value>,
+    /// Keep outgoing socket wrappers reachable while an OS connection/stream is active. The
+    /// transport state deliberately points back weakly, so this owner registry is the strong
+    /// lifetime edge until terminal close (or VM teardown).
+    pub(super) active_node_socket_objects: std::collections::HashMap<usize, Value>,
     /// Interpreter-owned ClientRequest values keyed exactly like the runtime Agent queue.
     pub(super) http_client_requests:
         std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,

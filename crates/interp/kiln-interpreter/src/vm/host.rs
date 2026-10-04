@@ -503,6 +503,54 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    fn node_socket_identity(state: &Rc<RefCell<NetSocketState>>) -> usize {
+        Rc::as_ptr(state) as usize
+    }
+
+    fn retain_active_node_socket_object(
+        &mut self,
+        state: &Rc<RefCell<NetSocketState>>,
+        object: Value,
+    ) {
+        let identity = Self::node_socket_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow_mut()
+                .active_node_socket_objects
+                .insert(identity, object);
+        } else {
+            self.active_node_socket_objects.insert(identity, object);
+        }
+    }
+
+    fn active_node_socket_object(&self, state: &Rc<RefCell<NetSocketState>>) -> Option<Value> {
+        let identity = Self::node_socket_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow()
+                .active_node_socket_objects
+                .get(&identity)
+                .cloned()
+        } else {
+            self.active_node_socket_objects.get(&identity).cloned()
+        }
+    }
+
+    fn take_active_node_socket_object(
+        &mut self,
+        state: &Rc<RefCell<NetSocketState>>,
+    ) -> Option<Value> {
+        let identity = Self::node_socket_identity(state);
+        if let Some(realm) = &self.module_realm {
+            realm
+                .borrow_mut()
+                .active_node_socket_objects
+                .remove(&identity)
+        } else {
+            self.active_node_socket_objects.remove(&identity)
+        }
+    }
+
     pub(crate) fn allocate_http_client_request_id(&mut self) -> u64 {
         if let Some(realm) = &self.module_realm {
             let mut realm = realm.borrow_mut();
@@ -670,6 +718,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     http_agent_request: None,
                 }));
                 let socket = node_socket_object(&state);
+                self.retain_active_node_socket_object(&state, socket.clone());
                 self.decorate_node_socket(&socket, instruction)?;
                 if let Some(callback) = callback {
                     self.dispatch_node_event(
@@ -932,6 +981,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }));
                     let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
                     self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+                    self.take_active_node_socket_object(&state);
                     return Ok(receiver.clone());
                 }
                 _ => {}
@@ -984,6 +1034,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }));
             let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
             self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
+            self.take_active_node_socket_object(&state);
             return Ok(receiver.clone());
         }
         let (server, resource) = {
@@ -2454,6 +2505,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_agent_request: None,
         }));
         let socket = node_socket_object(&socket_state);
+        self.retain_active_node_socket_object(&socket_state, socket.clone());
         self.decorate_node_socket(&socket, instruction)?;
         let request = state
             .borrow()
@@ -3128,6 +3180,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     if emit_close {
                         self.schedule_node_event_emit(socket, "close");
                     }
+                    if let Some(socket) = node_net_socket_value(server, resource)
+                        && let Ok(socket_state) = node_net_socket_state(&socket)
+                    {
+                        self.take_active_node_socket_object(&socket_state);
+                    }
                 }
                 let emit_close = {
                     let mut state = server.borrow_mut();
@@ -3611,6 +3668,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     }
                     if emit_socket_close && let Some(socket) = socket_object {
                         self.schedule_node_event_emit(socket, "close");
+                    }
+                    if let Some(socket) = socket {
+                        self.take_active_node_socket_object(&socket);
                     }
                     let mut server_state = server.borrow_mut();
                     if let Some(stream) = server_state
@@ -5752,18 +5812,32 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 .is_some_and(|socket| socket.borrow().destroyed),
                         };
                         if destroyed {
+                            match &target {
+                                PendingConnect::Net(state) => {
+                                    self.take_active_node_socket_object(state);
+                                }
+                                PendingConnect::Http(state) => {
+                                    if let Some(socket) = state.borrow().socket.as_ref() {
+                                        self.take_active_node_socket_object(socket);
+                                    }
+                                }
+                            }
                             return self.close_late_connect_resource(resource, self.instruction);
                         }
                         let (socket_state, socket, protocol, request) = match &target {
                             PendingConnect::Net(state) => {
                                 state.borrow_mut().connecting = false;
                                 state.borrow_mut().connect_request = None;
-                                let socket = state
-                                    .borrow()
-                                    .object
-                                    .as_ref()
-                                    .and_then(Weak::upgrade)
-                                    .map(Value::Object)
+                                let socket = self
+                                    .active_node_socket_object(state)
+                                    .or_else(|| {
+                                        state
+                                            .borrow()
+                                            .object
+                                            .as_ref()
+                                            .and_then(Weak::upgrade)
+                                            .map(Value::Object)
+                                    })
                                     .unwrap_or(Value::Undefined);
                                 (
                                     Rc::clone(state),
@@ -5788,6 +5862,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     .as_ref()
                                     .and_then(Weak::upgrade)
                                     .map(Value::Object)
+                                    .or_else(|| self.active_node_socket_object(&socket_state))
                                     .unwrap_or(Value::Undefined);
                                 socket_state.borrow_mut().connecting = false;
                                 socket_state.borrow_mut().resource = Some(resource);
@@ -6052,12 +6127,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                     state.destroyed = true;
                                     state.connect_request = None;
                                 }
-                                state
-                                    .borrow()
-                                    .object
-                                    .as_ref()
-                                    .and_then(Weak::upgrade)
-                                    .map(Value::Object)
+                                self.active_node_socket_object(state).or_else(|| {
+                                    state
+                                        .borrow()
+                                        .object
+                                        .as_ref()
+                                        .and_then(Weak::upgrade)
+                                        .map(Value::Object)
+                                })
                             }
                             PendingConnect::Http(state) => {
                                 let socket = state.borrow().socket.clone();
@@ -6072,6 +6149,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                         .as_ref()
                                         .and_then(Weak::upgrade)
                                         .map(Value::Object)
+                                        .or_else(|| self.active_node_socket_object(&socket))
                                 })
                             }
                         };
@@ -6104,6 +6182,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             let scheduled = self.scheduled(Job::NextTick(callback, Vec::new()));
                             self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
                         }
+                        match &target {
+                            PendingConnect::Net(state) => {
+                                self.take_active_node_socket_object(state);
+                            }
+                            PendingConnect::Http(state) => {
+                                if let Some(socket) = state.borrow().socket.as_ref() {
+                                    self.take_active_node_socket_object(socket);
+                                }
+                            }
+                        }
                         let retry = if let PendingConnect::Http(state) = &target {
                             let origin = {
                                 let state = state.borrow();
@@ -6134,6 +6222,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                                 .as_ref()
                                 .and_then(Weak::upgrade)
                                 .map(Value::Object)
+                                .or_else(|| self.active_node_socket_object(state))
                                 .unwrap_or(Value::Undefined),
                             PendingConnect::Http(state) => state
                                 .borrow()
