@@ -3926,6 +3926,8 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
 static int kiln_c99_keys_contain(kiln_value keys, const kiln_string *key) {
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value source, int depth,
+static void kiln_c99_object_init(kiln_object *object, size_t tail_slots);
+static void kiln_c99_array_init(kiln_array *array, int is_numeric);
 static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
 static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val value,
 static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_shape *from,
