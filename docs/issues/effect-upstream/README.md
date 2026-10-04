@@ -135,7 +135,16 @@ timeouts remain, while the max-resident-entities case passes without competing b
 The [complete 22-row microbenchmark comparison](../../performance/microbench-2026-10-04.md)
 reports no checksum divergences. Native beats Bun on six rows and is within 10% on eight;
 object allocation and Buffer concatenation remain major performance debts. These JavaScript
-microbenchmarks are separate from the direct-TypeScript Effect inventory.
+microbenchmarks are separate from the direct-TypeScript Effect inventory. A subsequent
+[Buffer.concat optimization](../../performance/buffer-concat-2026-10-04.md) reduces its quiet
+warm native time from 1,162 ms to 28 ms (41.5×), with matching checksums; Bun takes 6.125 ms.
+The integrated Buffer milestone passes all ten routine gate steps; `buffer-gate-reference.json`
+retains its frozen evidence.
+
+The new full production-profile run is still in progress. Its frozen compiler has exposed
+84 failures concentrated in Cron and DateTime; a direct Date setter probe reproduces optional
+argument loss in native-release while native-dev is correct. This is unresolved compiler work,
+and the passing routine gate does not establish full Effect correctness.
 
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream

@@ -1,0 +1,166 @@
+{
+  "schema": 1,
+  "workload": "bench/io/buffer.mjs",
+  "measurement": "median of three fresh-process warm medians; module setup, compilation and process startup excluded",
+  "source_sha256": "333f07a5562f1fd7959eaed6e41f6825b346a4ca5394f2e1d8c5e989d3a49ed5",
+  "harness_sha256": "b041101125e8f8e789321983bd5ec1579c3a8a8d63abf584adaae43afdcaf827",
+  "before_compiler_sha256": "560e7ccceee797c6e27015c93a417c091dc6304d62fa73b91b68518bcbd20cbf",
+  "after_compiler_sha256": "bccc5a44a5812c53dfc170cb6d6c63cfaf3d8f8fa2cbbf551785519c48dba181",
+  "before_source_commit": "e872e3a0",
+  "after_source_commit": "48bc244f",
+  "integrated_commit": "a5cb19ef",
+  "binary_sha256": {
+    "before": "d0a57975141cb39bbe402d02107169a63530f01bc9fd6014ce3d2d73b2e13194",
+    "after": "350f9c8b1707dbe38a7a64f1045abfcd87588d80983d799d29cc73cc039ccb9b"
+  },
+  "bun_version": "1.4.2",
+  "samples": [
+    {
+      "runtime": "before",
+      "round": 0,
+      "wall_s": 4.743577241897583,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 1163,
+        "warm_median": 1164,
+        "warm_best": 1154,
+        "batch": 1,
+        "samples": 2,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "after",
+      "round": 0,
+      "wall_s": 2.2505548000335693,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 34,
+        "warm_median": 28,
+        "warm_best": 27.5,
+        "batch": 2,
+        "samples": 36,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 0,
+      "wall_s": 2.178924560546875,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 15,
+        "warm_median": 6.25,
+        "warm_best": 5.875,
+        "batch": 8,
+        "samples": 40,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 1,
+      "wall_s": 2.15735125541687,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 17,
+        "warm_median": 6.125,
+        "warm_best": 6,
+        "batch": 8,
+        "samples": 41,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "after",
+      "round": 1,
+      "wall_s": 2.3143203258514404,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 34,
+        "warm_median": 28,
+        "warm_best": 27.75,
+        "batch": 4,
+        "samples": 18,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "before",
+      "round": 1,
+      "wall_s": 4.704909563064575,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 1162,
+        "warm_median": 1162,
+        "warm_best": 1149,
+        "batch": 1,
+        "samples": 2,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "before",
+      "round": 2,
+      "wall_s": 4.700956583023071,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 1158,
+        "warm_median": 1158,
+        "warm_best": 1150,
+        "batch": 1,
+        "samples": 2,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "after",
+      "round": 2,
+      "wall_s": 2.294790506362915,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 33,
+        "warm_median": 27.75,
+        "warm_best": 27.5,
+        "batch": 4,
+        "samples": 18,
+        "checksum": "78000000"
+      }
+    },
+    {
+      "runtime": "bun",
+      "round": 2,
+      "wall_s": 2.145096778869629,
+      "result": {
+        "name": "buffer",
+        "mode": "in-process",
+        "cold": 15,
+        "warm_median": 6.125,
+        "warm_best": 5.875,
+        "batch": 8,
+        "samples": 41,
+        "checksum": "78000000"
+      }
+    }
+  ],
+  "conditions": {
+    "agents_held_cpu": true,
+    "gate_completed_before_timing": true,
+    "full_suite_compile_paused_s": 27.57980513572693,
+    "active_test_paused": false,
+    "full_suite_compile_and_runner_resumed": true
+  },
+  "warm_median_ms": {
+    "before": 1162,
+    "after": 28,
+    "bun": 6.125
+  }
+}
