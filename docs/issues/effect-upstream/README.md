@@ -270,3 +270,18 @@ facades; ordinary ESM namespace objects retain their language semantics.
 - Implement actual GC-related capabilities where required; do not fake `gc`.
 - Address divergences by semantic owner and retain focused native parity probes.
 - Run the repository gate before each finished milestone is pushed to main.
+
+## Interpreter collector integration
+
+The integration at `d7677cce` shares suspension-local liveness between the native
+emitter and interpreter, traces promise sidecar/context owners, and implements
+WeakMap ephemeron activation. Keys are weak; a reachable map retains its value
+only when the key is independently reachable. Activation iterates to a fixed point
+for chained maps. Unknown owners remain conservative roots.
+
+The integrated interpreter and graph checks pass 275 tests (one ignored), and
+three affected native suspension-liveness checks pass.
+`collector-integration-reference.json` records source and log digests. The owned
+upstream Pool retest still passes 44/47: retention assertions at source lines
+871, 935 and 966 remain unresolved. These focused checks are not full Effect or
+native GC-stress verification.
