@@ -747,6 +747,7 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
                         .map(|(_, cell)| Value::Cell(Rc::clone(cell))),
                 );
                 values.extend(record.commonjs_namespace_failure.iter().cloned());
+                values.extend(record.completion.iter().cloned().map(Value::Promise));
             }
         }
         Owner::ModuleExports(exports) => values.extend(exports.values().cloned()),
@@ -781,6 +782,12 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
                 values.push(reaction.on_rejected.clone());
                 match &reaction.sink {
                     Sink::Promise(promise) => values.push(Value::Promise(Rc::clone(promise))),
+                    Sink::ImportRetry(retry) => {
+                        values.push(Value::Promise(Rc::clone(&retry.promise)));
+                    }
+                    Sink::ModulePlanWake(waiter) => {
+                        values.push(Value::Promise(Rc::clone(waiter)));
+                    }
                     Sink::Replay(promise, outcome) => {
                         values.push(Value::Promise(Rc::clone(promise)));
                         values.push(match outcome {
@@ -841,7 +848,39 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
             values.extend(value.thrown.borrow().iter().cloned());
         }
         Owner::ModuleSuspension(value) => {
-            values.extend(value.borrow().stack.iter().cloned());
+            let state = value.borrow();
+            values.extend(state.stack.iter().cloned());
+            values.push(Value::Promise(Rc::clone(&state.completion)));
+            if let Some(context) = &state.nested {
+                values.extend(context.locals.iter().cloned());
+                values.extend(
+                    context
+                        .self_bindings
+                        .iter()
+                        .map(|(cell, _)| Value::Cell(Rc::clone(cell))),
+                );
+                for (namespace, exports) in &context.self_namespaces {
+                    values.push(Value::Object(Rc::clone(namespace)));
+                    values.extend(exports.iter().filter_map(|(_, source)| match source {
+                        ModuleSelfExport::Settled(value) => Some(value.clone()),
+                        ModuleSelfExport::Slot(_) => None,
+                    }));
+                }
+                values.extend(context.target.reexports.iter().filter_map(|(_, binding)| {
+                    match binding {
+                        ModuleBinding::Ready(value) => Some(value.clone()),
+                        ModuleBinding::Export { .. } | ModuleBinding::Namespace { .. } => None,
+                    }
+                }));
+                if let Some(PrivateWindow::Open(Some(slot))) = &context.target.private_window {
+                    match &slot.property {
+                        Property::Value(value) => values.push(value.clone()),
+                        Property::Accessor { get, set } => {
+                            values.extend(get.iter().chain(set.iter()).cloned());
+                        }
+                    }
+                }
+            }
         }
         Owner::AsyncContext(value) => {
             values.extend(value.iter().map(|(_, store)| store.clone()));
@@ -1031,12 +1070,16 @@ fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
             for reaction in &value.state.borrow().reactions {
                 owners.push(Owner::AsyncContext(Rc::clone(&reaction.context)));
                 match &reaction.sink {
+                    Sink::ImportRetry(retry) => {
+                        owners.push(Owner::ModuleGeneration(Rc::clone(&retry.generation_owner)))
+                    }
                     Sink::AsyncDisposal(state) => {
                         owners.push(Owner::AsyncDisposal(Rc::clone(state)));
                     }
                     Sink::ModuleAwait(state) => {
                         owners.push(Owner::ModuleSuspension(Rc::clone(state)));
                     }
+                    Sink::ModulePlanWake(_) => {}
                     _ => {}
                 }
             }
@@ -1044,6 +1087,14 @@ fn owner_sidecar_children(owner: &Owner) -> Vec<Owner> {
         Owner::Element(value) => owners.push(Owner::CombinatorWalk(Rc::clone(&value.walk))),
         Owner::ModuleSuspension(value) => {
             if let Some(generation) = &value.borrow().module_generation {
+                owners.push(Owner::ModuleGeneration(Rc::clone(generation)));
+            }
+            if let Some(generation) = value
+                .borrow()
+                .nested
+                .as_ref()
+                .and_then(|context| context.module_generation_owner.as_ref())
+            {
                 owners.push(Owner::ModuleGeneration(Rc::clone(generation)));
             }
         }
@@ -1363,6 +1414,8 @@ mod tests {
             handlers: Vec::new(),
             instruction: 0,
             module_generation: Some(Rc::clone(&generation)),
+            completion: PromiseState::pending(),
+            nested: None,
         }));
         let promise = PromiseState::pending();
         promise.state.borrow_mut().reactions.push(Reaction {
@@ -1589,6 +1642,8 @@ mod tests {
             handlers: Vec::new(),
             instruction: 0,
             module_generation: None,
+            completion: PromiseState::pending(),
+            nested: None,
         }));
         let promise = PromiseState::pending();
         promise.state.borrow_mut().reactions.push(Reaction {

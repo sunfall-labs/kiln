@@ -782,6 +782,34 @@ struct ModuleSuspension {
     handlers: Vec<Handler>,
     instruction: usize,
     module_generation: Option<module_map::ModuleGenerationHandle>,
+    completion: Rc<PromiseData>,
+    nested: Option<SuspendedModuleContext>,
+}
+
+/// The module activation that must be parked when a dynamically imported module reaches TLA.
+/// Unlike an async function, a module body is the machine's active program rather than a
+/// `GeneratorData`; preserve its program and lexical slots as well as the instruction offset.
+#[derive(Debug)]
+struct SuspendedModuleContext {
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    strict: bool,
+    module_path: Option<Rc<str>>,
+    module_generation: u64,
+    module_generation_owner: Option<module_map::ModuleGenerationHandle>,
+    locals: Vec<Value>,
+    self_bindings: Vec<(Cell, u32)>,
+    self_namespaces: Vec<SelfNamespace>,
+    realm: RealmId,
+    target: ModuleEvaluationTarget,
+}
+
+#[derive(Debug)]
+struct ModuleEvaluationTarget {
+    key: String,
+    exports: Vec<String>,
+    reexports: Vec<(String, ModuleBinding)>,
+    private_window: Option<PrivateWindow>,
 }
 
 impl PartialEq for ModuleSuspension {
@@ -910,8 +938,8 @@ pub trait CommonJsModuleLoader {
     ) -> Result<Value, ExecutionError>;
 
     /// The body of the module at `module_path` has run to its end (or its top-level `await` has
-    /// settled), and `exports` are its own bindings. Called before the event loop runs the jobs
-    /// the body queued, so the realm's module map can record the module as evaluated first.
+    /// settled), and `exports` are its own bindings. Synchronous bodies publish before queued
+    /// jobs run; suspended bodies publish before their module-record completion is resolved.
     fn module_evaluated(&mut self, _module_path: &str, _exports: &[ModuleExportValue]) {}
 
     /// Materialize an already evaluated CommonJS module's ESM namespace only when ESM linking
@@ -1780,6 +1808,13 @@ pub struct PlannedModule {
     /// Names this module exports that are not its own bindings (`export *`, `export * as ns`),
     /// and where each one comes from.
     pub reexports: Vec<(String, ModuleBinding)>,
+    /// Canonical static dependencies, including side-effect-only imports. The interpreter uses
+    /// these edges to preserve module evaluation ordering when one body suspends at top-level
+    /// await; bindings alone omit side-effect-only edges.
+    pub dependencies: Vec<String>,
+    /// Strongly-connected component in the host's dependency graph. Members of one component
+    /// begin evaluation together before an external importer waits for their completion.
+    pub evaluation_component: u32,
 }
 
 /// How a planned module is evaluated.
@@ -1805,6 +1840,7 @@ pub enum PlannedBody {
 }
 
 /// Where one value a planned module imports comes from.
+#[derive(Clone, Debug)]
 pub enum ModuleBinding {
     /// The export `name` of the module whose key is `module`.
     Export { module: String, name: String },
@@ -1850,7 +1886,7 @@ pub struct ModuleLoadRequest {
     pub attributes: Option<ImportAttributes>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportAttributes {
     pub type_: Option<String>,
 }
@@ -2096,6 +2132,7 @@ pub(crate) fn new_engine_private(realm: RealmId) -> Value {
 }
 
 /// What closing a window has to undo.
+#[derive(Clone, Debug)]
 pub(crate) enum PrivateWindow {
     /// No window was opened: the realm has no engine-private object yet.
     Absent,
@@ -2103,6 +2140,9 @@ pub(crate) enum PrivateWindow {
     Nested,
     /// This window set the name, over `prior` when a program had defined one.
     Open(Option<Slot>),
+    /// The activation is suspended. The global name has been restored and will be opened again
+    /// when this module body resumes.
+    Parked,
 }
 
 /// Make the realm's engine-private object readable as `globalThis.__kilnPrivate`.
@@ -2137,6 +2177,26 @@ pub(crate) fn close_private_window(global: &mut ObjectData, window: PrivateWindo
         if let Some(slot) = prior {
             global.properties.push(slot);
         }
+    }
+}
+
+pub(crate) fn park_private_window(global: &mut ObjectData, window: &mut Option<PrivateWindow>) {
+    let Some(current) = window.take() else {
+        return;
+    };
+    match current {
+        PrivateWindow::Open(prior) => {
+            close_private_window(global, PrivateWindow::Open(prior));
+            *window = Some(PrivateWindow::Parked);
+        }
+        PrivateWindow::Nested => *window = Some(PrivateWindow::Parked),
+        other => *window = Some(other),
+    }
+}
+
+pub(crate) fn resume_private_window(global: &mut ObjectData, window: &mut Option<PrivateWindow>) {
+    if matches!(window, Some(PrivateWindow::Parked)) {
+        *window = Some(open_private_window(global));
     }
 }
 

@@ -44,6 +44,9 @@ pub struct ModuleRecord {
     /// dynamic import that links to a module still evaluating. Each starts in its dead zone and
     /// is filled when the module publishes.
     pub(super) pending: Vec<(String, Cell)>,
+    /// Shared completion identity for dynamic imports waiting on this module's TLA. Installed
+    /// before the current job returns, so reentrant queued imports adopt the same evaluation.
+    pub(super) completion: Option<Rc<PromiseData>>,
     /// CommonJS body evaluation and its ESM namespace snapshot are separate operations.
     pub(super) commonjs_namespace_ready: bool,
     pub(super) commonjs_namespace_failure: Option<Value>,
@@ -57,6 +60,7 @@ impl ModuleRecord {
             bindings: HashMap::new(),
             namespace: None,
             pending: Vec::new(),
+            completion: None,
             commonjs_namespace_ready: false,
             commonjs_namespace_failure: None,
         }
@@ -434,25 +438,52 @@ impl ModuleMap {
             .status = ModuleStatus::Evaluating;
     }
 
-    /// Record that evaluating `key` threw `error`.
-    pub fn fail(&mut self, realm: RealmId, key: &str, error: Value) {
-        let record = self.record(realm, key);
-        record
+    pub fn completion_in_generation(
+        &self,
+        realm: RealmId,
+        generation: u64,
+        key: &str,
+    ) -> Option<Rc<PromiseData>> {
+        self.generation_handle(realm, generation).and_then(|owner| {
+            owner
+                .borrow()
+                .records
+                .get(key)
+                .and_then(|record| record.completion.clone())
+        })
+    }
+
+    pub fn set_completion_in_generation(
+        &mut self,
+        realm: RealmId,
+        generation: u64,
+        key: &str,
+        completion: Rc<PromiseData>,
+    ) {
+        let owner = self.ensure_record_in_generation(realm, generation, key);
+        owner
             .borrow_mut()
             .records
             .get_mut(key)
             .expect("record inserted")
-            .status = ModuleStatus::Failed(error);
+            .completion = Some(completion);
+    }
+
+    /// Record that evaluating `key` threw `error`.
+    pub fn fail(&mut self, realm: RealmId, key: &str, error: Value) {
+        let record = self.record(realm, key);
+        let mut owner = record.borrow_mut();
+        let record = owner.records.get_mut(key).expect("record inserted");
+        record.status = ModuleStatus::Failed(error);
+        record.completion = None;
     }
 
     pub fn fail_in_generation(&mut self, realm: RealmId, generation: u64, key: &str, error: Value) {
         let record = self.ensure_record_in_generation(realm, generation, key);
-        record
-            .borrow_mut()
-            .records
-            .get_mut(key)
-            .expect("record inserted")
-            .status = ModuleStatus::Failed(error);
+        let mut owner = record.borrow_mut();
+        let record = owner.records.get_mut(key).expect("record inserted");
+        record.status = ModuleStatus::Failed(error);
+        record.completion = None;
     }
 
     /// Publish `key`'s exports and mark it evaluated. Every cell handed out for one of its names
@@ -486,6 +517,7 @@ impl ModuleMap {
             record.status = ModuleStatus::Evaluated;
             record.exports = Rc::new(exports);
             record.bindings = bindings;
+            record.completion = None;
             if let Some(namespace) = &record.namespace
                 && let Value::Object(fresh) = build_namespace(&record.bindings)
             {

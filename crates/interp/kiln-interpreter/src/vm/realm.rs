@@ -711,7 +711,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let self_bindings = std::mem::take(&mut self.self_bindings);
         let self_namespaces = std::mem::take(&mut self.self_namespaces);
         let outcome = self.entering(realm, |vm| {
-            vm.drive_module(program, locals, Some(Rc::from(REALM_BOOTSTRAP_PATH)), 0)
+            vm.drive_module(
+                program,
+                locals,
+                Some(Rc::from(REALM_BOOTSTRAP_PATH)),
+                0,
+                None,
+            )
         });
         self.self_bindings = self_bindings;
         self.self_namespaces = self_namespaces;

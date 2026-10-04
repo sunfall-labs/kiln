@@ -20,6 +20,35 @@ fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
 use kiln_host_abi::{HostError, HostOp};
 use kiln_ir::Builtin;
 
+#[test]
+fn suspended_engine_private_window_is_hidden_and_reopened_per_activation() {
+    let private = Rc::new(RefCell::new(ObjectData::default()));
+    let mut global = ObjectData::default();
+    global.set_non_enumerable(ENGINE_PRIVATE_SLOT, Value::Object(Rc::clone(&private)));
+    global.set("__kilnPrivate", Value::Number(1.0));
+
+    let mut window = Some(open_private_window(&mut global));
+    assert!(matches!(
+        global.get_own("__kilnPrivate"),
+        Some(Value::Object(current)) if Rc::ptr_eq(current, &private)
+    ));
+
+    park_private_window(&mut global, &mut window);
+    assert_eq!(global.get_own("__kilnPrivate"), Some(&Value::Number(1.0)));
+
+    // Code running while the module is parked can observe and update the public global slot.
+    // Resume opens a fresh window whose close restores that current value, not a stale snapshot.
+    global.set("__kilnPrivate", Value::Number(2.0));
+    resume_private_window(&mut global, &mut window);
+    assert!(matches!(
+        global.get_own("__kilnPrivate"),
+        Some(Value::Object(current)) if Rc::ptr_eq(current, &private)
+    ));
+
+    close_private_window(&mut global, window.expect("resumed private window"));
+    assert_eq!(global.get_own("__kilnPrivate"), Some(&Value::Number(2.0)));
+}
+
 struct TestHost {
     calls: Vec<(HostOp, Vec<HostValue>)>,
     clock_now: Option<f64>,

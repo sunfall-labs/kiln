@@ -90,6 +90,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let outcome = self.run()?;
         if self.suspended {
             self.suspend_module(outcome.value, 0, 0);
+            // The VM's `module_completion` is the runner's private signal that lets the
+            // module-owned event loop stop at settlement. Dynamic imports need a separate
+            // record completion, settled only after the graph publishes the module namespace.
+            if self.commonjs_loader.is_some()
+                && let Some(key) = self.module_path.as_deref()
+                && matches!(
+                    self.module_map.borrow().status_in_generation(
+                        self.current_realm,
+                        self.module_generation,
+                        key,
+                    ),
+                    Some(ModuleStatus::Evaluating)
+                )
+                && self
+                    .module_map
+                    .borrow()
+                    .completion_in_generation(self.current_realm, self.module_generation, key)
+                    .is_none()
+            {
+                let completion = PromiseState::pending();
+                completion.state.borrow_mut().handled = true;
+                self.module_map.borrow_mut().set_completion_in_generation(
+                    self.current_realm,
+                    self.module_generation,
+                    key,
+                    completion,
+                );
+            }
             return Ok(ExecutionResult {
                 value: Value::Undefined,
                 steps: self.steps,
@@ -119,11 +147,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             completion.state.borrow_mut().handled = true;
             self.module_completion = Some(completion);
         }
+        let completion = self
+            .module_completion
+            .as_ref()
+            .expect("module completion initialized")
+            .clone();
         let state = Rc::new(RefCell::new(ModuleSuspension {
             stack: self.stack.split_off(stack_base),
             handlers: self.handlers.split_off(handler_base),
             instruction: self.instruction,
             module_generation: self.module_generation_owner.clone(),
+            completion,
+            nested: None,
         }));
         self.module_suspension = Some(Rc::clone(&state));
         self.suspended = false;
@@ -150,6 +185,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         state: &Rc<RefCell<ModuleSuspension>>,
         outcome: Settled,
     ) -> Result<(), ExecutionError> {
+        if state.borrow().nested.is_some() {
+            return self.resume_nested_module_body(state, outcome);
+        }
         let stack_base = self.stack.len();
         let handler_base = self.handlers.len();
         let (saved_stack, saved_handlers, instruction, generation) = {
@@ -227,6 +265,228 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.stack.truncate(stack_base);
                 self.handlers.truncate(handler_base);
                 self.module_suspension = None;
+                Err(error)
+            }
+        }
+    }
+
+    fn resume_nested_module_body(
+        &mut self,
+        state: &Rc<RefCell<ModuleSuspension>>,
+        outcome: Settled,
+    ) -> Result<(), ExecutionError> {
+        let (mut saved_stack, mut saved_handlers, instruction, completion, generation, context) = {
+            let mut state = state.borrow_mut();
+            (
+                std::mem::take(&mut state.stack),
+                std::mem::take(&mut state.handlers),
+                state.instruction,
+                Rc::clone(&state.completion),
+                state.module_generation.clone(),
+                state.nested.take().expect("nested module context present"),
+            )
+        };
+        let realm = context.realm;
+        let generation_id = context.module_generation;
+        let mut target = context.target;
+        let parent_completion = self.module_completion.take();
+        let parent_suspension = self.module_suspension.take();
+        let parent_self_bindings = std::mem::take(&mut self.self_bindings);
+        let parent_self_namespaces = std::mem::take(&mut self.self_namespaces);
+        let caller_depth = self.frames.len();
+        let stack_base = self.stack.len();
+        let handler_base = self.handlers.len();
+        self.frames.push(Frame {
+            program: Rc::clone(&self.program),
+            strictness: Rc::clone(&self.strictness),
+            strict: self.strict,
+            module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
+            module_generation_owner: self.module_generation_owner.clone(),
+            new_target: self.new_target.clone(),
+            function: self.function.clone(),
+            method_name: self.method_name.clone(),
+            this_value: self.this_value.clone(),
+            arguments: self.arguments.clone(),
+            arguments_object: self.arguments_object.clone(),
+            mapped_arguments: self.mapped_arguments,
+            constructing: None,
+            super_call: false,
+            locals: std::mem::take(&mut self.locals),
+            realm: self.current_realm,
+            global_base: self.global_base,
+            instruction: self.instruction,
+            stack_base,
+        });
+        self.program = context.program;
+        self.strictness = context.strictness;
+        self.strict = context.strict;
+        self.module_path = context.module_path;
+        self.module_generation = context.module_generation;
+        self.module_generation_owner = context.module_generation_owner;
+        self.locals = context.locals;
+        self.self_bindings = context.self_bindings;
+        self.self_namespaces = context.self_namespaces;
+        self.current_realm = context.realm;
+        self.global_base = self.frames.len();
+        self.resume_module_private_window(realm, &mut target);
+        self.function = None;
+        self.method_name = None;
+        self.this_value = Value::Undefined;
+        self.new_target = Value::Undefined;
+        self.arguments.clear();
+        self.arguments_object = None;
+        self.mapped_arguments = false;
+        self.instruction = instruction;
+        self.module_completion = Some(Rc::clone(&completion));
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: stack_base,
+            native_depth: self.native_depth,
+        });
+        for handler in &mut saved_handlers {
+            handler.stack_height += stack_base;
+            handler.frame_depth = self.frames.len();
+            handler.native_depth = self.native_depth;
+        }
+        self.handlers.extend(saved_handlers);
+        self.stack.append(&mut saved_stack);
+        self.native_depth += 1;
+        self.suspended = false;
+
+        let result = match outcome {
+            Settled::Fulfilled(value) => {
+                self.stack.push(value);
+                self.run_frames(caller_depth)
+            }
+            Settled::Rejected(reason) => match self.unwind(reason, instruction) {
+                Ok(()) => self.run_frames(caller_depth),
+                Err(error) => Err(error),
+            },
+        };
+        self.native_depth -= 1;
+
+        if let Ok(execution) = &result
+            && self.suspended
+        {
+            self.park_module_private_window(realm, &mut target);
+            let target_key = target.key.clone();
+            let next_context = SuspendedModuleContext {
+                program: Rc::clone(&self.program),
+                strictness: Rc::clone(&self.strictness),
+                strict: self.strict,
+                module_path: self.module_path.clone(),
+                module_generation: generation_id,
+                module_generation_owner: generation,
+                locals: std::mem::take(&mut self.locals),
+                self_bindings: std::mem::take(&mut self.self_bindings),
+                self_namespaces: std::mem::take(&mut self.self_namespaces),
+                realm,
+                target,
+            };
+            self.suspend_module(execution.value.clone(), stack_base, handler_base + 1);
+            let next = self
+                .module_suspension
+                .as_ref()
+                .expect("resuspension created")
+                .clone();
+            next.borrow_mut().nested = Some(next_context);
+            self.module_map.borrow_mut().set_completion_in_generation(
+                realm,
+                generation_id,
+                &target_key,
+                Rc::clone(&completion),
+            );
+            self.module_suspension = None;
+            self.handlers.truncate(handler_base);
+            self.restore_caller_frame();
+            self.module_completion = parent_completion;
+            self.module_suspension = parent_suspension;
+            self.self_bindings = parent_self_bindings;
+            self.self_namespaces = parent_self_namespaces;
+            self.suspended = false;
+            return Ok(());
+        }
+
+        self.handlers.truncate(handler_base);
+        self.module_completion = parent_completion;
+        self.module_suspension = None;
+        if self.frames.len() > caller_depth {
+            self.restore_caller_frame();
+        }
+        self.self_bindings = parent_self_bindings;
+        self.self_namespaces = parent_self_namespaces;
+        self.close_module_private_window(realm, &mut target);
+        match result {
+            Ok(execution) => {
+                let returned = match execution.value {
+                    Value::Array(values) => values.items.borrow().clone(),
+                    _ => {
+                        let failure = self.entering(realm, |vm| {
+                            Ok(vm.construct_error(
+                                ErrorKind::Type,
+                                &[Value::String(
+                                    format!(
+                                        "module `{}` did not hand back its exports",
+                                        target.key
+                                    )
+                                    .into(),
+                                )],
+                            ))
+                        })?;
+                        self.module_map.borrow_mut().fail_in_generation(
+                            realm,
+                            generation_id,
+                            &target.key,
+                            failure.clone(),
+                        );
+                        self.settle(&completion, &Settled::Rejected(failure));
+                        self.module_suspension = parent_suspension;
+                        return Ok(());
+                    }
+                };
+                let mut exports: std::collections::HashMap<String, Value> =
+                    target.exports.iter().cloned().zip(returned).collect();
+                for (name, binding) in &target.reexports {
+                    if exports.contains_key(name) {
+                        continue;
+                    }
+                    if let Some(value) =
+                        self.module_binding_in_generation(binding, realm, generation_id)
+                    {
+                        exports.insert(name.clone(), value);
+                    }
+                }
+                self.module_map.borrow_mut().publish_in_generation(
+                    realm,
+                    generation_id,
+                    &target.key,
+                    exports,
+                );
+                let namespace = self.module_map.borrow_mut().namespace_in_generation(
+                    realm,
+                    generation_id,
+                    &target.key,
+                );
+                self.resolve_promise(&completion, namespace);
+                self.module_suspension = parent_suspension;
+                Ok(())
+            }
+            Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
+                let reason = self.caught.take().unwrap_or(Value::Undefined);
+                self.module_map.borrow_mut().fail_in_generation(
+                    realm,
+                    generation_id,
+                    &target.key,
+                    reason.clone(),
+                );
+                self.settle(&completion, &Settled::Rejected(reason));
+                self.module_suspension = parent_suspension;
+                Ok(())
+            }
+            Err(error) => {
+                self.module_suspension = parent_suspension;
                 Err(error)
             }
         }

@@ -884,12 +884,15 @@ impl GraphExecutor<'_> {
     /// linked to rather than run again.
     pub fn import_plan(&self) -> Result<ModulePlan, ModuleEvaluationError> {
         let static_reachable = self.statically_reachable();
-        let mut modules = Vec::new();
-        for path in self
+        let ordered_paths: Vec<_> = self
             .module_order()
             .iter()
             .filter(|path| static_reachable.contains(*path))
-        {
+            .cloned()
+            .collect();
+        let evaluation_components = self.evaluation_components(&ordered_paths);
+        let mut modules = Vec::new();
+        for path in &ordered_paths {
             let node = self
                 .module(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
@@ -958,12 +961,87 @@ impl GraphExecutor<'_> {
                 body,
                 bindings,
                 reexports,
+                dependencies: node
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| static_reachable.contains(&dependency.target))
+                    .map(|dependency| module_key(&dependency.target))
+                    .collect(),
+                evaluation_component: evaluation_components[path],
             });
         }
         Ok(ModulePlan {
             key: module_key(self.entry()),
             modules,
         })
+    }
+
+    /// Assign strongly-connected component identities to the static dependency closure. The
+    /// first pass follows dependency edges; the reverse pass groups exactly the modules whose
+    /// bodies must start together under the ECMAScript module evaluation algorithm.
+    fn evaluation_components(&self, ordered_paths: &[PathBuf]) -> HashMap<PathBuf, u32> {
+        let included: HashSet<_> = ordered_paths.iter().cloned().collect();
+        let mut visited = HashSet::new();
+        let mut finished = Vec::with_capacity(ordered_paths.len());
+        for root in ordered_paths {
+            if visited.contains(root) {
+                continue;
+            }
+            let mut stack = vec![(root.clone(), false)];
+            while let Some((path, expanded)) = stack.pop() {
+                if expanded {
+                    finished.push(path);
+                    continue;
+                }
+                if !visited.insert(path.clone()) {
+                    continue;
+                }
+                stack.push((path.clone(), true));
+                if let Some(node) = self.module(&path) {
+                    for dependency in node.dependencies.iter().rev() {
+                        if included.contains(&dependency.target)
+                            && !visited.contains(&dependency.target)
+                        {
+                            stack.push((dependency.target.clone(), false));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut reverse: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for path in ordered_paths {
+            if let Some(node) = self.module(path) {
+                for dependency in &node.dependencies {
+                    if included.contains(&dependency.target) {
+                        reverse
+                            .entry(dependency.target.clone())
+                            .or_default()
+                            .push(path.clone());
+                    }
+                }
+            }
+        }
+
+        let mut components = HashMap::with_capacity(ordered_paths.len());
+        let mut component = 0_u32;
+        for root in finished.into_iter().rev() {
+            if components.contains_key(&root) {
+                continue;
+            }
+            let mut stack = vec![root];
+            while let Some(path) = stack.pop() {
+                if components.contains_key(&path) {
+                    continue;
+                }
+                components.insert(path.clone(), component);
+                if let Some(importers) = reverse.get(&path) {
+                    stack.extend(importers.iter().cloned());
+                }
+            }
+            component = component.saturating_add(1);
+        }
+        components
     }
 
     /// Where each import of the source module at `path` comes from, by module key and name.

@@ -993,6 +993,17 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // owns the VM, program and locals needed by `Sink::ModuleAwait`; keep that VM alive and drain
     // it now, rather than letting the entry VM try to resume a continuation whose owner is gone.
     let suspended_module = vm.module_suspension.is_some();
+    let static_module_completion = if suspended_module && vm.commonjs_loader.is_some() {
+        vm.module_path.as_deref().and_then(|path| {
+            vm.module_map.borrow().completion_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+            )
+        })
+    } else {
+        None
+    };
     vm.esm_body_pending_checkpoint = commonjs_module.is_none();
     // A body that ran to its end has been evaluated: its bindings are final, and the realm's
     // module map learns them now, before the event loop runs the jobs the body queued -- one of
@@ -1051,6 +1062,22 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // module body without any `await` in it already is: the module failed, and saying so as a
     // rejection nobody handled would describe the same failure less plainly.
     if let Some(Settled::Rejected(reason)) = vm.module_outcome() {
+        if static_module_completion.is_some()
+            && let Some(path) = vm.module_path.as_deref()
+        {
+            vm.module_map.borrow_mut().fail_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+                reason.clone(),
+            );
+            vm.settle(
+                static_module_completion
+                    .as_ref()
+                    .expect("checked completion"),
+                &Settled::Rejected(reason.clone()),
+            );
+        }
         let trace = captured_trace(&reason);
         let instruction = vm.instruction;
         let message = vm.describe_uncaught(&reason, instruction);
@@ -1099,6 +1126,24 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         && let (Some(loader), Some(path)) = (commonjs_loader.as_deref_mut(), module_path)
     {
         loader.module_evaluated(path, &exports);
+    }
+    if let Some(completion) = static_module_completion
+        && let Some(path) = vm.module_path.as_deref()
+        && matches!(
+            vm.module_map.borrow().status_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+            ),
+            Some(ModuleStatus::Evaluated)
+        )
+    {
+        let namespace = vm.module_map.borrow_mut().namespace_in_generation(
+            vm.current_realm,
+            vm.module_generation,
+            path,
+        );
+        vm.resolve_promise(&completion, namespace);
     }
     let commonjs_exports = commonjs_module
         .as_ref()

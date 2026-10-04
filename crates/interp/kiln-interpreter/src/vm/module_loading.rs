@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Coerce what `import()` was given into a specifier string.
@@ -230,22 +231,165 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => {}
         }
 
+        // Evaluate each ready dependency SCC as a unit. Members of one component start together;
+        // independent components can also start while another waits, but a dependent component
+        // stays parked until all of its external dependencies have settled. This preserves cycles
+        // without serializing them and prevents a parent body from running ahead of TLA work.
+        let mut components: Vec<(u32, Vec<&PlannedModule>)> = Vec::new();
         for planned in &plan.modules {
-            match self
-                .module_map
-                .borrow()
-                .status_in_generation(realm, generation, &planned.key)
+            if let Some((_, members)) = components
+                .iter_mut()
+                .find(|(component, _)| *component == planned.evaluation_component)
             {
-                // Evaluated by whoever reached it first -- the static graph, or another
-                // `import()` -- or still evaluating further up this realm's stack (a module
-                // that imports itself, or one suspended at a top-level `await`). Either way it
-                // has its one evaluation, and this request links to it.
-                Some(ModuleStatus::Evaluated | ModuleStatus::Evaluating) => continue,
-                Some(ModuleStatus::Failed(failure)) => return Ok(Err(failure)),
-                Some(ModuleStatus::Linked) | None => {}
+                members.push(planned);
+            } else {
+                components.push((planned.evaluation_component, vec![planned]));
             }
-            if let Err(rejection) = self.evaluate_planned(planned, realm, generation)? {
-                return Ok(Err(rejection));
+        }
+        let module_components: HashMap<_, _> = plan
+            .modules
+            .iter()
+            .map(|module| (module.key.as_str(), module.evaluation_component))
+            .collect();
+        let mut started = HashSet::new();
+        loop {
+            let mut made_progress = false;
+            for (component, members) in &components {
+                if started.contains(component) {
+                    continue;
+                }
+                let mut blocked = false;
+                for planned in members {
+                    for dependency in &planned.dependencies {
+                        if module_components.get(dependency.as_str()) == Some(component) {
+                            continue;
+                        }
+                        let dependency_status = {
+                            self.module_map
+                                .borrow()
+                                .status_in_generation(realm, generation, dependency)
+                        };
+                        match dependency_status {
+                            Some(ModuleStatus::Evaluated) => {}
+                            Some(ModuleStatus::Failed(failure)) => {
+                                self.module_map.borrow_mut().fail_in_generation(
+                                    realm,
+                                    generation,
+                                    &plan.key,
+                                    failure.clone(),
+                                );
+                                return Ok(Err(failure));
+                            }
+                            Some(ModuleStatus::Linked) | Some(ModuleStatus::Evaluating) | None => {
+                                blocked = true
+                            }
+                        }
+                    }
+                }
+                if blocked {
+                    continue;
+                }
+                started.insert(*component);
+                made_progress = true;
+                for planned in members {
+                    let planned_status = {
+                        self.module_map.borrow().status_in_generation(
+                            realm,
+                            generation,
+                            &planned.key,
+                        )
+                    };
+                    match planned_status {
+                        Some(ModuleStatus::Evaluated | ModuleStatus::Evaluating) => continue,
+                        Some(ModuleStatus::Failed(failure)) => {
+                            self.module_map.borrow_mut().fail_in_generation(
+                                realm,
+                                generation,
+                                &plan.key,
+                                failure.clone(),
+                            );
+                            return Ok(Err(failure));
+                        }
+                        Some(ModuleStatus::Linked) | None => {}
+                    }
+                    if let Err(rejection) = self.evaluate_planned(planned, realm, generation)? {
+                        self.module_map.borrow_mut().fail_in_generation(
+                            realm,
+                            generation,
+                            &plan.key,
+                            rejection.clone(),
+                        );
+                        return Ok(Err(rejection));
+                    }
+                }
+            }
+
+            if started.len() == components.len() {
+                break;
+            }
+            if made_progress {
+                continue;
+            }
+
+            // Ready work has been exhausted. Wait for one outstanding dependency completion,
+            // then retry the graph: independent SCCs have already started, while blocked parents
+            // remain Linked. A retry also propagates the original rejection unchanged.
+            let wake = PromiseState::pending();
+            let mut wait_count = 0usize;
+            for (_, members) in &components {
+                for planned in members {
+                    let completion = {
+                        let module_map = self.module_map.borrow();
+                        matches!(
+                            module_map.status_in_generation(realm, generation, &planned.key),
+                            Some(ModuleStatus::Evaluating)
+                        )
+                        .then(|| {
+                            module_map.completion_in_generation(realm, generation, &planned.key)
+                        })
+                        .flatten()
+                    };
+                    if let Some(completion) = completion {
+                        self.react(
+                            &completion,
+                            Value::Undefined,
+                            Value::Undefined,
+                            Sink::ModulePlanWake(Rc::clone(&wake)),
+                            false,
+                        );
+                        wait_count += 1;
+                    }
+                }
+            }
+            if wait_count > 0 {
+                return Ok(Ok(Value::Promise(wake)));
+            }
+            // An unstarted component with no pending evaluation can only be blocked by malformed
+            // dependency metadata. Refuse explicitly instead of exposing a partially evaluated
+            // namespace or spinning the import job forever.
+            return Ok(Err(self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(
+                    "module dependency plan could not make progress".into(),
+                )],
+            )));
+        }
+
+        // Every SCC may have started while one or more members remain parked at TLA. The
+        // request still waits for the whole dependency closure, even when the requested module
+        // itself happens to have completed before another member of its SCC.
+        for planned in &plan.modules {
+            if matches!(
+                self.module_map
+                    .borrow()
+                    .status_in_generation(realm, generation, &planned.key),
+                Some(ModuleStatus::Evaluating)
+            ) && let Some(completion) =
+                self.module_map
+                    .borrow()
+                    .completion_in_generation(realm, generation, &planned.key)
+            {
+                return Ok(Ok(Value::Promise(completion)));
             }
         }
 
@@ -329,14 +473,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.module_map
             .borrow_mut()
             .begin_in_generation(realm, generation, &planned.key);
-        let module_result =
-            self.drive_module(Rc::clone(program), locals, Some(module_path), generation);
-        if let Some(window) = private_window
-            && let Value::Object(global) = self.global_object_in(realm)
-        {
-            close_private_window(&mut global.borrow_mut(), window);
-        }
+        let target = ModuleEvaluationTarget {
+            key: planned.key.clone(),
+            exports: names.clone(),
+            reexports: planned.reexports.clone(),
+            private_window,
+        };
+        let module_result = self.drive_module(
+            Rc::clone(program),
+            locals,
+            Some(module_path),
+            generation,
+            Some(target),
+        );
         let returned = match module_result? {
+            // The source body is suspended at top-level await. Its module record and shared
+            // completion promise remain pending until the parked activation resumes.
+            Ok(Value::Promise(_)) => return Ok(Ok(())),
             Ok(returned) => returned,
             Err(thrown) => {
                 self.module_map.borrow_mut().fail_in_generation(
@@ -463,7 +616,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A module that has finished hands over its binding; one that has not (a cycle, or a
     /// module still evaluating further up the stack) hands over a dead-zone cell its
     /// publication fills.
-    fn module_binding_in_generation(
+    pub(super) fn module_binding_in_generation(
         &mut self,
         binding: &ModuleBinding,
         realm: RealmId,
@@ -494,18 +647,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         locals: Vec<Value>,
         module_path: Option<Rc<str>>,
         module_generation: u64,
+        mut target: Option<ModuleEvaluationTarget>,
     ) -> Result<Result<Value, Value>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
+            if let Some(target) = target.as_mut() {
+                self.close_module_private_window(self.current_realm, target);
+            }
             return Err(ExecutionError::CallDepthExceeded {
                 limit: self.limits.max_native_depth,
             });
         }
         if self.frames.len() >= self.limits.max_call_depth {
+            if let Some(target) = target.as_mut() {
+                self.close_module_private_window(self.current_realm, target);
+            }
             return Err(ExecutionError::CallDepthExceeded {
                 limit: self.limits.max_call_depth,
             });
         }
         self.native_depth += 1;
+        let caller_module_completion = self.module_completion.take();
+        let caller_module_suspension = self.module_suspension.take();
+        let caller_self_bindings = std::mem::take(&mut self.self_bindings);
+        let caller_self_namespaces = std::mem::take(&mut self.self_namespaces);
         let installed = self.handlers.len();
         self.handlers.push(Handler {
             target: HOST_HANDLER,
@@ -548,14 +712,102 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.global_base = self.frames.len();
         self.instruction = 0;
         let outcome = self.run_frames(depth).map(|result| result.value);
+        let target_key_for_completion = target.as_ref().map(|target| target.key.clone());
+        if let Ok(value) = &outcome
+            && self.suspended
+            && let Some(mut target) = target
+        {
+            self.park_module_private_window(self.current_realm, &mut target);
+            let context = SuspendedModuleContext {
+                program: Rc::clone(&self.program),
+                strictness: Rc::clone(&self.strictness),
+                strict: self.strict,
+                module_path: self.module_path.clone(),
+                module_generation: self.module_generation,
+                module_generation_owner: self.module_generation_owner.clone(),
+                locals: std::mem::take(&mut self.locals),
+                self_bindings: std::mem::take(&mut self.self_bindings),
+                self_namespaces: std::mem::take(&mut self.self_namespaces),
+                realm: self.current_realm,
+                target,
+            };
+            let stack_base = self
+                .frames
+                .last()
+                .map_or(self.stack.len(), |frame| frame.stack_base);
+            self.suspend_module(value.clone(), stack_base, installed + 1);
+            let state = self
+                .module_suspension
+                .as_ref()
+                .expect("nested module suspension created");
+            let completion = Rc::clone(&state.borrow().completion);
+            state.borrow_mut().nested = Some(context);
+            self.module_map.borrow_mut().set_completion_in_generation(
+                self.current_realm,
+                module_generation,
+                target_key_for_completion
+                    .as_deref()
+                    .expect("nested module target has a key"),
+                Rc::clone(&completion),
+            );
+            self.module_suspension = None;
+            self.handlers.truncate(installed);
+            self.restore_caller_frame();
+            self.module_completion = caller_module_completion;
+            self.module_suspension = caller_module_suspension;
+            self.self_bindings = caller_self_bindings;
+            self.self_namespaces = caller_self_namespaces;
+            self.native_depth -= 1;
+            self.suspended = false;
+            return Ok(Ok(Value::Promise(completion)));
+        }
+        if let Some(target) = target.as_mut() {
+            self.close_module_private_window(self.current_realm, target);
+        }
         self.handlers.truncate(installed);
         self.native_depth -= 1;
+        self.module_completion = caller_module_completion;
+        self.module_suspension = caller_module_suspension;
+        self.self_bindings = caller_self_bindings;
+        self.self_namespaces = caller_self_namespaces;
         match outcome {
             Ok(value) => Ok(Ok(value)),
             Err(ExecutionError::CaughtByHost) => {
                 Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
             }
             Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn close_module_private_window(
+        &mut self,
+        realm: RealmId,
+        target: &mut ModuleEvaluationTarget,
+    ) {
+        if let Some(window) = target.private_window.take()
+            && let Value::Object(global) = self.global_object_in(realm)
+        {
+            close_private_window(&mut global.borrow_mut(), window);
+        }
+    }
+
+    pub(super) fn park_module_private_window(
+        &mut self,
+        realm: RealmId,
+        target: &mut ModuleEvaluationTarget,
+    ) {
+        if let Value::Object(global) = self.global_object_in(realm) {
+            park_private_window(&mut global.borrow_mut(), &mut target.private_window);
+        }
+    }
+
+    pub(super) fn resume_module_private_window(
+        &mut self,
+        realm: RealmId,
+        target: &mut ModuleEvaluationTarget,
+    ) {
+        if let Value::Object(global) = self.global_object_in(realm) {
+            resume_private_window(&mut global.borrow_mut(), &mut target.private_window);
         }
     }
 }

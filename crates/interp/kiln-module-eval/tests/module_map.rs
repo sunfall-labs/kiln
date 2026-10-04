@@ -376,6 +376,211 @@ fn runner_import_uses_current_generation_after_nested_reset_but_old_closure_keep
 }
 
 #[test]
+fn reset_during_top_level_await_keeps_the_pending_import_and_old_closure_generation() {
+    let project = Project::new();
+    project.write(
+        "waiting.mjs",
+        "globalThis.waitingRuns = (globalThis.waitingRuns || 0) + 1;\n\
+         const run = globalThis.waitingRuns;\n\
+         export const loadLeaf = () => import('./leaf.mjs');\n\
+         if (run === 1) await new Promise(resolve => { globalThis.releaseWaiting = resolve; });\n\
+         export { run };",
+    );
+    project.write(
+        "leaf.mjs",
+        "globalThis.leafRuns = (globalThis.leafRuns || 0) + 1; export const run = globalThis.leafRuns;",
+    );
+    expect_lines(
+        &project,
+        "const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+         if (!loader('registerRunner', import.meta.url)) throw new Error('runner registration failed');\n\
+         loader('reset');\n\
+         const pending = import('./waiting.mjs');\n\
+         const alsoPending = import('./waiting.mjs');\n\
+         await Promise.resolve();\n\
+         if (typeof globalThis.releaseWaiting !== 'function') throw new Error('module did not suspend');\n\
+         loader('reset');\n\
+         globalThis.releaseWaiting();\n\
+         const [old, same] = await Promise.all([pending, alsoPending]);\n\
+         const oldLeaf = await old.loadLeaf();\n\
+         const runnerLeaf = await import('./leaf.mjs');\n\
+         const fresh = await loader('importActual', './waiting.mjs', import.meta.url, new URL('./waiting.mjs', import.meta.url).href);\n\
+         console.log(old.run, oldLeaf.run, runnerLeaf.run, fresh.run, old === same, old !== fresh, globalThis.waitingRuns, globalThis.leafRuns);",
+        &["1 1 2 2 true true 2 2"],
+    );
+}
+
+#[test]
+fn dynamic_import_waits_for_async_dependencies_before_running_parent() {
+    let project = Project::new();
+    project.write(
+        "dependency.mjs",
+        "globalThis.events.push('dependency:start');\n\
+         await new Promise(resolve => { globalThis.releaseDependency = resolve; });\n\
+         globalThis.events.push('dependency:end'); export const ready = true;",
+    );
+    project.write(
+        "parent.mjs",
+        "import { ready } from './dependency.mjs';\n\
+         globalThis.events.push('parent'); export const value = ready;",
+    );
+    expect_lines(
+        &project,
+        "globalThis.events = [];\n\
+         const pending = import('./parent.mjs');\n\
+         await Promise.resolve();\n\
+         console.log(globalThis.events.join(','));\n\
+         globalThis.releaseDependency();\n\
+         const parent = await pending;\n\
+         console.log(globalThis.events.join(','), parent.value);",
+        &[
+            "dependency:start",
+            "dependency:start,dependency:end,parent true",
+        ],
+    );
+}
+
+#[test]
+fn dynamic_import_starts_async_members_of_one_cycle_before_waiting() {
+    let project = Project::new();
+    project.write(
+        "a.mjs",
+        "import './b.mjs';\n\
+         globalThis.startedA = true;\n\
+         await new Promise(resolve => { globalThis.releaseA = resolve; });\n\
+         export const a = 'a';",
+    );
+    project.write(
+        "b.mjs",
+        "import './a.mjs';\n\
+         globalThis.startedB = true;\n\
+         await new Promise(resolve => { globalThis.releaseB = resolve; });\n\
+         export const b = 'b';",
+    );
+    expect_lines(
+        &project,
+        "const pending = import('./a.mjs');\n\
+         await Promise.resolve();\n\
+         console.log(globalThis.startedA, globalThis.startedB);\n\
+         globalThis.releaseA(); globalThis.releaseB();\n\
+         const a = await pending;\n\
+         console.log(a.a, globalThis.startedA, globalThis.startedB);",
+        &["true true", "a true true"],
+    );
+}
+
+#[test]
+fn dynamic_import_starts_independent_dependency_while_another_dependency_awaits_it() {
+    let project = Project::new();
+    project.write(
+        "a.mjs",
+        "globalThis.events.push('a:start');\n\
+         await new Promise(resolve => { globalThis.releaseA = resolve; });\n\
+         globalThis.events.push('a:end'); export const a = 'a';",
+    );
+    project.write(
+        "b.mjs",
+        "globalThis.events.push('b'); globalThis.releaseA(); export const b = 'b';",
+    );
+    project.write(
+        "parent.mjs",
+        "import { a } from './a.mjs'; import { b } from './b.mjs';\n\
+         globalThis.events.push('parent'); export const value = a + b;",
+    );
+    expect_lines(
+        &project,
+        "globalThis.events = [];\n\
+         const parent = await import('./parent.mjs');\n\
+         console.log(globalThis.events.join(','), parent.value);",
+        &["a:start,b,a:end,parent ab"],
+    );
+}
+
+#[test]
+fn dynamic_import_wakes_for_any_dependency_completion() {
+    let project = Project::new();
+    project.write(
+        "a.mjs",
+        "globalThis.events.push('a:start');\n\
+         await new Promise(resolve => { globalThis.releaseA = resolve; });\n\
+         globalThis.events.push('a:end'); export const ready = true;",
+    );
+    project.write(
+        "b.mjs",
+        "globalThis.events.push('b:start');\n\
+         await Promise.resolve();\n\
+         globalThis.events.push('b:end'); export const ready = true;",
+    );
+    project.write(
+        "c.mjs",
+        "import './b.mjs';\n\
+         globalThis.events.push('c');\n\
+         globalThis.releaseA(); export const ready = true;",
+    );
+    project.write(
+        "root.mjs",
+        "import './a.mjs'; import './c.mjs';\n\
+         globalThis.events.push('root'); export const ready = true;",
+    );
+    expect_lines(
+        &project,
+        "globalThis.events = [];\n\
+         let watchdog;\n\
+         try { await Promise.race([import('./root.mjs'), new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('watchdog')), 100); })]); }\n\
+         catch (error) { globalThis.events.push(error.message); }\n\
+         clearTimeout(watchdog);\n\
+         console.log(globalThis.events.join(','));",
+        &["a:start,b:start,b:end,c,a:end,root"],
+    );
+}
+
+#[test]
+fn rejected_async_dependency_rejects_parent_without_running_its_body() {
+    let project = Project::new();
+    project.write(
+        "dependency.mjs",
+        "await Promise.reject(globalThis.reason); export const ready = true;",
+    );
+    project.write(
+        "parent.mjs",
+        "import { ready } from './dependency.mjs';\n\
+         globalThis.parentRan = true; export const value = ready;",
+    );
+    expect_lines(
+        &project,
+        "globalThis.reason = {};\n\
+         try { await import('./parent.mjs'); }\n\
+         catch (error) { console.log(error === globalThis.reason, globalThis.parentRan); }",
+        &["true undefined"],
+    );
+}
+
+#[test]
+fn rejected_pending_import_is_cached_in_its_generation_and_reset_retries_freshly() {
+    let project = Project::new();
+    project.write(
+        "retry.mjs",
+        "globalThis.retryRuns = (globalThis.retryRuns || 0) + 1;\n\
+         const run = globalThis.retryRuns;\n\
+         if (run === 1) await Promise.reject(globalThis.retryReason);\n\
+         export { run };",
+    );
+    expect_lines(
+        &project,
+        "const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+         if (!loader('registerRunner', import.meta.url)) throw new Error('runner registration failed');\n\
+         loader('reset'); globalThis.retryReason = {};\n\
+         let firstError;\n\
+         try { await import('./retry.mjs'); } catch (error) { firstError = error; }\n\
+         const cached = await import('./retry.mjs').catch(error => error);\n\
+         loader('reset');\n\
+         const fresh = await loader('importActual', './retry.mjs', import.meta.url, new URL('./retry.mjs', import.meta.url).href);\n\
+         console.log(firstError === globalThis.retryReason, cached === firstError, fresh.run, globalThis.retryRuns);",
+        &["true true 2 2"],
+    );
+}
+
+#[test]
 fn reset_recreates_dynamic_cycle_and_keeps_old_generation_namespace_alive() {
     let project = Project::new();
     project.write(
@@ -494,6 +699,52 @@ impl kiln_interpreter::ModuleLoaderService for FreshGraphLoader {
     }
 }
 
+/// A one-file engine builtin plan used to exercise the private-global window across TLA.
+struct EnginePrivateGraphLoader {
+    base: PathBuf,
+}
+
+impl kiln_interpreter::ModuleLoaderService for EnginePrivateGraphLoader {
+    fn load(
+        &self,
+        request: kiln_interpreter::ModuleLoadRequest,
+    ) -> Result<kiln_interpreter::ModulePlan, kiln_interpreter::ModuleLoadError> {
+        let importer = request.importer.as_deref().expect("importer");
+        let entry = self
+            .base
+            .join(Path::new(importer).parent().expect("importer directory"))
+            .join(&request.specifier)
+            .canonicalize()
+            .expect("canonical target");
+        let graph = ModuleGraph::build(
+            &entry,
+            &self.base,
+            |path: &Path| fs::read_to_string(path),
+            kiln_frontend_oxc::parse,
+        )
+        .expect("build engine-private graph");
+        let mut plan = graph
+            .import_plan_for_request(&entry, None)
+            .map_err(|error| kiln_interpreter::ModuleLoadError::Unsupported(error.to_string()))?;
+        if request.specifier.ends_with("private.mjs")
+            || request.specifier.ends_with("private-fail.mjs")
+        {
+            let source = plan
+                .modules
+                .iter_mut()
+                .find_map(|module| match &mut module.body {
+                    kiln_interpreter::PlannedBody::Source { engine_private, .. } => {
+                        Some(engine_private)
+                    }
+                    _ => None,
+                })
+                .expect("private module has a source body");
+            *source = true;
+        }
+        Ok(plan)
+    }
+}
+
 #[test]
 fn a_loader_with_its_own_graph_links_to_the_static_record() {
     let project = Project::new();
@@ -526,6 +777,85 @@ fn a_loader_with_its_own_graph_links_to_the_static_record() {
         )
         .expect("run");
     assert_eq!(host.lines, ["0,0 1 1 1"]);
+}
+
+#[test]
+fn engine_private_tla_hides_window_while_parked_and_reopens_on_resume() {
+    struct Oxc;
+    impl Frontend for Oxc {
+        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            kiln_frontend_oxc::parse_with_goal(path, source, kiln_hir::SourceGoal::Module)
+        }
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse {
+            let (module, static_requires) =
+                kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
+            CommonJsParse {
+                module,
+                static_requires,
+            }
+        }
+    }
+
+    let project = Project::new();
+    project.write(
+        "private.mjs",
+        "globalThis.privateStart = typeof __kilnPrivate;\n\
+         await new Promise(resolve => { globalThis.releasePrivate = resolve; });\n\
+         globalThis.privateAfterFirst = typeof __kilnPrivate;\n\
+         await new Promise(resolve => { globalThis.releasePrivateAgain = resolve; });\n\
+         globalThis.privateAfterSecond = typeof __kilnPrivate; export const done = true;",
+    );
+    project.write(
+        "ordinary.mjs",
+        "globalThis.ordinaryDuringWait = typeof __kilnPrivate; export const done = true;",
+    );
+    project.write(
+        "ordinary-again.mjs",
+        "globalThis.ordinaryDuringSecondWait = typeof __kilnPrivate; export const done = true;",
+    );
+    project.write(
+        "private-fail.mjs",
+        "globalThis.privateAtFailure = typeof __kilnPrivate;\n\
+         await Promise.reject(new Error('private module failed'));",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "const pending = import('./private.mjs');\n\
+         await Promise.resolve();\n\
+         if (typeof globalThis.releasePrivate !== 'function') throw new Error('module did not suspend');\n\
+         await import('./ordinary.mjs');\n\
+         globalThis.releasePrivate();\n\
+         await Promise.resolve();\n\
+         if (typeof globalThis.releasePrivateAgain !== 'function') throw new Error('module did not resuspend');\n\
+         await import('./ordinary-again.mjs');\n\
+         globalThis.releasePrivateAgain();\n\
+         const loaded = await pending;\n\
+         try { await import('./private-fail.mjs'); } catch {}\n\
+         console.log(globalThis.privateStart, globalThis.ordinaryDuringWait, globalThis.privateAfterFirst, globalThis.ordinaryDuringSecondWait, globalThis.privateAfterSecond, loaded.done, globalThis.privateAtFailure, typeof __kilnPrivate);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        Oxc,
+    )
+    .expect("build main graph");
+    let mut host = Output::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(
+                EnginePrivateGraphLoader {
+                    base: project.root.clone(),
+                },
+            )),
+        )
+        .expect("run engine-private activation probe");
+    assert_eq!(
+        host.lines,
+        ["object undefined object undefined object true object undefined"]
+    );
 }
 
 #[test]

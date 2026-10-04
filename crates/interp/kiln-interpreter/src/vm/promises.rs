@@ -134,6 +134,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         // Neither of these carries handlers: the bookkeeping *is* the reaction.
         match &reaction.sink {
+            Sink::ImportRetry(retry) => {
+                let retry = Rc::clone(retry);
+                if let Settled::Rejected(reason) = outcome {
+                    self.settle(&retry.promise, &Settled::Rejected(reason));
+                    return Ok(());
+                }
+                let realm = retry.generation_owner.borrow().realm;
+                let imported = self.entering(realm, |vm| {
+                    let previous = std::mem::replace(&mut vm.module_path, retry.importer.clone());
+                    let imported = vm.import_module_in_generation(
+                        &retry.specifier,
+                        retry.options.as_ref(),
+                        retry.generation,
+                    );
+                    vm.module_path = previous;
+                    imported
+                })?;
+                match imported {
+                    Ok(Value::Promise(completion)) => self.react(
+                        &completion,
+                        Value::Undefined,
+                        Value::Undefined,
+                        Sink::ImportRetry(retry),
+                        false,
+                    ),
+                    Ok(namespace) => {
+                        self.settle(&retry.promise, &Settled::Fulfilled(namespace));
+                    }
+                    Err(thrown) => self.settle(&retry.promise, &Settled::Rejected(thrown)),
+                }
+                return Ok(());
+            }
+            Sink::ModulePlanWake(waiter) => {
+                self.resolve_promise(waiter, Value::Undefined);
+                return Ok(());
+            }
             Sink::AsyncDisposal(state) => {
                 let state = Rc::clone(state);
                 self.async_disposal_resume(&state, outcome, self.instruction);
@@ -1129,19 +1165,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(
-                promise,
-                specifier,
-                options,
-                module_path,
-                generation,
-                _generation_owner,
-            ) => {
-                let previous = std::mem::replace(&mut self.module_path, module_path);
-                let imported =
-                    self.import_module_in_generation(&specifier, options.as_ref(), generation);
-                self.module_path = previous;
+            Job::Import(promise, specifier, options, module_path, generation, generation_owner) => {
+                let realm = generation_owner.borrow().realm;
+                let imported = self.entering(realm, |vm| {
+                    let previous = std::mem::replace(&mut vm.module_path, module_path.clone());
+                    let imported =
+                        vm.import_module_in_generation(&specifier, options.as_ref(), generation);
+                    vm.module_path = previous;
+                    imported
+                });
                 match imported? {
+                    Ok(Value::Promise(completion)) => {
+                        let retry = Rc::new(ImportRetry {
+                            promise,
+                            specifier,
+                            options,
+                            importer: module_path,
+                            generation,
+                            generation_owner,
+                        });
+                        self.react(
+                            &completion,
+                            Value::Undefined,
+                            Value::Undefined,
+                            Sink::ImportRetry(retry),
+                            false,
+                        )
+                    }
                     Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                     Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                 }

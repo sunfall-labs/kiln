@@ -141,6 +141,13 @@ pub(super) struct Reaction {
 pub(super) enum Sink {
     /// The promise `then` returned.
     Promise(Rc<PromiseData>),
+    /// A dynamic import waiting for one module in its dependency plan. Once that module settles,
+    /// the request is retried against the same importer and generation; this advances the plan
+    /// without allowing a dependent body to run before its asynchronous dependencies complete.
+    ImportRetry(Rc<ImportRetry>),
+    /// Wake a module-plan scheduler when any one of its pending dependencies settles. The
+    /// scheduler then rechecks all dependency states and starts every newly ready component.
+    ModulePlanWake(Rc<PromiseData>),
     /// Settle a promise with a *recorded* outcome once something else has settled, unless that
     /// something rejected. `finally` waits on its handler's result and then restores the outcome
     /// it was passing through.
@@ -186,6 +193,27 @@ pub(super) enum Sink {
         done: bool,
         is_return: bool,
     },
+}
+
+#[derive(Debug)]
+pub(super) struct ImportRetry {
+    pub(super) promise: Rc<PromiseData>,
+    pub(super) specifier: String,
+    pub(super) options: Option<ImportAttributes>,
+    pub(super) importer: Option<Rc<str>>,
+    pub(super) generation: u64,
+    pub(super) generation_owner: crate::module_map::ModuleGenerationHandle,
+}
+
+impl PartialEq for ImportRetry {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.promise, &other.promise)
+            && self.specifier == other.specifier
+            && self.options == other.options
+            && self.importer == other.importer
+            && self.generation == other.generation
+            && Rc::ptr_eq(&self.generation_owner, &other.generation_owner)
+    }
 }
 
 /// One `AsyncDisposableStack.prototype.disposeAsync` in flight.
