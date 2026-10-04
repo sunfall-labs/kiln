@@ -33,3 +33,18 @@ Provenance:
 - Node/Vitest oracle SHA-256: `f811d785382d5c113482816aca4925d701c230e2f4ba5e3f690b5e911e1fb9a6`
 
 `report.json` is the complete runner report. The five `*.log` files preserve each raw interpreter stream. Focused module-evaluation and interpreter crate results are recorded in the implementation review; this report covers only the five upstream selections above.
+
+## Focused validation
+
+The same source commit also passed the complete module-map integration target (`29 passed`) and interpreter crate tests (`255 passed, 1 ignored`). The reset-during-TLA regression passed independently. The A/B/C wake-order regression has a durable red/green pair: with the previous first-pending wait, the watchdog recorded `a:start,b:start,b:end,watchdog`; with wake-on-any-dependency settlement, it recorded the expected `a:start,b:start,b:end,c,a:end,root`. The engine-private TLA test suspends twice, checks an ordinary module sees `__kilnPrivate` as absent during both pauses, checks the resumed engine module sees it, and checks rejection removes the global exposure. A helper test also checks exact restoration of a pre-existing global property.
+
+The focused command forms were:
+
+```sh
+env MBX_GC_AUTO=false KILN_JOBS=1 RAYON_NUM_THREADS=1 mise exec -- \
+  mbx test -p kiln-module-eval --test module_map --jobs=1 -- --nocapture
+env MBX_GC_AUTO=false KILN_JOBS=1 RAYON_NUM_THREADS=1 mise exec -- \
+  mbx test -p kiln-interpreter --jobs=1 -- --test-threads=1
+```
+
+`module-map-29.log` and `interpreter-255.log` contain full test output; `focused-reset-tla.log`, `any-dependency-red.log`, `any-dependency-green.log`, `private-window-helper.log`, and `private-window-tla.log` retain individual regressions. The red run temporarily restored only the old first-pending wait behavior, then the tested shared-wake implementation was restored and rerun green before commit.
