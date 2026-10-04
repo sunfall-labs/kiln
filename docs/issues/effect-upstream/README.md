@@ -68,6 +68,20 @@ those different failures. `native-focused-reference.json` retains the separate
 compiler identities, source/adapter/report digests and failing case evidence.
 These subsets are not an updated whole-suite score.
 
+Subsequent frozen diagnostics pass all 223 codec cases and all 46 TestSchema cases on native.
+The linked-source URL fix passes all 11 SchemaAOTCompiler cases. Native Pool passes all 47 cases,
+including four GC cases that Bun skips; interpreter Pool still fails those four GC cases.
+With the production `native-release` profile, JSON patch passes all 10 cases on native while Bun
+passes nine. Production Arbitrary records 176/178 native passes versus 178/178 on Bun; its two
+remaining failures are original five-second case timeouts during a run that overlapped gate work,
+so they require quiet confirmation. The focused evidence records each compiler digest and profile.
+These results are separate selections and do not replace the incomplete whole-suite diagnostic.
+
+The next milestone's first gate attempt is not green: routine Test262 passed its chunk floors
+with 97,606 passes, but the benchmark preparation lane timed out waiting for correctness lanes
+under a six-worker budget. The run was stopped and its full evidence retained. A complete gate
+must be rerun on the final integrated fixes before that milestone is pushed.
+
 `scripts/effect-upstream.py` prepares an owned, locked cache workspace and loads
 TypeScript test sources directly. It pins adapter dependencies, imports upstream
 `vitest.setup.ts`, retains per-file logs and case IDs, and records timeouts,
