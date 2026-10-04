@@ -531,7 +531,25 @@ kiln_has_next_prototype:
                 *answer = 1;
                 return KILN_C99_OK;
             }
-            *answer = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE;
+            if ((size_t)index < array->count &&
+                array->elements[(size_t)index] != KILN_VAL_HOLE) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+            /* A sparse or out-of-range index can still be inherited from Array.prototype.
+             * Array iteration methods use this same [[HasProperty]] path before [[Get]], so
+             * checking only the dense vector made `1 in array` false while a direct read found
+             * the inherited value. */
+            {
+                kiln_value store;
+                if (kiln_c99_callable_store(
+                        kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store, 0) ==
+                    KILN_C99_OK && kiln_c99_store_has(store, key, ikey)) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+            }
+            *answer = 0;
             return KILN_C99_OK;
         }
         /* A name an array carries beside its elements -- `a.total`, the `index` on a match

@@ -3122,14 +3122,28 @@
             kiln_array *built_arr = kiln_c99_array_of(built_val);
             kiln_val vrecv = kiln_val_from_boundary(receiver);
             size_t length = array->count;
-            for (index = 0; index < length && index < array->count; ++index) {
-                if (array->elements[index] == KILN_VAL_HOLE) {
-                    kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE);
-                    built_arr->is_numeric = 0;
-                    continue;
+            for (index = 0; index < length; ++index) {
+                kiln_value element;
+                if (index < array->count && array->elements[index] != KILN_VAL_HOLE) {
+                    element = kiln_val_to_boundary(array->elements[index]);
+                } else {
+                    int present = 0;
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) {
+                        kiln_c99_heap_store_val(built_arr,
+                                                &built_arr->elements[built_arr->count++],
+                                                KILN_VAL_HOLE);
+                        built_arr->is_numeric = 0;
+                        continue;
+                    }
+                    status = kiln_c99_array_get_index(host, receiver, index, &element, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
                 }
                 kiln_val vvisit[3];
-                vvisit[0] = array->elements[index];
+                vvisit[0] = kiln_val_from_boundary(element);
                 vvisit[1] = kiln_c99_val_from_double((double)index);
                 vvisit[2] = vrecv;
                 kiln_val prod = KILN_VAL_UNDEFINED;
@@ -3151,11 +3165,22 @@
             kiln_array *built_arr = kiln_c99_array_of(built_val);
             kiln_val vrecv = kiln_val_from_boundary(receiver);
             size_t length = array->count;
-            for (index = 0; index < length && index < array->count; ++index) {
-                if (array->elements[index] == KILN_VAL_HOLE) {
-                    continue;
+            for (index = 0; index < length; ++index) {
+                kiln_val elem;
+                if (index < array->count && array->elements[index] != KILN_VAL_HOLE) {
+                    elem = array->elements[index];
+                } else {
+                    int present = 0;
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) continue;
+                    kiln_value inherited;
+                    status = kiln_c99_array_get_index(host, receiver, index, &inherited, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    elem = kiln_val_from_boundary(inherited);
                 }
-                kiln_val elem = array->elements[index];
                 kiln_val vvisit[3];
                 vvisit[0] = elem;
                 vvisit[1] = kiln_c99_val_from_double((double)index);
@@ -3180,7 +3205,7 @@
          * what the specification says and what stops an appending callback from looping. */
         {
             size_t length = array->count;
-            for (index = 0; index < length && index < array->count; ++index) {
+            for (index = 0; index < length; ++index) {
                 kiln_value visit[3];
                 kiln_value produced;
                 /* Every element walk skips a hole and visits an undefined. `map` still has to
@@ -3202,15 +3227,22 @@
                     status = kiln_c99_array_get_index(host, receiver, index, &visit[0], depth,
                                                       thrown);
                     if (status != KILN_C99_OK) return status;
-                } else if (array->elements[index] == KILN_VAL_HOLE) {
-                    if (code == KILN_C99_METHOD_MAP ||
-                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
-                        status = kiln_c99_array_push(built, kiln_c99_hole());
-                        if (status != KILN_C99_OK) {
-                            return status;
+                } else if (index >= array->count || array->elements[index] == KILN_VAL_HOLE) {
+                    int present = 0;
+                    status = kiln_c99_array_has_index(host, receiver, index, &present, depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
+                    if (!present) {
+                        if (code == KILN_C99_METHOD_MAP ||
+                            code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
+                            status = kiln_c99_array_push(built, kiln_c99_hole());
+                            if (status != KILN_C99_OK) return status;
                         }
+                        continue;
                     }
-                    continue;
+                    status = kiln_c99_array_get_index(host, receiver, index, &visit[0], depth,
+                                                      thrown);
+                    if (status != KILN_C99_OK) return status;
                 } else {
                     visit[0] = kiln_val_to_boundary(array->elements[index]);
                 }
