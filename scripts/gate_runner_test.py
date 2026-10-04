@@ -38,6 +38,16 @@ class BudgetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 budget({key: "0"}, 16, 16384)
 
+    def test_small_cpu_budget_keeps_single_case_memory_allowance(self):
+        # The full corpus includes generated eval sources whose frontend needs more than
+        # 1 GiB. Reducing CPU concurrency must not make those cases abort on allocation.
+        for cpus in (1, 2, 3, 4):
+            *_, workers, cap = budget({}, cpus, 16384)
+            self.assertEqual(cap, 4096)
+            self.assertLessEqual(workers, cpus)
+        self.assertEqual(budget({}, 4, 4096)[-1], 2048)
+        self.assertEqual(budget({"KILN_TEST262_MEMORY_MB": "1024"}, 4, 16384)[-1], 1024)
+
     def test_full_parallel_gate_reserves_one_worker_for_benchmark_preparation(self):
         parallel, total, tests, native, test262, _ = budget({}, 16, 32768)
         self.assertEqual((parallel, total, tests, native, test262), (1, 16, 4, 4, 7))

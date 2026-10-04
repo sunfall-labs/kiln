@@ -129,8 +129,9 @@ for the corpus.
 The gate builds the CLI once, runs the artifact-cache suite before concurrent filesystem work,
 then overlaps the remaining crate tests, native/thirdparty parity and Test262
 within one budget (at most 32 CPUs, or `KILN_GATE_JOBS` / `KILN_JOBS` if smaller). Test262 keeps
-one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers, at
-most half physical memory or 16 GiB. An explicit `KILN_TEST262_MEMORY_MB` is respected.
+one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers with
+a 4 GiB floor for single-case allocations, at most half physical memory or 16 GiB. An explicit
+`KILN_TEST262_MEMORY_MB` is respected.
 `KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. In a parallel non-quick gate, native
 thirdparty benchmark binaries compile with one reserved worker alongside correctness lanes, then
 wait at a gate-owned release marker; warmup and timed execution begin only after those lanes finish.
