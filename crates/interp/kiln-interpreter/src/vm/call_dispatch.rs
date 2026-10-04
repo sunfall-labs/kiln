@@ -379,6 +379,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let native = Native::CollectionGetOrInsert { weak, computed };
         if weak {
+            validate_weak_map_receiver(receiver)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             if !self.can_be_held_weakly(&key) {
                 return Err(ExecutionError::TypeErrorMessage {
@@ -462,6 +463,120 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 }
 
+#[cfg(test)]
+mod weak_get_or_insert_tests {
+    use super::*;
+    use kiln_host_abi::{HostError, HostOp};
+
+    struct Host;
+
+    impl HostOps for Host {
+        fn call(
+            &mut self,
+            _operation: HostOp,
+            _arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    #[test]
+    fn weak_map_receiver_is_checked_before_computed_callback_runs() {
+        let counter = Rc::new(RefCell::new(Value::Number(0.0)));
+        let callback_program = Rc::new(Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            constants: vec![Constant::Number(1.0f64.to_bits())],
+            code: Vec::new(),
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: false,
+                name: None,
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 0,
+                code: vec![
+                    Instruction::LoadUpvalue(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(kiln_ir::BinaryOp::Add),
+                    Instruction::StoreUpvalue(0),
+                    Instruction::LoadUpvalue(0),
+                    Instruction::Return,
+                ],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
+        });
+        let callback = Value::Function(Rc::new(Closure {
+            program: Rc::clone(&callback_program),
+            function: 0,
+            strictness: Rc::new(Strictness::default()),
+            module_path: None,
+            name: None,
+            inferred_name: None,
+            upvalues: vec![Rc::clone(&counter)],
+            realm: RealmId::PRIMARY,
+            captured_arguments: None,
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let empty_program = Rc::new(Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        });
+        let mut host = Host;
+        let mut vm = Vm::with_entropy_seed(
+            empty_program,
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .unwrap();
+
+        let result = vm.collection_get_or_insert(
+            true,
+            true,
+            &Value::Undefined,
+            &[
+                Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+                callback,
+            ],
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExecutionError::TypeErrorMessage { message })
+                if message == "incompatible WeakMap receiver"
+        ));
+        assert!(matches!(*counter.borrow(), Value::Number(0.0)));
+    }
+}
+
 fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
     let Value::Object(object) = receiver else {
         return None;
@@ -478,6 +593,23 @@ fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
         .iter()
         .find(|entry| entry.key.upgrade().as_ref() == Some(key))
         .map(|entry| entry.value.clone())
+}
+
+fn validate_weak_map_receiver(receiver: &Value) -> Result<(), ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    let object = object.borrow();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true)))
+        || object.weak_collection_entries.is_none()
+    {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn set_weak_map_value(
