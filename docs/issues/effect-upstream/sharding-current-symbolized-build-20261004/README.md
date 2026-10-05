@@ -27,6 +27,25 @@ The exact pair hash `9f9747a19882905c65626196c02048b1` resolves to `source/packa
 
 The pair hash `d26041571cf61f0bad70365407312980` resolves to `source/packages/effect/src/cluster/Sharding.ts`. Generated-C function 77 has source range `44860..48905` and 916 bytecode instructions. That range is the `sendOutgoing` closure, including local/remote routing, durable-message handling, retry scheduling, and shutdown abandonment. It is 38.3% inclusive but only 3.7% leaf, so much of its inclusive time is in callees. Its shape is a plausible follow-up target for the timeout group, especially tests involving retries or unavailable entities; this whole-suite profile does not prove that these samples occurred during the six timeout windows.
 
-The profile spans the complete test process and has no case markers. The harness's case records are emitted without timestamps, so the six failed case intervals cannot be aligned reliably to the sampled stacks. Treat the generated Sharding function as a targeted investigation lead, not as a demonstrated cause. A decisive next profile should run one unchanged failing case per process, preserving the original deadline, and a nearby passing control; keep the native binary and provider fixed so a profile can be compared without an emitter or runtime change.
+## Result-marker profile: per-case windows
+
+A second profile reused the identical native binary and retained stdout arrival timestamps as pairs of Unix and monotonic nanoseconds. The native console host flushes each newline (`crates/native/kiln-native-runtime/src/lib.rs`), so these timestamps follow the case-result records promptly. samply sample times are monotonic milliseconds; the marker clock pair's Unix-minus-monotonic offset changed by only 3,797 ns across the run. The first inventory marker was 173.121 ms after the sampled process thread registered, and the last sample was 3.292 ms after the final summary marker. The analyzer correlates these clocks directly.
+
+The analyzer reports each interval from the preceding inventory/result marker to the current case result. These windows include harness hooks, cleanup and setup around a case, so they are broader than the test callback itself. The six failing windows are:
+
+| Case | Marker interval | Native samples | `sendOutgoing` fn77 inclusive | `internal/effect` fn50 inclusive | timer runner inclusive |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Active request replay after entity defect | 5.057 s | 2,151 | 42.5% | 53.0% | 24.9% |
+| Active uninterruptible request after restart | 5.116 s | 1,711 | 39.9% | 56.3% | 28.6% |
+| Active stream after acknowledged chunk | 5.064 s | 2,244 | 41.4% | 54.0% | 26.2% |
+| Reset during asynchronous storage read | 5.030 s | 2,350 | 42.3% | 53.4% | 25.4% |
+| Durable messages while entity layers build | 5.040 s | 2,306 | 38.3% | 53.2% | 26.4% |
+| Durable messages with no entity registration | 5.039 s | 2,330 | 40.6% | 51.3% | 24.6% |
+
+Passing controls have comparable stack shares: the adjacent remote-reset storage-read pass has 41.3% in fn77, 53.1% in fn50 and 22.3% in timer runner; durable-message retry-on-restart has 32.3%, 55.6% and 26.6%; and the registration-missing local-send pass has 38.9%, 50.8% and 22.2%. Thus fn77 participates in all six failures, but its share is not unique to failing cases. The profile shows sustained Sharding/scheduler activity until each timeout; it does not identify a single pathological native primitive or distinguish excess retries from an expected state transition that never occurs.
+
+The next discriminating probe should run each unchanged failing case independently alongside a nearby passing control and record test-tagged counts for `sendOutgoing` attempts, retry scheduling, storage reads/claims/resets, and timer/fiber turns. That would show whether the failures repeatedly retry or stop making the state transition the test awaits. No implementation change or benchmark conclusion follows from this sampled run: its receipt records that an unrelated Rust identity-test build overlapped the initial diagnostic seconds, and a separate full322 run was active.
+
+The reproducible `analyze-profile.py` accepts `--markers-jsonl` and `--clock-receipt` to create `marker-profile-analysis.json`. For this profile, SHA-256 values are: gzipped profile `fc4b93ed1cd36a850028d3b74e169c219143f04555eabc47c6c2ce4df50119b0`; symbol sidecar `6204ec678f93b459c936338147656a3ce4995ef8fdf34456189f7b24749986a9`; marker arrivals `0ce7b362cb70818d9bfc210fdcb2d40e95e66637fe6363c7191bea95a8a4d04b`; receipt `9c3a3136b168d1e62db62a875554620ccda5125b2bc13ccb25ce1c2ca0f69fd9`. Binary SHA and Build ID match the earlier run above.
 
 Source evidence: the quiet result and logs, `profile.json.gz`, symbol sidecar, and leaf summary are retained in the sibling scratch directory `sharding-current-symbolized-prebuild` under `kiln-effect-next-milestone`. Their SHA-256 values are: profile `1cc284094f40dcb2fa1c052e3cd08a483b4322ea5fcf4568e6e70f4c8d39eaac`; symbol sidecar `3b13c8bcd7b59d00284227fe23b66fe0b96c21e928076319da542d894275ef30`; leaf summary `d7fab1c2e5ffaf57ebaa96575a4e5edac874436d33e3a0ed2314c9a924267d8c`; quiet result `c5ffc869ee04604f99d955e639adb56c08cb66f8b40d3b91a9ff79431e71a451`.

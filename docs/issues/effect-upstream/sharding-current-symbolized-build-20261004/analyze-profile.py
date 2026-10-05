@@ -41,6 +41,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("profile_gz", type=Path)
     parser.add_argument("symbols_json", type=Path)
+    parser.add_argument("--markers-jsonl", type=Path,
+                        help="newline-arrival records using monotonic_ns from the same host")
+    parser.add_argument("--clock-receipt", type=Path,
+                        help="receipt.json containing paired unix_ns/monotonic_ns observations")
     parser.add_argument("--source-root", type=Path,
                         help="root whose relative paths use kiln logical-module spelling")
     args = parser.parse_args()
@@ -56,6 +60,10 @@ def main():
     frames = thread["frameTable"]
     stacks = thread["stackTable"]
     funcs = thread["funcTable"]
+    native_resource = next(
+        index for index, library_index in enumerate(thread["resourceTable"]["lib"])
+        if profile["libs"][library_index]["debugName"] == "native.bin"
+    )
 
     def frame_name(frame_index):
         name = symbol_for(frames["address"][frame_index], starts, symbols, symbol_strings)
@@ -75,6 +83,7 @@ def main():
         "kiln_module_path_d26041571cf61f0bad70365407312980_fn_77",
         "kiln_module_path_9f9747a19882905c65626196c02048b1_fn_50",
     }
+    timed_rows = []
     for sample_index, leaf_stack in enumerate(thread["samples"]["stack"]):
         if leaf_stack is None:
             continue
@@ -87,7 +96,7 @@ def main():
             continue
         leaf_frame = stacks["frame"][leaf_stack]
         leaf_func = frames["func"][leaf_frame]
-        if funcs["resource"][leaf_func] != 1:  # resource 1 is native.bin in this profile
+        if funcs["resource"][leaf_func] != native_resource:
             continue
         native_samples += 1
         sample_time = thread["samples"]["time"][sample_index]
@@ -95,6 +104,7 @@ def main():
         time_max = sample_time if time_max is None else max(time_max, sample_time)
         leaf[chain[0]] += 1
         inclusive.update(set(chain))
+        timed_rows.append((sample_time, chain))
         for index, name in enumerate(chain):
             if name in focused:
                 caller = chain[index + 1] if index + 1 < len(chain) else "<stack-root>"
@@ -140,6 +150,86 @@ def main():
         ],
         "focused_symbols": focus_report,
     }
+    if args.markers_jsonl:
+        events = []
+        for line in args.markers_jsonl.read_text().splitlines():
+            marker = json.loads(line)
+            record = marker["record"]
+            if record.get("kind") in ("inventory", "case"):
+                events.append((marker["monotonic_ns"] / 1_000_000, record))
+
+        windows = []
+        previous_time = None
+        previous_record = None
+        interesting = set(focus for focus in focused if focus.startswith("kiln_module_path_"))
+        interesting.update({"kiln_c99_invoke_method_dispatch", "kiln_c99_run_timer"})
+        for arrival_time, record in events:
+            if record["kind"] == "inventory":
+                previous_time, previous_record = arrival_time, record
+                continue
+            if previous_time is None:
+                previous_time, previous_record = arrival_time, record
+                continue
+            rows = [chain for sample_time, chain in timed_rows
+                    if previous_time <= sample_time <= arrival_time]
+            counts = collections.Counter()
+            leaf_counts = collections.Counter()
+            for chain in rows:
+                leaf_counts[chain[0]] += 1
+                counts.update(set(chain))
+            windows.append({
+                "case_id": record.get("id"),
+                "outcome": record.get("outcome"),
+                "start_marker": previous_record.get("kind"),
+                "duration_ms_between_arrivals": round(arrival_time - previous_time, 3),
+                "native_samples": len(rows),
+                "symbols": {
+                    name: {"inclusive_samples": counts[name],
+                          "leaf_samples": leaf_counts[name],
+                          "inclusive_percent_of_window": round(counts[name] * 100 / len(rows), 2)
+                              if rows else None}
+                    for name in sorted(interesting)
+                },
+            })
+            previous_time, previous_record = arrival_time, record
+
+        failure_controls = []
+        for index, row in enumerate(windows):
+            if row["outcome"] != "fail":
+                continue
+            neighbors = []
+            for candidate_index in (index - 1, index + 1):
+                if 0 <= candidate_index < len(windows):
+                    candidate = windows[candidate_index]
+                    if candidate["outcome"] == "pass":
+                        neighbors.append(candidate)
+            failure_controls.append({"failure": row, "adjacent_passing_controls": neighbors})
+        report["marker_alignment"] = {
+            "clock": "profile sample time and marker monotonic_ns/1e6 are both host monotonic milliseconds",
+            "interpretation": "arrival-to-arrival intervals include harness hooks, cleanup and setup; not callback-only execution",
+            "case_windows": windows,
+            "failures_with_adjacent_controls": failure_controls,
+        }
+        if args.clock_receipt:
+            receipt = json.loads(args.clock_receipt.read_text())
+            start = receipt["clock_pairs_at_start"]
+            end = receipt["clock_pairs_at_end"]
+            start_offset = start["unix_ns"] - start["monotonic_ns"]
+            end_offset = end["unix_ns"] - end["monotonic_ns"]
+            marker_first = events[0][0]
+            marker_last = events[-1][0]
+            report["clock_alignment"] = {
+                "unix_minus_monotonic_start_ns": start_offset,
+                "unix_minus_monotonic_end_ns": end_offset,
+                "offset_drift_ns": end_offset - start_offset,
+                "profile_thread_register_ms": thread["registerTime"],
+                "first_event_marker_ms": marker_first,
+                "first_marker_minus_thread_register_ms": round(marker_first - thread["registerTime"], 3),
+                "profile_first_sample_ms": min(thread["samples"]["time"]),
+                "profile_last_sample_ms": max(thread["samples"]["time"]),
+                "last_event_marker_ms": marker_last,
+                "last_profile_sample_minus_last_marker_ms": round(max(thread["samples"]["time"]) - marker_last, 3),
+            }
     print(json.dumps(report, indent=2))
 
 
