@@ -1,4 +1,5 @@
 use super::*;
+use std::hash::Hasher;
 
 /// An ordinary object: string-keyed properties in insertion order.
 /// A `Vec` rather than a map because objects here are small and property order is observable --
@@ -227,6 +228,87 @@ pub(super) enum WeakCollectionKey {
     Callback(CallbackMethod, RealmId),
 }
 
+impl PartialEq for WeakCollectionKey {
+    fn eq(&self, other: &Self) -> bool {
+        use WeakCollectionKey as Key;
+        match (self, other) {
+            (Key::Object(a), Key::Object(b)) => Weak::ptr_eq(a, b),
+            (Key::Closure(a), Key::Closure(b)) => Weak::ptr_eq(a, b),
+            (Key::Array(a), Key::Array(b)) => Weak::ptr_eq(a, b),
+            (Key::Promise(a), Key::Promise(b)) => Weak::ptr_eq(a, b),
+            (Key::Generator(a), Key::Generator(b)) => Weak::ptr_eq(a, b),
+            (Key::Shared(a), Key::Shared(b)) => Weak::ptr_eq(a, b),
+            (Key::RegExp(a), Key::RegExp(b)) => Weak::ptr_eq(a, b),
+            (Key::Date(a), Key::Date(b)) => Weak::ptr_eq(a, b),
+            (Key::Temporal(a), Key::Temporal(b)) => Weak::ptr_eq(a, b),
+            (Key::Intl(a), Key::Intl(b)) => Weak::ptr_eq(a, b),
+            (Key::TypedArray(a), Key::TypedArray(b)) => Weak::ptr_eq(a, b),
+            (Key::ArrayBuffer(a), Key::ArrayBuffer(b)) => Weak::ptr_eq(a, b),
+            (Key::DataView(a), Key::DataView(b)) => Weak::ptr_eq(a, b),
+            (Key::Proxy(a), Key::Proxy(b)) => Weak::ptr_eq(a, b),
+            (Key::Bound(a), Key::Bound(b)) => Weak::ptr_eq(a, b),
+            (Key::Wrapped(a), Key::Wrapped(b)) => Weak::ptr_eq(a, b),
+            (Key::CommonJs(a), Key::CommonJs(b)) => Weak::ptr_eq(a, b),
+            (Key::CommonJsResolve(a), Key::CommonJsResolve(b)) => Weak::ptr_eq(a, b),
+            (Key::Settler(a, ar), Key::Settler(b, br)) => ar == br && Weak::ptr_eq(a, b),
+            (Key::Capability(a), Key::Capability(b)) => Weak::ptr_eq(a, b),
+            (Key::Element(a), Key::Element(b)) => Weak::ptr_eq(a, b),
+            (Key::UniqueSymbol(a), Key::UniqueSymbol(b)) => Weak::ptr_eq(a, b),
+            (Key::WellKnownSymbol(a), Key::WellKnownSymbol(b)) => a == b,
+            (Key::Native(an, ar), Key::Native(bn, br)) => an == bn && ar == br,
+            (Key::Callback(ac, ar), Key::Callback(bc, br)) => ac == bc && ar == br,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for WeakCollectionKey {}
+
+impl std::hash::Hash for WeakCollectionKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        use WeakCollectionKey as Key;
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Key::Object(value) => value.as_ptr().hash(state),
+            Key::Closure(value) => value.as_ptr().hash(state),
+            Key::Array(value) => value.as_ptr().hash(state),
+            Key::Promise(value) => value.as_ptr().hash(state),
+            Key::Generator(value) => value.as_ptr().hash(state),
+            Key::Shared(value) => value.as_ptr().hash(state),
+            Key::RegExp(value) => value.as_ptr().hash(state),
+            Key::Date(value) => value.as_ptr().hash(state),
+            Key::Temporal(value) => value.as_ptr().hash(state),
+            Key::Intl(value) => value.as_ptr().hash(state),
+            Key::TypedArray(value) => value.as_ptr().hash(state),
+            Key::ArrayBuffer(value) => value.as_ptr().hash(state),
+            Key::DataView(value) => value.as_ptr().hash(state),
+            Key::Proxy(value) => value.as_ptr().hash(state),
+            Key::Bound(value) => value.as_ptr().hash(state),
+            Key::Wrapped(value) => value.as_ptr().hash(state),
+            Key::CommonJs(value) | Key::CommonJsResolve(value) => value.as_ptr().hash(state),
+            Key::Settler(value, rejects) => {
+                value.as_ptr().hash(state);
+                rejects.hash(state);
+            }
+            Key::Capability(value) => value.as_ptr().hash(state),
+            Key::Element(value) => value.as_ptr().hash(state),
+            Key::UniqueSymbol(value) => value.as_ptr().hash(state),
+            Key::WellKnownSymbol(value) => std::mem::discriminant(value).hash(state),
+            // These engine callables are identity values too. Debug includes any operation
+            // payload, unlike a discriminant-only hash, and equality remains the authoritative
+            // check in the table.
+            Key::Native(value, realm) => {
+                format!("{value:?}").hash(state);
+                realm.hash(state);
+            }
+            Key::Callback(value, realm) => {
+                std::mem::discriminant(value).hash(state);
+                realm.hash(state);
+            }
+        }
+    }
+}
+
 impl WeakCollectionKey {
     pub(super) fn new(value: &Value) -> Option<Self> {
         Some(match value {
@@ -291,12 +373,6 @@ impl WeakCollectionKey {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct WeakCollectionEntry {
-    pub(super) key: WeakCollectionKey,
-    pub(super) value: Value,
-}
-
-#[derive(Clone, Debug)]
 pub struct ObjectData {
     pub(super) properties: Vec<Slot>,
     /// Shared graph targets are weak even though this interpreter keeps ordinary WeakRef targets
@@ -309,7 +385,8 @@ pub struct ObjectData {
     pub(super) finalization_cells: Vec<FinalizationCell>,
     /// WeakMap and WeakSet entries are not ordinary child edges. The cycle collector treats
     /// WeakMap values as conditional ephemeron edges and never traces either weak key directly.
-    pub(super) weak_collection_entries: Option<Vec<WeakCollectionEntry>>,
+    pub(super) weak_collection_entries:
+        Option<Box<std::collections::HashMap<WeakCollectionKey, Value>>>,
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     pub(super) error_brand: bool,

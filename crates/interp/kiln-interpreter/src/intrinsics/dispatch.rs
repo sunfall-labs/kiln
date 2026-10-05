@@ -2557,18 +2557,10 @@ pub(crate) fn call_native(
                     message: "value cannot be held weakly".to_owned(),
                 }
             })?;
-            if let Some(entry) = entries.iter_mut().find(|entry| {
-                entry.key.upgrade().as_ref() == Some(&key)
-            }) {
-                if is_map {
-                    entry.value = value;
-                }
-            } else {
-                entries.push(WeakCollectionEntry {
-                    key: weak_key,
-                    value: if is_map { value } else { Value::Undefined },
-                });
-            }
+            entries.insert(
+                weak_key,
+                if is_map { value } else { Value::Undefined },
+            );
             receiver.clone()
         }
         Native::WeakSetHas | Native::WeakMapHas | Native::WeakMapGet | Native::WeakSetDelete | Native::WeakMapDelete => {
@@ -2593,13 +2585,15 @@ pub(crate) fn call_native(
                     message: "incompatible weak collection receiver".to_owned(),
                 });
             }
-            let index = entries.iter().position(|entry| entry.key.upgrade().as_ref() == Some(&key));
+            let identity = WeakCollectionKey::new(&key);
             if deleting {
-                Value::Boolean(index.is_some_and(|index| { entries.remove(index); true }))
+                Value::Boolean(identity.is_some_and(|identity| entries.remove(&identity).is_some()))
             } else if getting {
-                index.map_or(Value::Undefined, |index| entries[index].value.clone())
+                identity
+                    .and_then(|identity| entries.get(&identity).cloned())
+                    .unwrap_or(Value::Undefined)
             } else {
-                Value::Boolean(index.is_some())
+                Value::Boolean(identity.is_some_and(|identity| entries.contains_key(&identity)))
             }
         }
         Native::SetAdd | Native::MapSet => {

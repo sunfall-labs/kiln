@@ -15,7 +15,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         let mut data = ObjectData::default();
         if weak {
-            data.weak_collection_entries = Some(Vec::new());
+            data.weak_collection_entries = Some(Box::default());
         } else {
             data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
         }

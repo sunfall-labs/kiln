@@ -415,7 +415,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             } else {
                 supplied
             };
-            set_weak_map_value(receiver, &key, &key_slot, value.clone())?;
+            set_weak_map_value(receiver, &key_slot, value.clone())?;
             return Ok(value);
         }
         let (entries, is_map) = require_collection(receiver, native)?;
@@ -598,6 +598,7 @@ fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
     let Value::Object(object) = receiver else {
         return None;
     };
+    let identity = WeakCollectionKey::new(key)?;
     let object = object.borrow();
     if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true)))
         || object.weak_collection_entries.is_none()
@@ -607,9 +608,8 @@ fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
     object
         .weak_collection_entries
         .as_ref()?
-        .iter()
-        .find(|entry| entry.key.upgrade().as_ref() == Some(key))
-        .map(|entry| entry.value.clone())
+        .get(&identity)
+        .cloned()
 }
 
 fn validate_weak_map_receiver(receiver: &Value) -> Result<(), ExecutionError> {
@@ -631,7 +631,6 @@ fn validate_weak_map_receiver(receiver: &Value) -> Result<(), ExecutionError> {
 
 fn set_weak_map_value(
     receiver: &Value,
-    key: &Value,
     weak_key: &WeakCollectionKey,
     value: Value,
 ) -> Result<(), ExecutionError> {
@@ -651,16 +650,6 @@ fn set_weak_map_value(
             message: "incompatible WeakMap receiver".to_owned(),
         });
     };
-    if let Some(entry) = entries
-        .iter_mut()
-        .find(|entry| entry.key.upgrade().as_ref() == Some(key))
-    {
-        entry.value = value;
-    } else {
-        entries.push(WeakCollectionEntry {
-            key: weak_key.clone(),
-            value,
-        });
-    }
+    entries.insert(weak_key.clone(), value);
     Ok(())
 }

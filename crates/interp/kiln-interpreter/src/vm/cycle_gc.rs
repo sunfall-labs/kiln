@@ -435,12 +435,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let weak_entries = nodes
                 .get(&parent)
                 .and_then(|node| match node.owner.as_ref() {
-                    Some(Owner::Object(object)) => object.borrow().weak_collection_entries.clone(),
+                    Some(Owner::Object(object)) => {
+                        object.borrow().weak_collection_entries.as_deref().cloned()
+                    }
                     _ => None,
-                })
-                .unwrap_or_default();
-            for entry in weak_entries {
-                let Some(key_value) = entry.key.upgrade() else {
+                });
+            for (weak_key, entry_value) in weak_entries.into_iter().flatten() {
+                let Some(key_value) = weak_key.upgrade() else {
                     continue;
                 };
                 let Some(key_owner) = owner_for_value(&key_value) else {
@@ -456,7 +457,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                     work.push(key);
                 }
-                if let Some(value_owner) = owner_for_value(&entry.value) {
+                if let Some(value_owner) = owner_for_value(&entry_value) {
                     let value = value_owner.key();
                     if let std::collections::hash_map::Entry::Vacant(slot) = nodes.entry(value) {
                         slot.insert(Node {
@@ -583,8 +584,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 let mut data = object.borrow_mut();
                 if let Some(entries) = data.weak_collection_entries.as_mut() {
-                    entries.retain(|entry| {
-                        entry.key.upgrade().is_some_and(|value| {
+                    entries.retain(|weak_key, _entry_value| {
+                        weak_key.upgrade().is_some_and(|value| {
                             owner_for_value(&value).is_none_or(|owner| live.contains(&owner.key()))
                         })
                     });
@@ -1935,7 +1936,7 @@ mod tests {
         let mut host = TestHost;
         let (mut vm, _) = test_vm(&mut host);
         let map = Rc::new(RefCell::new(ObjectData::default()));
-        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().weak_collection_entries = Some(Box::default());
         map.borrow_mut().set("@@map", Value::Boolean(true));
         vm.module_map
             .borrow_mut()
@@ -1950,10 +1951,10 @@ mod tests {
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
-                value: Value::Object(Rc::clone(&value)),
-            });
+            .insert(
+                WeakCollectionKey::Object(Rc::downgrade(&key)),
+                Value::Object(Rc::clone(&value)),
+            );
         let weak_map = vm
             .construct_weak_ref(&[Value::Object(Rc::clone(&map))], 0)
             .unwrap();
@@ -1988,7 +1989,7 @@ mod tests {
         let mut host = TestHost;
         let (mut vm, _) = test_vm(&mut host);
         let map = Rc::new(RefCell::new(ObjectData::default()));
-        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().weak_collection_entries = Some(Box::default());
         map.borrow_mut().set("@@map", Value::Boolean(true));
         vm.module_map
             .borrow_mut()
@@ -2000,10 +2001,10 @@ mod tests {
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
-                value: Value::Object(Rc::clone(&value)),
-            });
+            .insert(
+                WeakCollectionKey::Object(Rc::downgrade(&key)),
+                Value::Object(Rc::clone(&value)),
+            );
         let weak_key = vm
             .construct_weak_ref(&[Value::Object(Rc::clone(&key))], 0)
             .unwrap();
@@ -2029,7 +2030,7 @@ mod tests {
         let mut host = TestHost;
         let (mut vm, _) = test_vm(&mut host);
         let map = Rc::new(RefCell::new(ObjectData::default()));
-        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().weak_collection_entries = Some(Box::default());
         map.borrow_mut().set("@@map", Value::Boolean(true));
         vm.module_map
             .borrow_mut()
@@ -2041,10 +2042,10 @@ mod tests {
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Object(Rc::downgrade(&key)),
-                value: Value::Object(Rc::clone(&value)),
-            });
+            .insert(
+                WeakCollectionKey::Object(Rc::downgrade(&key)),
+                Value::Object(Rc::clone(&value)),
+            );
         let weak_value = vm
             .construct_weak_ref(&[Value::Object(Rc::clone(&value))], 0)
             .unwrap();
@@ -2075,7 +2076,7 @@ mod tests {
         let first = Rc::new(RefCell::new(ObjectData::default()));
         let second = Rc::new(RefCell::new(ObjectData::default()));
         for map in [&first, &second] {
-            map.borrow_mut().weak_collection_entries = Some(Vec::new());
+            map.borrow_mut().weak_collection_entries = Some(Box::default());
             map.borrow_mut().set("@@map", Value::Boolean(true));
             vm.module_map
                 .borrow_mut()
@@ -2090,19 +2091,19 @@ mod tests {
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Object(Rc::downgrade(&root_key)),
-                value: Value::Object(Rc::clone(&chained_key)),
-            });
+            .insert(
+                WeakCollectionKey::Object(Rc::downgrade(&root_key)),
+                Value::Object(Rc::clone(&chained_key)),
+            );
         second
             .borrow_mut()
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Object(Rc::downgrade(&chained_key)),
-                value: Value::Object(Rc::clone(&final_value)),
-            });
+            .insert(
+                WeakCollectionKey::Object(Rc::downgrade(&chained_key)),
+                Value::Object(Rc::clone(&final_value)),
+            );
         let weak_final = vm
             .construct_weak_ref(&[Value::Object(Rc::clone(&final_value))], 0)
             .unwrap();
@@ -2152,11 +2153,139 @@ mod tests {
     }
 
     #[test]
+    fn weak_collection_index_preserves_identity_and_reinsert_semantics() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let map = vm
+            .construct_collection(Native::WeakMapConstructor, &[], 0)
+            .unwrap();
+        let Value::Object(map_object) = &map else {
+            unreachable!()
+        };
+        let object_key = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let array_key = Value::Array(ArrayData::new(Vec::new()));
+        let native_key = Value::Native(Native::ArrayPush, RealmId::PRIMARY);
+        let other_native_key = Value::Native(Native::ArrayPop, RealmId::PRIMARY);
+        let call = |vm: &Vm<'_, TestHost>, method, args: &[Value]| {
+            crate::intrinsics::call_native(&vm.intrinsics, method, &map, args)
+        };
+
+        for (key, value) in [
+            (&object_key, 11.0),
+            (&array_key, 22.0),
+            (&native_key, 33.0),
+            (&other_native_key, 44.0),
+        ] {
+            assert_eq!(
+                call(
+                    &vm,
+                    Native::WeakMapSet,
+                    &[(*key).clone(), Value::Number(value)]
+                ),
+                Ok(map.clone())
+            );
+        }
+        assert_eq!(
+            map_object
+                .borrow()
+                .weak_collection_entries
+                .as_ref()
+                .unwrap()
+                .len(),
+            4
+        );
+        for (key, value) in [
+            (&object_key, 11.0),
+            (&array_key, 22.0),
+            (&native_key, 33.0),
+            (&other_native_key, 44.0),
+        ] {
+            assert_eq!(
+                call(&vm, Native::WeakMapGet, &[(*key).clone()]),
+                Ok(Value::Number(value))
+            );
+        }
+        assert_eq!(
+            call(
+                &vm,
+                Native::WeakMapSet,
+                &[object_key.clone(), Value::Number(55.0)]
+            ),
+            Ok(map.clone())
+        );
+        assert_eq!(
+            map_object
+                .borrow()
+                .weak_collection_entries
+                .as_ref()
+                .unwrap()
+                .len(),
+            4,
+            "setting an existing identity must update, not duplicate"
+        );
+        assert_eq!(
+            call(&vm, Native::WeakMapDelete, &[object_key.clone()]),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            call(&vm, Native::WeakMapDelete, &[object_key.clone()]),
+            Ok(Value::Boolean(false))
+        );
+        assert_eq!(
+            call(
+                &vm,
+                Native::WeakMapSet,
+                &[object_key.clone(), Value::Number(66.0)]
+            ),
+            Ok(map.clone())
+        );
+        assert_eq!(
+            call(&vm, Native::WeakMapGet, &[object_key.clone()]),
+            Ok(Value::Number(66.0))
+        );
+
+        let set = vm
+            .construct_collection(Native::WeakSetConstructor, &[], 0)
+            .unwrap();
+        assert_eq!(
+            crate::intrinsics::call_native(
+                &vm.intrinsics,
+                Native::WeakSetAdd,
+                &set,
+                &[array_key.clone()]
+            ),
+            Ok(set.clone())
+        );
+        assert_eq!(
+            crate::intrinsics::call_native(
+                &vm.intrinsics,
+                Native::WeakSetHas,
+                &set,
+                &[array_key.clone()]
+            ),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            crate::intrinsics::call_native(
+                &vm.intrinsics,
+                Native::WeakSetDelete,
+                &set,
+                &[array_key.clone()]
+            ),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            crate::intrinsics::call_native(&vm.intrinsics, Native::WeakSetHas, &set, &[array_key]),
+            Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
     fn weak_map_closure_key_and_value_cycle_is_collectible() {
         let mut host = TestHost;
         let (mut vm, program) = test_vm(&mut host);
         let map = Rc::new(RefCell::new(ObjectData::default()));
-        map.borrow_mut().weak_collection_entries = Some(Vec::new());
+        map.borrow_mut().weak_collection_entries = Some(Box::default());
         map.borrow_mut().set("@@map", Value::Boolean(true));
         vm.module_map
             .borrow_mut()
@@ -2187,10 +2316,10 @@ mod tests {
             .weak_collection_entries
             .as_mut()
             .unwrap()
-            .push(WeakCollectionEntry {
-                key: WeakCollectionKey::Closure(Rc::downgrade(&closure)),
-                value: Value::Object(Rc::clone(&value)),
-            });
+            .insert(
+                WeakCollectionKey::Closure(Rc::downgrade(&closure)),
+                Value::Object(Rc::clone(&value)),
+            );
         let weak_closure = Rc::downgrade(&closure);
         let weak_value = Rc::downgrade(&value);
         drop(closure);
