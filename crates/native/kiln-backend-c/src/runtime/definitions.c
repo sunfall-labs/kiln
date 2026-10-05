@@ -356,6 +356,7 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     int has_configurable = 0;
     int existed = 0;
     int intrinsic_callable_name_length = 0;
+    int intrinsic_builtin_member = 0;
     int status;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
     if (kiln_c99_is_node_hidden_key_key(view)) {
@@ -513,13 +514,33 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
                                                     thrown);
     if (status != KILN_C99_OK) return status;
     existed = intrinsic_callable_name_length;
+    /* Most builtin members are table-driven and their descriptors are synthesized by the
+     * surface authority. Temporal's namespace is custom-read, so seed the same virtual-property
+     * descriptor here before merging a partial `defineProperty` request. Otherwise
+     * `{ value: replacement }` would materialize it with the defaults for a *new* property and
+     * make a later restore fail. */
+    if (!existed && target.tag == KILN_VALUE_BUILTIN &&
+        target.bits == KILN_C99_BUILTIN_TEMPORAL && kiln_c99_same_name_key(view, "Now")) {
+        kiln_object *object = kiln_c99_object_of(store);
+        if (!kiln_c99_property_read_own(object, view, stable, &current)) {
+            memset(&current, 0, sizeof current);
+            current.key = view;
+            status = kiln_c99_get_key(host, target, view, stable, &current.value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            current.writable = 1;
+            current.enumerable = 0;
+            current.configurable = 1;
+            intrinsic_builtin_member = 1;
+            existed = 1;
+        }
+    }
     /* A new data property needs no dictionary entry. The bootstrap defines most built-in
      * methods this way; keeping their stores shaped lets all realms use the shared layout and
      * the object's inline value slots. Missing descriptor fields have the ordinary default
      * (false, or undefined for value). Redefinitions still take the full checks below. */
     {
         kiln_object *object = kiln_c99_object_of(store);
-        if (!intrinsic_callable_name_length &&
+        if (!intrinsic_callable_name_length && !intrinsic_builtin_member &&
             !(target.tag == KILN_VALUE_ARRAY && kiln_c99_key_index_key(view) >= 0.0) &&
             object->shape != NULL && !object->frozen &&
             !object->not_extensible && !owner_closed &&
@@ -546,7 +567,7 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     }
     {
         kiln_object *object = kiln_c99_object_of(store);
-        if (!intrinsic_callable_name_length)
+        if (!intrinsic_callable_name_length && !intrinsic_builtin_member)
             existed = kiln_c99_property_read_own(object, view, stable, &current);
         /* A default array element lives in the dense vector until its descriptor changes. It
          * still participates in ValidateAndApplyPropertyDescriptor as an ordinary writable,
@@ -1103,7 +1124,14 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             int owned = 0;
             const kiln_builtin_member *member =
                 kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
-            if (member != NULL || kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
+            /* `Temporal` is deliberately outside the table-driven surface: its constructor
+             * members are resolved by the custom namespace reader. Keep the one object-valued
+             * namespace member in descriptor reflection too, or fake-timer libraries cannot
+             * capture and restore `Temporal.Now`. */
+            int temporal_namespace_value = target.bits == KILN_C99_BUILTIN_TEMPORAL &&
+                                            kiln_c99_same_name_key(view, "Now");
+            if (member != NULL || temporal_namespace_value ||
+                kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
                 /* A table-driven or namespace member is an own property: writable and
                  * configurable for methods and builtins, non-writable for text and numbers.
                  * Node's global Buffer is the exception to the usual non-enumerable builtin
