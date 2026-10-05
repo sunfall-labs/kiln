@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use kiln_hir::Module;
+use kiln_hir::{Module, StaticSourceProvenance};
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
     cjs_static_module_syntax_diagnostics, compile_commonjs, compile_module,
@@ -25,6 +25,33 @@ use kiln_module_resolver::{
 };
 
 pub const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
+
+fn compiler_generated_helper_target(
+    specifier: &str,
+    provenance: Option<&StaticSourceProvenance>,
+    project_root: &Path,
+) -> Option<ResolvedModule> {
+    let provenance = provenance?;
+    if !provenance
+        .generated_helper_imports
+        .iter()
+        .any(|helper| helper.as_ref() == specifier)
+        || provenance
+            .authored_internal_helper_imports
+            .iter()
+            .any(|authored| authored.as_ref() == specifier)
+    {
+        return None;
+    }
+    let builtin = NodeBuiltin::parse(specifier)?;
+    if builtin != NodeBuiltin::OxcUsingCtx || !builtin.is_engine_internal() {
+        return None;
+    }
+    Some(ResolvedModule::new(
+        builtin.virtual_path(project_root),
+        ResolutionKind::Builtin,
+    ))
+}
 
 /// A cache-stable identity for private names in one project graph. Files retain their absolute
 /// paths everywhere else (resolution, diagnostics, and `import.meta`); only the compiler identity
@@ -2459,21 +2486,26 @@ where
                             NodeRequestKind::Import
                         };
                         for specifier in &program.dependencies {
-                            let resolved = match self
-                                .resolver
-                                .resolve_for_request(specifier, &path, request)
-                            {
-                                Ok(resolved) => resolved,
-                                // CommonJS resolution is synchronous execution, not linking.
-                                // Keep unresolved literals out of the captured target map so an
-                                // executed `require()` throws where JavaScript can catch it.
-                                Err(_) if source == ModuleSource::CommonJs => continue,
-                                Err(error) => {
-                                    return Err(ModuleGraphError::Resolve {
-                                        importer: path.clone(),
-                                        specifier: specifier.clone(),
-                                        error,
-                                    });
+                            let resolved = if let Some(resolved) = compiler_generated_helper_target(
+                                specifier,
+                                program.program.static_source_provenance.as_deref(),
+                                self.resolver.project_root(),
+                            ) {
+                                resolved
+                            } else {
+                                match self.resolver.resolve_for_request(specifier, &path, request) {
+                                    Ok(resolved) => resolved,
+                                    // CommonJS resolution is synchronous execution, not linking.
+                                    // Keep unresolved literals out of the captured target map so an
+                                    // executed `require()` throws where JavaScript can catch it.
+                                    Err(_) if source == ModuleSource::CommonJs => continue,
+                                    Err(error) => {
+                                        return Err(ModuleGraphError::Resolve {
+                                            importer: path.clone(),
+                                            specifier: specifier.clone(),
+                                            error,
+                                        });
+                                    }
                                 }
                             };
                             let source = if let Some(builtin) = resolved.builtin() {
@@ -2535,9 +2567,14 @@ where
                             // An engine-internal module (`kiln:actors/core`) is never named by a
                             // program: it goes through the resolver, which refuses it for any
                             // importer that is not an engine builtin.
-                            let resolved = if let Some(builtin) =
-                                NodeBuiltin::parse(&request.specifier)
-                                    .filter(|builtin| !builtin.is_engine_internal())
+                            let resolved = if let Some(resolved) = compiler_generated_helper_target(
+                                &request.specifier,
+                                program.program.static_source_provenance.as_deref(),
+                                self.resolver.project_root(),
+                            ) {
+                                resolved
+                            } else if let Some(builtin) = NodeBuiltin::parse(&request.specifier)
+                                .filter(|builtin| !builtin.is_engine_internal())
                             {
                                 ResolvedModule::new(
                                     builtin.virtual_path(self.resolver.project_root()),

@@ -7,6 +7,7 @@
 mod dce_guard;
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     sync::Arc,
@@ -33,10 +34,11 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
-        Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-        FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
-        MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
-        TSEnumDeclaration, TSEnumMemberName, VariableDeclaration, VariableDeclarationKind,
+        CallExpression, Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind,
+        Expression, FormalParameters, Function, ImportDeclarationSpecifier, ImportExpression,
+        ImportOrExportKind, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
+        PropertyKind, Statement, TSEnumDeclaration, TSEnumMemberName, VariableDeclaration,
+        VariableDeclarationKind,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -48,13 +50,14 @@ use oxc_semantic::SymbolId;
 use oxc_semantic::{IsGlobalReference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_str::Ident;
+use oxc_str::Str;
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
     ImportImportName,
 };
 use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
-use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+use oxc_transformer::{Helper, JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 /// Whether a static TypeScript module is parsed as its authored source or after a real
 /// per-module TypeScript-to-JavaScript transform. Static parser entrypoints use
@@ -68,6 +71,7 @@ pub enum StaticTypescriptPolicy {
 }
 
 const STATIC_TS_TRANSFORM_FINGERPRINT: &str = "kiln-static-ts-v2;oxc=0.147.0;target=node22;typescript=default;jsx=automatic;codegen=0.147.0-default";
+const COMPILER_HELPER_SPECIFIER_PREFIX: &str = "kiln:compiler-runtime/helpers/";
 
 /// Convert Oxc's lossless sentinel representation into ECMAScript UTF-16 units.
 ///
@@ -389,12 +393,59 @@ fn transform_static_typescript(
         })
         .collect::<Vec<_>>();
 
+    struct AuthoredInternalHelperFinder(HashSet<String>);
+    impl<'ast> Visit<'ast> for AuthoredInternalHelperFinder {
+        fn visit_import_expression(&mut self, expression: &ImportExpression<'ast>) {
+            if let Expression::StringLiteral(source) = expression.source.without_parentheses() {
+                let specifier = source.value.as_str();
+                if specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX) {
+                    self.0.insert(specifier.to_owned());
+                }
+            }
+            walk::walk_import_expression(self, expression);
+        }
+
+        fn visit_call_expression(&mut self, call: &CallExpression<'ast>) {
+            if matches!(&call.callee, Expression::Identifier(callee) if callee.name == "require") {
+                if let Some(Expression::StringLiteral(source)) = call
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .map(Expression::without_parentheses)
+                {
+                    let specifier = source.value.as_str();
+                    if specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX) {
+                        self.0.insert(specifier.to_owned());
+                    }
+                }
+            }
+            walk::walk_call_expression(self, call);
+        }
+    }
+    let authored_static_internal_helpers = parsed
+        .module_record
+        .requested_modules
+        .keys()
+        .map(|specifier| specifier.as_str())
+        .filter(|specifier| specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut finder = AuthoredInternalHelperFinder(authored_static_internal_helpers);
+    finder.visit_program(&parsed.program);
+    let mut authored_internal_helper_imports = finder.0.into_iter().collect::<Vec<_>>();
+    authored_internal_helper_imports.sort_unstable();
+
     let semantic = SemanticBuilder::new()
         .with_enum_eval(true)
         .build(&parsed.program)
         .semantic;
     let mut options = TransformOptions::from_target("node22")
         .expect("the pinned Oxc target syntax is part of this transform policy");
+    // Oxc's default helper module is an npm package. Route its compiler-generated helper imports
+    // through a reserved internal namespace so the graph can bind helpers to Kiln-owned modules
+    // without changing authored imports or relying on ambient globals.
+    const OXC_HELPER_MODULE: &str = "kiln:compiler-runtime";
+    options.helper_loader.module_name = Cow::Borrowed(OXC_HELPER_MODULE);
     options.jsx = JsxOptions {
         jsx_plugin: source_type.is_jsx(),
         runtime: JsxRuntime::Automatic,
@@ -405,6 +456,33 @@ fn transform_static_typescript(
     if !transform.diagnostics.is_empty() {
         return Err(transform.diagnostics.iter().map(lower_diagnostic).collect());
     }
+
+    let mut generated_helper_imports = Vec::new();
+    #[expect(
+        deprecated,
+        reason = "Oxc exposes helper provenance only through this transform result"
+    )]
+    for helper in transform.helpers_used.keys().copied() {
+        let compiler_specifier = format!("{OXC_HELPER_MODULE}/helpers/{}", helper.name());
+        if helper == Helper::UsingCtx {
+            generated_helper_imports.push(Arc::<str>::from(compiler_specifier));
+            continue;
+        }
+        // Preserve Oxc's normal runtime-package contract for unrelated helpers. Only the one
+        // helper Kiln currently provides as an internal virtual module is redirected.
+        let external_specifier = format!("@oxc-project/runtime/helpers/{}", helper.name());
+        for statement in &mut parsed.program.body {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                continue;
+            };
+            if declaration.source.value.as_str() == compiler_specifier {
+                declaration.source.value = Str::from_str_in(&external_specifier, &&allocator);
+                declaration.source.raw = None;
+            }
+        }
+    }
+    generated_helper_imports.sort_unstable();
+    generated_helper_imports.dedup();
 
     let generated = oxc_codegen::Codegen::new()
         .with_options(oxc_codegen::CodegenOptions {
@@ -459,7 +537,7 @@ fn transform_static_typescript(
     }
 
     let fingerprint: Arc<str> = Arc::from(format!(
-        "{STATIC_TS_TRANSFORM_FINGERPRINT};source-kind={:?};module={};commonjs={};jsx={}",
+        "{STATIC_TS_TRANSFORM_FINGERPRINT};source-kind={:?};module={};commonjs={};jsx={};compiler-helper-policy=internal-usingctx-v1",
         source_kind(source_type),
         source_type.is_module(),
         source_type.is_commonjs(),
@@ -469,6 +547,9 @@ fn transform_static_typescript(
         Vec::with_capacity(source.len() + fingerprint.len() + segments.len() * 8 + 24);
     append_identity_field(&mut identity_bytes, source.as_bytes());
     append_identity_field(&mut identity_bytes, fingerprint.as_bytes());
+    for helper in &generated_helper_imports {
+        append_identity_field(&mut identity_bytes, helper.as_bytes());
+    }
     for segment in &segments {
         identity_bytes.extend_from_slice(&segment.generated_offset.to_le_bytes());
         identity_bytes.extend_from_slice(&segment.original_offset.to_le_bytes());
@@ -491,6 +572,12 @@ fn transform_static_typescript(
             transform_fingerprint: fingerprint,
             identity,
             authored_value_imports: authored_value_imports.into(),
+            generated_helper_imports: generated_helper_imports.into(),
+            authored_internal_helper_imports: authored_internal_helper_imports
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect::<Vec<_>>()
+                .into(),
             source_map: segments.into(),
         },
     ))
@@ -6951,6 +7038,84 @@ mod tests {
                 .iter()
                 .any(|request| request.specifier == "./types.ts"),
             "type-only source imports are absent from runtime dependencies"
+        );
+    }
+
+    #[test]
+    fn static_typescript_records_only_generated_oxc_using_helper_edges() {
+        let parsed = parse_static_typescript(
+            "managed.ts",
+            "await using resource = makeResource(); export { resource };",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let provenance = parsed
+            .static_source_provenance
+            .as_ref()
+            .expect("static TypeScript has source provenance");
+        assert_eq!(
+            provenance
+                .generated_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["kiln:compiler-runtime/helpers/usingCtx"]
+        );
+        assert!(
+            parsed
+                .requested_modules
+                .iter()
+                .any(|request| { request.specifier == "kiln:compiler-runtime/helpers/usingCtx" })
+        );
+
+        let authored = parse_static_typescript(
+            "ordinary.ts",
+            "import usingCtx from '@oxc-project/runtime/helpers/usingCtx'; export default usingCtx;",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        let authored_provenance = authored
+            .static_source_provenance
+            .expect("static TypeScript has source provenance");
+        assert!(authored_provenance.generated_helper_imports.is_empty());
+        assert!(
+            authored
+                .requested_modules
+                .iter()
+                .any(|request| { request.specifier == "@oxc-project/runtime/helpers/usingCtx" })
+        );
+
+        let collision = parse_static_typescript(
+            "collision.mts",
+            "import usingCtx from 'kiln:compiler-runtime/helpers/usingCtx'; void usingCtx; await using resource = makeResource(); void import('kiln:compiler-runtime/helpers/asyncExample'); void require('kiln:compiler-runtime/helpers/requireExample'); void import('kiln:compiler-runtime/helpers/usingCtx');",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(
+            collision.diagnostics.is_empty(),
+            "{:?}",
+            collision.diagnostics
+        );
+        let provenance = collision
+            .static_source_provenance
+            .expect("static TypeScript has source provenance");
+        assert_eq!(
+            provenance
+                .generated_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["kiln:compiler-runtime/helpers/usingCtx"]
+        );
+        assert_eq!(
+            provenance
+                .authored_internal_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            [
+                "kiln:compiler-runtime/helpers/asyncExample",
+                "kiln:compiler-runtime/helpers/requireExample",
+                "kiln:compiler-runtime/helpers/usingCtx"
+            ]
         );
     }
 

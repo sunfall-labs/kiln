@@ -1842,6 +1842,82 @@ fn package_policy_links_a_named_package_import() {
 }
 
 #[test]
+fn generated_oxc_using_helper_links_internally_but_authored_internal_import_is_refused() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mts",
+        "await using resource = makeResource(); void resource;",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("compiler-generated helper edge links to Kiln's typed helper module");
+    let helper = NodeBuiltin::OxcUsingCtx.virtual_path(&project.root);
+    let helper_node = graph.module(&helper).expect("helper module is linked");
+    assert_eq!(
+        helper_node.source,
+        ModuleSource::NodeBuiltin(NodeBuiltin::OxcUsingCtx)
+    );
+    assert!(
+        graph
+            .module(&entry)
+            .expect("entry module")
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.target == helper),
+        "the generated helper is an ordinary graph dependency"
+    );
+
+    let commonjs_project = TempProject::new();
+    let commonjs_entry = commonjs_project.write(
+        "main.cts",
+        "using resource = makeResource(); void resource;",
+    );
+    let resolver = NodeRuntimeResolver::new(&commonjs_project.root).expect("Node resolver");
+    let commonjs_graph = ModuleGraph::build_node(
+        &commonjs_entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("CommonJS static TypeScript also links its compiler-owned helper");
+    let commonjs_helper = NodeBuiltin::OxcUsingCtx.virtual_path(&commonjs_project.root);
+    assert!(
+        commonjs_graph
+            .module(&commonjs_entry)
+            .expect("CommonJS entry exists")
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.target == commonjs_helper),
+        "the CommonJS transformed helper request is linked"
+    );
+
+    let authored_project = TempProject::new();
+    let authored_entry = authored_project.write(
+        "main.mts",
+        "import usingCtx from 'kiln:compiler-runtime/helpers/usingCtx'; void usingCtx; await using resource = makeResource();",
+    );
+    let resolver = NodeRuntimeResolver::new(&authored_project.root).expect("Node resolver");
+    let error = ModuleGraph::build_node(
+        &authored_entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect_err("source-authored imports cannot link compiler internals");
+    assert!(
+        error
+            .to_string()
+            .contains("kiln:compiler-runtime/helpers/usingCtx` is internal"),
+        "got {error}"
+    );
+}
+
+#[test]
 fn graph_retains_resolver_verified_package_aliases_for_linked_runtime_imports() {
     let project = TempProject::new();
     let package = project.root.join("node_modules/pkg");

@@ -159,20 +159,52 @@
   }
 
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).
-  function SuppressedError(this: any, error: any, suppressed: any, message?: any) {
+  const NativeSuppressedError = G.SuppressedError;
+  function SuppressedError(this: any, error: any, suppressed: any, message?: any): any {
+    if (typeof NativeSuppressedError === "function") {
+      // The native constructor supplies [[ErrorData]], stack capture, and the Error prototype
+      // chain. The TS facade installs the two standard payload properties, which are not part of
+      // the native constructor's message-only error allocation path.
+      // Allocate the engine-branded Error without forwarding `message`: the native constructor
+      // currently provides the Error object/stack but does not install SuppressedError's JS
+      // fields. The facade below performs the single required ToString conversion.
+      const result = new NativeSuppressedError();
+      const targetPrototype =
+        typeof new.target === "function" && new.target.prototype != null
+          ? new.target.prototype
+          : SuppressedError.prototype;
+      if (Object.getPrototypeOf(result) !== targetPrototype) {
+        if (typeof Object.setPrototypeOf === "function") {
+          Object.setPrototypeOf(result, targetPrototype);
+        } else {
+          result.__proto__ = targetPrototype;
+        }
+      }
+      defineHidden(result, "error", error);
+      defineHidden(result, "suppressed", suppressed);
+      // Error-style constructors create an own `message` only when a non-undefined message was
+      // supplied. The prototype still provides the observable empty string otherwise.
+      if (message !== undefined) defineHidden(result, "message", `${message}`);
+      return result;
+    }
     if (!(this instanceof SuppressedError)) {
       return new (SuppressedError as any)(error, suppressed, message);
     }
-    this.error = error;
-    this.suppressed = suppressed;
-    this.message = message !== undefined ? String(message) : "";
+    defineHidden(this, "error", error);
+    defineHidden(this, "suppressed", suppressed);
+    if (message !== undefined) defineHidden(this, "message", `${message}`);
   }
 
-  if (typeof Object.setPrototypeOf === "function") {
+  if (typeof NativeSuppressedError === "function" && NativeSuppressedError.prototype) {
+    SuppressedError.prototype = NativeSuppressedError.prototype;
+  } else if (typeof Object.setPrototypeOf === "function") {
     Object.setPrototypeOf(SuppressedError.prototype, ErrorCtor.prototype);
+  } else {
+    SuppressedError.prototype.__proto__ = ErrorCtor.prototype;
+  }
+  if (typeof Object.setPrototypeOf === "function") {
     Object.setPrototypeOf(SuppressedError, ErrorCtor);
   } else {
-    (SuppressedError.prototype as any).__proto__ = ErrorCtor.prototype;
     (SuppressedError as any).__proto__ = ErrorCtor;
   }
 
@@ -180,19 +212,9 @@
   defineHidden(SuppressedError.prototype, "message", "");
   defineHidden(SuppressedError.prototype, "constructor", SuppressedError);
 
-  if (typeof G.SuppressedError === "undefined") {
-    defineHidden(G, "SuppressedError", SuppressedError);
+  if (typeof NativeSuppressedError === "function") {
+    G.SuppressedError = SuppressedError;
   } else {
-    if (!G.SuppressedError.prototype || G.SuppressedError.prototype === G.Error?.prototype) {
-      try {
-        const parentProto = G.Error ? G.Error.prototype : Object.prototype;
-        G.SuppressedError.prototype = Object.create(parentProto);
-      } catch (_) {}
-    }
-    if (G.SuppressedError.prototype) {
-      defineHidden(G.SuppressedError.prototype, "name", "SuppressedError");
-      defineHidden(G.SuppressedError.prototype, "message", "");
-      defineHidden(G.SuppressedError.prototype, "constructor", G.SuppressedError);
-    }
+    defineHidden(G, "SuppressedError", SuppressedError);
   }
 })();

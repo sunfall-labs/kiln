@@ -111,6 +111,8 @@ pub enum NodeBuiltin {
     Vm,
     GuiJsxRuntime,
     NodeProcess,
+    /// Oxc's explicit-resource-management helper. Only generated TS-transform edges may link it.
+    OxcUsingCtx,
 }
 
 impl NodeBuiltin {
@@ -163,6 +165,7 @@ impl NodeBuiltin {
         Self::Constants,
         Self::V8,
         Self::Vm,
+        Self::OxcUsingCtx,
     ];
 
     pub fn parse(specifier: &str) -> Option<Self> {
@@ -178,6 +181,7 @@ impl NodeBuiltin {
             "kiln:actors" => Self::Actors,
             "kiln:actors/core" => Self::ActorsCore,
             "kiln:actors/worker" => Self::ActorsWorker,
+            "kiln:compiler-runtime/helpers/usingCtx" => Self::OxcUsingCtx,
             "kiln:gui" => Self::Gui,
             // What `"jsxImportSource": "kiln:gui"` compiles JSX to.
             "kiln:gui/jsx-runtime" | "kiln:gui/jsx-dev-runtime" => Self::GuiJsxRuntime,
@@ -233,6 +237,7 @@ impl NodeBuiltin {
             Self::Actors => "kiln:actors",
             Self::ActorsCore => "kiln:actors/core",
             Self::ActorsWorker => "kiln:actors/worker",
+            Self::OxcUsingCtx => "kiln:compiler-runtime/helpers/usingCtx",
             Self::Gui => "kiln:gui",
             Self::GuiJsxRuntime => "kiln:gui/jsx-runtime",
             Self::Assert => "node:assert",
@@ -286,6 +291,9 @@ impl NodeBuiltin {
     pub const fn internal_owner(self) -> Option<&'static str> {
         match self {
             Self::ActorsCore | Self::ActorsWorker => Some("kiln:actors"),
+            Self::OxcUsingCtx => {
+                Some("kiln:compiler-runtime (compiler-generated TypeScript helper import)")
+            }
             _ => None,
         }
     }

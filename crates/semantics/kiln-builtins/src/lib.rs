@@ -292,6 +292,17 @@ declare_ts_builtins! {
             "versions",
         ],
     },
+    OxcUsingCtx {
+        variant: OxcUsingCtx,
+        file: "oxc_using_ctx.ts",
+        logical_path: "kiln:compiler-runtime/helpers/usingCtx.ts",
+        source_const: OXC_USING_CTX_SOURCE,
+        exports_const: OXC_USING_CTX_EXPORTS,
+        sample_source_check: "export default function usingCtx",
+        presence_test: oxc_using_ctx_helper_source_is_present,
+        compilation_test: oxc_using_ctx_helper_compiles_cleanly,
+        exports: ["default"],
+    },
     Assert {
         variant: Assert,
         file: "node/assert.ts",

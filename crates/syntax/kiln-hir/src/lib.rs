@@ -137,6 +137,14 @@ pub struct StaticSourceProvenance {
     /// filters out requests still present in generated JavaScript and uses only erased requests
     /// as resolver hints for runtime-package aliases; this metadata is never an execution edge.
     pub authored_value_imports: Arc<[Arc<str>]>,
+    /// Compiler-generated Oxc helper imports. These are distinct from authored imports so the
+    /// module graph can bind its private helper modules without allowing source code to import
+    /// those implementation details directly.
+    pub generated_helper_imports: Arc<[Arc<str>]>,
+    /// Source-authored static, dynamic, and literal `require` references to Kiln's reserved
+    /// compiler-helper namespace. This lets the graph reject a collision even if Oxc also emits
+    /// a helper import with the same specifier in that module.
+    pub authored_internal_helper_imports: Arc<[Arc<str>]>,
     pub source_map: Arc<[SourceMapSegment]>,
 }
 

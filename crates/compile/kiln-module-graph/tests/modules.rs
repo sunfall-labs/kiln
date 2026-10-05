@@ -7,7 +7,7 @@ use kiln_ir::{ExportBinding, ModuleProgram, compile_module};
 use kiln_module_eval::{GraphModuleLoader, ModuleEvaluationError, ModuleGraphExecution};
 use kiln_module_graph::*;
 use kiln_module_resolver::{
-    NodeModuleFormat, NodePackageResolver, NodeRuntimeResolver, PinnedPackageResolver,
+    NodeBuiltin, NodeModuleFormat, NodePackageResolver, NodeRuntimeResolver, PinnedPackageResolver,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

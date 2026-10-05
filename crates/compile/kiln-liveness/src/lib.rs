@@ -1062,7 +1062,7 @@ pub fn retained_method_groups(
             | Shared | Tty | Zlib | StringDecoder | QueryString | WorkerThreads | PerfHooks
             | AsyncHooks | ChildProcess | Timers | TimersPromises | Readline | ReadlinePromises
             | Sqlite | Constants | V8 | Vm | Util | UtilTypes | DiagnosticsChannel | Gui
-            | GuiJsxRuntime | Tls => 0,
+            | GuiJsxRuntime | OxcUsingCtx | Tls => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })
