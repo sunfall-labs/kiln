@@ -735,6 +735,12 @@ static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value
     if (parent.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_construct(host, produced, parent, args, argc, depth, thrown);
     }
+    if (parent.tag == KILN_VALUE_PROXY) {
+        /* A Proxy used as a class heritage value follows [[Construct]], not [[Call]]. Preserve
+         * the new.target of the derived constructor so the trap receives the actual subclass. */
+        return kiln_c99_construct_with_new_target(host, produced, parent, args, argc,
+                                                   kiln_c99_new_target, depth, thrown);
+    }
     {
         kiln_value saved = kiln_c99_adopted_this;
         kiln_c99_adopted_this = kiln_c99_undefined();
@@ -771,7 +777,7 @@ static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value
  * ordinary call and has no way to report an adoption back to *its* caller, so
  * `class B extends A extends Array` loses the array at the second link. Both engines lose it in
  * the same place, which is the property this backend is measured on. */
-static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced, int preserve_prototype) {
     kiln_value prototype;
     kiln_value *slot;
     /* A parent that produced nothing -- every JavaScript constructor -- leaves `this` alone. */
@@ -780,6 +786,13 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     }
     if (receiver->tag != KILN_VALUE_OBJECT ||
         (produced.tag == receiver->tag && produced.bits == receiver->bits)) {
+        return KILN_C99_OK;
+    }
+    if (preserve_prototype) {
+        /* A Proxy construct trap (or an ordinary constructor explicitly returning an object)
+         * has already chosen the object's prototype. Only native base constructors need the
+         * derived receiver's prototype transplanted onto their separately allocated result. */
+        *receiver = produced;
         return KILN_C99_OK;
     }
     prototype = kiln_c99_object_of(*receiver)->prototype;
@@ -901,10 +914,12 @@ static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
     return status;
 }
 
-static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
+static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced, kiln_val parent) {
     kiln_value breceiver = kiln_val_to_boundary(*receiver);
     kiln_value bproduced = kiln_val_to_boundary(produced);
-    int status = kiln_c99_adopt_super(&breceiver, bproduced);
+    kiln_value bparent = kiln_val_to_boundary(parent);
+    int status = kiln_c99_adopt_super(
+        &breceiver, bproduced, bparent.tag != KILN_VALUE_BUILTIN);
     if (status == KILN_C99_OK) {
         *receiver = kiln_val_from_boundary(breceiver);
     }

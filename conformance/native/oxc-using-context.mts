@@ -1,3 +1,4 @@
+// kiln-native: profile=native-release
 const order: string[] = [];
 {
   using first = { [Symbol.dispose]() { order.push("first"); } };
@@ -80,6 +81,11 @@ for (const key of ["error", "suppressed", "message"]) {
     throw new Error(`SuppressedError ${key} descriptor mismatch`);
   }
 }
+const errorPayloadOrder = Object.getOwnPropertyNames(error)
+  .filter((key) => key === "message" || key === "error" || key === "suppressed");
+if (errorPayloadOrder.join(",") !== "message,error,suppressed") {
+  throw new Error(`SuppressedError payload properties were created in the wrong order: ${errorPayloadOrder.join(",")}`);
+}
 
 const noMessage = new SuppressedError(errorValue, suppressedValue);
 if (noMessage.message !== "" || Object.hasOwn(noMessage, "message")) {
@@ -128,5 +134,120 @@ const newTarget = new Proxy(function NewTarget() {}, {
 const reflected = Reflect.construct(SuppressedError, [errorValue, suppressedValue], newTarget);
 if (newTargetPrototypeReads !== 1 || Object.getPrototypeOf(reflected) !== derivedPrototype) {
   throw new Error("SuppressedError reread newTarget.prototype or lost its selected prototype");
+}
+function PrimitivePrototypeTarget() {}
+PrimitivePrototypeTarget.prototype = 1;
+const primitivePrototypeResult = Reflect.construct(
+  SuppressedError,
+  [errorValue, suppressedValue],
+  PrimitivePrototypeTarget,
+);
+if (Object.getPrototypeOf(primitivePrototypeResult) !== SuppressedError.prototype) {
+  throw new Error("primitive newTarget.prototype did not use SuppressedError.prototype");
+}
+const explicitObjectPrototypeResult = Reflect.construct(
+  SuppressedError,
+  [errorValue, suppressedValue],
+  Object,
+);
+if (Object.getPrototypeOf(explicitObjectPrototypeResult) !== Object.prototype) {
+  throw new Error("explicit Object.prototype was confused with the intrinsic fallback");
+}
+let primitiveProxyPrototypeReads = 0;
+const primitiveProxyTarget = new Proxy(function PrimitiveProxyTarget() {}, {
+  get(target, key, receiver) {
+    if (key === "prototype") {
+      primitiveProxyPrototypeReads++;
+      return 1;
+    }
+    return Reflect.get(target, key, receiver);
+  },
+});
+const primitiveProxyResult = Reflect.construct(
+  SuppressedError,
+  [errorValue, suppressedValue],
+  primitiveProxyTarget,
+);
+if (primitiveProxyPrototypeReads !== 1 ||
+    Object.getPrototypeOf(primitiveProxyResult) !== SuppressedError.prototype) {
+  throw new Error("primitive Proxy newTarget prototype fallback was incorrect or reread");
+}
+const constructOrder: string[] = [];
+const orderedTarget = new Proxy(function OrderedTarget() {}, {
+  get(target, key, receiver) {
+    if (key === "prototype") constructOrder.push("prototype");
+    return Reflect.get(target, key, receiver);
+  },
+});
+const throwingMessage = {
+  toString() {
+    constructOrder.push("message");
+    throw errorValue;
+  },
+};
+let constructionThrow: unknown;
+try {
+  Reflect.construct(
+    SuppressedError,
+    [errorValue, suppressedValue, throwingMessage],
+    orderedTarget,
+  );
+} catch (caught) {
+  constructionThrow = caught;
+}
+if (constructionThrow !== errorValue || constructOrder.join(",") !== "prototype,message") {
+  throw new Error("SuppressedError changed newTarget/message conversion order");
+}
+const proxyReturnPrototype = {};
+let proxySuperSawDerived = false;
+function ProxyParent() {}
+const proxyParent = new Proxy(ProxyParent, {
+  construct(_target, _arguments, newTarget) {
+    proxySuperSawDerived = newTarget === ProxyDerived;
+    return Object.create(proxyReturnPrototype);
+  },
+});
+class ProxyDerived extends proxyParent {
+  constructor() {
+    const superResult = super();
+    if (superResult !== this) throw new Error("super() lost its construction result");
+  }
+}
+const proxyDerived = new ProxyDerived();
+if (!proxySuperSawDerived || Object.getPrototypeOf(proxyDerived) !== proxyReturnPrototype) {
+  throw new Error(
+    `Proxy super() mismatch: newTarget=${proxySuperSawDerived}, prototype=${Object.getPrototypeOf(proxyDerived) === proxyReturnPrototype}`,
+  );
+}
+let transparentSuperSawDerived = false;
+function TransparentParent(this: { value?: number; forwarded?: unknown }, value: number) {
+  this.value = value;
+  this.forwarded = new.target;
+}
+const transparentParent = new Proxy(TransparentParent, {});
+class TransparentDerived extends transparentParent {
+  constructor() {
+    const superResult = super(17);
+    if (superResult !== this) throw new Error("transparent Proxy super() lost its construction result");
+  }
+}
+const transparentDerived = new TransparentDerived();
+transparentSuperSawDerived = transparentDerived.forwarded === TransparentDerived;
+if (!transparentSuperSawDerived || transparentDerived.value !== 17) {
+  throw new Error("transparent Proxy did not forward the derived newTarget");
+}
+const explicitParentObject = { explicit: true };
+function ExplicitParent() {
+  return explicitParentObject;
+}
+class ExplicitDerived extends new Proxy(ExplicitParent, {}) {
+  constructor() {
+    const superResult = super();
+    if (superResult !== this) throw new Error("transparent Proxy lost explicit parent return");
+  }
+}
+const explicitDerived = new ExplicitDerived();
+if (explicitDerived !== explicitParentObject) {
+  throw new Error("transparent Proxy replaced explicit parent return");
 }
 console.log("Oxc using context and SuppressedError passed");

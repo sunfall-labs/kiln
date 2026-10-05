@@ -361,9 +361,9 @@ extern int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
 extern int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
-extern int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced);
+extern int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced, int preserve_prototype);
 extern int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown);
-extern int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced);
+extern int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced, kiln_val parent);
 extern int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 extern int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype, kiln_value *thrown);
 extern int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);

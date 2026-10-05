@@ -325,7 +325,7 @@ pub(crate) fn emit_tail_instruction(
             let argc = usize::from(*argc);
             writeln!(
                 output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; int status = kiln_c99_super_call_val(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; kiln_val parent = stack[sp - {argc} - 1]; int status = kiln_c99_super_call_val(host, &produced, parent, receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced, parent); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -336,7 +336,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::SuperForward => {
             writeln!(
                 output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; int status = kiln_c99_super_call_val(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; kiln_val parent = stack[sp - 1]; int status = kiln_c99_super_call_val(host, &produced, parent, receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced, parent); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
             )
             .unwrap();
         }
@@ -513,7 +513,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::SuperApply => {
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result, parent); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }

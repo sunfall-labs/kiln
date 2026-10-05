@@ -159,56 +159,57 @@
   }
 
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).
-  const NativeSuppressedError = G.SuppressedError;
-  function SuppressedError(this: any, error: any, suppressed: any, message?: any): any {
-    const targetPrototype =
-      new.target === undefined ? SuppressedError.prototype : Object.getPrototypeOf(this);
-    // Both constructors create an engine-branded Error with its stack state. Constructing the
-    // native SuppressedError without arguments lets this facade apply the standard payload and
-    // message properties exactly once; the Error fallback keeps that brand when the runtime has
-    // no native SuppressedError constructor.
-    const result =
-      typeof NativeSuppressedError === "function"
-        ? new NativeSuppressedError()
-        : new (ErrorCtor as any)();
-    if (Object.getPrototypeOf(result) !== targetPrototype) {
-      if (typeof Object.setPrototypeOf === "function") {
-        Object.setPrototypeOf(result, targetPrototype);
-      } else {
-        result.__proto__ = targetPrototype;
-      }
-    }
+  // An ordinary function is the public Proxy target so `.prototype` is a real class-heritage
+  // object. Allocate through Error itself for the engine Error brand and stack state: the
+  // current native SuppressedError intrinsic uses Error's first-argument message convention,
+  // whereas SuppressedError's first two arguments are payloads. This facade applies the public
+  // payload and newTarget semantics in both engines.
+  function allocateBrandedError(): any {
+    return Reflect.construct(ErrorCtor, [], ErrorCtor);
+  }
+  function withPayload(result: any, error: any, suppressed: any, message: any): any {
+    // Spec order: convert and create message before the error and suppressed properties.
+    if (message !== undefined) defineHidden(result, "message", `${message}`);
     defineHidden(result, "error", error);
     defineHidden(result, "suppressed", suppressed);
-    // Error-style constructors create an own `message` only when a non-undefined message was
-    // supplied. The prototype still provides the observable empty string otherwise.
-    if (message !== undefined) defineHidden(result, "message", `${message}`);
     return result;
   }
-
-  if (typeof NativeSuppressedError === "function" && NativeSuppressedError.prototype) {
-    SuppressedError.prototype = NativeSuppressedError.prototype;
-  } else if (typeof Object.setPrototypeOf === "function") {
-    Object.setPrototypeOf(SuppressedError.prototype, ErrorCtor.prototype);
-  } else {
-    SuppressedError.prototype.__proto__ = ErrorCtor.prototype;
+  function setSuppressedPrototype(result: any, prototype: any): void {
+    if (typeof Object.setPrototypeOf === "function") Object.setPrototypeOf(result, prototype);
+    else result.__proto__ = prototype;
   }
-  // Built-in constructors expose a fixed prototype property. The ordinary function declaration
-  // starts writable; after installing the realm's prototype, lock it to match the intrinsic.
-  Object.defineProperty(SuppressedError, "prototype", { writable: false });
+  function SuppressedErrorTarget(error: any, suppressed: any, message?: any): any {}
+  const publicPrototype = Object.create(ErrorCtor.prototype);
+  SuppressedErrorTarget.prototype = publicPrototype;
+  Object.defineProperty(SuppressedErrorTarget, "prototype", { writable: false });
+  Object.defineProperty(SuppressedErrorTarget, "name", { value: "SuppressedError" });
   if (typeof Object.setPrototypeOf === "function") {
-    Object.setPrototypeOf(SuppressedError, ErrorCtor);
+    Object.setPrototypeOf(SuppressedErrorTarget, ErrorCtor);
   } else {
-    (SuppressedError as any).__proto__ = ErrorCtor;
+    (SuppressedErrorTarget as any).__proto__ = ErrorCtor;
   }
-
-  defineHidden(SuppressedError.prototype, "name", "SuppressedError");
-  defineHidden(SuppressedError.prototype, "message", "");
-  defineHidden(SuppressedError.prototype, "constructor", SuppressedError);
-
-  if (typeof NativeSuppressedError === "function") {
-    G.SuppressedError = SuppressedError;
-  } else {
-    defineHidden(G, "SuppressedError", SuppressedError);
-  }
+  const SuppressedError: any = new Proxy(SuppressedErrorTarget, {
+    apply(_target: any, _thisArg: any, argumentsList: any[]): any {
+      const result = allocateBrandedError();
+      setSuppressedPrototype(result, publicPrototype);
+      return withPayload(result, argumentsList[0], argumentsList[1], argumentsList[2]);
+    },
+    construct(_target: any, argumentsList: any[], newTarget: Function): any {
+      // GetPrototypeFromConstructor observes a Proxy newTarget's prototype once. Primitive
+      // values select this facade's ordinary default prototype, preserving explicit
+      // Object.prototype as a distinct, valid selection.
+      const requestedPrototype = Reflect.get(newTarget, "prototype");
+      const prototype = requestedPrototype !== null &&
+          (typeof requestedPrototype === "object" || typeof requestedPrototype === "function")
+        ? requestedPrototype
+        : publicPrototype;
+      const result = allocateBrandedError();
+      setSuppressedPrototype(result, prototype);
+      return withPayload(result, argumentsList[0], argumentsList[1], argumentsList[2]);
+    },
+  });
+  defineHidden(publicPrototype, "name", "SuppressedError");
+  defineHidden(publicPrototype, "message", "");
+  defineHidden(publicPrototype, "constructor", SuppressedError);
+  defineHidden(G, "SuppressedError", SuppressedError);
 })();
