@@ -45,8 +45,12 @@ The [complete 650-probe native allocation-stress run](allocator-full-stress-2026
 records 580 matches, five named refusals, 45 declared stress skips and 20 HTTP divergences.
 Those HTTP failures exposed a full-GUI provider package built without `realm-http` despite
 advertising HTTP capability. The feature contract is repaired with a red/green regression,
-and a corrected package is undergoing focused HTTP-stress and GUI checks. This full stress
-run remains failed until a complete corrected run proves otherwise.
+and the [corrected package's focused checks](allocator-full-stress-20261004/http-provider-fix-focused/)
+match all 20 HTTP probes and three GUI probes under allocation stress, with one declared
+GUI stress skip. This full stress run remains failed until a complete corrected run proves
+otherwise. A fresh full integration gate (`run.zqPsS00h`) is now running with an eight-CPU
+budget and a 4 GiB Test262 cap; its release build passed and the candidate CLI is frozen as
+`16958abcd29f328d23bb789fc188f0e55a065e349b0b77736ce0354ba1820ceb`.
 
 The runner's opt-in artifact compression and shared-cache collection have also been
 [validated against 43 unchanged Boolean cases in native and Bun](runner-resource-policy-validation/).
