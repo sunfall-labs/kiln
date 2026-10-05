@@ -161,38 +161,29 @@
   // 2. Implement SuppressedError (ES2024 / Explicit Resource Management).
   const NativeSuppressedError = G.SuppressedError;
   function SuppressedError(this: any, error: any, suppressed: any, message?: any): any {
-    if (typeof NativeSuppressedError === "function") {
-      // The native constructor supplies [[ErrorData]], stack capture, and the Error prototype
-      // chain. The TS facade installs the two standard payload properties, which are not part of
-      // the native constructor's message-only error allocation path.
-      // Allocate the engine-branded Error without forwarding `message`: the native constructor
-      // currently provides the Error object/stack but does not install SuppressedError's JS
-      // fields. The facade below performs the single required ToString conversion.
-      const result = new NativeSuppressedError();
-      const targetPrototype =
-        typeof new.target === "function" && new.target.prototype != null
-          ? new.target.prototype
-          : SuppressedError.prototype;
-      if (Object.getPrototypeOf(result) !== targetPrototype) {
-        if (typeof Object.setPrototypeOf === "function") {
-          Object.setPrototypeOf(result, targetPrototype);
-        } else {
-          result.__proto__ = targetPrototype;
-        }
+    const targetPrototype =
+      new.target === undefined ? SuppressedError.prototype : Object.getPrototypeOf(this);
+    // Both constructors create an engine-branded Error with its stack state. Constructing the
+    // native SuppressedError without arguments lets this facade apply the standard payload and
+    // message properties exactly once; the Error fallback keeps that brand when the runtime has
+    // no native SuppressedError constructor.
+    const result =
+      typeof NativeSuppressedError === "function"
+        ? new NativeSuppressedError()
+        : new (ErrorCtor as any)();
+    if (Object.getPrototypeOf(result) !== targetPrototype) {
+      if (typeof Object.setPrototypeOf === "function") {
+        Object.setPrototypeOf(result, targetPrototype);
+      } else {
+        result.__proto__ = targetPrototype;
       }
-      defineHidden(result, "error", error);
-      defineHidden(result, "suppressed", suppressed);
-      // Error-style constructors create an own `message` only when a non-undefined message was
-      // supplied. The prototype still provides the observable empty string otherwise.
-      if (message !== undefined) defineHidden(result, "message", `${message}`);
-      return result;
     }
-    if (!(this instanceof SuppressedError)) {
-      return new (SuppressedError as any)(error, suppressed, message);
-    }
-    defineHidden(this, "error", error);
-    defineHidden(this, "suppressed", suppressed);
-    if (message !== undefined) defineHidden(this, "message", `${message}`);
+    defineHidden(result, "error", error);
+    defineHidden(result, "suppressed", suppressed);
+    // Error-style constructors create an own `message` only when a non-undefined message was
+    // supplied. The prototype still provides the observable empty string otherwise.
+    if (message !== undefined) defineHidden(result, "message", `${message}`);
+    return result;
   }
 
   if (typeof NativeSuppressedError === "function" && NativeSuppressedError.prototype) {
@@ -202,6 +193,9 @@
   } else {
     SuppressedError.prototype.__proto__ = ErrorCtor.prototype;
   }
+  // Built-in constructors expose a fixed prototype property. The ordinary function declaration
+  // starts writable; after installing the realm's prototype, lock it to match the intrinsic.
+  Object.defineProperty(SuppressedError, "prototype", { writable: false });
   if (typeof Object.setPrototypeOf === "function") {
     Object.setPrototypeOf(SuppressedError, ErrorCtor);
   } else {

@@ -34,7 +34,7 @@ export default function usingCtx(): any {
       let dispose: any;
       if (isAsync) dispose = value[disposalSymbol("asyncDispose", "Symbol.asyncDispose")];
       let asyncFallback: any;
-      if (dispose === undefined) {
+      if (dispose === undefined || dispose === null) {
         dispose = value[disposalSymbol("dispose", "Symbol.dispose")];
         if (isAsync) asyncFallback = dispose;
       }
@@ -68,6 +68,7 @@ export default function usingCtx(): any {
     d() {
       let error = this.e;
       let needsAwait = false;
+      let hasAwaited = false;
 
       const recordError = (nextError: any): any => {
         error = error !== EMPTY_ERROR ? suppressedError(nextError, error) : nextError;
@@ -78,16 +79,25 @@ export default function usingCtx(): any {
         let resource: Resource | undefined;
         while ((resource = stack.pop())) {
           try {
-            if (!resource.async && needsAwait) {
+            if (!resource.async && needsAwait && !hasAwaited) {
               needsAwait = false;
+              hasAwaited = true;
               stack.push(resource);
               return Promise.resolve().then(next);
             }
             if (resource.dispose) {
               const result = resource.dispose.call(resource.value);
               if (resource.async) {
-                needsAwait = true;
-                return Promise.resolve(result).then(next, recordError);
+                return Promise.resolve(result).then(
+                  () => {
+                    hasAwaited = true;
+                    return next();
+                  },
+                  (nextError) => {
+                    hasAwaited = true;
+                    return recordError(nextError);
+                  },
+                );
               }
             } else {
               needsAwait = true;
@@ -96,7 +106,7 @@ export default function usingCtx(): any {
             return recordError(nextError);
           }
         }
-        if (needsAwait) {
+        if (needsAwait && !hasAwaited) {
           return error !== EMPTY_ERROR ? Promise.reject(error) : Promise.resolve();
         }
         if (error !== EMPTY_ERROR) throw error;
