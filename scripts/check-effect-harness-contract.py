@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = [
@@ -46,6 +47,31 @@ def main():
             raise RuntimeError(f'{name}: unexpected exit {result.returncode}; see {destination}')
         return destination / (name + '.log')
 
+    if args.kiln:
+        # A requested wall-clock policy is insufficient: older CLIs answered ClockNow with a
+        # synthetic 2020 epoch even under --clock wall. Such a CLI can pass the adapter's
+        # self-clocked spin fixture while failing to charge synchronous work real milliseconds.
+        # Reject that known failure before comparing deadline outcomes to Vitest.
+        probe = destination / 'clock-epoch.mjs'
+        probe.write_text('console.log("KILN_CLOCK_EPOCH " + JSON.stringify(Date.now()));\n')
+        started_ms = time.time() * 1000
+        log = run('interpreter-clock', [str(args.kiln.resolve()), '--one-shot', 'run',
+                                      str(probe), '--node', '--clock', 'wall'], 0)
+        finished_ms = time.time() * 1000
+        samples = [json.loads(line.removeprefix('KILN_CLOCK_EPOCH '))
+                   for line in log.read_text().splitlines()
+                   if line.startswith('KILN_CLOCK_EPOCH ')]
+        tolerance_ms = 1000
+        if (len(samples) != 1 or type(samples[0]) not in (int, float)
+                or not started_ms - tolerance_ms <= samples[0] <= finished_ms + tolerance_ms):
+            raise RuntimeError('interpreter --clock wall did not return the system epoch; '
+                               f'samples={samples!r}; see {log}')
+        (destination / 'clock-epoch.json').write_text(json.dumps({
+            'check': 'system epoch sanity; deadline behavior is checked separately',
+            'sample_ms': samples[0], 'parent_started_ms': started_ms,
+            'parent_finished_ms': finished_ms, 'tolerance_ms': tolerance_ms,
+        }, indent=2) + '\n')
+
     oracle = destination / 'oracle.json'
     oracle.unlink(missing_ok=True)
     run('vitest', ['node', str(vitest), 'run', '--config',
@@ -82,7 +108,7 @@ def main():
             binary = destination / 'native'
             binary.unlink(missing_ok=True)
             run('native-build', [kiln, '--one-shot', 'build', shim, '--node',
-                                 '--output', str(binary)], 0)
+                                 '--profile', 'native-release', '--output', str(binary)], 0)
             check('native', [str(binary)])
     print(f'evidence: {destination}')
 
