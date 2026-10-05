@@ -41,6 +41,8 @@ primitive and explicit `Object.prototype` new-target prototypes, one observable 
 read, and both trap and transparent Proxy `super()` behavior (including explicit parent-object
 returns and derived `new.target`).
 
-The final-source ManagedRuntime 9-case interpreter replay passed 9/9 with all cases mapped to
-Node/Vitest 5.0.3. The matching native-release replay is in progress; its receipt will be added
-separately when it completes. No upstream budgets were changed.
+The final-source ManagedRuntime replay passed 9/9 under both interpreter and native-release, with
+all cases mapped to Node/Vitest 5.0.3 and no timeout or source-transform gap. Full reports and raw
+logs are in `managedruntime-final/`. The native executable and compressed artifact are intentionally
+not committed; the report retains their hashes and the toolchain/provider identity. No upstream
+case budgets were changed.
