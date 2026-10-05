@@ -81,6 +81,14 @@ confirm all 66 current Sharding cases were recorded: 60 pass and the same six fa
 original 5-second deadlines. The profile retains the exact ELF Build ID and local symbols;
 CPU hotspots are evidence to investigate, not yet a diagnosis or optimization result.
 
+The [selected async-reset diagnostic](sharding-async-reset-native-diagnostic-20261005/)
+compares unchanged test bodies with their original five-second deadlines. The native
+remote-reset control passes after ten storage reads; the async-reset case times out after
+26 reads, while pristine and instrumented Bun controls both pass and the instrumented Bun
+case completes 127 reads. Each native case sends one persisted local request with no outgoing
+retry churn. This narrows the investigation to progress during the storage-reset path; it
+does not yet distinguish execution cost from scheduling behavior or establish a fix.
+
 ## Corpus and measurement
 
 `conformance/effect-upstream/corpus.json` pins Effect 4.0.0 at
