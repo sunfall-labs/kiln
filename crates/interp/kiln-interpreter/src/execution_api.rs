@@ -363,6 +363,7 @@ pub(super) fn refuses_every_write(target: &Value) -> bool {
 /// TypeError in the specification and silently ignored here, as every frozen object's writes are.
 pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> Value {
     let mut data = ObjectData::default();
+    let mut namespace_cells = Vec::new();
     for (name, value) in exports {
         // A namespace object holds values, so an exported cell is read through here. Node's
         // namespace objects are live; this one is a snapshot taken when the provider finished.
@@ -380,7 +381,9 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
                 configurable: false,
             },
         );
-        data.track_namespace_cell(&name, value.clone());
+        if matches!(value, Value::Cell(_)) {
+            namespace_cells.push((name, value));
+        }
     }
     // The tag is what `Object.prototype.toString` reads, and it is the only own property a
     // namespace has that is not an export -- so `String(ns)` is "[object Module]" rather than
@@ -400,6 +403,11 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     // furniture through a module it imported.
     data.set_prototype(Value::Null);
     data.close_as_module_namespace();
+    // Finish defining the whole shape before recording indices: array-index export names can
+    // be inserted ahead of earlier string exports while the property store maintains its order.
+    for (name, cell) in namespace_cells {
+        data.track_namespace_cell(&name, cell);
+    }
     Value::Object(tracked_object(data))
 }
 

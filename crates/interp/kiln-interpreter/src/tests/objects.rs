@@ -3471,3 +3471,45 @@ fn namespace_refresh_keeps_the_replacement_slot_for_duplicate_input_names() {
         Some(&Value::Number(20.0))
     );
 }
+
+#[test]
+fn namespace_refresh_resolves_slots_after_index_keys_are_ordered() {
+    let ordinary = Rc::new(RefCell::new(Value::Number(1.0)));
+    let ten = Rc::new(RefCell::new(Value::Number(10.0)));
+    let two = Rc::new(RefCell::new(Value::Number(2.0)));
+    let namespace = namespace_object([
+        ("ordinary".to_owned(), Value::Cell(ordinary.clone())),
+        ("10".to_owned(), Value::Cell(ten.clone())),
+        ("2".to_owned(), Value::Cell(two.clone())),
+    ]);
+    let Value::Object(object) = namespace else {
+        panic!("module namespace must be an object");
+    };
+
+    let namespace_value = Value::Object(object.clone());
+    assert_eq!(
+        own_property_keys(&Intrinsics::default(), &namespace_value),
+        vec!["2".to_owned(), "10".to_owned(), "ordinary".to_owned()]
+    );
+    for key in ["2", "10", "ordinary"] {
+        let attrs = object
+            .borrow()
+            .get_own_attributes(key)
+            .expect("namespace export remains present");
+        assert!(attrs.enumerable);
+        assert!(attrs.writable);
+        assert!(!attrs.configurable);
+    }
+
+    *ordinary.borrow_mut() = Value::Number(101.0);
+    *ten.borrow_mut() = Value::Number(110.0);
+    *two.borrow_mut() = Value::Number(102.0);
+    object.borrow_mut().refresh_namespace();
+
+    assert_eq!(
+        object.borrow().get_own("ordinary"),
+        Some(&Value::Number(101.0))
+    );
+    assert_eq!(object.borrow().get_own("10"), Some(&Value::Number(110.0)));
+    assert_eq!(object.borrow().get_own("2"), Some(&Value::Number(102.0)));
+}

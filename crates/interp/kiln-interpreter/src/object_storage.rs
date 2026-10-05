@@ -462,11 +462,10 @@ impl ObjectData {
     /// Record the cell and immutable property slot an export is a second name for.
     pub fn track_namespace_cell(&mut self, key: &str, cell: Value) {
         if matches!(cell, Value::Cell(_)) {
-            // Namespace exports are inserted immediately before they are tracked. Usually the
-            // matching slot is last; find its actual position as well so duplicate names in a
-            // direct `namespace_object` input preserve define-value's replacement behavior.
-            // The namespace is closed before it escapes, making every slot non-configurable and
-            // keeping these indices stable for every later live-binding refresh.
+            // Construction has closed the namespace before tracking cells, so later reads can
+            // reuse immutable indices even when numeric export names reordered earlier slots.
+            // The last-slot shortcut and one-time search also preserve duplicate-name inputs;
+            // refreshing never searches by name.
             let index = self
                 .properties
                 .last()
