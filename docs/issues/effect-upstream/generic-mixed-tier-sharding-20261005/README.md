@@ -3,7 +3,7 @@
 This is a single candidate replay, not an acceptance result. The candidate changes native-release
 optimization for bounded, frame-free, direct-callable generic function bodies in large modules.
 The selected Sharding input is the unchanged upstream `cluster/Sharding` suite (66 cases) from
-Effect pin `67ba4e46a11ccda0b6761578bfd22c04ae00167`; each case retained the original 5,000 ms
+Effect pin `67ba4e46a11ccda0b6761578bfd22c04ae00167d`; each case retained the original 5,000 ms
 deadline.
 
 The candidate compiler source is commit `7461336fd18ea428ac66d3b8587622709f61f35c`. Its release
@@ -40,3 +40,5 @@ The full build, replay report, complete native case log, and build log are retai
 note. The tier remains experimental: one fewer timeout is a concrete result, but the additional
 compile cost is material and the unchanged 66-case replay needs repetition before any performance
 claim.
+
+Replay harness SHA-256: `778fceda42fdaa5597825fa4d99bfd4d47044883efe48cf0a1332e3127a53913`. Current combined harness SHA-256: `6f06bd17422ee1c290ad68cf2ef37fa8a475aa937a675c7101bbf416fc3f9f27`. The candidate predates the corrected hook-deadline harness and the shared Array/constructor follow-ups. Its focused improvement therefore is experimental evidence, not final-source acceptance.
