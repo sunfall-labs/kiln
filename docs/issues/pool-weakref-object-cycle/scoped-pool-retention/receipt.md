@@ -74,8 +74,31 @@ The expanded-root diagnostic does not yet include `ModuleMap.weak_ref_keepalive`
 resource coordination. The archived expanded-root binary/log therefore should not be described as
 an exhaustive root census.
 
-### Next diagnostic
+## Rc-header heap scan (candidate matches only)
 
-Use the Scope target pointer from its WeakRef-construction hook, verify the pinned Rust `Rc` layout,
-and watch the strong-count field from Scope creation through the first unexplained retained count.
-Attribute clone/drop backtraces to the lasting owner before changing collector behavior.
+The diagnostic CLI was built from source base `64808deb2c6bd0abfd2458c7e370da5719ffc1a8` plus
+private instrumentation (source-diff SHA-256
+`84c667912d1cfa97dafe6e3429daa7c76e8d3029b45a9ee88a8450787b75ac2a`). The executable SHA-256 is
+`9600e8fb7fa255e083042a45b772df4796842a37fa2d3627e8f27347e5e65c1c`; the isolated probe remains
+`dc0e5485b048b7f238d066a790a3681a804c5aa892ba10f5b11629a9f1af90b9`.
+
+The exact `Rc<RefCell<ObjectData>>` header is 16 bytes before the allocation payload on this x86-64
+build; the birth hook's `Rc::strong_count` agreed with the header's first word. The first scan
+attempt attached its conditional stop to the allocation hook by mistake and produced no memory scan;
+its full output is `heap-scan/failed-attempt.log`. The corrected run stopped at the first
+`WeakRef.deref()` entry observed while the selected Scope header read strong=1, weak=3. It scanned
+80 writable mappings and found 12 occurrences of the header bytes in anonymous mappings. The
+complete GDB script and output are `heap-scan/scan.gdb` and `heap-scan/successful-scan.log`.
+
+Those occurrences are not yet attributed to an owning `Rc`. `Value` is a Rust enum without an
+explicit representation, and `Weak<T>` stores the same header pointer as `Rc<T>`. The scan also
+does not distinguish allocator slack, stale freed contents, collector/weak-census storage, or
+anonymous thread-stack mappings. Its stop is before a WeakRef upgrade but is not yet proven to be
+the WeakRef for this selected Scope. Consequently the 12 matches are leads only; this run does not
+identify the retained strong owner or establish a production fix.
+
+## Next diagnostic
+
+The next diagnostic will identify live parent fields using a private, nonowning allocation
+registry and type-aware edge inspection. Raw pointer matches alone cannot distinguish a strong
+owner from weak handles or stale storage. No production collector change is justified yet.
